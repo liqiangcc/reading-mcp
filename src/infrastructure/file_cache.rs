@@ -50,12 +50,13 @@ impl RawResourceCache for FileRawResourceCache {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(cache_io_error(&body_path, error)),
         };
-        let metadata: RawResourceMetadata = serde_json::from_slice(&metadata_bytes).map_err(|error| {
-            ApplicationError::CacheFailed(format!(
-                "failed to decode {}: {error}",
-                metadata_path.display()
-            ))
-        })?;
+        let metadata: RawResourceMetadata =
+            serde_json::from_slice(&metadata_bytes).map_err(|error| {
+                ApplicationError::CacheFailed(format!(
+                    "failed to decode {}: {error}",
+                    metadata_path.display()
+                ))
+            })?;
 
         Ok(Some(metadata.into_resource(body)))
     }
@@ -128,9 +129,12 @@ impl ParsedDocumentCache for FileParsedDocumentCache {
             .map_err(|error| cache_io_error(&directory, error))?;
         let file_key = parsed_key(&key);
         let path = directory.join(format!("{file_key}.json"));
-        let bytes = serde_json::to_vec(&CachedDocument::from_document(&document)).map_err(|error| {
-            ApplicationError::CacheFailed(format!("failed to encode parsed cache entry: {error}"))
-        })?;
+        let bytes =
+            serde_json::to_vec(&CachedDocument::from_document(&document)).map_err(|error| {
+                ApplicationError::CacheFailed(format!(
+                    "failed to encode parsed cache entry: {error}"
+                ))
+            })?;
         fs::write(&path, bytes)
             .await
             .map_err(|error| cache_io_error(&path, error))?;

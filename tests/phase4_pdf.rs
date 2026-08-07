@@ -32,7 +32,7 @@ async fn pdf_toc_reuses_existing_open_structure_search_and_read_flow() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let index = Arc::new(InMemorySearchIndex::default());
     let opened = OpenDocumentUseCase::new(
-        Arc::new(LocalFileSourcePolicy),
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase4()),
         repository.clone(),

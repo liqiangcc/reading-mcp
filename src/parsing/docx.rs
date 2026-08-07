@@ -8,7 +8,9 @@ use zip::ZipArchive;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, Location, Section, SectionId};
 
-use super::archive::{ArchiveLimits, read_entry, read_optional_entry, utf8_entry, validate_archive_entries};
+use super::archive::{
+    ArchiveLimits, read_entry, read_optional_entry, utf8_entry, validate_archive_entries,
+};
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 pub struct DocxParser {
@@ -37,9 +39,10 @@ impl Parser for DocxParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
-        let mut archive = ZipArchive::new(Cursor::new(resource.bytes.as_slice())).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid DOCX ZIP archive: {error}"))
-        })?;
+        let mut archive =
+            ZipArchive::new(Cursor::new(resource.bytes.as_slice())).map_err(|error| {
+                ApplicationError::ParseFailed(format!("invalid DOCX ZIP archive: {error}"))
+            })?;
         validate_archive_entries(&archive, &self.limits)?;
         let mut total_read = 0usize;
         let document_xml = utf8_entry(
@@ -221,7 +224,10 @@ fn heading_level(style: &str) -> Option<u8> {
         .collect::<String>()
         .to_ascii_lowercase();
     let suffix = normalized.strip_prefix("heading")?;
-    suffix.parse::<u8>().ok().filter(|level| (1..=6).contains(level))
+    suffix
+        .parse::<u8>()
+        .ok()
+        .filter(|level| (1..=6).contains(level))
 }
 
 fn extract_core_title(xml: &str) -> Option<String> {

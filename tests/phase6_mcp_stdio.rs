@@ -78,11 +78,16 @@ Processes own resources and execution state.
     assert_eq!(opened.title, "Operating Systems");
     assert_eq!(opened.media_type, "text/markdown");
     assert_eq!(opened.section_count, 4);
+    assert!(opened.source.starts_with("file://"));
+    assert!(opened.content_hash.starts_with("sha256:"));
+
+    let opened_document_id = opened.document_id.clone();
+    let opened_source = opened.source.clone();
 
     let structure = client
         .call_tool(
             CallToolRequestParams::new("get_document_structure").with_arguments(arguments(json!({
-                "document_id": opened.document_id,
+                "document_id": opened_document_id,
                 "max_depth": 4
             }))),
         )
@@ -95,16 +100,22 @@ Processes own resources and execution state.
         structure.sections[0].section_id,
         "section://operating-systems"
     );
+    assert_eq!(structure.sections[0].parent_id, None);
     assert_eq!(structure.sections[0].children.len(), 2);
     assert_eq!(
         structure.sections[0].children[0].section_id,
         "section://operating-systems/virtual-memory"
     );
+    assert_eq!(
+        structure.sections[0].children[0].parent_id.as_deref(),
+        Some("section://operating-systems")
+    );
 
+    let structure_document_id = structure.document_id.clone();
     let searched = client
         .call_tool(
             CallToolRequestParams::new("search_document").with_arguments(arguments(json!({
-                "document_id": structure.document_id,
+                "document_id": structure_document_id,
                 "query": "replacement algorithms",
                 "limit": 10
             }))),
@@ -119,12 +130,15 @@ Processes own resources and execution state.
         owner_section_id,
         "section://operating-systems/virtual-memory"
     );
+    assert_eq!(searched.hits[0].title, "Virtual Memory");
+    assert_eq!(searched.hits[0].source, opened_source);
     assert!(searched.hits[0].snippet.contains("replacement algorithms"));
 
+    let searched_document_id = searched.document_id.clone();
     let context = client
         .call_tool(
             CallToolRequestParams::new("get_context").with_arguments(arguments(json!({
-                "document_id": searched.document_id,
+                "document_id": searched_document_id,
                 "section_id": owner_section_id,
                 "before": 0,
                 "after": 1,
@@ -135,14 +149,17 @@ Processes own resources and execution state.
         .expect("get_context MCP call should succeed")
         .into_typed::<GetContextResponse>()
         .expect("context should return typed structured content");
+    assert_eq!(context.source, opened.source);
     assert!(context.content.contains("Virtual Memory"));
     assert!(context.content.contains("Page Tables"));
 
+    let context_document_id = context.document_id.clone();
+    let context_owner_section_id = context.owner_section_id.clone();
     let read = client
         .call_tool(
             CallToolRequestParams::new("read_document").with_arguments(arguments(json!({
-                "document_id": context.document_id,
-                "section_id": context.owner_section_id,
+                "document_id": context_document_id,
+                "section_id": context_owner_section_id,
                 "max_chars": 4000
             }))),
         )
@@ -150,6 +167,8 @@ Processes own resources and execution state.
         .expect("read_document MCP call should succeed")
         .into_typed::<ReadDocumentResponse>()
         .expect("read should return typed structured content");
+    assert_eq!(read.source, opened.source);
+    assert_eq!(read.section_id, "section://operating-systems/virtual-memory");
     assert!(read.content.contains("Address spaces give each process"));
     assert!(read.content.contains("Page replacement algorithms"));
     assert!(read.content.contains("### Page Tables"));

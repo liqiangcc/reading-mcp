@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::StatusCode;
 use reqwest::header::{
     CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
 };
 use reqwest::redirect::Policy;
-use reqwest::StatusCode;
 use tokio::sync::Semaphore;
 use url::Url;
 
@@ -83,7 +83,8 @@ impl HttpRetriever {
         options: &RetrievalOptions,
         validators: &HttpValidators,
     ) -> Result<HttpRetrievalOutcome, ApplicationError> {
-        self.retrieve_internal(source, options, Some(validators)).await
+        self.retrieve_internal(source, options, Some(validators))
+            .await
     }
 
     async fn fetch_once(

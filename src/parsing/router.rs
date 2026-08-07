@@ -62,17 +62,18 @@ impl Parser for ParserRouter {
         match media_type.as_str() {
             "text/markdown" | "text/x-markdown" => self.markdown.parse(resource).await,
             "text/plain" => self.text.parse(resource).await,
-            "text/html" | "application/xhtml+xml" => self
-                .html
-                .as_ref()
-                .ok_or_else(|| {
-                    ApplicationError::ParseFailed(format!(
-                        "unsupported media type: {}",
-                        resource.media_type.0
-                    ))
-                })?
-                .parse(resource)
-                .await,
+            "text/html" | "application/xhtml+xml" => {
+                self.html
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ApplicationError::ParseFailed(format!(
+                            "unsupported media type: {}",
+                            resource.media_type.0
+                        ))
+                    })?
+                    .parse(resource)
+                    .await
+            }
             _ => Err(ApplicationError::ParseFailed(format!(
                 "unsupported media type: {}",
                 resource.media_type.0

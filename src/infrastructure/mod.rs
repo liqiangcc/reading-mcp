@@ -1,9 +1,11 @@
+mod budget;
 mod cache;
 mod file_cache;
 mod memory_index;
 mod memory_repository;
 mod noop_index;
 
+pub use budget::{BudgetedParser, BudgetedRetriever, ResourceBudget};
 pub use cache::{
     CachingParser, CachingRetriever, InMemoryParsedDocumentCache, InMemoryRawResourceCache,
 };

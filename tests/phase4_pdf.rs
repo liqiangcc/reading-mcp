@@ -55,7 +55,10 @@ async fn pdf_toc_reuses_existing_open_structure_search_and_read_flow() {
         .expect("PDF structure should be available");
 
     assert_eq!(structure.sections.len(), 2);
-    assert_eq!(structure.sections[0].section_id.0, "section://virtual-memory");
+    assert_eq!(
+        structure.sections[0].section_id.0,
+        "section://virtual-memory"
+    );
     assert_eq!(structure.sections[0].children.len(), 1);
     assert_eq!(
         structure.sections[0].children[0].section_id.0,
@@ -218,12 +221,7 @@ fn build_pdf_bytes(page_texts: &[&str], with_toc: bool) -> Vec<u8> {
 
     if with_toc && page_ids.len() >= 3 {
         let virtual_memory = document.add_bookmark(
-            Bookmark::new(
-                "Virtual Memory".into(),
-                [0.0, 0.0, 0.0],
-                0,
-                page_ids[0],
-            ),
+            Bookmark::new("Virtual Memory".into(), [0.0, 0.0, 0.0], 0, page_ids[0]),
             None,
         );
         document.add_bookmark(

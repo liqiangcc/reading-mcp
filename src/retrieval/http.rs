@@ -1,0 +1,252 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED, LOCATION};
+use reqwest::redirect::Policy;
+use tokio::sync::Semaphore;
+use url::Url;
+
+use crate::application::ports::{
+    ApplicationError, RetrievalOptions, RetrievedResource, Retriever,
+};
+use crate::domain::{DocumentSource, MediaType};
+use crate::security::HttpAccessPolicy;
+
+#[derive(Clone, Debug)]
+pub struct HttpRetrieverConfig {
+    pub max_redirects: usize,
+    pub max_response_bytes: usize,
+    pub request_timeout: Duration,
+    pub connect_timeout: Duration,
+    pub max_concurrency: usize,
+    pub user_agent: String,
+}
+
+impl Default for HttpRetrieverConfig {
+    fn default() -> Self {
+        Self {
+            max_redirects: 5,
+            max_response_bytes: 16 * 1024 * 1024,
+            request_timeout: Duration::from_secs(20),
+            connect_timeout: Duration::from_secs(8),
+            max_concurrency: 8,
+            user_agent: "reading-mcp/0.1".into(),
+        }
+    }
+}
+
+pub struct HttpRetriever {
+    access_policy: Arc<dyn HttpAccessPolicy>,
+    config: HttpRetrieverConfig,
+    permits: Semaphore,
+}
+
+impl HttpRetriever {
+    pub fn new(access_policy: Arc<dyn HttpAccessPolicy>, config: HttpRetrieverConfig) -> Self {
+        let max_concurrency = config.max_concurrency.max(1);
+        Self {
+            access_policy,
+            config,
+            permits: Semaphore::new(max_concurrency),
+        }
+    }
+
+    async fn fetch_once(&self, url: &Url) -> Result<reqwest::Response, ApplicationError> {
+        let endpoint = self.access_policy.resolve_public_endpoint(url).await?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ApplicationError::InvalidRequest("URL must contain a host".into()))?;
+
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(Policy::none())
+            .connect_timeout(self.config.connect_timeout)
+            .timeout(self.config.request_timeout)
+            .user_agent(&self.config.user_agent);
+
+        if host.parse::<std::net::IpAddr>().is_err() {
+            builder = builder.resolve(host, endpoint);
+        }
+
+        let client = builder.build().map_err(|error| {
+            ApplicationError::RetrievalFailed(format!("failed to build HTTP client: {error}"))
+        })?;
+        client.get(url.clone()).send().await.map_err(|error| {
+            ApplicationError::RetrievalFailed(format!("HTTP request failed for {url}: {error}"))
+        })
+    }
+}
+
+#[async_trait]
+impl Retriever for HttpRetriever {
+    async fn retrieve(
+        &self,
+        source: &DocumentSource,
+        options: &RetrievalOptions,
+    ) -> Result<RetrievedResource, ApplicationError> {
+        if options.auth_profile.is_some() {
+            return Err(ApplicationError::InvalidRequest(
+                "auth_profile is not implemented for HTTP retrieval yet".into(),
+            ));
+        }
+
+        let _permit = self.permits.acquire().await.map_err(|_| {
+            ApplicationError::RetrievalFailed("HTTP concurrency limiter is closed".into())
+        })?;
+
+        let mut current = self.access_policy.parse_and_validate(source)?;
+        let mut redirect_count = 0usize;
+
+        loop {
+            self.access_policy.validate_url(&current)?;
+            let response = self.fetch_once(&current).await?;
+            let status = response.status();
+
+            if status.is_redirection() {
+                if redirect_count >= self.config.max_redirects {
+                    return Err(ApplicationError::RetrievalFailed(format!(
+                        "redirect limit exceeded at {current}"
+                    )));
+                }
+
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        ApplicationError::RetrievalFailed(format!(
+                            "redirect response from {current} has no valid Location header"
+                        ))
+                    })?;
+                let next = current.join(location).map_err(|error| {
+                    ApplicationError::RetrievalFailed(format!(
+                        "invalid redirect target from {current}: {error}"
+                    ))
+                })?;
+                self.access_policy.validate_url(&next)?;
+                current = next;
+                redirect_count += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                return Err(ApplicationError::RetrievalFailed(format!(
+                    "HTTP {status} returned for {current}"
+                )));
+            }
+
+            if let Some(length) = response.content_length()
+                && length > self.config.max_response_bytes as u64
+            {
+                return Err(ApplicationError::RetrievalFailed(format!(
+                    "response from {current} exceeds {} bytes",
+                    self.config.max_response_bytes
+                )));
+            }
+
+            let media_type = response_media_type(&response, &current)?;
+            let etag = header_string(&response, ETAG);
+            let last_modified = header_string(&response, LAST_MODIFIED);
+            let declared_length = header_string(&response, CONTENT_LENGTH);
+            let mut metadata = BTreeMap::new();
+            metadata.insert("http_status".into(), status.as_u16().to_string());
+            metadata.insert("http_redirect_count".into(), redirect_count.to_string());
+            metadata.insert("http_content_type".into(), media_type.0.clone());
+            if let Some(length) = declared_length {
+                metadata.insert("http_content_length".into(), length);
+            }
+
+            let mut response = response;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|error| {
+                ApplicationError::RetrievalFailed(format!(
+                    "failed reading response body from {current}: {error}"
+                ))
+            })? {
+                if bytes.len().saturating_add(chunk.len()) > self.config.max_response_bytes {
+                    return Err(ApplicationError::RetrievalFailed(format!(
+                        "response body from {current} exceeds {} bytes after decompression",
+                        self.config.max_response_bytes
+                    )));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+
+            return Ok(RetrievedResource {
+                source: source.clone(),
+                final_source: DocumentSource(current.to_string()),
+                media_type,
+                bytes,
+                etag,
+                last_modified,
+                metadata,
+            });
+        }
+    }
+}
+
+fn response_media_type(
+    response: &reqwest::Response,
+    url: &Url,
+) -> Result<MediaType, ApplicationError> {
+    if let Some(value) = response.headers().get(CONTENT_TYPE)
+        && let Ok(value) = value.to_str()
+    {
+        let media_type = value
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if allowed_media_type(&media_type) {
+            return Ok(MediaType(value.to_string()));
+        }
+        return Err(ApplicationError::RetrievalFailed(format!(
+            "unsupported HTTP content type: {value}"
+        )));
+    }
+
+    let inferred = media_type_from_url(url).ok_or_else(|| {
+        ApplicationError::RetrievalFailed(
+            "HTTP response has no supported Content-Type and URL extension is unknown".into(),
+        )
+    })?;
+    Ok(MediaType(inferred.into()))
+}
+
+fn allowed_media_type(value: &str) -> bool {
+    matches!(
+        value,
+        "text/plain"
+            | "text/markdown"
+            | "text/x-markdown"
+            | "text/html"
+            | "application/xhtml+xml"
+            | "application/pdf"
+    )
+}
+
+fn media_type_from_url(url: &Url) -> Option<&'static str> {
+    let path = url.path().to_ascii_lowercase();
+    if path.ends_with(".md") || path.ends_with(".markdown") {
+        Some("text/markdown")
+    } else if path.ends_with(".txt") || path.ends_with(".text") {
+        Some("text/plain")
+    } else if path.ends_with(".html") || path.ends_with(".htm") {
+        Some("text/html")
+    } else if path.ends_with(".pdf") {
+        Some("application/pdf")
+    } else {
+        None
+    }
+}
+
+fn header_string(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}

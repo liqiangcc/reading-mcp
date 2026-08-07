@@ -37,6 +37,7 @@ impl ReadDocumentUseCase {
             .get(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
+        let document_id = document.id.clone();
         let section = document
             .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
@@ -45,7 +46,7 @@ impl ReadDocumentUseCase {
         let (content, truncated) = truncate_chars(rendered, command.max_chars);
 
         Ok(ReadSectionResult {
-            document_id: document.id,
+            document_id,
             section_id: section.id.clone(),
             content,
             location: section.location.clone(),

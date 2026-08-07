@@ -33,10 +33,16 @@ async fn http_retriever_follows_validated_redirects_and_preserves_metadata() {
 
     assert_eq!(resource.media_type.0, "text/markdown");
     assert_eq!(resource.etag.as_deref(), Some("\"fixture-v1\""));
-    assert_eq!(resource.last_modified.as_deref(), Some("Fri, 07 Aug 2026 00:00:00 GMT"));
+    assert_eq!(
+        resource.last_modified.as_deref(),
+        Some("Fri, 07 Aug 2026 00:00:00 GMT")
+    );
     assert!(resource.final_source.0.ends_with("/doc.md"));
     assert_eq!(
-        resource.metadata.get("http_redirect_count").map(String::as_str),
+        resource
+            .metadata
+            .get("http_redirect_count")
+            .map(String::as_str),
         Some("1")
     );
     assert!(String::from_utf8_lossy(&resource.bytes).contains("Virtual Memory"));
@@ -174,7 +180,10 @@ impl HttpAccessPolicy for TestHttpPolicy {
 
     async fn resolve_public_endpoint(&self, url: &Url) -> Result<SocketAddr, ApplicationError> {
         self.validate_url(url)?;
-        Ok(SocketAddr::new(self.endpoint.ip(), url.port().unwrap_or(self.endpoint.port())))
+        Ok(SocketAddr::new(
+            self.endpoint.ip(),
+            url.port().unwrap_or(self.endpoint.port()),
+        ))
     }
 }
 

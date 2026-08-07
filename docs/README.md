@@ -4,6 +4,7 @@
 - [设计原则](design-principles.md)：关注点分离（SoC）、单一职责（SRP）、变化原因矩阵、依赖方向、禁止耦合和架构评审清单。
 - [架构设计](architecture.md)：领域模型、Retriever/Parser/Search/Cache 边界、稳定定位与 SSRF 设计。
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
+- [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链、资源限制、Raw/Parsed 持久化缓存和明确未实现项。
 
 ## 推荐阅读顺序
 
@@ -16,7 +17,9 @@ architecture.md
       ↓
 mvp.md
       ↓
-开始实现
+phase5-security-cache.md
+      ↓
+开始实现 / 继续演进
 ```
 
 ## 核心共识

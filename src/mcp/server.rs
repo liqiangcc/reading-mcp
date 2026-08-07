@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use serde_json::json;
 
 use crate::application::get_context::{GetContextCommand, GetContextUseCase};
 use crate::application::get_document_structure::{GetDocumentStructureUseCase, SectionOutline};
@@ -245,6 +246,12 @@ fn location_dto(location: &Location) -> LocationDto {
 
 fn to_mcp_error(error: ApplicationError) -> ErrorData {
     let message = error.to_string();
+    let (code, retryable) = error_descriptor(&error);
+    let data = Some(json!({
+        "code": code,
+        "retryable": retryable,
+    }));
+
     match error {
         ApplicationError::InvalidRequest(_)
         | ApplicationError::BlockedSource(_)
@@ -253,9 +260,47 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::RetrievalFailed(_)
         | ApplicationError::ParseFailed(_)
         | ApplicationError::DocumentNotFound
-        | ApplicationError::SectionNotFound => ErrorData::invalid_params(message, None),
+        | ApplicationError::SectionNotFound => ErrorData::invalid_params(message, data),
         ApplicationError::RepositoryFailed(_)
         | ApplicationError::CacheFailed(_)
-        | ApplicationError::IndexFailed(_) => ErrorData::internal_error(message, None),
+        | ApplicationError::IndexFailed(_) => ErrorData::internal_error(message, data),
+    }
+}
+
+fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
+    match error {
+        ApplicationError::InvalidRequest(_) => ("INVALID_REQUEST", false),
+        ApplicationError::BlockedSource(_) => ("BLOCKED_SOURCE", false),
+        ApplicationError::AuthenticationFailed(_) => ("AUTHENTICATION_FAILED", false),
+        ApplicationError::ResourceLimitExceeded(_) => ("RESOURCE_LIMIT_EXCEEDED", false),
+        ApplicationError::RetrievalFailed(_) => ("RETRIEVAL_FAILED", true),
+        ApplicationError::ParseFailed(_) => ("PARSE_FAILED", false),
+        ApplicationError::DocumentNotFound => ("DOCUMENT_NOT_FOUND", false),
+        ApplicationError::SectionNotFound => ("SECTION_NOT_FOUND", false),
+        ApplicationError::RepositoryFailed(_) => ("REPOSITORY_FAILED", true),
+        ApplicationError::CacheFailed(_) => ("CACHE_FAILED", true),
+        ApplicationError::IndexFailed(_) => ("INDEX_FAILED", true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_descriptor;
+    use crate::application::ports::ApplicationError;
+
+    #[test]
+    fn error_taxonomy_is_stable_and_exposes_retryability() {
+        assert_eq!(
+            error_descriptor(&ApplicationError::RetrievalFailed("network".into())),
+            ("RETRIEVAL_FAILED", true)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::ResourceLimitExceeded("large".into())),
+            ("RESOURCE_LIMIT_EXCEEDED", false)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::BlockedSource("private".into())),
+            ("BLOCKED_SOURCE", false)
+        );
     }
 }

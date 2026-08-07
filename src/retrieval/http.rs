@@ -303,6 +303,14 @@ fn allowed_media_type(value: &str) -> bool {
             | "text/html"
             | "application/xhtml+xml"
             | "application/pdf"
+            | "application/epub+zip"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/json"
+            | "application/yaml"
+            | "application/x-yaml"
+            | "text/yaml"
+            | "application/vnd.oai.openapi+json"
+            | "application/vnd.oai.openapi+yaml"
     )
 }
 
@@ -316,6 +324,14 @@ fn media_type_from_url(url: &Url) -> Option<&'static str> {
         Some("text/html")
     } else if path.ends_with(".pdf") {
         Some("application/pdf")
+    } else if path.ends_with(".epub") {
+        Some("application/epub+zip")
+    } else if path.ends_with(".docx") {
+        Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    } else if path.ends_with(".json") {
+        Some("application/json")
+    } else if path.ends_with(".yaml") || path.ends_with(".yml") {
+        Some("application/yaml")
     } else {
         None
     }

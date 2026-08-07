@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
-use crate::domain::{DocumentId, Location, Section};
+use crate::domain::{DocumentId, Location, Section, SectionId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SectionOutline {
-    pub section_id: crate::domain::SectionId,
+    pub section_id: SectionId,
+    pub parent_id: Option<SectionId>,
     pub title: String,
     pub level: u8,
     pub location: Location,
@@ -56,6 +57,7 @@ fn outline(section: &Section, max_depth: Option<u8>, depth: u8) -> SectionOutlin
 
     SectionOutline {
         section_id: section.id.clone(),
+        parent_id: section.parent_id.clone(),
         title: section.title.clone(),
         level: section.level,
         location: section.location.clone(),

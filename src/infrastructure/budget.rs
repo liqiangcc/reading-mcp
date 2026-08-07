@@ -4,7 +4,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::time::timeout;
 
-use crate::application::ports::{ApplicationError, Parser, RetrievalOptions, RetrievedResource, Retriever};
+use crate::application::ports::{
+    ApplicationError, Parser, RetrievalOptions, RetrievedResource, Retriever,
+};
 use crate::domain::{Document, DocumentSource, Section};
 
 #[derive(Clone, Debug)]
@@ -100,7 +102,13 @@ fn validate_document_budget(
     let mut max_depth = 0usize;
 
     for section in &document.root_sections {
-        accumulate(section, 1, &mut section_count, &mut char_count, &mut max_depth);
+        accumulate(
+            section,
+            1,
+            &mut section_count,
+            &mut char_count,
+            &mut max_depth,
+        );
     }
 
     if section_count > budget.max_sections {

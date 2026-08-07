@@ -14,8 +14,9 @@ use crate::application::search_document::SearchDocumentUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
     FileRawResourceCache, InMemoryDocumentRepository, InMemoryParsedDocumentCache,
-    InMemoryRawResourceCache, InMemorySearchIndex, ObservedParser, ObservedRetriever,
-    ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex,
+    InMemoryRawResourceCache, InMemorySearchIndex, ObservedParsedDocumentCache, ObservedParser,
+    ObservedRawResourceCache, ObservedRetriever, ObservedSearchIndex, SqliteDocumentRepository,
+    SqliteSearchIndex,
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::ParserRouter;
@@ -32,6 +33,17 @@ struct RuntimeComponents {
     parsed_cache: Arc<dyn ParsedDocumentCache>,
     repository: Arc<dyn DocumentRepository>,
     search_index: Arc<dyn SearchIndex>,
+}
+
+impl RuntimeComponents {
+    fn observed(self) -> Self {
+        Self {
+            raw_cache: Arc::new(ObservedRawResourceCache::new(self.raw_cache)),
+            parsed_cache: Arc::new(ObservedParsedDocumentCache::new(self.parsed_cache)),
+            repository: self.repository,
+            search_index: Arc::new(ObservedSearchIndex::new(self.search_index)),
+        }
+    }
 }
 
 pub fn build_server(
@@ -53,6 +65,11 @@ pub fn build_server(
     ));
 
     let components = build_state_components(&config)?;
+    let components = if config.telemetry {
+        components.observed()
+    } else {
+        components
+    };
 
     let http = Arc::new(HttpRetriever::with_credentials(
         retriever_http_policy,
@@ -89,13 +106,8 @@ pub fn build_server(
         parser
     };
 
-    let search_index: Arc<dyn SearchIndex> = if config.telemetry {
-        Arc::new(ObservedSearchIndex::new(components.search_index))
-    } else {
-        components.search_index
-    };
-
     let repository = components.repository;
+    let search_index = components.search_index;
     let open_document = Arc::new(OpenDocumentUseCase::new(
         source_policy,
         retriever,

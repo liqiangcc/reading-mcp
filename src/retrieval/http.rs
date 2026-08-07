@@ -3,14 +3,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED, LOCATION};
+use reqwest::header::{
+    CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION,
+};
 use reqwest::redirect::Policy;
+use reqwest::StatusCode;
 use tokio::sync::Semaphore;
 use url::Url;
 
 use crate::application::ports::{ApplicationError, RetrievalOptions, RetrievedResource, Retriever};
 use crate::domain::{DocumentSource, MediaType};
 use crate::security::HttpAccessPolicy;
+
+use super::auth::{CredentialProvider, NoCredentialProvider};
 
 #[derive(Clone, Debug)]
 pub struct HttpRetrieverConfig {
@@ -35,23 +40,58 @@ impl Default for HttpRetrieverConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HttpValidators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+pub enum HttpRetrievalOutcome {
+    Resource(RetrievedResource),
+    NotModified,
+}
+
 pub struct HttpRetriever {
     access_policy: Arc<dyn HttpAccessPolicy>,
+    credentials: Arc<dyn CredentialProvider>,
     config: HttpRetrieverConfig,
     permits: Semaphore,
 }
 
 impl HttpRetriever {
     pub fn new(access_policy: Arc<dyn HttpAccessPolicy>, config: HttpRetrieverConfig) -> Self {
+        Self::with_credentials(access_policy, config, Arc::new(NoCredentialProvider))
+    }
+
+    pub fn with_credentials(
+        access_policy: Arc<dyn HttpAccessPolicy>,
+        config: HttpRetrieverConfig,
+        credentials: Arc<dyn CredentialProvider>,
+    ) -> Self {
         let max_concurrency = config.max_concurrency.max(1);
         Self {
             access_policy,
+            credentials,
             config,
             permits: Semaphore::new(max_concurrency),
         }
     }
 
-    async fn fetch_once(&self, url: &Url) -> Result<reqwest::Response, ApplicationError> {
+    pub async fn retrieve_conditional(
+        &self,
+        source: &DocumentSource,
+        options: &RetrievalOptions,
+        validators: &HttpValidators,
+    ) -> Result<HttpRetrievalOutcome, ApplicationError> {
+        self.retrieve_internal(source, options, Some(validators)).await
+    }
+
+    async fn fetch_once(
+        &self,
+        url: &Url,
+        auth_profile: Option<&str>,
+        validators: Option<&HttpValidators>,
+    ) -> Result<reqwest::Response, ApplicationError> {
         let endpoint = self.access_policy.resolve_public_endpoint(url).await?;
         let host = url
             .host_str()
@@ -71,25 +111,32 @@ impl HttpRetriever {
         let client = builder.build().map_err(|error| {
             ApplicationError::RetrievalFailed(format!("failed to build HTTP client: {error}"))
         })?;
-        client.get(url.clone()).send().await.map_err(|error| {
+        let mut request = client.get(url.clone());
+
+        if let Some(profile) = auth_profile {
+            let token = self.credentials.bearer_token(profile, url)?;
+            request = request.bearer_auth(token);
+        }
+        if let Some(validators) = validators {
+            if let Some(etag) = &validators.etag {
+                request = request.header(IF_NONE_MATCH, etag);
+            }
+            if let Some(last_modified) = &validators.last_modified {
+                request = request.header(IF_MODIFIED_SINCE, last_modified);
+            }
+        }
+
+        request.send().await.map_err(|error| {
             ApplicationError::RetrievalFailed(format!("HTTP request failed for {url}: {error}"))
         })
     }
-}
 
-#[async_trait]
-impl Retriever for HttpRetriever {
-    async fn retrieve(
+    async fn retrieve_internal(
         &self,
         source: &DocumentSource,
         options: &RetrievalOptions,
-    ) -> Result<RetrievedResource, ApplicationError> {
-        if options.auth_profile.is_some() {
-            return Err(ApplicationError::InvalidRequest(
-                "auth_profile is not implemented for HTTP retrieval yet".into(),
-            ));
-        }
-
+        validators: Option<&HttpValidators>,
+    ) -> Result<HttpRetrievalOutcome, ApplicationError> {
         let _permit = self.permits.acquire().await.map_err(|_| {
             ApplicationError::RetrievalFailed("HTTP concurrency limiter is closed".into())
         })?;
@@ -99,8 +146,24 @@ impl Retriever for HttpRetriever {
 
         loop {
             self.access_policy.validate_url(&current)?;
-            let response = self.fetch_once(&current).await?;
+            let request_validators = (redirect_count == 0).then_some(validators).flatten();
+            let response = self
+                .fetch_once(
+                    &current,
+                    options.auth_profile.as_deref(),
+                    request_validators,
+                )
+                .await?;
             let status = response.status();
+
+            if status == StatusCode::NOT_MODIFIED {
+                if validators.is_some() {
+                    return Ok(HttpRetrievalOutcome::NotModified);
+                }
+                return Err(ApplicationError::RetrievalFailed(format!(
+                    "unexpected HTTP 304 returned for {current}"
+                )));
+            }
 
             if status.is_redirection() {
                 if redirect_count >= self.config.max_redirects {
@@ -138,7 +201,7 @@ impl Retriever for HttpRetriever {
             if let Some(length) = response.content_length()
                 && length > self.config.max_response_bytes as u64
             {
-                return Err(ApplicationError::RetrievalFailed(format!(
+                return Err(ApplicationError::ResourceLimitExceeded(format!(
                     "response from {current} exceeds {} bytes",
                     self.config.max_response_bytes
                 )));
@@ -164,7 +227,7 @@ impl Retriever for HttpRetriever {
                 ))
             })? {
                 if bytes.len().saturating_add(chunk.len()) > self.config.max_response_bytes {
-                    return Err(ApplicationError::RetrievalFailed(format!(
+                    return Err(ApplicationError::ResourceLimitExceeded(format!(
                         "response body from {current} exceeds {} bytes after decompression",
                         self.config.max_response_bytes
                     )));
@@ -172,7 +235,7 @@ impl Retriever for HttpRetriever {
                 bytes.extend_from_slice(&chunk);
             }
 
-            return Ok(RetrievedResource {
+            return Ok(HttpRetrievalOutcome::Resource(RetrievedResource {
                 source: source.clone(),
                 final_source: DocumentSource(current.to_string()),
                 media_type,
@@ -180,7 +243,23 @@ impl Retriever for HttpRetriever {
                 etag,
                 last_modified,
                 metadata,
-            });
+            }));
+        }
+    }
+}
+
+#[async_trait]
+impl Retriever for HttpRetriever {
+    async fn retrieve(
+        &self,
+        source: &DocumentSource,
+        options: &RetrievalOptions,
+    ) -> Result<RetrievedResource, ApplicationError> {
+        match self.retrieve_internal(source, options, None).await? {
+            HttpRetrievalOutcome::Resource(resource) => Ok(resource),
+            HttpRetrievalOutcome::NotModified => Err(ApplicationError::RetrievalFailed(
+                "unexpected not-modified result without cache validators".into(),
+            )),
         }
     }
 }

@@ -75,10 +75,8 @@ impl RuntimeConfig {
             config.resource_budget.parse_timeout.as_secs(),
         )?);
 
-        config.http.max_redirects = env_usize(
-            "READING_MCP_HTTP_MAX_REDIRECTS",
-            config.http.max_redirects,
-        )?;
+        config.http.max_redirects =
+            env_usize("READING_MCP_HTTP_MAX_REDIRECTS", config.http.max_redirects)?;
         config.http.max_response_bytes = config.resource_budget.max_document_bytes;
         config.http.max_concurrency = env_usize(
             "READING_MCP_HTTP_MAX_CONCURRENCY",

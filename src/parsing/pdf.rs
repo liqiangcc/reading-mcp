@@ -293,11 +293,7 @@ fn build_toc_sections(entries: &[PdfTocEntry], pages: &[PageText], max_page: u32
         .collect()
 }
 
-fn text_for_page_range(
-    pages: &BTreeMap<u32, &str>,
-    start_page: u32,
-    end_page: u32,
-) -> String {
+fn text_for_page_range(pages: &BTreeMap<u32, &str>, start_page: u32, end_page: u32) -> String {
     (start_page..=end_page)
         .filter_map(|page| pages.get(&page).copied())
         .filter(|text| !text.trim().is_empty())

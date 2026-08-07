@@ -35,10 +35,7 @@ async fn local_file_budget_is_checked_before_reading_body() {
         .await
         .expect_err("oversized local file must be rejected before reading");
 
-    assert!(matches!(
-        error,
-        ApplicationError::ResourceLimitExceeded(_)
-    ));
+    assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
     assert!(error.to_string().contains("16 bytes"));
 }
 
@@ -55,10 +52,7 @@ async fn normalized_document_budget_rejects_excessive_content() {
         .await
         .expect_err("oversized normalized document must be rejected");
 
-    assert!(matches!(
-        error,
-        ApplicationError::ResourceLimitExceeded(_)
-    ));
+    assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
     assert!(error.to_string().contains("characters"));
 }
 
@@ -75,10 +69,7 @@ async fn parser_timeout_is_exposed_as_resource_limit() {
         .await
         .expect_err("slow parser must be bounded");
 
-    assert!(matches!(
-        error,
-        ApplicationError::ResourceLimitExceeded(_)
-    ));
+    assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
     assert!(error.to_string().contains("timeout"));
 }
 
@@ -99,10 +90,7 @@ async fn pdf_total_page_budget_is_enforced_before_text_extraction() {
         .await
         .expect_err("PDF over page budget must be rejected");
 
-    assert!(matches!(
-        error,
-        ApplicationError::ResourceLimitExceeded(_)
-    ));
+    assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
     assert!(error.to_string().contains("2 pages"));
 }
 
@@ -187,8 +175,9 @@ fn sample_document() -> Document {
             parent_id: None,
             title: "Virtual Memory".into(),
             level: 1,
-            content: "Address spaces isolate memory.\n\nPage replacement algorithms choose victims."
-                .into(),
+            content:
+                "Address spaces isolate memory.\n\nPage replacement algorithms choose victims."
+                    .into(),
             location: Location {
                 section_path: vec!["Virtual Memory".into()],
                 native_location: Some("markdown:#virtual-memory".into()),

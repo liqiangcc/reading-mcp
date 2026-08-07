@@ -209,10 +209,10 @@ async fn persistent_stdio_runtime_survives_server_restart() {
         .env("READING_MCP_TELEMETRY", "false");
     let first_transport =
         TokioChildProcess::new(first_command).expect("first MCP process should start");
-    let first_client = ()
-        .serve(first_transport)
-        .await
-        .expect("first MCP process should initialize");
+    let first_client =
+        ().serve(first_transport)
+            .await
+            .expect("first MCP process should initialize");
 
     let opened = first_client
         .call_tool(
@@ -237,10 +237,10 @@ async fn persistent_stdio_runtime_survives_server_restart() {
         .env("READING_MCP_TELEMETRY", "false");
     let second_transport =
         TokioChildProcess::new(second_command).expect("second MCP process should start");
-    let second_client = ()
-        .serve(second_transport)
-        .await
-        .expect("second MCP process should initialize");
+    let second_client =
+        ().serve(second_transport)
+            .await
+            .expect("second MCP process should initialize");
 
     let read = second_client
         .call_tool(
@@ -253,7 +253,10 @@ async fn persistent_stdio_runtime_survives_server_restart() {
         .expect("persisted document should be readable without reopening")
         .into_typed::<ReadDocumentResponse>()
         .expect("read response should be typed");
-    assert!(read.content.contains("Replacement algorithms survive restart."));
+    assert!(
+        read.content
+            .contains("Replacement algorithms survive restart.")
+    );
 
     let searched = second_client
         .call_tool(

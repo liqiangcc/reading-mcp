@@ -132,7 +132,11 @@ fn parse_atx_heading(line: &str) -> Option<(u8, String)> {
     }
 
     let remainder = &trimmed[level..];
-    if !remainder.is_empty() && !remainder.starts_with(char::is_whitespace) {
+    if remainder
+        .chars()
+        .next()
+        .is_some_and(|first| !first.is_whitespace())
+    {
         return None;
     }
 

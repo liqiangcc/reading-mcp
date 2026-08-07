@@ -40,7 +40,10 @@ Processes own resources and execution state.
     let local_roots = std::env::join_paths([directory.path()])
         .expect("temporary directory should be a valid local root list");
     let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
-    command.env("READING_MCP_LOCAL_ROOTS", local_roots);
+    command
+        .env("READING_MCP_LOCAL_ROOTS", local_roots)
+        .env("READING_MCP_STATE_DIR", "memory")
+        .env("READING_MCP_TELEMETRY", "false");
     let transport =
         TokioChildProcess::new(command).expect("reading-mcp child process should start");
     let client = ().serve(transport).await.expect("MCP initialization should succeed");
@@ -182,6 +185,94 @@ Processes own resources and execution state.
         .cancel()
         .await
         .expect("MCP child process should close cleanly");
+}
+
+#[tokio::test]
+async fn persistent_stdio_runtime_survives_server_restart() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let state_dir = directory.path().join("state");
+    let document_path = directory.path().join("persistent.md");
+    tokio::fs::write(
+        &document_path,
+        "# Persistent Book\n\n## Memory\n\nReplacement algorithms survive restart.\n",
+    )
+    .await
+    .expect("persistent fixture should be written");
+
+    let local_roots = std::env::join_paths([directory.path()])
+        .expect("temporary directory should be a valid local root list");
+
+    let mut first_command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
+    first_command
+        .env("READING_MCP_LOCAL_ROOTS", &local_roots)
+        .env("READING_MCP_STATE_DIR", &state_dir)
+        .env("READING_MCP_TELEMETRY", "false");
+    let first_transport =
+        TokioChildProcess::new(first_command).expect("first MCP process should start");
+    let first_client = ()
+        .serve(first_transport)
+        .await
+        .expect("first MCP process should initialize");
+
+    let opened = first_client
+        .call_tool(
+            CallToolRequestParams::new("open_document").with_arguments(arguments(json!({
+                "source": document_path.to_string_lossy()
+            }))),
+        )
+        .await
+        .expect("document should open before restart")
+        .into_typed::<OpenDocumentResponse>()
+        .expect("open response should be typed");
+    let document_id = opened.document_id.clone();
+    first_client
+        .cancel()
+        .await
+        .expect("first MCP process should close cleanly");
+
+    let mut second_command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
+    second_command
+        .env("READING_MCP_LOCAL_ROOTS", local_roots)
+        .env("READING_MCP_STATE_DIR", &state_dir)
+        .env("READING_MCP_TELEMETRY", "false");
+    let second_transport =
+        TokioChildProcess::new(second_command).expect("second MCP process should start");
+    let second_client = ()
+        .serve(second_transport)
+        .await
+        .expect("second MCP process should initialize");
+
+    let read = second_client
+        .call_tool(
+            CallToolRequestParams::new("read_document").with_arguments(arguments(json!({
+                "document_id": document_id,
+                "section_id": "section://persistent-book/memory"
+            }))),
+        )
+        .await
+        .expect("persisted document should be readable without reopening")
+        .into_typed::<ReadDocumentResponse>()
+        .expect("read response should be typed");
+    assert!(read.content.contains("Replacement algorithms survive restart."));
+
+    let searched = second_client
+        .call_tool(
+            CallToolRequestParams::new("search_document").with_arguments(arguments(json!({
+                "document_id": opened.document_id,
+                "query": "replacement algorithms",
+                "limit": 10
+            }))),
+        )
+        .await
+        .expect("persistent FTS should survive restart")
+        .into_typed::<SearchDocumentResponse>()
+        .expect("search response should be typed");
+    assert!(!searched.hits.is_empty());
+
+    second_client
+        .cancel()
+        .await
+        .expect("second MCP process should close cleanly");
 }
 
 fn arguments(value: Value) -> Map<String, Value> {

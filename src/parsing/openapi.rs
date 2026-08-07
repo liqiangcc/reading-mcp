@@ -207,10 +207,7 @@ fn operation_section(
         }
     }
     Section {
-        id: SectionId(format!(
-            "{}/{method}",
-            parent_id.0.trim_end_matches('/')
-        )),
+        id: SectionId(format!("{}/{method}", parent_id.0.trim_end_matches('/'))),
         parent_id: Some(parent_id.clone()),
         title: title.clone(),
         level: 2,
@@ -299,11 +296,6 @@ mod tests {
             .await
             .expect("OpenAPI YAML should parse");
         assert_eq!(parsed.title, "Pet API");
-        assert!(
-            parsed
-                .root_sections
-                .iter()
-                .any(|section| section.title == "/pets")
-        );
+        assert!(parsed.root_sections.iter().any(|section| section.title == "/pets"));
     }
 }

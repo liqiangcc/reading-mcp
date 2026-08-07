@@ -7,7 +7,7 @@ use roxmltree::Document as XmlDocument;
 use zip::ZipArchive;
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
-use crate::domain::{Document, DocumentSource, Location, MediaType, Section, SectionId};
+use crate::domain::{Document, DocumentSource, MediaType, Section, SectionId};
 
 use super::HtmlParser;
 use super::archive::{ArchiveLimits, read_entry, utf8_entry, validate_archive_entries};

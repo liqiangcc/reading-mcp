@@ -143,7 +143,7 @@ impl SearchIndex for SqliteSearchIndex {
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let mut units = Vec::new();
         for section in &document.root_sections {
-            collect_search_units(document, section, &mut units);
+            collect_search_units(section, &mut units);
         }
 
         let mut connection = self
@@ -166,14 +166,15 @@ impl SearchIndex for SqliteSearchIndex {
                 )
                 .map_err(index_error)?;
             for unit in units {
-                let location_json = serde_json::to_string(&StoredLocation::from_location(&unit.location))
-                    .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
+                let location_json =
+                    serde_json::to_string(&StoredLocation::from_location(&unit.location))
+                        .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
                 statement
                     .execute(params![
                         &document.id.0,
                         unit.section_id.0,
                         unit.title,
-                        document.source.0,
+                        &document.source.0,
                         unit.snippet,
                         location_json,
                         unit.body
@@ -257,7 +258,7 @@ struct SearchUnit {
     location: Location,
 }
 
-fn collect_search_units(document: &Document, section: &Section, output: &mut Vec<SearchUnit>) {
+fn collect_search_units(section: &Section, output: &mut Vec<SearchUnit>) {
     let paragraphs = section
         .content
         .split("\n\n")
@@ -292,7 +293,7 @@ fn collect_search_units(document: &Document, section: &Section, output: &mut Vec
     }
 
     for child in &section.children {
-        collect_search_units(document, child, output);
+        collect_search_units(child, output);
     }
 }
 

@@ -17,8 +17,10 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         let resource_budget = ResourceBudget::default();
-        let mut http = HttpRetrieverConfig::default();
-        http.max_response_bytes = resource_budget.max_document_bytes;
+        let http = HttpRetrieverConfig {
+            max_response_bytes: resource_budget.max_document_bytes,
+            ..HttpRetrieverConfig::default()
+        };
         Self {
             local_roots: vec![],
             state_dir: default_state_dir(),
@@ -32,11 +34,13 @@ impl Default for RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn from_env() -> Result<Self, String> {
-        let mut config = Self::default();
-
-        config.local_roots = std::env::var_os("READING_MCP_LOCAL_ROOTS")
+        let local_roots = std::env::var_os("READING_MCP_LOCAL_ROOTS")
             .map(|value| std::env::split_paths(&value).collect())
             .unwrap_or_default();
+        let mut config = Self {
+            local_roots,
+            ..Self::default()
+        };
 
         if let Some(value) = std::env::var_os("READING_MCP_STATE_DIR") {
             let value = value.to_string_lossy();

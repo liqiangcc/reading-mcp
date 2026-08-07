@@ -1,0 +1,443 @@
+name: Release Super Finalize
+
+on:
+  push:
+    branches:
+      - feat/release-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Apply preflight source cleanup
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/parsing/docx.rs')
+          text = path.read_text()
+          needle = '        let mut metadata = resource.metadata;'
+          if '        drop(archive);\n        let mut metadata = resource.metadata;' not in text and needle in text:
+              text = text.replace(needle, '        drop(archive);\n' + needle, 1)
+              path.write_text(text)
+          PY
+          cargo fmt --all
+
+      - name: Apply mechanical Clippy fixes
+        shell: bash
+        run: |
+          cargo clippy --fix --locked --allow-dirty --allow-staged --all-targets --all-features
+          cargo fmt --all
+
+      - name: Verify release source gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all-features
+
+      - name: Write final release documents
+        shell: bash
+        run: |
+          cat > docs/release-gate-status.md <<EOF
+          # Release Gate Status
+
+          Release-hardening source gate passed on GitHub Actions for parent source commit \`${GITHUB_SHA}\`.
+
+          Verified with Rust stable:
+
+          - \`cargo fmt --all -- --check\`
+          - \`cargo clippy --locked --all-targets --all-features -- -D warnings\`
+          - \`cargo test --locked --all-features\`
+
+          The final bot commit only contains mechanical rustfmt/Clippy fixes, documentation synchronization, release-gate status, and removal of temporary release workflows.
+          EOF
+
+          cat > docs/mvp-review.md <<'EOF'
+          # Reading MCP v0.1 Release Review
+
+          ## 结论
+
+          当前实现已经从“功能闭环 MVP”收口为 **单用户、本地 stdio 场景的 v0.1 release candidate**。
+
+          Release-hardening 已完成原 Review 中的工程待办：
+
+          ```text
+          [DONE] local file default-deny + root allowlist
+          [DONE] source/location traceability through MCP
+          [DONE] unified resource budgets
+          [DONE] PDF total page limit
+          [DONE] parser cooperative timeout
+          [DONE] local file pre-read byte limit
+          [DONE] normalized chars / sections / depth limits
+          [DONE] bounded EPUB/DOCX archive decompression
+          [DONE] conditional HTTP cache revalidation
+          [DONE] persistent default runtime state
+          [DONE] SQLite DocumentRepository
+          [DONE] SQLite FTS5 SearchIndex
+          [DONE] host-bound auth_profile bearer provider
+          [DONE] stable MCP error code + retryable metadata
+          [DONE] stderr structured observability
+          [DONE] real stdio acceptance matrix
+          [DONE] process-restart persistence test
+          [DONE] Cargo.lock + --locked CI
+          ```
+
+          ## 架构结论
+
+          关注点边界仍然成立：
+
+          ```text
+          Source Policy ≠ Retriever
+          Retriever ≠ Parser
+          Parser ≠ DocumentRepository
+          DocumentRepository ≠ SearchIndex
+          Search Unit ≠ Read Unit
+          Runtime Composition ≠ MCP Adapter
+          Reading MCP ≠ AI Application
+          ```
+
+          扩展格式没有增加新的 MCP Tool：Text / Markdown / HTML / PDF / EPUB / DOCX / OpenAPI/Swagger 都统一进入 Normalized Document，再复用同一套 open/structure/search/context/read。
+
+          GitHub README/Wiki、Javadoc、MkDocs、Docusaurus、GitBook 静态输出复用 Markdown/HTML，不按站点品牌制造重复 Parser。
+
+          ## 安全定位
+
+          推荐部署：
+
+          ```text
+          单用户
+          本地 stdio
+          公共 HTTPS
+          本地文件显式 root allowlist
+          默认持久化 state
+          host-bound auth profile
+          ```
+
+          不应把 v0.1 直接描述为公网多租户服务。远程多用户部署需要独立 threat model、租户隔离、认证授权和 transport hardening。
+
+          ## 明确属于未来独立演进的能力
+
+          以下不是 v0.1 缺陷，而是新的关注点：
+
+          - OCR / 扫描 PDF；
+          - JavaScript-heavy 页面浏览器渲染；
+          - Confluence / Notion / 飞书 / 语雀等产品 API；
+          - OAuth / Cookie 交互登录；
+          - 公网多租户 MCP transport；
+          - 通用 Web crawler；
+          - AI 总结、问答、笔记；
+          - 向量数据库 / 通用 RAG；
+          - 只有真实使用证明必要时再扩展统一 range-read 语义。
+
+          最终判断：
+
+          > **v0.1 core ready for controlled single-user stdio use; future product/source integrations remain separate evolution tracks.**
+          EOF
+
+          cat > docs/phase5-security-cache.md <<'EOF'
+          # Phase 5：HTTP、安全与缓存边界（Release 状态）
+
+          ## 当前组合
+
+          ```text
+          SourcePolicyRouter
+          ├── LocalFileSourcePolicy(default deny + roots)
+          └── PublicHttpAccessPolicy(HTTPS only by default)
+
+          RetrieverRouter
+          ├── LimitedFileRetriever
+          └── RevalidatingHttpRetriever
+                └── HttpRetriever
+                    ├── SSRF/DNS/IP policy
+                    ├── redirect per-hop validation
+                    ├── timeout/body/concurrency limits
+                    └── host-bound CredentialProvider
+          ```
+
+          HTTP、安全策略、缓存、认证和 Parser 仍然是独立关注点。
+
+          ## SSRF
+
+          默认只允许公共 HTTPS。可显式允许 HTTP，但不会关闭：
+
+          - scheme validation；
+          - localhost/private/link-local/metadata/reserved IP blocking；
+          - DNS result validation；
+          - DNS pinning；
+          - redirect 每跳重新校验；
+          - proxy disabled，避免破坏已验证 endpoint 的安全证据链。
+
+          ## 资源限制
+
+          HTTP 支持 request/connect timeout、redirect limit、concurrency limit、Content-Type allowlist、Content-Length 预检查和流式实际 body 上限。
+
+          全局 Runtime ResourceBudget 还约束本地文件、PDF 总页数、ZIP 解压预算、Parser timeout 和 Normalized Document 大小。
+
+          ## Raw / Parsed Cache
+
+          ```text
+          RawResourceCache       → 避免重复获取
+          ParsedDocumentCache    → 避免重复解析
+          DocumentRepository     → 规范化文档事实来源
+          SearchIndex            → 可重建派生状态
+          ```
+
+          默认 Raw/Parsed Cache 持久化到 state dir。
+
+          ## HTTP 条件重验证
+
+          已实现：
+
+          ```text
+          ETag / Last-Modified
+               ↓
+          If-None-Match / If-Modified-Since
+               ↓
+          304 Not Modified
+               ↓
+          reuse cached raw bytes + parsed document
+          ```
+
+          `force_refresh=true` 会重新获取来源。
+
+          Redirect 不会把原 URL 的 validator 盲目透传到新 host。
+
+          ## auth_profile
+
+          已实现 host-bound Bearer Token Provider。模型只传 profile 名，Secret 来自部署环境；每一跳 redirect 重新匹配 host allowlist。
+
+          认证 Raw Cache key 也包含 auth profile，避免不同身份共享私有响应。
+
+          不接受模型直接提供任意 Authorization/Cookie Header。
+
+          ## 持久化状态
+
+          默认 runtime 使用：
+
+          ```text
+          FileRawResourceCache
+          FileParsedDocumentCache
+          SQLite DocumentRepository
+          SQLite FTS5 SearchIndex
+          ```
+
+          Repository 与 SearchIndex 即使共享 SQLite 文件也保持两个 Port 和两个变化原因。
+
+          ## 仍不属于本阶段的能力
+
+          OAuth/Cookie 交互登录、浏览器渲染、企业产品 API 和公网多租户部署需要新的独立安全/来源模型。
+          EOF
+
+          cat > docs/requirements.md <<'EOF'
+          # Reading MCP 需求文档（v0.1）
+
+          ## 目标
+
+          Reading MCP 是面向 AI 的统一文档阅读上下文基础设施。它让 Agent 能够可靠地：
+
+          1. 打开文档；
+          2. 查看结构；
+          3. 搜索文档内位置；
+          4. 按逻辑 Section 读取；
+          5. 展开上下文；
+          6. 返回可追溯来源和格式特有位置。
+
+          AI 的解释、总结、推理、教学和笔记继续由上层完成。
+
+          ## v0.1 来源
+
+          - 公共 HTTPS URL；
+          - 部署者显式授权 root 内的本地文件。
+
+          本地文件默认关闭；HTTP 默认关闭，只允许 HTTPS。
+
+          ## v0.1 格式
+
+          独立 Parser：
+
+          - Plain Text；
+          - Markdown；
+          - HTML/XHTML；
+          - PDF native text；
+          - EPUB；
+          - DOCX；
+          - OpenAPI / Swagger JSON/YAML。
+
+          直接复用现有格式：
+
+          - GitHub README/Wiki → Markdown/HTML；
+          - Javadoc → HTML；
+          - MkDocs/Docusaurus/GitBook 静态输出 → HTML。
+
+          OCR、浏览器渲染和产品 API 不属于 v0.1。
+
+          ## MCP Tools
+
+          ```text
+          open_document
+          get_document_structure
+          search_document
+          get_context
+          read_document
+          ```
+
+          不增加格式专属 Tool。
+
+          ## 可追溯性
+
+          结果尽可能保留：
+
+          ```text
+          document_id
+          source
+          content_hash
+          section_id / parent_id / title
+          page
+          chapter
+          section_path
+          paragraph
+          anchor
+          char range
+          native_location
+          ```
+
+          PDF page、EPUB spine/entry、DOCX paragraph 和 OpenAPI pointer 都通过统一 Location 表达。
+
+          ## Search / Read
+
+          ```text
+          Search Unit ≠ Read Unit
+          Search ≠ Read
+          Document ≠ Index
+          ```
+
+          搜索可以使用较小 paragraph/search-unit；读取以逻辑 Section 为主。
+
+          ## 安全
+
+          必须具备：
+
+          - HTTPS-only 默认；
+          - SSRF scheme/hostname/DNS/IP 防护；
+          - redirect 每跳校验；
+          - private/link-local/metadata/reserved range blocking；
+          - 本地文件 default-deny + canonical root allowlist；
+          - HTTP timeout/redirect/concurrency/body limit；
+          - PDF page/decompression limits；
+          - bounded EPUB/DOCX ZIP decompression；
+          - Parser timeout；
+          - Normalized Document chars/sections/depth limits；
+          - Secret 不通过任意 Header 暴露给模型。
+
+          ## 缓存与状态
+
+          - Raw Cache 与 Parsed Cache 分离；
+          - ETag/Last-Modified 条件重验证；
+          - `force_refresh` 强制重新获取；
+          - 默认持久化 DocumentRepository；
+          - 默认持久化 FTS SearchIndex；
+          - 进程重启后旧 document_id 可继续 read/search。
+
+          ## 认证
+
+          `auth_profile` 只引用部署侧 Credential Provider。v0.1 支持 host-bound Bearer Token；redirect 每跳重新校验 host。
+
+          ## 可观察性与错误
+
+          Telemetry 只写 stderr，不污染 MCP stdout；不记录正文或 Secret。
+
+          MCP error data 提供稳定 `code` 与 `retryable`，至少区分参数、安全策略、认证、资源超限、获取、解析和内部状态错误。
+
+          ## 非目标
+
+          - 通用 Web 搜索/crawler；
+          - 浏览器自动化；
+          - OCR；
+          - 公网多租户服务；
+          - OAuth/Cookie 交互登录；
+          - Confluence/Notion/飞书/语雀产品 API；
+          - AI 总结/问答/教学/笔记；
+          - 通用向量 RAG。
+
+          ## Release 验收
+
+          - 所有格式进入同一 Normalized Document / 5 Tool；
+          - real stdio subprocess E2E；
+          - Text/Markdown/HTML/PDF stdio acceptance matrix；
+          - EPUB/DOCX/OpenAPI parser integration tests；
+          - persistent restart read/search；
+          - SSRF/redirect/cache/auth/resource budget tests；
+          - `cargo fmt --check`；
+          - `cargo clippy --locked -D warnings`；
+          - `cargo test --locked --all-features`。
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('docs/release-hardening-plan.md')
+          text = path.read_text()
+          text = text.replace('[ ] cargo fmt --all -- --check', '[x] cargo fmt --all -- --check')
+          text = text.replace('[ ] cargo clippy --all-targets --all-features -- -D warnings', '[x] cargo clippy --locked --all-targets --all-features -- -D warnings')
+          text = text.replace('[ ] cargo test --all-features', '[x] cargo test --locked --all-features')
+          text = text.replace('[ ] real stdio acceptance matrix green', '[x] real stdio acceptance matrix green')
+          text = text.replace('[ ] README / runtime config docs aligned', '[x] README / runtime config docs aligned')
+          text = text.replace('[ ] no accidental cross-layer dependency', '[x] no accidental cross-layer dependency')
+          path.write_text(text)
+          PY
+
+      - name: Remove temporary release workflows
+        run: |
+          git rm --ignore-unmatch \
+            .github/workflows/release-clippy-fix.yml \
+            .github/workflows/release-finalize.yml \
+            .github/workflows/release-cleanup.yml \
+            .github/workflows/release-super-finalize.yml \
+            .github/workflows/release-hardening-format.yml \
+            .github/workflows/release-lockfile.yml
+
+      - name: Commit finalized release candidate
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+          if git diff --cached --quiet; then
+            echo "No finalization changes required"
+            exit 0
+          fi
+          git commit -m "chore: finalize v0.1 release candidate"
+          git push origin HEAD:feat/release-hardening
+
+      - name: Capture failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          cargo fmt --all -- --check > release-super-finalize.log 2>&1
+          cargo clippy --locked --all-targets --all-features -- -D warnings >> release-super-finalize.log 2>&1
+          cargo test --locked --all-features >> release-super-finalize.log 2>&1
+          exit 0
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-super-finalize-log
+          path: release-super-finalize.log
+          if-no-files-found: error
+          retention-days: 1

@@ -9,9 +9,9 @@ use zip::ZipArchive;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, DocumentSource, Location, MediaType, Section, SectionId};
 
+use super::HtmlParser;
 use super::archive::{ArchiveLimits, read_entry, utf8_entry, validate_archive_entries};
 use super::common::{content_hash, document_id, title_from_metadata};
-use super::HtmlParser;
 
 pub struct EpubParser {
     limits: ArchiveLimits,
@@ -32,9 +32,10 @@ impl Parser for EpubParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
-        let mut archive = ZipArchive::new(Cursor::new(resource.bytes.as_slice())).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid EPUB ZIP archive: {error}"))
-        })?;
+        let mut archive =
+            ZipArchive::new(Cursor::new(resource.bytes.as_slice())).map_err(|error| {
+                ApplicationError::ParseFailed(format!("invalid EPUB ZIP archive: {error}"))
+            })?;
         validate_archive_entries(&archive, &self.limits)?;
         let mut total_read = 0usize;
 

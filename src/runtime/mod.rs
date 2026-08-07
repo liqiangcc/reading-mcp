@@ -59,10 +59,8 @@ pub fn build_server(
         config.http.clone(),
         Arc::new(EnvironmentCredentialProvider),
     ));
-    let http: Arc<dyn Retriever> = Arc::new(RevalidatingHttpRetriever::new(
-        http,
-        components.raw_cache,
-    ));
+    let http: Arc<dyn Retriever> =
+        Arc::new(RevalidatingHttpRetriever::new(http, components.raw_cache));
     let file: Arc<dyn Retriever> = Arc::new(LimitedFileRetriever::new(
         config.resource_budget.max_document_bytes,
     ));

@@ -47,8 +47,10 @@ impl ReadingMcpServer {
     }
 
     pub fn with_local_roots(local_roots: Vec<PathBuf>) -> Self {
-        let mut config = RuntimeConfig::default();
-        config.local_roots = local_roots;
+        let config = RuntimeConfig {
+            local_roots,
+            ..RuntimeConfig::default()
+        };
         crate::runtime::build_server(config).expect("Reading MCP runtime must build")
     }
 

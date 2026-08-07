@@ -168,7 +168,10 @@ Processes own resources and execution state.
         .into_typed::<ReadDocumentResponse>()
         .expect("read should return typed structured content");
     assert_eq!(read.source, opened.source);
-    assert_eq!(read.section_id, "section://operating-systems/virtual-memory");
+    assert_eq!(
+        read.section_id,
+        "section://operating-systems/virtual-memory"
+    );
     assert!(read.content.contains("Address spaces give each process"));
     assert!(read.content.contains("Page replacement algorithms"));
     assert!(read.content.contains("### Page Tables"));

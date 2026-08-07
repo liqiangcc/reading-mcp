@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
-use scraper::html5ever::tree_builder::TreeSink;
+use markup5ever::interface::tree_builder::TreeSink;
 use scraper::{ElementRef, Html, HtmlTreeSink, Selector};
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};

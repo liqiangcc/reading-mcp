@@ -7,23 +7,11 @@ use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use crate::application::get_context::{GetContextCommand, GetContextUseCase};
 use crate::application::get_document_structure::{GetDocumentStructureUseCase, SectionOutline};
 use crate::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use crate::application::ports::{
-    ApplicationError, DocumentRepository, Parser, RawResourceCache, RetrievalOptions, Retriever,
-    SearchIndex, SourcePolicy,
-};
+use crate::application::ports::{ApplicationError, RetrievalOptions};
 use crate::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
 use crate::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
 use crate::domain::{DocumentId, DocumentSource, Location, SectionId};
-use crate::infrastructure::{
-    CachingParser, CachingRetriever, InMemoryDocumentRepository, InMemoryParsedDocumentCache,
-    InMemoryRawResourceCache, InMemorySearchIndex,
-};
-use crate::parsing::ParserRouter;
-use crate::retrieval::{
-    FileRetriever, HttpRetriever, HttpRetrieverConfig, LocalFileSourcePolicy, RetrieverRouter,
-    SourcePolicyRouter,
-};
-use crate::security::{HttpAccessPolicy, PublicHttpAccessPolicy};
+use crate::runtime::RuntimeConfig;
 
 use super::contracts::{
     GetContextRequest, GetContextResponse, GetDocumentStructureRequest,
@@ -31,8 +19,6 @@ use super::contracts::{
     ReadDocumentRequest, ReadDocumentResponse, SearchDocumentRequest, SearchDocumentResponse,
     SearchHitDto, SectionNode,
 };
-
-const LOCAL_ROOTS_ENV: &str = "READING_MCP_LOCAL_ROOTS";
 
 #[derive(Clone)]
 pub struct ReadingMcpServer {
@@ -51,58 +37,34 @@ impl Default for ReadingMcpServer {
 
 impl ReadingMcpServer {
     pub fn new() -> Self {
-        Self::with_local_roots(Vec::<PathBuf>::new())
+        crate::runtime::build_server(RuntimeConfig::default())
+            .expect("default Reading MCP runtime must build")
     }
 
-    pub fn from_env() -> Self {
-        let local_roots = std::env::var_os(LOCAL_ROOTS_ENV)
-            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-            .unwrap_or_default();
-        Self::with_local_roots(local_roots)
+    pub fn from_env() -> Result<Self, String> {
+        let config = RuntimeConfig::from_env()?;
+        crate::runtime::build_server(config).map_err(|error| error.to_string())
     }
 
     pub fn with_local_roots(local_roots: Vec<PathBuf>) -> Self {
-        let http_policy = Arc::new(PublicHttpAccessPolicy::https_only());
-        let source_http_policy: Arc<dyn SourcePolicy> = http_policy.clone();
-        let retriever_http_policy: Arc<dyn HttpAccessPolicy> = http_policy;
+        let mut config = RuntimeConfig::default();
+        config.local_roots = local_roots;
+        crate::runtime::build_server(config).expect("Reading MCP runtime must build")
+    }
 
-        let source_policy: Arc<dyn SourcePolicy> = Arc::new(SourcePolicyRouter::new(
-            Arc::new(LocalFileSourcePolicy::allow_roots(local_roots)),
-            source_http_policy,
-        ));
-
-        let http_retriever: Arc<dyn Retriever> = Arc::new(HttpRetriever::new(
-            retriever_http_policy,
-            HttpRetrieverConfig::default(),
-        ));
-        let retriever_router: Arc<dyn Retriever> = Arc::new(RetrieverRouter::new(
-            Arc::new(FileRetriever),
-            http_retriever,
-        ));
-        let raw_cache: Arc<dyn RawResourceCache> = Arc::new(InMemoryRawResourceCache::default());
-        let retriever: Arc<dyn Retriever> =
-            Arc::new(CachingRetriever::new(retriever_router, raw_cache));
-
-        let parser: Arc<dyn Parser> = Arc::new(CachingParser::new(
-            Arc::new(ParserRouter::phase4()),
-            Arc::new(InMemoryParsedDocumentCache::default()),
-        ));
-        let repository: Arc<dyn DocumentRepository> =
-            Arc::new(InMemoryDocumentRepository::default());
-        let search_index: Arc<dyn SearchIndex> = Arc::new(InMemorySearchIndex::default());
-
+    pub(crate) fn from_use_cases(
+        open_document: Arc<OpenDocumentUseCase>,
+        get_structure: Arc<GetDocumentStructureUseCase>,
+        search_document: Arc<SearchDocumentUseCase>,
+        read_document: Arc<ReadDocumentUseCase>,
+        get_context: Arc<GetContextUseCase>,
+    ) -> Self {
         Self {
-            open_document: Arc::new(OpenDocumentUseCase::new(
-                source_policy,
-                retriever,
-                parser,
-                repository.clone(),
-                search_index.clone(),
-            )),
-            get_structure: Arc::new(GetDocumentStructureUseCase::new(repository.clone())),
-            search_document: Arc::new(SearchDocumentUseCase::new(search_index)),
-            read_document: Arc::new(ReadDocumentUseCase::new(repository.clone())),
-            get_context: Arc::new(GetContextUseCase::new(repository)),
+            open_document,
+            get_structure,
+            search_document,
+            read_document,
+            get_context,
         }
     }
 }
@@ -284,6 +246,8 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
     match error {
         ApplicationError::InvalidRequest(_)
         | ApplicationError::BlockedSource(_)
+        | ApplicationError::AuthenticationFailed(_)
+        | ApplicationError::ResourceLimitExceeded(_)
         | ApplicationError::RetrievalFailed(_)
         | ApplicationError::ParseFailed(_)
         | ApplicationError::DocumentNotFound

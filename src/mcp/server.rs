@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -31,6 +32,8 @@ use super::contracts::{
     SearchHitDto, SectionNode,
 };
 
+const LOCAL_ROOTS_ENV: &str = "READING_MCP_LOCAL_ROOTS";
+
 #[derive(Clone)]
 pub struct ReadingMcpServer {
     open_document: Arc<OpenDocumentUseCase>,
@@ -48,12 +51,23 @@ impl Default for ReadingMcpServer {
 
 impl ReadingMcpServer {
     pub fn new() -> Self {
+        Self::with_local_roots(Vec::<PathBuf>::new())
+    }
+
+    pub fn from_env() -> Self {
+        let local_roots = std::env::var_os(LOCAL_ROOTS_ENV)
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        Self::with_local_roots(local_roots)
+    }
+
+    pub fn with_local_roots(local_roots: Vec<PathBuf>) -> Self {
         let http_policy = Arc::new(PublicHttpAccessPolicy::https_only());
         let source_http_policy: Arc<dyn SourcePolicy> = http_policy.clone();
         let retriever_http_policy: Arc<dyn HttpAccessPolicy> = http_policy;
 
         let source_policy: Arc<dyn SourcePolicy> = Arc::new(SourcePolicyRouter::new(
-            Arc::new(LocalFileSourcePolicy),
+            Arc::new(LocalFileSourcePolicy::allow_roots(local_roots)),
             source_http_policy,
         ));
 
@@ -96,7 +110,7 @@ impl ReadingMcpServer {
 #[tool_router]
 impl ReadingMcpServer {
     #[tool(
-        description = "Open a local file or public HTTPS document, parse it, cache it, and index it for reading"
+        description = "Open a public HTTPS document or an explicitly allowed local file, parse it, cache it, and index it for reading"
     )]
     async fn open_document(
         &self,

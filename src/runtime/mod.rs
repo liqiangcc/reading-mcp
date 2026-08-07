@@ -27,6 +27,13 @@ use crate::security::{HttpAccessPolicy, PublicHttpAccessPolicy};
 
 pub use config::RuntimeConfig;
 
+struct RuntimeComponents {
+    raw_cache: Arc<dyn RawResourceCache>,
+    parsed_cache: Arc<dyn ParsedDocumentCache>,
+    repository: Arc<dyn DocumentRepository>,
+    search_index: Arc<dyn SearchIndex>,
+}
+
 pub fn build_server(
     config: RuntimeConfig,
 ) -> Result<ReadingMcpServer, crate::application::ports::ApplicationError> {
@@ -45,42 +52,17 @@ pub fn build_server(
         source_http_policy,
     ));
 
-    let (raw_cache, parsed_cache, repository, search_index): (
-        Arc<dyn RawResourceCache>,
-        Arc<dyn ParsedDocumentCache>,
-        Arc<dyn DocumentRepository>,
-        Arc<dyn SearchIndex>,
-    ) = match &config.state_dir {
-        Some(state_dir) => {
-            std::fs::create_dir_all(state_dir).map_err(|error| {
-                crate::application::ports::ApplicationError::RepositoryFailed(format!(
-                    "{}: {error}",
-                    state_dir.display()
-                ))
-            })?;
-            let cache_root = state_dir.join("cache");
-            let database = state_dir.join("reading-mcp.sqlite");
-            (
-                Arc::new(FileRawResourceCache::new(&cache_root)),
-                Arc::new(FileParsedDocumentCache::new(&cache_root)),
-                Arc::new(SqliteDocumentRepository::open(&database)?),
-                Arc::new(SqliteSearchIndex::open(&database)?),
-            )
-        }
-        None => (
-            Arc::new(InMemoryRawResourceCache::default()),
-            Arc::new(InMemoryParsedDocumentCache::default()),
-            Arc::new(InMemoryDocumentRepository::default()),
-            Arc::new(InMemorySearchIndex::default()),
-        ),
-    };
+    let components = build_state_components(&config)?;
 
     let http = Arc::new(HttpRetriever::with_credentials(
         retriever_http_policy,
         config.http.clone(),
         Arc::new(EnvironmentCredentialProvider),
     ));
-    let http: Arc<dyn Retriever> = Arc::new(RevalidatingHttpRetriever::new(http, raw_cache));
+    let http: Arc<dyn Retriever> = Arc::new(RevalidatingHttpRetriever::new(
+        http,
+        components.raw_cache,
+    ));
     let file: Arc<dyn Retriever> = Arc::new(LimitedFileRetriever::new(
         config.resource_budget.max_document_bytes,
     ));
@@ -99,7 +81,7 @@ pub fn build_server(
         Arc::new(ParserRouter::phase4_with_pdf_limit(
             config.resource_budget.max_pdf_pages,
         )),
-        parsed_cache,
+        components.parsed_cache,
     ));
     let parser: Arc<dyn Parser> =
         Arc::new(BudgetedParser::new(parser, config.resource_budget.clone()));
@@ -110,11 +92,12 @@ pub fn build_server(
     };
 
     let search_index: Arc<dyn SearchIndex> = if config.telemetry {
-        Arc::new(ObservedSearchIndex::new(search_index))
+        Arc::new(ObservedSearchIndex::new(components.search_index))
     } else {
-        search_index
+        components.search_index
     };
 
+    let repository = components.repository;
     let open_document = Arc::new(OpenDocumentUseCase::new(
         source_policy,
         retriever,
@@ -134,4 +117,33 @@ pub fn build_server(
         read_document,
         get_context,
     ))
+}
+
+fn build_state_components(
+    config: &RuntimeConfig,
+) -> Result<RuntimeComponents, crate::application::ports::ApplicationError> {
+    match &config.state_dir {
+        Some(state_dir) => {
+            std::fs::create_dir_all(state_dir).map_err(|error| {
+                crate::application::ports::ApplicationError::RepositoryFailed(format!(
+                    "{}: {error}",
+                    state_dir.display()
+                ))
+            })?;
+            let cache_root = state_dir.join("cache");
+            let database = state_dir.join("reading-mcp.sqlite");
+            Ok(RuntimeComponents {
+                raw_cache: Arc::new(FileRawResourceCache::new(&cache_root)),
+                parsed_cache: Arc::new(FileParsedDocumentCache::new(&cache_root)),
+                repository: Arc::new(SqliteDocumentRepository::open(&database)?),
+                search_index: Arc::new(SqliteSearchIndex::open(&database)?),
+            })
+        }
+        None => Ok(RuntimeComponents {
+            raw_cache: Arc::new(InMemoryRawResourceCache::default()),
+            parsed_cache: Arc::new(InMemoryParsedDocumentCache::default()),
+            repository: Arc::new(InMemoryDocumentRepository::default()),
+            search_index: Arc::new(InMemorySearchIndex::default()),
+        }),
+    }
 }

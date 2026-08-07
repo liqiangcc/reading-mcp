@@ -20,14 +20,16 @@ use crate::infrastructure::{
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::ParserRouter;
 use crate::retrieval::{
-    EnvironmentCredentialProvider, HttpRetriever, LimitedFileRetriever, RevalidatingHttpRetriever,
-    RetrieverRouter, SourcePolicyRouter,
+    EnvironmentCredentialProvider, HttpRetriever, LimitedFileRetriever, RetrieverRouter,
+    RevalidatingHttpRetriever, SourcePolicyRouter,
 };
 use crate::security::{HttpAccessPolicy, PublicHttpAccessPolicy};
 
 pub use config::RuntimeConfig;
 
-pub fn build_server(config: RuntimeConfig) -> Result<ReadingMcpServer, crate::application::ports::ApplicationError> {
+pub fn build_server(
+    config: RuntimeConfig,
+) -> Result<ReadingMcpServer, crate::application::ports::ApplicationError> {
     let http_policy = Arc::new(if config.allow_http {
         PublicHttpAccessPolicy::allow_http()
     } else {
@@ -99,10 +101,8 @@ pub fn build_server(config: RuntimeConfig) -> Result<ReadingMcpServer, crate::ap
         )),
         parsed_cache,
     ));
-    let parser: Arc<dyn Parser> = Arc::new(BudgetedParser::new(
-        parser,
-        config.resource_budget.clone(),
-    ));
+    let parser: Arc<dyn Parser> =
+        Arc::new(BudgetedParser::new(parser, config.resource_budget.clone()));
     let parser: Arc<dyn Parser> = if config.telemetry {
         Arc::new(ObservedParser::new(parser))
     } else {

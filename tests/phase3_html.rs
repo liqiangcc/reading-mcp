@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use reading_mcp::application::ports::{
-    DocumentRepository, Parser, RetrievalOptions, RetrievedResource,
-};
+use reading_mcp::application::ports::{Parser, RetrievalOptions, RetrievedResource};
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
 use reading_mcp::domain::{DocumentSource, MediaType, SectionId};

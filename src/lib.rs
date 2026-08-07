@@ -4,3 +4,4 @@ pub mod infrastructure;
 pub mod mcp;
 pub mod parsing;
 pub mod retrieval;
+pub mod security;

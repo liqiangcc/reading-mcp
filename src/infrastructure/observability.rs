@@ -35,7 +35,7 @@ impl RawResourceCache for ObservedRawResourceCache {
         emit(json!({
             "event": "raw_cache_get",
             "duration_ms": started.elapsed().as_millis(),
-            "hit": result.as_ref().is_ok_and(Option::is_some),
+            "hit": result.as_ref().is_ok_and(|value| value.is_some()),
             "success": result.is_ok()
         }));
         result
@@ -75,7 +75,7 @@ impl ParsedDocumentCache for ObservedParsedDocumentCache {
         emit(json!({
             "event": "parsed_cache_get",
             "duration_ms": started.elapsed().as_millis(),
-            "hit": result.as_ref().is_ok_and(Option::is_some),
+            "hit": result.as_ref().is_ok_and(|value| value.is_some()),
             "success": result.is_ok()
         }));
         result

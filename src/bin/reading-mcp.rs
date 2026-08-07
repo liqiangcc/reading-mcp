@@ -3,7 +3,8 @@ use rmcp::{ServiceExt, transport::stdio};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = ReadingMcpServer::from_env().serve(stdio()).await?;
+    let server = ReadingMcpServer::from_env().map_err(std::io::Error::other)?;
+    let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

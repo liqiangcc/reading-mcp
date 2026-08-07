@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = "0.1"
+lopdf = { version = "0.44", default-features = false }
 markup5ever = "0.39"
 schemars = "1"
 scraper = "0.27"

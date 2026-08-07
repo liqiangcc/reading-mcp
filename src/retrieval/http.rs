@@ -8,9 +8,7 @@ use reqwest::redirect::Policy;
 use tokio::sync::Semaphore;
 use url::Url;
 
-use crate::application::ports::{
-    ApplicationError, RetrievalOptions, RetrievedResource, Retriever,
-};
+use crate::application::ports::{ApplicationError, RetrievalOptions, RetrievedResource, Retriever};
 use crate::domain::{DocumentSource, MediaType};
 use crate::security::HttpAccessPolicy;
 
@@ -243,7 +241,10 @@ fn media_type_from_url(url: &Url) -> Option<&'static str> {
     }
 }
 
-fn header_string(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Option<String> {
+fn header_string(
+    response: &reqwest::Response,
+    name: reqwest::header::HeaderName,
+) -> Option<String> {
     response
         .headers()
         .get(name)

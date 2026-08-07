@@ -45,7 +45,7 @@ async fn html_reuses_open_structure_search_and_read_without_special_use_cases() 
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let index = Arc::new(InMemorySearchIndex::default());
     let opened = OpenDocumentUseCase::new(
-        Arc::new(LocalFileSourcePolicy),
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase3()),
         repository.clone(),

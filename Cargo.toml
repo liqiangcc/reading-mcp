@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = "0.1"
 schemars = "1"
+scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"

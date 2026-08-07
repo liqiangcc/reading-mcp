@@ -139,6 +139,12 @@ fn media_type_for_path(path: &std::path::Path) -> MediaType {
         Some("txt") | Some("text") => MediaType("text/plain".into()),
         Some("html") | Some("htm") => MediaType("text/html".into()),
         Some("pdf") => MediaType("application/pdf".into()),
+        Some("epub") => MediaType("application/epub+zip".into()),
+        Some("docx") => MediaType(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+        ),
+        Some("json") => MediaType("application/json".into()),
+        Some("yaml") | Some("yml") => MediaType("application/yaml".into()),
         _ => MediaType("application/octet-stream".into()),
     }
 }

@@ -29,5 +29,6 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi
 url = "2"
 
 [dev-dependencies]
+rmcp = { version = "2.2", features = ["client", "transport-child-process"] }
 tempfile = "3"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

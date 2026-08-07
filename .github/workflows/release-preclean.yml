@@ -1,0 +1,46 @@
+name: Release Preclean
+
+on:
+  push:
+    branches:
+      - feat/release-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  preclean:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Remove obsolete temporary workflows
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm --ignore-unmatch \
+            .github/workflows/release-clippy-fix.yml \
+            .github/workflows/release-finalize.yml \
+            .github/workflows/release-cleanup.yml \
+            .github/workflows/release-preclean.yml \
+            .github/workflows/release-hardening-format.yml \
+            .github/workflows/release-lockfile.yml
+          if git diff --cached --quiet; then
+            echo "No obsolete temporary workflows remain"
+            exit 0
+          fi
+          git commit -m "ci: remove obsolete release helper workflows"
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin feat/release-hardening || true
+            if git push origin HEAD:feat/release-hardening; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Unable to publish pre-clean commit"
+          exit 1

@@ -16,15 +16,9 @@ pub trait HttpAccessPolicy: Send + Sync {
     async fn resolve_public_endpoint(&self, url: &Url) -> Result<SocketAddr, ApplicationError>;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PublicHttpAccessPolicy {
     allow_http: bool,
-}
-
-impl Default for PublicHttpAccessPolicy {
-    fn default() -> Self {
-        Self { allow_http: false }
-    }
 }
 
 impl PublicHttpAccessPolicy {

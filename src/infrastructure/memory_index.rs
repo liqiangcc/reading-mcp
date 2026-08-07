@@ -4,7 +4,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use crate::application::ports::{ApplicationError, SearchHit, SearchIndex};
-use crate::domain::{Document, DocumentId, Location, Section, SectionId};
+use crate::domain::{Document, DocumentId, DocumentSource, Location, Section, SectionId};
 
 const MAX_SNIPPET_CHARS: usize = 320;
 
@@ -16,6 +16,8 @@ pub struct InMemorySearchIndex {
 #[derive(Clone, Debug)]
 struct SearchUnit {
     section_id: SectionId,
+    title: String,
+    source: DocumentSource,
     search_text: String,
     snippet: String,
     location: Location,
@@ -26,7 +28,7 @@ impl SearchIndex for InMemorySearchIndex {
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let mut units = Vec::new();
         for section in &document.root_sections {
-            collect_units(section, &mut units);
+            collect_units(section, &document.source, &mut units);
         }
 
         self.documents
@@ -69,6 +71,8 @@ impl SearchIndex for InMemorySearchIndex {
                 let score = score(&haystack, &normalized_query, &terms);
                 (score > 0.0).then(|| SearchHit {
                     section_id: unit.section_id.clone(),
+                    title: unit.title.clone(),
+                    source: unit.source.clone(),
                     snippet: unit.snippet.clone(),
                     score,
                     location: unit.location.clone(),
@@ -89,11 +93,13 @@ impl SearchIndex for InMemorySearchIndex {
     }
 }
 
-fn collect_units(section: &Section, output: &mut Vec<SearchUnit>) {
+fn collect_units(section: &Section, source: &DocumentSource, output: &mut Vec<SearchUnit>) {
     let title = section.title.trim();
     if section.content.trim().is_empty() {
         output.push(SearchUnit {
             section_id: section.id.clone(),
+            title: section.title.clone(),
+            source: source.clone(),
             search_text: title.to_string(),
             snippet: truncate(title, MAX_SNIPPET_CHARS),
             location: section.location.clone(),
@@ -114,6 +120,8 @@ fn collect_units(section: &Section, output: &mut Vec<SearchUnit>) {
 
             output.push(SearchUnit {
                 section_id: section.id.clone(),
+                title: section.title.clone(),
+                source: source.clone(),
                 search_text: format!("{title}\n{paragraph}"),
                 snippet: truncate(paragraph, MAX_SNIPPET_CHARS),
                 location,
@@ -122,7 +130,7 @@ fn collect_units(section: &Section, output: &mut Vec<SearchUnit>) {
     }
 
     for child in &section.children {
-        collect_units(child, output);
+        collect_units(child, source, output);
     }
 }
 

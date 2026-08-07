@@ -1,6 +1,6 @@
+use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
 use rmcp::transport::TokioChildProcess;
-use rmcp::ServiceExt;
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
@@ -87,7 +87,10 @@ Processes own resources and execution state.
         .into_typed::<GetDocumentStructureResponse>()
         .expect("structure should return typed structured content");
     assert_eq!(structure.sections.len(), 1);
-    assert_eq!(structure.sections[0].section_id, "section://operating-systems");
+    assert_eq!(
+        structure.sections[0].section_id,
+        "section://operating-systems"
+    );
     assert_eq!(structure.sections[0].children.len(), 2);
     assert_eq!(
         structure.sections[0].children[0].section_id,
@@ -149,7 +152,10 @@ Processes own resources and execution state.
     assert!(read.content.contains("physical frames"));
     assert!(!read.truncated);
 
-    client.cancel().await.expect("MCP child process should close cleanly");
+    client
+        .cancel()
+        .await
+        .expect("MCP child process should close cleanly");
 }
 
 fn arguments(value: Value) -> Map<String, Value> {

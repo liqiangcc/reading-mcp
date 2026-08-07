@@ -95,16 +95,16 @@ fn collect_headings(text: &str) -> Vec<HeadingEvent> {
             continue;
         }
 
-        if fence.is_none() {
-            if let Some((level, title)) = parse_atx_heading(line) {
-                events.push(HeadingEvent {
-                    byte_start: byte_offset,
-                    body_start: byte_offset + line.len(),
-                    line_number: line_index + 1,
-                    level,
-                    title,
-                });
-            }
+        if fence.is_none()
+            && let Some((level, title)) = parse_atx_heading(line)
+        {
+            events.push(HeadingEvent {
+                byte_start: byte_offset,
+                body_start: byte_offset + line.len(),
+                line_number: line_index + 1,
+                level,
+                title,
+            });
         }
 
         byte_offset += line.len();

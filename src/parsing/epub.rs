@@ -9,10 +9,8 @@ use zip::ZipArchive;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, DocumentSource, Location, MediaType, Section, SectionId};
 
-use super::archive::{
-    ArchiveLimits, read_entry, read_optional_entry, utf8_entry, validate_archive_entries,
-};
-use super::common::{content_hash, document_id, slugify, title_from_metadata};
+use super::archive::{ArchiveLimits, read_entry, utf8_entry, validate_archive_entries};
+use super::common::{content_hash, document_id, title_from_metadata};
 use super::HtmlParser;
 
 pub struct EpubParser {
@@ -154,27 +152,10 @@ impl Parser for EpubParser {
             ));
         }
 
+        drop(archive);
         let mut metadata = resource.metadata;
         metadata.insert("epub_package_path".into(), package_path);
         metadata.insert("epub_spine_items".into(), parsed_spine.to_string());
-        if let Some(nav) = manifest
-            .values()
-            .find(|(_, media)| media == "application/xhtml+xml")
-            .map(|(href, _)| href)
-        {
-            let _ = read_optional_entry(
-                &mut archive,
-                &resolve_archive_path(
-                    metadata
-                        .get("epub_package_path")
-                        .expect("package path just inserted"),
-                    nav,
-                )?,
-                &self.limits,
-                &mut total_read,
-            );
-        }
-
         let title = package_title
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| title_from_metadata(&metadata, &resource.final_source));
@@ -220,7 +201,13 @@ fn remap_epub_section(
 }
 
 fn resolve_archive_path(package_path: &str, href: &str) -> Result<String, ApplicationError> {
-    let href = href.split('#').next().unwrap_or(href).split('?').next().unwrap_or(href);
+    let href = href
+        .split('#')
+        .next()
+        .unwrap_or(href)
+        .split('?')
+        .next()
+        .unwrap_or(href);
     let base = package_path
         .rsplit_once('/')
         .map(|(parent, _)| parent)

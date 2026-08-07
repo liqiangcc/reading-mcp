@@ -41,7 +41,7 @@ pub(crate) fn read_entry<R: Read + Seek>(
     limits: &ArchiveLimits,
     total_read: &mut usize,
 ) -> Result<Vec<u8>, ApplicationError> {
-    let mut file = archive.by_name(name).map_err(|error| {
+    let file = archive.by_name(name).map_err(|error| {
         ApplicationError::ParseFailed(format!("archive entry {name:?} is unavailable: {error}"))
     })?;
     let declared = usize::try_from(file.size()).unwrap_or(usize::MAX);

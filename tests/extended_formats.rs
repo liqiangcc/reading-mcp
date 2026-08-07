@@ -10,11 +10,7 @@ async fn epub_docx_and_openapi_share_the_same_normalized_document_contract() {
     let router = ParserRouter::release(100, ArchiveLimits::default());
 
     let epub = router
-        .parse(resource(
-            "book.epub",
-            "application/epub+zip",
-            build_epub(),
-        ))
+        .parse(resource("book.epub", "application/epub+zip", build_epub()))
         .await
         .expect("EPUB should parse");
     assert_eq!(epub.title, "Operating Systems EPUB");
@@ -64,11 +60,7 @@ async fn epub_docx_and_openapi_share_the_same_normalized_document_contract() {
         .find(|section| section.title == "/memory")
         .expect("OpenAPI path should become a section");
     assert_eq!(path.children[0].title, "GET /memory");
-    assert!(
-        path.children[0]
-            .content
-            .contains("Orbital memory endpoint")
-    );
+    assert!(path.children[0].content.contains("Orbital memory endpoint"));
 }
 
 fn resource(name: &str, media_type: &str, bytes: Vec<u8>) -> RetrievedResource {

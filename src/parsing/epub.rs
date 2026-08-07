@@ -55,18 +55,11 @@ impl Parser for EpubParser {
             .descendants()
             .find(|node| node.is_element() && node.tag_name().name() == "rootfile")
             .and_then(|node| node.attribute("full-path"))
-            .ok_or_else(|| {
-                ApplicationError::ParseFailed("EPUB container has no rootfile".into())
-            })?
+            .ok_or_else(|| ApplicationError::ParseFailed("EPUB container has no rootfile".into()))?
             .to_string();
 
         let package = utf8_entry(
-            read_entry(
-                &mut archive,
-                &package_path,
-                &self.limits,
-                &mut total_read,
-            )?,
+            read_entry(&mut archive, &package_path, &self.limits, &mut total_read)?,
             &package_path,
         )?;
         let package_xml = XmlDocument::parse(&package).map_err(|error| {
@@ -118,12 +111,7 @@ impl Parser for EpubParser {
                 continue;
             }
             let entry_path = resolve_archive_path(&package_path, href)?;
-            let xhtml = read_entry(
-                &mut archive,
-                &entry_path,
-                &self.limits,
-                &mut total_read,
-            )?;
+            let xhtml = read_entry(&mut archive, &entry_path, &self.limits, &mut total_read)?;
             let parsed = self
                 .html
                 .parse(RetrievedResource {

@@ -102,10 +102,7 @@ impl Parser for OpenApiParser {
     }
 }
 
-fn overview_section(
-    specification: &str,
-    info: Option<&serde_json::Map<String, Value>>,
-) -> Section {
+fn overview_section(specification: &str, info: Option<&serde_json::Map<String, Value>>) -> Section {
     let mut lines = vec![specification.to_string()];
     if let Some(info) = info {
         if let Some(version) = info.get("version").and_then(Value::as_str) {
@@ -296,6 +293,11 @@ mod tests {
             .await
             .expect("OpenAPI YAML should parse");
         assert_eq!(parsed.title, "Pet API");
-        assert!(parsed.root_sections.iter().any(|section| section.title == "/pets"));
+        assert!(
+            parsed
+                .root_sections
+                .iter()
+                .any(|section| section.title == "/pets")
+        );
     }
 }

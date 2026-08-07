@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -61,8 +59,7 @@ impl Parser for OpenApiParser {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| title_from_metadata(&resource.metadata, &resource.final_source));
-        let mut root_sections = Vec::new();
-        root_sections.push(overview_section(&specification, info));
+        let mut root_sections = vec![overview_section(&specification, info)];
 
         if let Some(paths) = object.get("paths").and_then(Value::as_object) {
             for (path, path_item) in paths {
@@ -243,7 +240,10 @@ fn schema_section(schemas: &serde_json::Map<String, Value>) -> Section {
             content: serde_json::to_string_pretty(schema).unwrap_or_default(),
             location: Location {
                 section_path: vec!["Schemas".into(), name.clone()],
-                native_location: Some(format!("openapi:#/components/schemas/{}", pointer_escape(name))),
+                native_location: Some(format!(
+                    "openapi:#/components/schemas/{}",
+                    pointer_escape(name)
+                )),
                 ..Location::default()
             },
             children: vec![],
@@ -277,6 +277,8 @@ fn pointer_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::OpenApiParser;
     use crate::application::ports::{Parser, RetrievedResource};
     use crate::domain::{DocumentSource, MediaType};

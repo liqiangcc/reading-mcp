@@ -69,16 +69,9 @@ pub struct SearchHitDto {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadDocumentRequest {
     pub document_id: String,
-    pub target: ReadTarget,
+    pub section_id: String,
     #[serde(default)]
     pub max_chars: Option<usize>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReadTarget {
-    Section { section_id: String },
-    Pages { start: u32, end: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -139,13 +139,19 @@ async fn open_document_runs_only_against_abstract_ports() {
 
     assert_eq!(result.document_id, DocumentId("doc:test".into()));
     assert_eq!(result.section_count, 1);
-    assert!(repository
-        .saved
-        .lock()
-        .expect("repository mutex poisoned")
-        .is_some());
+    assert!(
+        repository
+            .saved
+            .lock()
+            .expect("repository mutex poisoned")
+            .is_some()
+    );
     assert_eq!(
-        index.indexed.lock().expect("index mutex poisoned").as_slice(),
+        index
+            .indexed
+            .lock()
+            .expect("index mutex poisoned")
+            .as_slice(),
         &[DocumentId("doc:test".into())]
     );
 }
@@ -156,7 +162,8 @@ fn mcp_contract_schema_is_sdk_independent() {
     let json = serde_json::to_value(schema).expect("schema should serialize");
 
     assert_eq!(
-        json.pointer("/properties/source/type").and_then(|value| value.as_str()),
+        json.pointer("/properties/source/type")
+            .and_then(|value| value.as_str()),
         Some("string")
     );
 }

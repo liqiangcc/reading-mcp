@@ -38,8 +38,8 @@ async fn stdio_acceptance_matrix_covers_all_mvp_formats() {
         .await
         .expect("PDF fixture should be written");
 
-    let local_roots = std::env::join_paths([directory.path()])
-        .expect("acceptance root should be valid");
+    let local_roots =
+        std::env::join_paths([directory.path()]).expect("acceptance root should be valid");
     let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
@@ -59,7 +59,10 @@ async fn stdio_acceptance_matrix_covers_all_mvp_formats() {
     assert_flow(&client, &html, "text/html", "section://memory").await;
     assert_flow(&client, &pdf, "application/pdf", "section://page-1").await;
 
-    client.cancel().await.expect("MCP process should close cleanly");
+    client
+        .cancel()
+        .await
+        .expect("MCP process should close cleanly");
 }
 
 async fn assert_flow(
@@ -175,8 +178,6 @@ fn build_pdf(text: &str) -> Vec<u8> {
     });
     document.trailer.set("Root", catalog_id);
     let mut bytes = Vec::new();
-    document
-        .save_to(&mut bytes)
-        .expect("PDF should serialize");
+    document.save_to(&mut bytes).expect("PDF should serialize");
     bytes
 }

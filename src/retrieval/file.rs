@@ -97,6 +97,7 @@ fn media_type_for_path(path: &std::path::Path) -> MediaType {
         Some("md") | Some("markdown") => MediaType("text/markdown".into()),
         Some("txt") | Some("text") => MediaType("text/plain".into()),
         Some("html") | Some("htm") => MediaType("text/html".into()),
+        Some("pdf") => MediaType("application/pdf".into()),
         _ => MediaType("application/octet-stream".into()),
     }
 }

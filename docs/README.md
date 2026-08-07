@@ -1,11 +1,12 @@
 # Reading MCP 文档导航
 
-- [需求文档](requirements.md)：项目目标、功能范围、安全要求、非目标和验收标准。
+- [需求文档](requirements.md)：项目目标、当前 MVP 功能范围、安全要求、非目标和验收标准。
 - [设计原则](design-principles.md)：关注点分离（SoC）、单一职责（SRP）、变化原因矩阵、依赖方向、禁止耦合和架构评审清单。
 - [架构设计](architecture.md)：领域模型、Retriever/Parser/Search/Cache 边界、稳定定位与 SSRF 设计。
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链、资源限制、Raw/Parsed 持久化缓存和明确未实现项。
-- [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、5 个 Tool、stdio 子进程端到端测试和 MCP/Application 边界验收。
+- [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、5 个 Tool、default-deny 本地文件策略和 stdio 子进程端到端测试。
+- [MVP Hardening Review](mvp-review.md)：发布前完整 Review、已修问题、剩余 hardening backlog 和当前适用部署边界。
 
 ## 推荐阅读顺序
 
@@ -22,7 +23,9 @@ phase5-security-cache.md
       ↓
 phase6-mcp-stdio.md
       ↓
-真实客户端验证 / 继续演进
+mvp-review.md
+      ↓
+受控真实使用 / 继续 hardening
 ```
 
 ## 核心共识
@@ -32,6 +35,16 @@ Reading MCP = 文档上下文基础设施
 
 负责：获取 / 解析 / 结构化 / 搜索 / 定位 / 读取 / 引用 / 缓存
 不负责：总结 / 问答 / 推理 / 教学 / 通用 Web 搜索 / 通用 RAG
+```
+
+当前 MVP 推荐定位：
+
+```text
+单用户
+本地 stdio
+公共 HTTPS
+本地文件 default-deny
+显式授权 local roots
 ```
 
 实现过程中如果出现新的能力需求，必须先判断：

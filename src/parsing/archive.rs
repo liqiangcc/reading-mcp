@@ -94,6 +94,8 @@ pub(crate) fn read_optional_entry<R: Read + Seek>(
 
 pub(crate) fn utf8_entry(bytes: Vec<u8>, name: &str) -> Result<String, ApplicationError> {
     String::from_utf8(bytes).map_err(|error| {
-        ApplicationError::ParseFailed(format!("archive XML/text entry {name:?} is not UTF-8: {error}"))
+        ApplicationError::ParseFailed(format!(
+            "archive XML/text entry {name:?} is not UTF-8: {error}"
+        ))
     })
 }

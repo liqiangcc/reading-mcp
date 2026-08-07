@@ -1,14 +1,22 @@
+mod archive;
 mod common;
+mod docx;
+mod epub;
 mod html;
 mod limited_pdf;
 mod markdown;
+mod openapi;
 mod pdf;
 mod router;
 mod text;
 
+pub use archive::ArchiveLimits;
+pub use docx::DocxParser;
+pub use epub::EpubParser;
 pub use html::HtmlParser;
 pub use limited_pdf::LimitedPdfParser;
 pub use markdown::MarkdownParser;
+pub use openapi::OpenApiParser;
 pub use pdf::PdfParser;
 pub use router::ParserRouter;
 pub use text::TextParser;

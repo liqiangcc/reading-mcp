@@ -25,7 +25,7 @@ async fn search_units_are_smaller_than_logical_read_sections() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let index = Arc::new(InMemorySearchIndex::default());
     let open = OpenDocumentUseCase::new(
-        Arc::new(LocalFileSourcePolicy),
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase1()),
         repository.clone(),
@@ -96,7 +96,7 @@ async fn context_expansion_reads_canonical_document_not_search_snippets() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let index = Arc::new(InMemorySearchIndex::default());
     let opened = OpenDocumentUseCase::new(
-        Arc::new(LocalFileSourcePolicy),
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase1()),
         repository.clone(),

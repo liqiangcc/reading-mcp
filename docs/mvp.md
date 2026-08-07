@@ -193,20 +193,28 @@ search "virtual memory"
 
 任务：
 
-- PDF text extraction；
+- PDF native text extraction；
 - page mapping；
 - TOC/bookmark 提取（存在时）；
-- heading heuristic（无 TOC 时）；
-- page range read；
-- section 到 page location 映射。
+- 无 TOC 时先降级为稳定的 page-level Sections，不在 MVP 中猜测章节层级；
+- section 到 page/native location 映射；
+- 对单页解压文本设置资源上限；
+- 无可提取文本时明确返回 OCR unsupported 错误。
 
 验收：
 
 - PDF 搜索结果带页码；
-- `read_document` 可按 page range 读取；
-- 有目录的教材可以按章节导航；
+- 有目录的教材可以按章节导航和递归读取；
+- 无目录的 PDF 仍可通过 `section://page-N` 稳定定位和读取；
+- 页范围通过标准 `Location.page` / `native_location` 表达，不新增 PDF 专属 MCP Tool；
 - PdfParser 与 HttpRetriever/FileRetriever 正交；
-- PDF 特定 page/native location 不污染其他 Parser 的接口。
+- PDF 特定 page/native location 不污染其他 Parser、Application 或 MCP 接口。
+
+设计取舍：
+
+> MVP 优先使用 PDF 自带目录作为作者定义的阅读结构。无目录时不通过不稳定的字号/版式 heuristic 冒充章节结构，而是先保持 page-level 可定位性。只有真实教材 fixture 证明有必要时，再把 heading heuristic 作为 PdfParser 内部可替换策略演进。
+
+同时不新增 `read_pdf_page_range` 之类格式专属 Tool。PDF 页码属于 `Location` 的来源定位信息，读取仍统一通过 `read_document` / Section 语义完成，避免 PDF 概念泄漏到 MCP/Application 契约。
 
 不在 MVP 强求 OCR。扫描 PDF 先返回明确 unsupported/insufficient-text 错误。
 

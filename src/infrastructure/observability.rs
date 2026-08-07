@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::application::ports::{
-    ApplicationError, Parser, RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex,
+    ApplicationError, Parser, RetrievalOptions, RetrievedResource, Retriever, SearchHit,
+    SearchIndex,
 };
 use crate::domain::{Document, DocumentId, DocumentSource};
 

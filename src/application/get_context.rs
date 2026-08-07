@@ -4,7 +4,7 @@ use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::reading_support::{
     flatten_sections, render_section_shallow, truncate_chars,
 };
-use crate::domain::{DocumentId, Location, SectionId};
+use crate::domain::{DocumentId, DocumentSource, Location, SectionId};
 
 const MAX_CONTEXT_WINDOW: usize = 20;
 
@@ -20,6 +20,7 @@ pub struct GetContextCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GetContextResult {
     pub document_id: DocumentId,
+    pub source: DocumentSource,
     pub owner_section_id: SectionId,
     pub content: String,
     pub location: Location,
@@ -51,6 +52,7 @@ impl GetContextUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let document_id = document.id.clone();
+        let source = document.source.clone();
 
         let mut sections = Vec::new();
         flatten_sections(&document.root_sections, &mut sections);
@@ -71,6 +73,7 @@ impl GetContextUseCase {
 
         Ok(GetContextResult {
             document_id,
+            source,
             owner_section_id: owner.id.clone(),
             content,
             location: owner.location.clone(),

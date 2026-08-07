@@ -9,7 +9,7 @@ Reading MCP 是一个面向 AI 的统一文档阅读上下文服务。
 1. 打开文档；
 2. 识别文档结构；
 3. 搜索文档内容；
-4. 精确读取章节或位置范围；
+4. 精确读取逻辑章节；
 5. 展开命中位置的上下文；
 6. 返回可追溯的位置和来源。
 
@@ -43,16 +43,18 @@ AI 不一次读取整本书，而是：
 ```text
 open_document
 → get_document_structure
-→ read_document(section)
 → search_document(query)
-→ get_context(location)
+→ get_context(section)
+→ read_document(section)
 ```
+
+PDF 的页码继续保留在统一 `Location` 中，不为 PDF 单独增加读取 Tool。
 
 ### 3.3 证据链学习
 
 AI 回答某个概念时，需要能够返回：
 
-- 原始文档；
+- 原始文档来源；
 - 章节；
 - 页码或逻辑位置；
 - 原文上下文。
@@ -70,17 +72,20 @@ AI 回答某个概念时，需要能够返回：
 MVP source 类型：
 
 - HTTP/HTTPS URL；
-- 本地文件路径（由部署模式决定是否开启）。
+- 显式授权目录中的本地文件路径。
 
-返回至少包含：
+本地文件访问必须默认关闭，由部署配置显式提供 allowlisted roots 后才允许。
+
+`open_document` 返回至少包含：
 
 - `document_id`；
+- `source`；
 - title；
 - media type；
 - content hash；
-- source；
-- 是否存在目录；
-- 页数/章节数（可获取时）。
+- section count。
+
+格式特有信息（例如 PDF page/location）通过 Normalized Document / Location 表达，不要求把所有格式元数据平铺到 `open_document`。
 
 ### FR-002 获取文档结构
 
@@ -89,20 +94,21 @@ MVP source 类型：
 结构至少包含：
 
 - section id；
+- parent id；
 - title；
 - level；
-- parent id；
 - location；
 - children。
 
 ### FR-003 文档内搜索
 
-必须支持对已经打开或缓存的文档进行全文搜索。
+必须支持对已经打开的文档进行全文搜索。
 
 搜索结果至少返回：
 
 - section id；
 - title；
+- source；
 - snippet；
 - location；
 - score。
@@ -111,23 +117,37 @@ MVP 优先全文检索，不要求向量搜索。
 
 ### FR-004 按章节读取
 
-必须支持通过 `section_id` 读取完整章节或受限长度正文。
+必须支持通过 `section_id` 读取完整逻辑章节或受限长度正文，并返回：
 
-### FR-005 按范围读取
+- document id；
+- source；
+- section id；
+- location；
+- content；
+- truncated。
 
-必须支持通过位置范围读取正文，例如：
+### FR-005 稳定位置表达与后续范围读取
 
-- page range；
-- logical location range；
-- paragraph/anchor range。
+MVP 必须在统一 `Location` 中尽可能保留：
+
+- page；
+- logical section path；
+- paragraph；
+- anchor；
+- char range；
+- format-specific native locator。
+
+MVP 的读取单元保持为 `Section`，不声明尚未实现的 page-range / arbitrary-range Tool 参数。
+
+后续如果真实使用证明需要范围读取，应继续扩展统一 `read_document` 语义，而不是增加 `read_pdf_page_range` 等格式专属 Tool。
 
 ### FR-006 上下文展开
 
-必须支持围绕搜索命中位置向前/向后展开上下文，以避免孤立 chunk。
+必须支持围绕 owning section 向前/向后展开上下文，以避免把孤立 search unit 当作完整语义。
 
 ### FR-007 来源定位
 
-所有正文返回结果必须尽可能携带可追溯位置。
+所有正文或搜索命中返回结果必须尽可能携带可追溯来源和位置。
 
 示例：
 
@@ -135,26 +155,30 @@ MVP 优先全文检索，不要求向量搜索。
 {
   "document_id": "doc_xxx",
   "source": "...",
-  "chapter": "7",
-  "section": "7.3 Page Tables",
+  "section_id": "section://chapter-7/page-tables",
   "page": 183,
-  "location": "section://7/3#p12",
+  "location": "section://chapter-7/page-tables#p12",
   "content": "..."
 }
 ```
 
 ### FR-008 缓存
 
-同一文档在未变化时不应重复下载和解析。
+同一文档在缓存有效时不应重复下载和解析。
 
-缓存至少考虑：
+缓存分层至少考虑：
 
 - normalized source；
 - ETag；
 - Last-Modified；
 - content hash；
+- raw resource；
 - parsed document；
 - search index。
+
+MVP 已支持 Raw/Parsed Cache 和 `force_refresh=true` 手动重新获取来源。
+
+当前尚未实现基于 `If-None-Match` / `If-Modified-Since` 的自动条件重验证，因此默认缓存不会主动发现远端内容变化；这是明确的后续 hardening 项，而不是隐式承诺。
 
 ### FR-009 格式路由
 
@@ -174,7 +198,7 @@ read_document
 get_context
 ```
 
-不在 MVP 增加语义重复的小工具。
+不在 MVP 增加语义重复或格式专属的小工具。
 
 ---
 
@@ -186,7 +210,7 @@ get_context
 
 ### NFR-002 可追溯性
 
-正文返回值必须保留来源和位置。
+正文与搜索命中必须保留来源和位置。
 
 ### NFR-003 确定性
 
@@ -198,11 +222,11 @@ get_context
 
 ### NFR-005 关注分离
 
-Retriever、Parser、Index、Cache、MCP Adapter 必须职责独立。
+Retriever、Parser、Index、Cache、Security Policy、MCP Adapter 必须职责独立。
 
 ### NFR-006 安全默认
 
-外部 URL 获取必须默认启用 SSRF 防护和资源限制。
+外部 URL 获取必须默认启用 SSRF 防护和资源限制；本地文件访问必须 default-deny 并限制到显式授权根目录。
 
 ### NFR-007 无模型依赖
 
@@ -214,9 +238,11 @@ Reading MCP 核心运行不依赖 LLM。
 
 ### SR-001 协议限制
 
-默认仅允许 `https`，可配置开启 `http`。
+默认仅允许 `https`，可在明确配置下开启 `http`。
 
-禁止 `file://`、`ftp://`、`gopher://` 等远程输入协议。
+禁止 `ftp://`、`gopher://` 等输入协议。
+
+本地文件不是“任意 URL scheme”，而是独立受控来源：默认关闭，只有显式 allowlisted roots 才能读取。
 
 ### SR-002 SSRF 防护
 
@@ -240,15 +266,23 @@ Reading MCP 核心运行不依赖 LLM。
 
 ### SR-004 资源限制
 
-必须可配置：
+MVP 当前已具备：
 
-- HTTP timeout；
-- 最大响应体；
-- 最大文档页数；
-- 最大解析时长；
+- HTTP request/connect timeout；
+- 最大 HTTP response body；
 - 最大 redirect；
-- 最大并发；
-- Content-Type allowlist。
+- 最大 HTTP 并发；
+- Content-Type allowlist；
+- PDF 单页解压文本上限。
+
+发布后仍需要继续 hardening：
+
+- PDF 总页数上限；
+- Parser 全局执行时限 / 可取消执行模型；
+- 本地文件最大读取大小；
+- 更完整的压缩/解析资源预算。
+
+这些限制必须继续留在 retrieval/parsing/config 边界内，不能散落到 MCP handler。
 
 ### SR-005 凭据隔离
 
@@ -261,6 +295,8 @@ auth_profile
 ```
 
 引用本地或外部 Secret Provider。
+
+MVP 当前保留 `auth_profile` 契约但 HTTP Retriever 会明确拒绝使用；在 credential store + host binding 完成前不接受任意凭据注入。
 
 ---
 
@@ -316,17 +352,19 @@ auth_profile
 
 ---
 
-## 10. 验收标准
+## 10. MVP 验收标准
 
 MVP 完成必须至少证明：
 
 1. 可以打开 HTML、Markdown、Text、PDF；
 2. 能抽取标题和基本章节结构；
 3. 能通过同一 `search_document` 搜索不同格式；
-4. 能按 section/location 读取正文；
+4. 能按 `section_id` 读取正文，并在统一 Location 中保留 page/logical location；
 5. 搜索命中后可以展开上下文；
-6. 返回结果包含来源定位；
-7. 重复打开相同文档会命中缓存；
+6. open/search/read/context 返回可追溯 source/location；
+7. 重复打开相同文档会命中缓存，并可使用 `force_refresh` 手动重新获取；
 8. localhost / 私网 / metadata URL 默认被拒绝；
 9. redirect 到私网地址仍会被拒绝；
-10. MCP 不包含任何 LLM 总结或问答逻辑。
+10. stdio 默认不能读取任意本地文件，只有显式授权根目录可访问；
+11. MCP 不包含任何 LLM 总结或问答逻辑；
+12. 真实 MCP stdio client 可以完成 `open → structure → search → context → read`。

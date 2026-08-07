@@ -129,10 +129,10 @@ fn capture_html_metadata(
 
     let link_selector = selector("link[rel]")?;
     if let Some(canonical) = document.select(&link_selector).find(|element| {
-        element
-            .value()
-            .attr("rel")
-            .is_some_and(|rel| rel.split_ascii_whitespace().any(|item| item.eq_ignore_ascii_case("canonical")))
+        element.value().attr("rel").is_some_and(|rel| {
+            rel.split_ascii_whitespace()
+                .any(|item| item.eq_ignore_ascii_case("canonical"))
+        })
     }) && let Some(href) = canonical.value().attr("href")
     {
         metadata.insert("canonical_href".into(), href.to_string());
@@ -141,7 +141,9 @@ fn capture_html_metadata(
     Ok(())
 }
 
-fn collect_content(root: ElementRef<'_>) -> Result<(Vec<HeadingEvent>, Vec<String>), ApplicationError> {
+fn collect_content(
+    root: ElementRef<'_>,
+) -> Result<(Vec<HeadingEvent>, Vec<String>), ApplicationError> {
     let block_selector = selector("h1, h2, h3, h4, h5, h6, p, pre, blockquote, li, table")?;
     let mut events: Vec<HeadingEvent> = Vec::new();
     let mut preamble = Vec::new();
@@ -188,7 +190,8 @@ fn collect_content(root: ElementRef<'_>) -> Result<(Vec<HeadingEvent>, Vec<Strin
 }
 
 fn build_html_sections(events: &[HeadingEvent], preamble: &[String]) -> Vec<Section> {
-    let mut nodes: Vec<SectionNode> = Vec::with_capacity(events.len() + usize::from(!preamble.is_empty()));
+    let mut nodes: Vec<SectionNode> =
+        Vec::with_capacity(events.len() + usize::from(!preamble.is_empty()));
     let mut last_at_level: [Option<usize>; 6] = [None; 6];
     let mut id_counts: HashMap<String, usize> = HashMap::new();
 
@@ -211,7 +214,9 @@ fn build_html_sections(events: &[HeadingEvent], preamble: &[String]) -> Vec<Sect
     let heading_base = nodes.len();
     for (event_index, event) in events.iter().enumerate() {
         let level_index = usize::from(event.level - 1);
-        let parent_event_index = (0..level_index).rev().find_map(|index| last_at_level[index]);
+        let parent_event_index = (0..level_index)
+            .rev()
+            .find_map(|index| last_at_level[index]);
         let parent = parent_event_index.map(|index| heading_base + index);
 
         for slot in last_at_level.iter_mut().skip(level_index) {

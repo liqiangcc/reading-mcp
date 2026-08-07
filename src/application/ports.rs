@@ -30,6 +30,12 @@ pub struct SearchHit {
     pub location: Location,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParsedCacheKey {
+    pub final_source: DocumentSource,
+    pub raw_sha256: String,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ApplicationError {
     #[error("source blocked: {0}")]
@@ -40,6 +46,8 @@ pub enum ApplicationError {
     ParseFailed(String),
     #[error("document repository failed: {0}")]
     RepositoryFailed(String),
+    #[error("cache failed: {0}")]
+    CacheFailed(String),
     #[error("search index failed: {0}")]
     IndexFailed(String),
     #[error("document not found")]
@@ -67,6 +75,27 @@ pub trait Retriever: Send + Sync {
 #[async_trait]
 pub trait Parser: Send + Sync {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError>;
+}
+
+#[async_trait]
+pub trait RawResourceCache: Send + Sync {
+    async fn get(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<Option<RetrievedResource>, ApplicationError>;
+
+    async fn put(
+        &self,
+        source: &DocumentSource,
+        resource: RetrievedResource,
+    ) -> Result<(), ApplicationError>;
+}
+
+#[async_trait]
+pub trait ParsedDocumentCache: Send + Sync {
+    async fn get(&self, key: &ParsedCacheKey) -> Result<Option<Document>, ApplicationError>;
+
+    async fn put(&self, key: ParsedCacheKey, document: Document) -> Result<(), ApplicationError>;
 }
 
 #[async_trait]

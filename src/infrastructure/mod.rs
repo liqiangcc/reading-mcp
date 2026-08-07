@@ -15,5 +15,8 @@ pub use file_cache::{FileParsedDocumentCache, FileRawResourceCache};
 pub use memory_index::InMemorySearchIndex;
 pub use memory_repository::InMemoryDocumentRepository;
 pub use noop_index::NoopSearchIndex;
-pub use observability::{ObservedParser, ObservedRetriever, ObservedSearchIndex};
+pub use observability::{
+    ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
+    ObservedSearchIndex,
+};
 pub use sqlite::{SqliteDocumentRepository, SqliteSearchIndex};

@@ -37,9 +37,15 @@ Processes own resources and execution state.
     .await
     .expect("Markdown fixture should be written");
 
-    let transport = TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_reading-mcp")))
-        .expect("reading-mcp child process should start");
-    let client = ().serve(transport).await.expect("MCP initialization should succeed");
+    let local_roots = std::env::join_paths([directory.path()])
+        .expect("temporary directory should be a valid local root list");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
+    command.env("READING_MCP_LOCAL_ROOTS", local_roots);
+    let transport = TokioChildProcess::new(command).expect("reading-mcp child process should start");
+    let client = ()
+        .serve(transport)
+        .await
+        .expect("MCP initialization should succeed");
 
     let mut tool_names = client
         .list_all_tools()

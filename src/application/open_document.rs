@@ -4,7 +4,7 @@ use crate::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievalOptions, Retriever, SearchIndex,
     SourcePolicy,
 };
-use crate::domain::{DocumentId, DocumentSource, MediaType};
+use crate::domain::{ContentHash, DocumentId, DocumentSource, MediaType};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenDocumentCommand {
@@ -15,8 +15,10 @@ pub struct OpenDocumentCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenDocumentResult {
     pub document_id: DocumentId,
+    pub source: DocumentSource,
     pub title: String,
     pub media_type: MediaType,
+    pub content_hash: ContentHash,
     pub section_count: usize,
 }
 
@@ -59,8 +61,10 @@ impl OpenDocumentUseCase {
         let document = self.parser.parse(resource).await?;
         let result = OpenDocumentResult {
             document_id: document.id.clone(),
+            source: document.source.clone(),
             title: document.title.clone(),
             media_type: document.media_type.clone(),
+            content_hash: document.content_hash.clone(),
             section_count: document.section_count(),
         };
 

@@ -5,13 +5,92 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::application::ports::{
-    ApplicationError, Parser, RetrievalOptions, RetrievedResource, Retriever, SearchHit,
-    SearchIndex,
+    ApplicationError, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
+    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex,
 };
 use crate::domain::{Document, DocumentId, DocumentSource};
 
 fn emit(value: serde_json::Value) {
     eprintln!("{value}");
+}
+
+pub struct ObservedRawResourceCache {
+    inner: Arc<dyn RawResourceCache>,
+}
+
+impl ObservedRawResourceCache {
+    pub fn new(inner: Arc<dyn RawResourceCache>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl RawResourceCache for ObservedRawResourceCache {
+    async fn get(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<Option<RetrievedResource>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.get(source).await;
+        emit(json!({
+            "event": "raw_cache_get",
+            "duration_ms": started.elapsed().as_millis(),
+            "hit": result.as_ref().is_ok_and(Option::is_some),
+            "success": result.is_ok()
+        }));
+        result
+    }
+
+    async fn put(
+        &self,
+        source: &DocumentSource,
+        resource: RetrievedResource,
+    ) -> Result<(), ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.put(source, resource).await;
+        emit(json!({
+            "event": "raw_cache_put",
+            "duration_ms": started.elapsed().as_millis(),
+            "success": result.is_ok()
+        }));
+        result
+    }
+}
+
+pub struct ObservedParsedDocumentCache {
+    inner: Arc<dyn ParsedDocumentCache>,
+}
+
+impl ObservedParsedDocumentCache {
+    pub fn new(inner: Arc<dyn ParsedDocumentCache>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ParsedDocumentCache for ObservedParsedDocumentCache {
+    async fn get(&self, key: &ParsedCacheKey) -> Result<Option<Document>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.get(key).await;
+        emit(json!({
+            "event": "parsed_cache_get",
+            "duration_ms": started.elapsed().as_millis(),
+            "hit": result.as_ref().is_ok_and(Option::is_some),
+            "success": result.is_ok()
+        }));
+        result
+    }
+
+    async fn put(&self, key: ParsedCacheKey, document: Document) -> Result<(), ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.put(key, document).await;
+        emit(json!({
+            "event": "parsed_cache_put",
+            "duration_ms": started.elapsed().as_millis(),
+            "success": result.is_ok()
+        }));
+        result
+    }
 }
 
 pub struct ObservedRetriever {

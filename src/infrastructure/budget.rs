@@ -13,6 +13,9 @@ use crate::domain::{Document, DocumentSource, Section};
 pub struct ResourceBudget {
     pub max_document_bytes: usize,
     pub max_pdf_pages: usize,
+    pub max_archive_entries: usize,
+    pub max_archive_entry_bytes: usize,
+    pub max_archive_total_bytes: usize,
     pub max_sections: usize,
     pub max_section_depth: usize,
     pub max_normalized_chars: usize,
@@ -24,6 +27,9 @@ impl Default for ResourceBudget {
         Self {
             max_document_bytes: 32 * 1024 * 1024,
             max_pdf_pages: 2_000,
+            max_archive_entries: 10_000,
+            max_archive_entry_bytes: 16 * 1024 * 1024,
+            max_archive_total_bytes: 64 * 1024 * 1024,
             max_sections: 20_000,
             max_section_depth: 32,
             max_normalized_chars: 16_000_000,

@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievalOptions, RetrievedResource};
+use reading_mcp::application::ports::{
+    DocumentRepository, Parser, RetrievalOptions, RetrievedResource,
+};
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
 use reading_mcp::domain::{DocumentSource, MediaType, SectionId};
@@ -94,7 +96,11 @@ async fn html_reuses_open_structure_search_and_read_without_special_use_cases() 
         searched.hits[0].section_id.0,
         "section://operating-systems/virtual-memory"
     );
-    assert!(searched.hits[0].snippet.contains("Page replacement algorithms"));
+    assert!(
+        searched.hits[0]
+            .snippet
+            .contains("Page replacement algorithms")
+    );
 
     let read = ReadDocumentUseCase::new(repository)
         .execute(ReadSectionCommand {
@@ -108,11 +114,17 @@ async fn html_reuses_open_structure_search_and_read_without_special_use_cases() 
     assert!(read.content.contains("Address spaces give each process"));
     assert!(read.content.contains("Page replacement algorithms"));
     assert!(read.content.contains("### Page Tables"));
-    assert!(read.content.contains("Page table entries map virtual pages"));
+    assert!(
+        read.content
+            .contains("Page table entries map virtual pages")
+    );
     assert!(!read.content.contains("Navigation noise"));
     assert!(!read.content.contains("Footer noise"));
     assert_eq!(read.location.anchor.as_deref(), Some("virtual-memory"));
-    assert_eq!(read.location.native_location.as_deref(), Some("html:#virtual-memory"));
+    assert_eq!(
+        read.location.native_location.as_deref(),
+        Some("html:#virtual-memory")
+    );
 }
 
 #[tokio::test]
@@ -155,7 +167,10 @@ async fn html_parser_extracts_document_metadata_without_network_logic() {
         parsed.metadata.get("html_title").map(String::as_str),
         Some("Fallback HTML Title")
     );
-    assert_eq!(parsed.root_sections[0].location.anchor.as_deref(), Some("intro"));
+    assert_eq!(
+        parsed.root_sections[0].location.anchor.as_deref(),
+        Some("intro")
+    );
 }
 
 #[tokio::test]

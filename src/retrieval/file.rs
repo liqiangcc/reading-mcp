@@ -8,8 +8,26 @@ use crate::application::ports::{
 };
 use crate::domain::{DocumentSource, MediaType};
 
-#[derive(Default)]
-pub struct LocalFileSourcePolicy;
+#[derive(Clone, Debug, Default)]
+pub struct LocalFileSourcePolicy {
+    allowed_roots: Vec<PathBuf>,
+}
+
+impl LocalFileSourcePolicy {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn allow_roots<I, P>(roots: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        Self {
+            allowed_roots: roots.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 
 #[async_trait]
 impl SourcePolicy for LocalFileSourcePolicy {
@@ -27,7 +45,30 @@ impl SourcePolicy for LocalFileSourcePolicy {
             )));
         }
 
-        Ok(())
+        if self.allowed_roots.is_empty() {
+            return Err(ApplicationError::BlockedSource(
+                "local file access is disabled; configure an allowed root explicitly".into(),
+            ));
+        }
+
+        let path = source_to_path(source)?;
+        let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
+            ApplicationError::RetrievalFailed(format!("{}: {error}", path.display()))
+        })?;
+
+        for root in &self.allowed_roots {
+            let Ok(canonical_root) = tokio::fs::canonicalize(root).await else {
+                continue;
+            };
+            if canonical.starts_with(&canonical_root) {
+                return Ok(());
+            }
+        }
+
+        Err(ApplicationError::BlockedSource(format!(
+            "local file is outside configured roots: {}",
+            canonical.display()
+        )))
     }
 }
 

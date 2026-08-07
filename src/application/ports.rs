@@ -25,6 +25,8 @@ pub struct RetrievedResource {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchHit {
     pub section_id: SectionId,
+    pub title: String,
+    pub source: DocumentSource,
     pub snippet: String,
     pub score: f32,
     pub location: Location,

@@ -76,7 +76,13 @@ fn profile_key(profile: &str) -> Result<String, ApplicationError> {
     }
     Ok(trimmed
         .chars()
-        .map(|ch| if ch == '-' { '_' } else { ch.to_ascii_uppercase() })
+        .map(|ch| {
+            if ch == '-' {
+                '_'
+            } else {
+                ch.to_ascii_uppercase()
+            }
+        })
         .collect())
 }
 

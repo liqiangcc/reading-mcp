@@ -19,7 +19,7 @@ use crate::infrastructure::{
     SqliteSearchIndex,
 };
 use crate::mcp::ReadingMcpServer;
-use crate::parsing::ParserRouter;
+use crate::parsing::{ArchiveLimits, ParserRouter};
 use crate::retrieval::{
     EnvironmentCredentialProvider, HttpRetriever, LimitedFileRetriever, RetrieverRouter,
     RevalidatingHttpRetriever, SourcePolicyRouter,
@@ -92,9 +92,15 @@ pub fn build_server(
         retriever
     };
 
+    let archive_limits = ArchiveLimits {
+        max_entries: config.resource_budget.max_archive_entries,
+        max_entry_bytes: config.resource_budget.max_archive_entry_bytes,
+        max_total_bytes: config.resource_budget.max_archive_total_bytes,
+    };
     let parser: Arc<dyn Parser> = Arc::new(CachingParser::new(
-        Arc::new(ParserRouter::phase4_with_pdf_limit(
+        Arc::new(ParserRouter::release(
             config.resource_budget.max_pdf_pages,
+            archive_limits,
         )),
         components.parsed_cache,
     ));

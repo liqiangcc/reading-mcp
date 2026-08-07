@@ -99,7 +99,8 @@ fn collect_units(section: &Section, output: &mut Vec<SearchUnit>) {
             location: section.location.clone(),
         });
     } else {
-        for (unit_index, (start, end)) in paragraph_ranges(&section.content).into_iter().enumerate() {
+        for (unit_index, (start, end)) in paragraph_ranges(&section.content).into_iter().enumerate()
+        {
             let paragraph = &section.content[start..end];
             let mut location = section.location.clone();
             if let Some(base) = section.location.char_start {

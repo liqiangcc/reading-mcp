@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use reading_mcp::application::ports::{
-    ApplicationError, RetrievalOptions, Retriever, RawResourceCache,
+    ApplicationError, RawResourceCache, RetrievalOptions, Retriever,
 };
 use reading_mcp::domain::DocumentSource;
 use reading_mcp::infrastructure::InMemoryRawResourceCache;
@@ -147,9 +147,7 @@ impl HttpAccessPolicy for TestHttpPolicy {
     }
 }
 
-async fn spawn_fixture(
-    state: Arc<FixtureState>,
-) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+async fn spawn_fixture(state: Arc<FixtureState>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener should bind");
@@ -170,7 +168,10 @@ async fn spawn_fixture(
                 let path = first_line.split_whitespace().nth(1).unwrap_or("/");
                 let host = request
                     .lines()
-                    .find_map(|line| line.strip_prefix("host: ").or_else(|| line.strip_prefix("Host: ")))
+                    .find_map(|line| {
+                        line.strip_prefix("host: ")
+                            .or_else(|| line.strip_prefix("Host: "))
+                    })
                     .unwrap_or_default();
 
                 let response = match path {
@@ -179,9 +180,7 @@ async fn spawn_fixture(
                         if request.contains("If-None-Match: \"fixture-v1\"")
                             || request.contains("if-none-match: \"fixture-v1\"")
                         {
-                            state
-                                .not_modified_responses
-                                .fetch_add(1, Ordering::SeqCst);
+                            state.not_modified_responses.fetch_add(1, Ordering::SeqCst);
                             "HTTP/1.1 304 Not Modified\r\nETag: \"fixture-v1\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
                         } else {
                             let body = "# Conditional\n\nCached document body.\n";
@@ -212,7 +211,8 @@ async fn spawn_fixture(
                         "HTTP/1.1 302 Found\r\nLocation: http://other.test:{}/auth.md\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         address.port()
                     ),
-                    _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                    _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string(),
                 };
 
                 let _ = socket.write_all(response.as_bytes()).await;

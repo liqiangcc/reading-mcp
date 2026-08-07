@@ -5,13 +5,19 @@ use async_trait::async_trait;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::Document;
 
-use super::{HtmlParser, LimitedPdfParser, MarkdownParser, PdfParser, TextParser};
+use super::{
+    ArchiveLimits, DocxParser, EpubParser, HtmlParser, LimitedPdfParser, MarkdownParser,
+    OpenApiParser, PdfParser, TextParser,
+};
 
 pub struct ParserRouter {
     markdown: Arc<dyn Parser>,
     text: Arc<dyn Parser>,
     html: Option<Arc<dyn Parser>>,
     pdf: Option<Arc<dyn Parser>>,
+    epub: Option<Arc<dyn Parser>>,
+    docx: Option<Arc<dyn Parser>>,
+    openapi: Option<Arc<dyn Parser>>,
 }
 
 impl ParserRouter {
@@ -21,6 +27,9 @@ impl ParserRouter {
             text,
             html: None,
             pdf: None,
+            epub: None,
+            docx: None,
+            openapi: None,
         }
     }
 
@@ -34,6 +43,9 @@ impl ParserRouter {
             text,
             html: Some(html),
             pdf: None,
+            epub: None,
+            docx: None,
+            openapi: None,
         }
     }
 
@@ -48,6 +60,9 @@ impl ParserRouter {
             text,
             html: Some(html),
             pdf: Some(pdf),
+            epub: None,
+            docx: None,
+            openapi: None,
         }
     }
 
@@ -80,6 +95,18 @@ impl ParserRouter {
             Arc::new(LimitedPdfParser::new(max_pages)),
         )
     }
+
+    pub fn release(max_pdf_pages: usize, archive_limits: ArchiveLimits) -> Self {
+        Self {
+            markdown: Arc::new(MarkdownParser),
+            text: Arc::new(TextParser),
+            html: Some(Arc::new(HtmlParser)),
+            pdf: Some(Arc::new(LimitedPdfParser::new(max_pdf_pages))),
+            epub: Some(Arc::new(EpubParser::new(archive_limits.clone()))),
+            docx: Some(Arc::new(DocxParser::new(archive_limits))),
+            openapi: Some(Arc::new(OpenApiParser)),
+        }
+    }
 }
 
 #[async_trait]
@@ -94,37 +121,32 @@ impl Parser for ParserRouter {
             .trim()
             .to_ascii_lowercase();
 
-        match media_type.as_str() {
-            "text/markdown" | "text/x-markdown" => self.markdown.parse(resource).await,
-            "text/plain" => self.text.parse(resource).await,
-            "text/html" | "application/xhtml+xml" => {
-                self.html
-                    .as_ref()
-                    .ok_or_else(|| {
-                        ApplicationError::ParseFailed(format!(
-                            "unsupported media type: {}",
-                            resource.media_type.0
-                        ))
-                    })?
-                    .parse(resource)
-                    .await
+        let parser = match media_type.as_str() {
+            "text/markdown" | "text/x-markdown" => return self.markdown.parse(resource).await,
+            "text/plain" => return self.text.parse(resource).await,
+            "text/html" | "application/xhtml+xml" => self.html.as_ref(),
+            "application/pdf" => self.pdf.as_ref(),
+            "application/epub+zip" => self.epub.as_ref(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+                self.docx.as_ref()
             }
-            "application/pdf" => {
-                self.pdf
-                    .as_ref()
-                    .ok_or_else(|| {
-                        ApplicationError::ParseFailed(format!(
-                            "unsupported media type: {}",
-                            resource.media_type.0
-                        ))
-                    })?
-                    .parse(resource)
-                    .await
-            }
-            _ => Err(ApplicationError::ParseFailed(format!(
-                "unsupported media type: {}",
-                resource.media_type.0
-            ))),
-        }
+            "application/json"
+            | "application/yaml"
+            | "application/x-yaml"
+            | "text/yaml"
+            | "application/vnd.oai.openapi+json"
+            | "application/vnd.oai.openapi+yaml" => self.openapi.as_ref(),
+            _ => None,
+        };
+
+        parser
+            .ok_or_else(|| {
+                ApplicationError::ParseFailed(format!(
+                    "unsupported media type: {}",
+                    resource.media_type.0
+                ))
+            })?
+            .parse(resource)
+            .await
     }
 }

@@ -95,7 +95,9 @@ impl ReadingMcpServer {
 
 #[tool_router]
 impl ReadingMcpServer {
-    #[tool(description = "Open a local file or public HTTPS document, parse it, cache it, and index it for reading")]
+    #[tool(
+        description = "Open a local file or public HTTPS document, parse it, cache it, and index it for reading"
+    )]
     async fn open_document(
         &self,
         Parameters(request): Parameters<OpenDocumentRequest>,
@@ -120,7 +122,9 @@ impl ReadingMcpServer {
         }))
     }
 
-    #[tool(description = "Return the section hierarchy and source locations for an opened document without returning full body text")]
+    #[tool(
+        description = "Return the section hierarchy and source locations for an opened document without returning full body text"
+    )]
     async fn get_document_structure(
         &self,
         Parameters(request): Parameters<GetDocumentStructureRequest>,
@@ -137,7 +141,9 @@ impl ReadingMcpServer {
         }))
     }
 
-    #[tool(description = "Search within one opened document and return small matches that point back to owning sections and exact locations")]
+    #[tool(
+        description = "Search within one opened document and return small matches that point back to owning sections and exact locations"
+    )]
     async fn search_document(
         &self,
         Parameters(request): Parameters<SearchDocumentRequest>,
@@ -167,7 +173,9 @@ impl ReadingMcpServer {
         }))
     }
 
-    #[tool(description = "Read one logical section, including its child sections, from the canonical parsed document")]
+    #[tool(
+        description = "Read one logical section, including its child sections, from the canonical parsed document"
+    )]
     async fn read_document(
         &self,
         Parameters(request): Parameters<ReadDocumentRequest>,
@@ -190,7 +198,9 @@ impl ReadingMcpServer {
         }))
     }
 
-    #[tool(description = "Expand neighboring logical sections around a located section without using search snippets as the source of truth")]
+    #[tool(
+        description = "Expand neighboring logical sections around a located section without using search snippets as the source of truth"
+    )]
     async fn get_context(
         &self,
         Parameters(request): Parameters<GetContextRequest>,

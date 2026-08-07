@@ -46,6 +46,10 @@ pub enum ApplicationError {
     RetrievalFailed(String),
     #[error("parse failed: {0}")]
     ParseFailed(String),
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimitExceeded(String),
+    #[error("authentication profile failed: {0}")]
+    AuthenticationFailed(String),
     #[error("document repository failed: {0}")]
     RepositoryFailed(String),
     #[error("cache failed: {0}")]

@@ -23,7 +23,7 @@ async fn markdown_open_structure_and_read_form_a_complete_loop() {
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let open = OpenDocumentUseCase::new(
-        Arc::new(LocalFileSourcePolicy),
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase1()),
         repository.clone(),
@@ -89,7 +89,7 @@ async fn plain_text_is_exposed_as_one_logical_section() {
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let open = OpenDocumentUseCase::new(
-        Arc::new(LocalFileSourcePolicy),
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase1()),
         repository.clone(),
@@ -123,10 +123,33 @@ async fn plain_text_is_exposed_as_one_logical_section() {
 
 #[tokio::test]
 async fn local_file_policy_rejects_network_sources() {
-    let error = LocalFileSourcePolicy
+    let directory = tempdir().expect("temp directory should be created");
+    let error = LocalFileSourcePolicy::allow_roots([directory.path()])
         .validate(&DocumentSource("https://example.com/book.md".into()))
         .await
         .expect_err("network source must be blocked in local file mode");
 
     assert!(matches!(error, ApplicationError::BlockedSource(_)));
+}
+
+#[tokio::test]
+async fn local_file_policy_is_disabled_by_default_and_blocks_outside_roots() {
+    let allowed = tempdir().expect("allowed temp directory should be created");
+    let outside = tempdir().expect("outside temp directory should be created");
+    let outside_path = outside.path().join("secret.md");
+    tokio::fs::write(&outside_path, "# secret\n")
+        .await
+        .expect("outside fixture should be written");
+
+    let disabled = LocalFileSourcePolicy::disabled()
+        .validate(&DocumentSource(outside_path.to_string_lossy().into_owned()))
+        .await
+        .expect_err("default policy must block local file access");
+    assert!(matches!(disabled, ApplicationError::BlockedSource(_)));
+
+    let outside_error = LocalFileSourcePolicy::allow_roots([allowed.path()])
+        .validate(&DocumentSource(outside_path.to_string_lossy().into_owned()))
+        .await
+        .expect_err("paths outside configured roots must be blocked");
+    assert!(matches!(outside_error, ApplicationError::BlockedSource(_)));
 }

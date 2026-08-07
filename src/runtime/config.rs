@@ -62,6 +62,18 @@ impl RuntimeConfig {
             "READING_MCP_MAX_PDF_PAGES",
             config.resource_budget.max_pdf_pages,
         )?;
+        config.resource_budget.max_archive_entries = env_usize(
+            "READING_MCP_MAX_ARCHIVE_ENTRIES",
+            config.resource_budget.max_archive_entries,
+        )?;
+        config.resource_budget.max_archive_entry_bytes = env_usize(
+            "READING_MCP_MAX_ARCHIVE_ENTRY_BYTES",
+            config.resource_budget.max_archive_entry_bytes,
+        )?;
+        config.resource_budget.max_archive_total_bytes = env_usize(
+            "READING_MCP_MAX_ARCHIVE_TOTAL_BYTES",
+            config.resource_budget.max_archive_total_bytes,
+        )?;
         config.resource_budget.max_sections = env_usize(
             "READING_MCP_MAX_SECTIONS",
             config.resource_budget.max_sections,
@@ -106,6 +118,15 @@ fn validate(config: &RuntimeConfig) -> Result<(), String> {
     }
     if config.resource_budget.max_pdf_pages == 0 {
         return Err("READING_MCP_MAX_PDF_PAGES must be greater than zero".into());
+    }
+    if config.resource_budget.max_archive_entries == 0 {
+        return Err("READING_MCP_MAX_ARCHIVE_ENTRIES must be greater than zero".into());
+    }
+    if config.resource_budget.max_archive_entry_bytes == 0 {
+        return Err("READING_MCP_MAX_ARCHIVE_ENTRY_BYTES must be greater than zero".into());
+    }
+    if config.resource_budget.max_archive_total_bytes == 0 {
+        return Err("READING_MCP_MAX_ARCHIVE_TOTAL_BYTES must be greater than zero".into());
     }
     if config.resource_budget.parse_timeout.is_zero() {
         return Err("READING_MCP_PARSE_TIMEOUT_SECS must be greater than zero".into());

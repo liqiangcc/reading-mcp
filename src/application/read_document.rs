@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::reading_support::{render_section_tree, truncate_chars};
-use crate::domain::{DocumentId, Location, SectionId};
+use crate::domain::{DocumentId, DocumentSource, Location, SectionId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSectionCommand {
@@ -14,6 +14,7 @@ pub struct ReadSectionCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSectionResult {
     pub document_id: DocumentId,
+    pub source: DocumentSource,
     pub section_id: SectionId,
     pub content: String,
     pub location: Location,
@@ -39,6 +40,7 @@ impl ReadDocumentUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let document_id = document.id.clone();
+        let source = document.source.clone();
         let section = document
             .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
@@ -48,6 +50,7 @@ impl ReadDocumentUseCase {
 
         Ok(ReadSectionResult {
             document_id,
+            source,
             section_id: section.id.clone(),
             content,
             location: section.location.clone(),

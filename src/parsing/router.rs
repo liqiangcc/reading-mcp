@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::Document;
 
-use super::{HtmlParser, MarkdownParser, PdfParser, TextParser};
+use super::{HtmlParser, LimitedPdfParser, MarkdownParser, PdfParser, TextParser};
 
 pub struct ParserRouter {
     markdown: Arc<dyn Parser>,
@@ -69,6 +69,15 @@ impl ParserRouter {
             Arc::new(TextParser),
             Arc::new(HtmlParser),
             Arc::new(PdfParser),
+        )
+    }
+
+    pub fn phase4_with_pdf_limit(max_pages: usize) -> Self {
+        Self::with_html_pdf(
+            Arc::new(MarkdownParser),
+            Arc::new(TextParser),
+            Arc::new(HtmlParser),
+            Arc::new(LimitedPdfParser::new(max_pages)),
         )
     }
 }

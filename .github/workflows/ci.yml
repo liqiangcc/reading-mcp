@@ -20,7 +20,23 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Format
+        id: format
         run: cargo fmt --all -- --check
+
+      - name: Capture rustfmt patch
+        if: failure() && steps.format.outcome == 'failure'
+        run: |
+          cargo fmt --all
+          git diff --binary > rustfmt.patch
+
+      - name: Upload rustfmt patch
+        if: failure() && steps.format.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt-patch
+          path: rustfmt.patch
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings

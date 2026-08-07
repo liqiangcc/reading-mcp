@@ -96,6 +96,7 @@ fn media_type_for_path(path: &std::path::Path) -> MediaType {
     match extension.as_deref() {
         Some("md") | Some("markdown") => MediaType("text/markdown".into()),
         Some("txt") | Some("text") => MediaType("text/plain".into()),
+        Some("html") | Some("htm") => MediaType("text/html".into()),
         _ => MediaType("application/octet-stream".into()),
     }
 }

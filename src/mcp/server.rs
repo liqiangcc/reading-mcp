@@ -130,8 +130,10 @@ impl ReadingMcpServer {
 
         Ok(Json(OpenDocumentResponse {
             document_id: result.document_id.0,
+            source: result.source.0,
             title: result.title,
             media_type: result.media_type.0,
+            content_hash: result.content_hash.0,
             section_count: result.section_count,
         }))
     }
@@ -179,6 +181,8 @@ impl ReadingMcpServer {
                 .into_iter()
                 .map(|hit| SearchHitDto {
                     section_id: hit.section_id.0,
+                    title: hit.title,
+                    source: hit.source.0,
                     snippet: hit.snippet,
                     score: hit.score,
                     location: location_dto(&hit.location),
@@ -206,6 +210,8 @@ impl ReadingMcpServer {
 
         Ok(Json(ReadDocumentResponse {
             document_id: result.document_id.0,
+            source: result.source.0,
+            section_id: result.section_id.0,
             content: result.content,
             location: location_dto(&result.location),
             truncated: result.truncated,
@@ -233,6 +239,7 @@ impl ReadingMcpServer {
 
         Ok(Json(GetContextResponse {
             document_id: result.document_id.0,
+            source: result.source.0,
             owner_section_id: result.owner_section_id.0,
             content: result.content,
             location: location_dto(&result.location),
@@ -251,6 +258,7 @@ impl ServerHandler for ReadingMcpServer {}
 fn section_node(section: &SectionOutline) -> SectionNode {
     SectionNode {
         section_id: section.section_id.0.clone(),
+        parent_id: section.parent_id.as_ref().map(|parent| parent.0.clone()),
         title: section.title.clone(),
         level: section.level,
         location: location_dto(&section.location),

@@ -76,7 +76,10 @@ async fn search_units_are_smaller_than_logical_read_sections() {
     assert!(read.content.contains("Address spaces give each process"));
     assert!(read.content.contains("Page replacement algorithms"));
     assert!(read.content.contains("### Page Tables"));
-    assert!(read.content.contains("Page table entries map virtual pages"));
+    assert!(
+        read.content
+            .contains("Page table entries map virtual pages")
+    );
 }
 
 #[tokio::test]
@@ -109,9 +112,7 @@ async fn context_expansion_reads_canonical_document_not_search_snippets() {
     let context = GetContextUseCase::new(repository)
         .execute(GetContextCommand {
             document_id: opened.document_id,
-            section_id: SectionId(
-                "section://operating-systems/virtual-memory/page-tables".into(),
-            ),
+            section_id: SectionId("section://operating-systems/virtual-memory/page-tables".into()),
             before: 1,
             after: 1,
             max_chars: None,

@@ -11,8 +11,9 @@ pub struct TextParser;
 #[async_trait]
 impl Parser for TextParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let text = String::from_utf8(resource.bytes.clone())
-            .map_err(|error| ApplicationError::ParseFailed(format!("invalid UTF-8 text: {error}")))?;
+        let text = String::from_utf8(resource.bytes.clone()).map_err(|error| {
+            ApplicationError::ParseFailed(format!("invalid UTF-8 text: {error}"))
+        })?;
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let title = title_from_metadata(&resource.metadata, &resource.final_source);

@@ -152,10 +152,11 @@ fn paragraph_ranges(content: &str) -> Vec<(usize, usize)> {
         ranges.push(range);
     }
 
-    if ranges.is_empty() && !content.trim().is_empty() {
-        if let Some(range) = trim_range(content, 0, content.len()) {
-            ranges.push(range);
-        }
+    if ranges.is_empty()
+        && !content.trim().is_empty()
+        && let Some(range) = trim_range(content, 0, content.len())
+    {
+        ranges.push(range);
     }
 
     ranges

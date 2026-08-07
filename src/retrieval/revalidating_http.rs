@@ -27,15 +27,17 @@ impl Retriever for RevalidatingHttpRetriever {
         source: &DocumentSource,
         options: &RetrievalOptions,
     ) -> Result<RetrievedResource, ApplicationError> {
+        let cache_key = scoped_cache_key(source, options.auth_profile.as_deref());
+
         if options.force_refresh {
             let resource = self.inner.retrieve(source, options).await?;
-            self.cache.put(source, resource.clone()).await?;
+            self.cache.put(&cache_key, resource.clone()).await?;
             return Ok(resource);
         }
 
-        let Some(cached) = self.cache.get(source).await? else {
+        let Some(cached) = self.cache.get(&cache_key).await? else {
             let resource = self.inner.retrieve(source, options).await?;
-            self.cache.put(source, resource.clone()).await?;
+            self.cache.put(&cache_key, resource.clone()).await?;
             return Ok(resource);
         };
 
@@ -55,9 +57,16 @@ impl Retriever for RevalidatingHttpRetriever {
             HttpRetrievalOutcome::NotModified => Ok(cached),
             HttpRetrievalOutcome::Resource(mut resource) => {
                 resource.source = source.clone();
-                self.cache.put(source, resource.clone()).await?;
+                self.cache.put(&cache_key, resource.clone()).await?;
                 Ok(resource)
             }
         }
+    }
+}
+
+fn scoped_cache_key(source: &DocumentSource, auth_profile: Option<&str>) -> DocumentSource {
+    match auth_profile {
+        Some(profile) => DocumentSource(format!("auth-profile:{profile}\0{}", source.0)),
+        None => source.clone(),
     }
 }

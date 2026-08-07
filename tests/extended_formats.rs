@@ -24,12 +24,13 @@ async fn epub_docx_and_openapi_share_the_same_normalized_document_contract() {
             .flat_map(flatten)
             .any(|section| section.content.contains("Orbital memory in EPUB"))
     );
-    assert!(
-        epub.root_sections
-            .iter()
-            .flat_map(flatten)
-            .any(|section| section.location.native_location.as_deref().is_some_and(|value| value.starts_with("epub:")))
-    );
+    assert!(epub.root_sections.iter().flat_map(flatten).any(|section| {
+        section
+            .location
+            .native_location
+            .as_deref()
+            .is_some_and(|value| value.starts_with("epub:"))
+    }));
 
     let docx = router
         .parse(resource(
@@ -41,7 +42,11 @@ async fn epub_docx_and_openapi_share_the_same_normalized_document_contract() {
         .expect("DOCX should parse");
     assert_eq!(docx.title, "Operating Systems DOCX");
     assert_eq!(docx.root_sections[0].title, "Virtual Memory");
-    assert!(docx.root_sections[0].content.contains("Orbital memory in DOCX"));
+    assert!(
+        docx.root_sections[0]
+            .content
+            .contains("Orbital memory in DOCX")
+    );
 
     let openapi = router
         .parse(resource(
@@ -59,7 +64,11 @@ async fn epub_docx_and_openapi_share_the_same_normalized_document_contract() {
         .find(|section| section.title == "/memory")
         .expect("OpenAPI path should become a section");
     assert_eq!(path.children[0].title, "GET /memory");
-    assert!(path.children[0].content.contains("Orbital memory endpoint"));
+    assert!(
+        path.children[0]
+            .content
+            .contains("Orbital memory endpoint")
+    );
 }
 
 fn resource(name: &str, media_type: &str, bytes: Vec<u8>) -> RetrievedResource {

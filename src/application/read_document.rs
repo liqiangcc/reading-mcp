@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
-use crate::domain::{DocumentId, Location, Section, SectionId};
+use crate::application::reading_support::{render_section_tree, truncate_chars};
+use crate::domain::{DocumentId, Location, SectionId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSectionCommand {
@@ -42,7 +43,7 @@ impl ReadDocumentUseCase {
             .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
 
-        let rendered = render_section(section);
+        let rendered = render_section_tree(section);
         let (content, truncated) = truncate_chars(rendered, command.max_chars);
 
         Ok(ReadSectionResult {
@@ -53,41 +54,4 @@ impl ReadDocumentUseCase {
             truncated,
         })
     }
-}
-
-fn render_section(section: &Section) -> String {
-    let mut output = String::new();
-    render_into(section, &mut output);
-    output.trim().to_string()
-}
-
-fn render_into(section: &Section, output: &mut String) {
-    let heading_level = usize::from(section.level.clamp(1, 6));
-    output.push_str(&"#".repeat(heading_level));
-    output.push(' ');
-    output.push_str(&section.title);
-    output.push('\n');
-
-    if !section.content.trim().is_empty() {
-        output.push('\n');
-        output.push_str(section.content.trim());
-        output.push('\n');
-    }
-
-    for child in &section.children {
-        output.push('\n');
-        render_into(child, output);
-    }
-}
-
-fn truncate_chars(content: String, max_chars: Option<usize>) -> (String, bool) {
-    let Some(limit) = max_chars else {
-        return (content, false);
-    };
-
-    if content.chars().count() <= limit {
-        return (content, false);
-    }
-
-    (content.chars().take(limit).collect(), true)
 }

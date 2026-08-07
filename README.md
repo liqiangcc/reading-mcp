@@ -2,144 +2,133 @@
 
 > 面向 AI 的统一文档与书籍阅读上下文基础设施。
 
-Reading MCP 的目标不是让 AI 替用户读书，而是让 AI 能够与用户**精确地阅读同一份文档、同一本书**，并始终保留章节、页码/位置和来源边界。
+Reading MCP 的目标不是让 AI 替用户读书，而是让 AI 能够与用户**精确地阅读同一份文档、同一本书**，并保留来源、章节与格式特有位置。
 
 它负责文档的获取、解析、结构化、定位、搜索、按需读取和缓存；解释、总结、推理、教学、生成问题等能力继续由上层 AI 完成。
 
-## 为什么需要 Reading MCP
+## 当前 MVP 状态
 
-AI 阅读长文档时常见问题：
-
-- 整份文档一次进入上下文，Token 消耗大；
-- 固定字符数切块破坏章节结构和连续论证；
-- HTML、PDF、EPUB、Markdown 等格式接口不统一；
-- AI 难以明确指出内容来自哪一章、哪一节、哪一页；
-- 同一文档被重复下载、重复解析；
-- 在线 URL 读取存在 SSRF、重定向和凭据泄漏风险；
-- “获取文档”和“理解文档”的职责容易混在一起。
-
-Reading MCP 将这些问题收敛到一个统一的文档上下文层。
-
-## 核心流程
+当前已经打通：
 
 ```text
-URL / Local Document
-        ↓
-     Retriever
-        ↓
- Security Validation
-        ↓
- Content-Type Router
-        ↓
-       Parser
-        ↓
-Normalized Document
-        ↓
-TOC / Search / Section / Range
-        ↓
-       Cache
-        ↓
-        MCP
-        ↓
-        AI
+Local File / Public HTTPS
+          ↓
+      Security Policy
+          ↓
+       Retriever
+          ↓
+     Raw Resource Cache
+          ↓
+       Parser Router
+   ┌──────┼──────┬──────┐
+ Text Markdown  HTML   PDF
+   └──────┼──────┴──────┘
+          ↓
+ Normalized Document
+     ┌────┴────┐
+ Repository   SearchIndex
+     └────┬────┘
+          ↓
+  Application UseCases
+          ↓
+       MCP stdio
+          ↓
+       AI Client
 ```
 
-对 AI 而言，无论文档原始格式是什么，都遵循统一阅读过程：
+MVP 支持：
 
-```text
-open
-  ↓
-inspect structure
-  ↓
-search / locate
-  ↓
-read section
-  ↓
-expand context when needed
-```
+- Plain Text
+- Markdown
+- 静态 HTML
+- 原生文本 PDF
+- 本地文件（默认关闭，需显式授权目录）
+- 公共 HTTPS 文档
+- SSRF / DNS / redirect 安全校验
+- Raw / Parsed Cache
+- 文档内全文搜索
+- 真实 MCP stdio Server
 
-## 适用场景
+## MCP Tools
 
-- 在线技术文档
-- RFC / KIP / ADR / 设计文档
-- PDF 教材与技术书
-- EPUB 电子书
-- Markdown Book
-- GitHub README / Wiki
-- OpenAPI / Swagger 文档
-- Javadoc / MkDocs / Docusaurus / GitBook
-
-尤其适合教材和技术书阅读：AI 可以先查看目录，再按章节阅读，搜索概念后展开上下文，并返回准确来源位置，而不是把整本书机械切块后塞入上下文。
-
-## MCP 核心工具
-
-MVP 建议保持少而稳定：
+MVP 只暴露 5 个稳定 Tool：
 
 ```text
 open_document
 get_document_structure
 search_document
-read_document
 get_context
+read_document
+```
+
+推荐调用顺序：
+
+```text
+open_document
+      ↓
+get_document_structure
+      ↓
+search_document
+      ↓
+get_context
+      ↓
+read_document
 ```
 
 ### `open_document`
 
-获取、校验、解析并缓存文档，返回 `document_id` 和元数据。
+打开、校验、获取、解析并索引文档，返回：
+
+```text
+document_id
+source
+title
+media_type
+content_hash
+section_count
+```
 
 ### `get_document_structure`
 
-返回目录、章节层级和可导航位置，不返回整篇正文。
+返回结构化 Section Tree，不返回整篇正文。节点包含：
+
+```text
+section_id
+parent_id
+title
+level
+location
+children
+```
 
 ### `search_document`
 
-只搜索已经打开或缓存的文档内容，不承担 Web 搜索职责。
+在已打开文档中执行小粒度搜索，返回：
 
-### `read_document`
+```text
+section_id
+title
+source
+snippet
+score
+location
+```
 
-按 section、page/location 或 range 精确读取正文。
+Search Unit 可以小于阅读章节，但结果必须映射回 owning Section。
 
 ### `get_context`
 
-围绕搜索命中位置展开前后文，避免把孤立 chunk 当作完整语义。
+围绕 owning Section 展开前后逻辑上下文。正文来自规范化 Document，而不是搜索 snippet 拼接。
 
-## 核心边界
+### `read_document`
 
-Reading MCP 负责：
+按 `section_id` 读取完整逻辑章节，并递归包含其子章节。
 
-```text
-获取
-解析
-结构化
-搜索
-定位
-读取
-引用
-缓存
-```
+MVP **不声明尚未实现的 page-range / arbitrary-range Tool**。PDF 页码、HTML anchor 等格式特有位置统一放在 `Location` 中返回。
 
-Reading MCP 不负责：
+## 为什么不是固定 Chunk Reader
 
-```text
-Web 搜索
-通用浏览器自动化
-表单提交
-网站操作
-AI 总结
-AI 问答
-AI 推理
-自动生成笔记
-自动生成题目
-通用 RAG 平台
-```
-
-核心原则：
-
-> MCP 负责可靠地提供文档上下文，AI 负责理解、解释、推理和教学。
-
-## 结构优先，而不是机械切块
-
-不要默认：
+默认不要把长文档机械切成：
 
 ```text
 0-5000 chars
@@ -147,7 +136,7 @@ AI 推理
 10000-15000 chars
 ```
 
-优先保留：
+Reading MCP 优先保留作者定义或格式可恢复的阅读结构：
 
 ```text
 section://installation/linux/docker
@@ -155,21 +144,15 @@ section://configuration/database
 section://chapter-7/page-tables
 ```
 
-当一个 section 仍然过大时，再按以下顺序降级切分：
+核心原则：
 
-```text
-section boundary
-      ↓
-paragraph boundary
-      ↓
-sentence boundary
-      ↓
-hard size limit
-```
+> 结构优先，长度限制兜底。
 
-## Normalized Document Model
+搜索可以使用 paragraph/search-unit 粒度；读取仍尽量保持完整逻辑 Section。
 
-不同格式最终统一为类似模型：
+## Normalized Document
+
+不同格式最终统一为：
 
 ```text
 Document
@@ -179,149 +162,171 @@ Document
 ├── media_type
 ├── content_hash
 ├── metadata
-├── sections[]
-│   ├── id
-│   ├── parent_id
-│   ├── title
-│   ├── level
-│   ├── content
-│   ├── location
-│   └── children[]
-├── links[]
-└── assets[]
+└── sections[]
+    ├── id
+    ├── parent_id
+    ├── title
+    ├── level
+    ├── content
+    ├── location
+    └── children[]
 ```
 
-位置需要尽可能保留：
+`Location` 尽可能保留：
 
 ```text
 page
 chapter
-section
+section_path
 paragraph
 anchor
 char range
+native_location
 ```
 
-不是所有格式都具备所有字段：PDF 更偏向 page，EPUB 更偏向 spine/location，HTML/Markdown 更偏向 section/anchor。
+PDF 更偏向 page/native locator，HTML/Markdown 更偏向 section/anchor；格式差异不会扩散成不同 MCP Tool。
 
-## 架构原则
-
-获取与解析分离：
+## 架构边界
 
 ```text
-Retriever
-├── HttpRetriever
-├── FileRetriever
-└── BrowserRetriever    # future / optional
-
-Parser
-├── HtmlParser
-├── MarkdownParser
-├── PdfParser
-├── TextParser
-└── EpubParser          # phase 2
+来源获取
+≠
+安全策略
+≠
+格式解析
+≠
+规范化文档
+≠
+缓存
+≠
+Repository
+≠
+SearchIndex
+≠
+MCP Adapter
+≠
+AI 理解与推理
 ```
 
-`Retriever` 只负责得到原始内容，不理解文档结构；`Parser` 不关心文档来自 URL 还是本地文件；搜索层只依赖 Normalized Document。
-
-## 安全原则
-
-在线文档读取必须默认防御 SSRF。
-
-默认只允许 `http/https`，并阻止访问 localhost、loopback、link-local 和 RFC1918 私网地址；每一次 DNS 解析和 redirect 后都必须重新校验目标地址。
-
-还应限制：
-
-- 最大响应大小
-- 最大 PDF 页数
-- HTTP / parse timeout
-- 最大 redirect 次数
-- 最大并发
-- Content-Type allowlist
-- 解压炸弹
-
-认证信息不应作为模型可见的明文 Header 传入，推荐使用：
-
-```json
-{
-  "auth_profile": "company-docs"
-}
-```
-
-真实凭据由环境变量、Keychain、Secret Manager 或 Vault 管理。
-
-## 缓存
-
-同一文档不应反复下载和解析：
+几个关键约束：
 
 ```text
-normalized source
-      ↓
-ETag / Last-Modified
-      ↓
-content hash
-      ↓
-raw cache
-      ↓
-parsed cache
-      ↓
-search index
+Retrieval ≠ Parsing
+Search ≠ Read
+Section ≠ Search Unit
+Document ≠ Index
+Storage ≠ Cache ≠ Index
+MCP ≠ Application Logic
+Reading MCP ≠ AI Application
 ```
 
-文档状态不应绑定单个 MCP session。
+新增格式主要修改 `parsing`；新增来源主要修改 `retrieval/security`；更换 SearchIndex 不应修改 Parser；更换 MCP transport 不应修改 Domain/Application。
 
-## 格式路线图
+## 安全默认
 
-### MVP
+### 公共 URL
 
-- HTML
-- Markdown
-- Plain Text
-- PDF
+默认只允许 HTTPS，并拒绝：
 
-### Phase 2
+- localhost / loopback
+- RFC1918 私网
+- link-local
+- cloud metadata 地址
+- IPv6 private/link-local
+- URL 内嵌 username/password
 
-- EPUB
-- DOCX
-- GitHub README / Wiki
-- OpenAPI / Swagger
-- Javadoc
-- MkDocs / Docusaurus / GitBook
+每一次 redirect 都重新执行 URL、DNS 和目标 IP 校验。
 
-### Phase 3
+HTTP Retriever 默认禁用环境/system proxy，以保持“已验证 DNS → pinned endpoint → direct request”的安全证据链。
 
-- JavaScript-heavy 文档站
-- Confluence
-- Notion
-- 飞书文档
-- 语雀
-- 企业内部认证文档
+### 本地文件
 
-## 书籍辅助阅读
+**默认不能读取任何本地文件。**
 
-Reading MCP 特别适合作为 AI 辅助阅读教材/书籍的底层能力：
+只有部署者显式设置允许访问的根目录后才开启：
+
+```bash
+READING_MCP_LOCAL_ROOTS=/home/me/books:/home/me/docs \
+  ./target/release/reading-mcp
+```
+
+程序会 canonicalize 请求路径和授权根目录，并要求目标位于某个 root 下。
+
+这意味着：
 
 ```text
-打开书籍
-  ↓
-读取目录
-  ↓
-建立章节知识框架
-  ↓
-逐节阅读原文
-  ↓
-搜索概念
-  ↓
-展开上下文
-  ↓
-AI 解释 / 对比 / 推理
-  ↓
-必要时回到原文验证
+未配置 local roots
+→ /etc/passwd        拒绝
+→ ~/books/os.md      拒绝
+
+允许 ~/books
+→ ~/books/os.md      允许
+→ ~/secrets/a.md     拒绝
 ```
 
-最终目标：
+## 构建与运行
 
-> 让 AI 不替用户读书，而是让 AI 能够精确地和用户一起读同一本书。
+```bash
+cargo build --release --bin reading-mcp
+./target/release/reading-mcp
+```
+
+默认运行时：
+
+```text
+Public HTTPS → enabled
+Local File   → disabled
+MCP Transport→ stdio
+```
+
+如果 MCP Client 需要本地文档，把 `READING_MCP_LOCAL_ROOTS` 作为该 MCP Server 的环境变量配置即可。
+
+## 缓存语义
+
+缓存分层：
+
+```text
+RawResourceCache
+      ↓
+ParsedDocumentCache
+      ↓
+DocumentRepository
+      ↓
+SearchIndex
+```
+
+`force_refresh=true` 会绕过 Raw Cache 重新获取来源；如果获取后的 bytes 未变化，Parsed Cache 仍可复用。
+
+当前已经保存 HTTP `ETag` / `Last-Modified`，但尚未实现自动 `If-None-Match` / `If-Modified-Since` 条件重验证，所以长期运行时需要 `force_refresh` 主动确认远端变化。
+
+## 当前明确限制
+
+MVP 适合：
+
+```text
+单用户
+本地 stdio
+受信部署者
+公共 HTTPS
+显式授权本地目录
+```
+
+尚未完成：
+
+- PDF 总页数资源上限
+- Parser 全局 timeout / cancellation
+- 本地文件最大读取大小
+- HTTP 条件缓存重验证
+- 默认 runtime 的持久化 Repository/SearchIndex
+- HTTP auth_profile credential provider / host binding
+- OCR
+- EPUB / DOCX
+- JavaScript-heavy Browser Retriever
+- Streamable HTTP MCP transport
+- AI 总结 / 问答 / 笔记
+- 跨文档向量检索
+
+因此当前不应直接定位成公网多租户文档服务。
 
 ## 项目原则
 
@@ -330,10 +335,18 @@ AI 解释 / 对比 / 推理
 按需读取 > 整篇注入
 可追溯 > 无来源回答
 职责分离 > MCP 内置智能
-统一抽象 > 格式特化接口
-安全默认 > 任意 URL 可访问
+统一抽象 > 格式专属 Tool
+安全默认 > 任意来源可访问
 全文搜索优先 > 过早引入向量数据库
 MVP 简单可用 > 一开始支持所有格式
 ```
 
-详细需求、架构设计和 MVP 实施计划将在 `docs/` 中继续完善。
+详细设计与 Review：
+
+- `docs/requirements.md`
+- `docs/design-principles.md`
+- `docs/architecture.md`
+- `docs/mvp.md`
+- `docs/phase5-security-cache.md`
+- `docs/phase6-mcp-stdio.md`
+- `docs/mvp-review.md`

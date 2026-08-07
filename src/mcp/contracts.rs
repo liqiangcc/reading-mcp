@@ -13,8 +13,10 @@ pub struct OpenDocumentRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct OpenDocumentResponse {
     pub document_id: String,
+    pub source: String,
     pub title: String,
     pub media_type: String,
+    pub content_hash: String,
     pub section_count: usize,
 }
 
@@ -34,6 +36,8 @@ pub struct GetDocumentStructureResponse {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SectionNode {
     pub section_id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
     pub title: String,
     pub level: u8,
     pub location: LocationDto,
@@ -61,6 +65,8 @@ pub struct SearchDocumentResponse {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct SearchHitDto {
     pub section_id: String,
+    pub title: String,
+    pub source: String,
     pub snippet: String,
     pub score: f32,
     pub location: LocationDto,
@@ -77,6 +83,8 @@ pub struct ReadDocumentRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadDocumentResponse {
     pub document_id: String,
+    pub source: String,
+    pub section_id: String,
     pub content: String,
     pub location: LocationDto,
     pub truncated: bool,
@@ -101,6 +109,7 @@ fn default_context_window() -> usize {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct GetContextResponse {
     pub document_id: String,
+    pub source: String,
     pub owner_section_id: String,
     pub content: String,
     pub location: LocationDto,

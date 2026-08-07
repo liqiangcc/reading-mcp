@@ -45,30 +45,52 @@ Domain + Ports + Adapters
 
 ### `open_document`
 
-输入本地文件路径或公共 HTTPS URL，完成安全校验、获取、解析、缓存和索引。
+输入公共 HTTPS URL，或显式授权目录中的本地文件，完成安全校验、获取、解析、缓存和索引。
 
 返回：
 
 - `document_id`
+- `source`
 - `title`
 - `media_type`
+- `content_hash`
 - `section_count`
 
 ### `get_document_structure`
 
 读取已经打开文档的 Section Tree 和 Location，不返回整篇正文。
 
+每个节点返回：
+
+- `section_id`
+- `parent_id`
+- `title`
+- `level`
+- `location`
+- `children`
+
 ### `search_document`
 
-在已经打开文档中执行小粒度全文检索，返回 snippet、owning `section_id` 和 Location。
+在已经打开文档中执行小粒度全文检索，返回：
+
+- snippet；
+- owning `section_id`；
+- section title；
+- source；
+- Location；
+- score。
 
 ### `get_context`
 
 围绕 owning section 展开相邻逻辑章节。正文来源仍然是 DocumentRepository，而不是搜索 snippet。
 
+返回 `source + owner_section_id + location + content`。
+
 ### `read_document`
 
 按 `section_id` 读取完整逻辑章节，并递归包含其子章节。
+
+返回 `source + section_id + location + content`。
 
 当前 MCP 契约不声明尚未实现的 PDF page-range 专属读取接口。PDF 页码仍通过统一 `Location` 返回。
 
@@ -76,11 +98,12 @@ Domain + Ports + Adapters
 
 ## 4. 默认运行时组合
 
-`ReadingMcpServer::new()` 当前装配：
+`ReadingMcpServer` 当前装配：
 
 ```text
 SourcePolicyRouter
 ├── LocalFileSourcePolicy
+│      └── allowlisted roots / default denied
 └── PublicHttpAccessPolicy::https_only()
 
 RetrieverRouter
@@ -109,7 +132,8 @@ InMemorySearchIndex
 
 - HTTP 默认只允许 HTTPS；测试或显式配置下可允许 HTTP。
 - SSRF、DNS、redirect 和响应大小策略仍由 Phase 5 的 Security Policy / HttpRetriever 负责。
-- 当前 stdio 默认组合使用内存缓存；Phase 5 已提供持久化 Raw/Parsed Cache adapter，可在后续配置层接入。
+- **本地文件访问默认关闭。** 只有显式配置授权根目录后才能读取本地文件。
+- 当前 stdio 默认组合使用内存 Raw/Parsed Cache、Repository 和 SearchIndex；Phase 5 已提供持久化 Raw/Parsed Cache adapter，但尚未接入默认 runtime config。
 - 不存在 AI/LLM SDK 依赖。
 
 ---
@@ -122,29 +146,88 @@ InMemorySearchIndex
 cargo build --release --bin reading-mcp
 ```
 
-stdio MCP Server：
+默认启动：
 
 ```bash
 ./target/release/reading-mcp
 ```
 
-MCP 客户端只需要把该 binary 配置为 stdio command。例如概念配置：
+此时：
+
+```text
+public HTTPS documents  → allowed by HTTP security policy
+local files             → denied by default
+```
+
+如果需要读取本地文档，必须显式配置允许访问的根目录。
+
+Unix/macOS 示例：
+
+```bash
+READING_MCP_LOCAL_ROOTS=/home/me/books:/home/me/docs \
+  ./target/release/reading-mcp
+```
+
+Windows 使用平台原生 PATH 分隔符配置多个根目录。
+
+`READING_MCP_LOCAL_ROOTS` 使用 `std::env::split_paths` 解析，因此遵循当前操作系统的 path-list 规则。
+
+MCP 客户端概念配置：
 
 ```json
 {
   "mcpServers": {
     "reading": {
-      "command": "/absolute/path/to/reading-mcp"
+      "command": "/absolute/path/to/reading-mcp",
+      "env": {
+        "READING_MCP_LOCAL_ROOTS": "/home/me/books:/home/me/docs"
+      }
     }
   }
 }
 ```
 
-具体客户端的配置文件位置由客户端自身决定。
+具体客户端的配置文件位置和环境变量字段由客户端自身决定。
 
 ---
 
-## 6. 真实 stdio 验收测试
+## 6. 本地文件安全边界
+
+本地文件不是“只要 MCP 在本机就默认全部可读”。
+
+安全链路：
+
+```text
+source path
+    ↓
+LocalFileSourcePolicy
+    ↓
+canonicalize requested path
+    ↓
+canonicalize configured roots
+    ↓
+requested path must be inside one root
+    ↓
+FileRetriever
+```
+
+因此：
+
+```text
+未配置 root
+→ 所有 local file source 拒绝
+
+配置 /home/me/books
+→ /home/me/books/os/book.md 允许
+→ /etc/passwd 拒绝
+→ /home/me/secrets/notes.md 拒绝
+```
+
+当前 policy 与 retriever 会分别 canonicalize，后续如果要覆盖对抗性本地文件系统的 symlink race，可进一步把“解析安全路径”抽象为单次 capability/handle 传递；这不是当前 stdio 单用户场景的 MVP 阻断项。
+
+---
+
+## 7. 真实 stdio 验收测试
 
 `tests/phase6_mcp_stdio.rs` 不直接调用 Application UseCase，而是：
 
@@ -179,7 +262,13 @@ get_context
 read_document
 ```
 
-测试使用临时 Markdown 文档，不依赖公网。
+测试使用临时 Markdown 文档，不依赖公网，并通过：
+
+```text
+READING_MCP_LOCAL_ROOTS=<temporary directory>
+```
+
+显式授权 fixture 所在目录。
 
 验收内容：
 
@@ -190,13 +279,14 @@ read_document
 - `open_document` 建立的 Repository/SearchIndex 状态能被后续 Tool 共享；
 - search 返回小粒度命中；
 - context/read 返回规范化文档正文；
+- source/location/section 信息可以通过 Tool 结果追溯；
 - stdio 子进程可以干净关闭。
 
 ---
 
-## 7. 架构验收
+## 8. 架构验收
 
-Phase 6 需要继续满足：
+Phase 6 继续满足：
 
 ```text
 rmcp → mcp adapter
@@ -220,10 +310,18 @@ search index → rmcp DTO
 
 ---
 
-## 8. 本阶段明确不做
+## 9. 当前明确限制
+
+当前 MVP 仍明确不做或未完成：
 
 - Streamable HTTP MCP transport；
 - OAuth；
+- HTTP `auth_profile` credential store / host binding；
+- HTTP ETag/Last-Modified 条件重验证；
+- 默认 runtime 的持久化 Repository/SearchIndex；
+- PDF 总页数上限；
+- Parser 全局执行 timeout / cancellation；
+- 本地文件最大大小限制；
 - MCP Resources/Prompts；
 - browser rendering；
 - OCR；
@@ -231,4 +329,4 @@ search index → rmcp DTO
 - AI 总结、问答、笔记；
 - 跨文档语义检索。
 
-先验证 stdio + 5 个核心 Tool 足够稳定，再根据真实使用数据决定下一步。
+这些限制应按真实使用优先级逐步解决，而不是继续扩大 Reading MCP 的职责边界。

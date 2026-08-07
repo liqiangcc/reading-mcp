@@ -5,12 +5,13 @@ use async_trait::async_trait;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::Document;
 
-use super::{HtmlParser, MarkdownParser, TextParser};
+use super::{HtmlParser, MarkdownParser, PdfParser, TextParser};
 
 pub struct ParserRouter {
     markdown: Arc<dyn Parser>,
     text: Arc<dyn Parser>,
     html: Option<Arc<dyn Parser>>,
+    pdf: Option<Arc<dyn Parser>>,
 }
 
 impl ParserRouter {
@@ -19,6 +20,7 @@ impl ParserRouter {
             markdown,
             text,
             html: None,
+            pdf: None,
         }
     }
 
@@ -31,6 +33,21 @@ impl ParserRouter {
             markdown,
             text,
             html: Some(html),
+            pdf: None,
+        }
+    }
+
+    pub fn with_html_pdf(
+        markdown: Arc<dyn Parser>,
+        text: Arc<dyn Parser>,
+        html: Arc<dyn Parser>,
+        pdf: Arc<dyn Parser>,
+    ) -> Self {
+        Self {
+            markdown,
+            text,
+            html: Some(html),
+            pdf: Some(pdf),
         }
     }
 
@@ -43,6 +60,15 @@ impl ParserRouter {
             Arc::new(MarkdownParser),
             Arc::new(TextParser),
             Arc::new(HtmlParser),
+        )
+    }
+
+    pub fn phase4() -> Self {
+        Self::with_html_pdf(
+            Arc::new(MarkdownParser),
+            Arc::new(TextParser),
+            Arc::new(HtmlParser),
+            Arc::new(PdfParser),
         )
     }
 }
@@ -64,6 +90,18 @@ impl Parser for ParserRouter {
             "text/plain" => self.text.parse(resource).await,
             "text/html" | "application/xhtml+xml" => {
                 self.html
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ApplicationError::ParseFailed(format!(
+                            "unsupported media type: {}",
+                            resource.media_type.0
+                        ))
+                    })?
+                    .parse(resource)
+                    .await
+            }
+            "application/pdf" => {
+                self.pdf
                     .as_ref()
                     .ok_or_else(|| {
                         ApplicationError::ParseFailed(format!(

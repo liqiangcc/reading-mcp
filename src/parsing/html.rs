@@ -1,0 +1,321 @@
+use std::collections::{BTreeMap, HashMap};
+
+use async_trait::async_trait;
+use markup5ever::interface::tree_builder::TreeSink;
+use scraper::{ElementRef, Html, HtmlTreeSink, Selector};
+
+use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
+use crate::domain::{Document, Location, Section, SectionId};
+
+use super::common::{content_hash, document_id, slugify, title_from_metadata};
+
+#[derive(Default)]
+pub struct HtmlParser;
+
+#[derive(Clone, Debug)]
+struct HeadingEvent {
+    level: u8,
+    title: String,
+    anchor: Option<String>,
+    body: Vec<String>,
+    ordinal: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SectionNode {
+    id: SectionId,
+    parent: Option<usize>,
+    title: String,
+    level: u8,
+    content: String,
+    location: Location,
+    path: Vec<String>,
+}
+
+#[async_trait]
+impl Parser for HtmlParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let html = String::from_utf8(resource.bytes.clone()).map_err(|error| {
+            ApplicationError::ParseFailed(format!("invalid UTF-8 HTML: {error}"))
+        })?;
+        let hash = content_hash(&resource.bytes);
+        let id = document_id(&resource.final_source, &hash);
+
+        let document = remove_noise(Html::parse_document(&html))?;
+        let root = content_root(&document)?;
+        let (events, preamble) = collect_content(root)?;
+        let mut metadata = resource.metadata;
+        capture_html_metadata(&document, &mut metadata)?;
+
+        let fallback_title = title_from_metadata(&metadata, &resource.final_source);
+        let title = events
+            .iter()
+            .find(|event| event.level == 1)
+            .map(|event| event.title.clone())
+            .or_else(|| metadata.get("html_title").cloned())
+            .unwrap_or_else(|| fallback_title.clone());
+
+        let root_sections = if events.is_empty() {
+            let content = if preamble.is_empty() {
+                collapse_whitespace(&root.text().collect::<Vec<_>>().join(" "))
+            } else {
+                preamble.join("\n\n")
+            };
+
+            vec![Section {
+                id: SectionId("section://document".into()),
+                parent_id: None,
+                title: title.clone(),
+                level: 1,
+                content,
+                location: Location {
+                    section_path: vec!["document".into()],
+                    native_location: Some("html:document".into()),
+                    ..Location::default()
+                },
+                children: vec![],
+            }]
+        } else {
+            build_html_sections(&events, &preamble)
+        };
+
+        Ok(Document {
+            id,
+            source: resource.final_source,
+            title,
+            media_type: resource.media_type,
+            content_hash: hash,
+            metadata,
+            root_sections,
+        })
+    }
+}
+
+fn remove_noise(document: Html) -> Result<Html, ApplicationError> {
+    let selector = selector("script, style, nav, footer, aside, noscript, template, svg")?;
+    let node_ids = document
+        .select(&selector)
+        .map(|element| element.id())
+        .collect::<Vec<_>>();
+    let tree = HtmlTreeSink::new(document);
+    for id in node_ids {
+        tree.remove_from_parent(&id);
+    }
+    Ok(tree.finish())
+}
+
+fn content_root(document: &Html) -> Result<ElementRef<'_>, ApplicationError> {
+    for query in ["main", "article", "body"] {
+        let selector = selector(query)?;
+        if let Some(element) = document.select(&selector).next() {
+            return Ok(element);
+        }
+    }
+
+    Ok(document.root_element())
+}
+
+fn capture_html_metadata(
+    document: &Html,
+    metadata: &mut BTreeMap<String, String>,
+) -> Result<(), ApplicationError> {
+    let title_selector = selector("title")?;
+    if let Some(title) = document.select(&title_selector).next() {
+        let value = normalized_element_text(title);
+        if !value.is_empty() {
+            metadata.insert("html_title".into(), value);
+        }
+    }
+
+    let link_selector = selector("link[rel]")?;
+    if let Some(canonical) = document.select(&link_selector).find(|element| {
+        element.value().attr("rel").is_some_and(|rel| {
+            rel.split_ascii_whitespace()
+                .any(|item| item.eq_ignore_ascii_case("canonical"))
+        })
+    }) && let Some(href) = canonical.value().attr("href")
+    {
+        metadata.insert("canonical_href".into(), href.to_string());
+    }
+
+    Ok(())
+}
+
+fn collect_content(
+    root: ElementRef<'_>,
+) -> Result<(Vec<HeadingEvent>, Vec<String>), ApplicationError> {
+    let block_selector = selector("h1, h2, h3, h4, h5, h6, p, pre, blockquote, li, table")?;
+    let mut events: Vec<HeadingEvent> = Vec::new();
+    let mut preamble = Vec::new();
+
+    for element in root.select(&block_selector) {
+        let tag = element.value().name();
+        if let Some(level) = heading_level(tag) {
+            let title = normalized_element_text(element);
+            if title.is_empty() {
+                continue;
+            }
+            events.push(HeadingEvent {
+                level,
+                title,
+                anchor: element.value().attr("id").map(str::to_string),
+                body: Vec::new(),
+                ordinal: events.len() + 1,
+            });
+            continue;
+        }
+
+        let text = if tag == "pre" {
+            element
+                .text()
+                .collect::<Vec<_>>()
+                .join("")
+                .trim()
+                .to_string()
+        } else {
+            normalized_element_text(element)
+        };
+        if text.is_empty() {
+            continue;
+        }
+
+        if let Some(current) = events.last_mut() {
+            current.body.push(text);
+        } else {
+            preamble.push(text);
+        }
+    }
+
+    Ok((events, preamble))
+}
+
+fn build_html_sections(events: &[HeadingEvent], preamble: &[String]) -> Vec<Section> {
+    let mut nodes: Vec<SectionNode> =
+        Vec::with_capacity(events.len() + usize::from(!preamble.is_empty()));
+    let mut last_at_level: [Option<usize>; 6] = [None; 6];
+    let mut id_counts: HashMap<String, usize> = HashMap::new();
+
+    if !preamble.is_empty() {
+        nodes.push(SectionNode {
+            id: SectionId("section://preamble".into()),
+            parent: None,
+            title: "Preamble".into(),
+            level: 1,
+            content: preamble.join("\n\n"),
+            location: Location {
+                section_path: vec!["Preamble".into()],
+                native_location: Some("html:preamble".into()),
+                ..Location::default()
+            },
+            path: vec!["Preamble".into()],
+        });
+    }
+
+    let heading_base = nodes.len();
+    for (event_index, event) in events.iter().enumerate() {
+        let level_index = usize::from(event.level - 1);
+        let parent_event_index = (0..level_index)
+            .rev()
+            .find_map(|index| last_at_level[index]);
+        let parent = parent_event_index.map(|index| heading_base + index);
+
+        for slot in last_at_level.iter_mut().skip(level_index) {
+            *slot = None;
+        }
+        last_at_level[level_index] = Some(event_index);
+
+        let mut path = parent
+            .map(|parent_index| nodes[parent_index].path.clone())
+            .unwrap_or_default();
+        path.push(event.title.clone());
+
+        let base_id = format!(
+            "section://{}",
+            path.iter()
+                .map(|segment| slugify(segment))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let count = id_counts.entry(base_id.clone()).or_insert(0);
+        *count += 1;
+        let section_id = if *count == 1 {
+            base_id
+        } else {
+            format!("{base_id}-{}", *count)
+        };
+
+        let native_location = event
+            .anchor
+            .as_ref()
+            .map(|anchor| format!("html:#{anchor}"))
+            .unwrap_or_else(|| format!("html:heading:{}", event.ordinal));
+
+        nodes.push(SectionNode {
+            id: SectionId(section_id),
+            parent,
+            title: event.title.clone(),
+            level: event.level,
+            content: event.body.join("\n\n"),
+            location: Location {
+                section_path: path.clone(),
+                anchor: event.anchor.clone(),
+                native_location: Some(native_location),
+                ..Location::default()
+            },
+            path,
+        });
+    }
+
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.parent.is_none())
+        .map(|(index, _)| build_section(index, &nodes))
+        .collect()
+}
+
+fn build_section(index: usize, nodes: &[SectionNode]) -> Section {
+    let node = &nodes[index];
+    let children = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.parent == Some(index))
+        .map(|(child_index, _)| build_section(child_index, nodes))
+        .collect();
+
+    Section {
+        id: node.id.clone(),
+        parent_id: node.parent.map(|parent| nodes[parent].id.clone()),
+        title: node.title.clone(),
+        level: node.level,
+        content: node.content.clone(),
+        location: node.location.clone(),
+        children,
+    }
+}
+
+fn heading_level(tag: &str) -> Option<u8> {
+    match tag {
+        "h1" => Some(1),
+        "h2" => Some(2),
+        "h3" => Some(3),
+        "h4" => Some(4),
+        "h5" => Some(5),
+        "h6" => Some(6),
+        _ => None,
+    }
+}
+
+fn normalized_element_text(element: ElementRef<'_>) -> String {
+    collapse_whitespace(&element.text().collect::<Vec<_>>().join(" "))
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn selector(value: &str) -> Result<Selector, ApplicationError> {
+    Selector::parse(value).map_err(|error| {
+        ApplicationError::ParseFailed(format!("invalid internal HTML selector `{value}`: {error}"))
+    })
+}

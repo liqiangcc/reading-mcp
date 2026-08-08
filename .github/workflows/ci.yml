@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        id: format
+        run: cargo fmt --all -- --check
+
+      - name: Capture rustfmt patch
+        if: failure() && steps.format.outcome == 'failure'
+        run: |
+          cargo fmt --all
+          git diff --binary > rustfmt.patch
+
+      - name: Upload rustfmt patch
+        if: failure() && steps.format.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt-patch
+          path: rustfmt.patch
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Clippy
+        id: clippy
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 | tee clippy.log
+
+      - name: Upload Clippy log
+        if: failure() && steps.clippy.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-log
+          path: clippy.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Test
+        id: test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --all-features 2>&1 | tee test.log
+
+      - name: Upload test log
+        if: failure() && steps.test.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: test.log
+          if-no-files-found: error
+          retention-days: 1

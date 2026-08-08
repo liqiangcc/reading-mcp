@@ -1,0 +1,38 @@
+[package]
+name = "reading-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "Document and book reading context infrastructure for MCP"
+license = "MIT"
+
+[lib]
+name = "reading_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "reading-mcp"
+path = "src/bin/reading-mcp.rs"
+
+[dependencies]
+async-trait = "0.1"
+lopdf = { version = "0.44", default-features = false }
+markup5ever = "0.39"
+reqwest = { version = "0.12", default-features = false, features = ["brotli", "deflate", "gzip", "rustls-tls"] }
+rmcp = { version = "2.2", features = ["schemars", "transport-io"] }
+roxmltree = "0.21.1"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+schemars = "1"
+scraper = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "0.0.29"
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+url = "2"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+rmcp = { version = "2.2", features = ["client", "transport-child-process"] }
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

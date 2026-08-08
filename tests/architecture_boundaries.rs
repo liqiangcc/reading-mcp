@@ -7,11 +7,27 @@ fn core_layers_do_not_gain_forbidden_concrete_dependencies() {
 
     assert_tree_excludes(
         &root.join("domain"),
-        &["crate::mcp", "rmcp::", "reqwest::", "lopdf::", "rusqlite::", "scraper::", "zip::"],
+        &[
+            "crate::mcp",
+            "rmcp::",
+            "reqwest::",
+            "lopdf::",
+            "rusqlite::",
+            "scraper::",
+            "zip::",
+        ],
     );
     assert_tree_excludes(
         &root.join("application"),
-        &["crate::mcp", "rmcp::", "reqwest::", "lopdf::", "rusqlite::", "scraper::", "zip::"],
+        &[
+            "crate::mcp",
+            "rmcp::",
+            "reqwest::",
+            "lopdf::",
+            "rusqlite::",
+            "scraper::",
+            "zip::",
+        ],
     );
     assert_tree_excludes(
         &root.join("parsing"),

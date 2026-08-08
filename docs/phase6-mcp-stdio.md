@@ -1,332 +1,110 @@
 # Phase 6：MCP stdio Server 与真实调用验证
 
-## 1. 目标
+## 目标
 
-Phase 6 的目标不是新增文档能力，而是把已经稳定的 Application UseCase 通过真正的 MCP 协议暴露出去，并验证客户端能够通过 stdio 完成完整阅读流程。
-
-核心约束：
-
-> MCP 只负责协议适配与运行时装配，不承载文档获取、解析、搜索和读取业务逻辑。
-
-因此本阶段不修改 Domain、Parser、SearchIndex 或阅读语义。
-
----
-
-## 2. 运行时结构
+通过真正的 MCP stdio transport 暴露既有 Application UseCase，而不让协议 SDK 进入 Domain/Application/Parsing/Retrieval。
 
 ```text
 MCP Client
-    │
-    │ stdio / JSON-RPC
-    ▼
+  ↓ stdio / JSON-RPC
 reading-mcp binary
-    │
-    ▼
+  ↓
 ReadingMcpServer
-    │
-    ├── open_document
-    ├── get_document_structure
-    ├── search_document
-    ├── get_context
-    └── read_document
-          │
-          ▼
-     Application UseCases
-          │
-          ▼
+  ↓
+Application UseCases
+  ↓
 Domain + Ports + Adapters
 ```
 
-`rmcp` 依赖只进入 MCP adapter 和 binary。Domain/Application 不依赖 MCP SDK。
+`rmcp` 只进入 MCP adapter/binary。
 
----
-
-## 3. 当前 MCP Tools
-
-### `open_document`
-
-输入公共 HTTPS URL，或显式授权目录中的本地文件，完成安全校验、获取、解析、缓存和索引。
-
-返回：
-
-- `document_id`
-- `source`
-- `title`
-- `media_type`
-- `content_hash`
-- `section_count`
-
-### `get_document_structure`
-
-读取已经打开文档的 Section Tree 和 Location，不返回整篇正文。
-
-每个节点返回：
-
-- `section_id`
-- `parent_id`
-- `title`
-- `level`
-- `location`
-- `children`
-
-### `search_document`
-
-在已经打开文档中执行小粒度全文检索，返回：
-
-- snippet；
-- owning `section_id`；
-- section title；
-- source；
-- Location；
-- score。
-
-### `get_context`
-
-围绕 owning section 展开相邻逻辑章节。正文来源仍然是 DocumentRepository，而不是搜索 snippet。
-
-返回 `source + owner_section_id + location + content`。
-
-### `read_document`
-
-按 `section_id` 读取完整逻辑章节，并递归包含其子章节。
-
-返回 `source + section_id + location + content`。
-
-当前 MCP 契约不声明尚未实现的 PDF page-range 专属读取接口。PDF 页码仍通过统一 `Location` 返回。
-
----
-
-## 4. 默认运行时组合
-
-`ReadingMcpServer` 当前装配：
+## 5 个 Tool
 
 ```text
-SourcePolicyRouter
-├── LocalFileSourcePolicy
-│      └── allowlisted roots / default denied
-└── PublicHttpAccessPolicy::https_only()
-
-RetrieverRouter
-├── FileRetriever
-└── HttpRetriever
-       ↓
-CachingRetriever
-       ↓
-InMemoryRawResourceCache
-
-ParserRouter::phase4()
-├── TextParser
-├── MarkdownParser
-├── HtmlParser
-└── PdfParser
-       ↓
-CachingParser
-       ↓
-InMemoryParsedDocumentCache
-
-InMemoryDocumentRepository
-InMemorySearchIndex
-```
-
-说明：
-
-- HTTP 默认只允许 HTTPS；测试或显式配置下可允许 HTTP。
-- SSRF、DNS、redirect 和响应大小策略仍由 Phase 5 的 Security Policy / HttpRetriever 负责。
-- **本地文件访问默认关闭。** 只有显式配置授权根目录后才能读取本地文件。
-- 当前 stdio 默认组合使用内存 Raw/Parsed Cache、Repository 和 SearchIndex；Phase 5 已提供持久化 Raw/Parsed Cache adapter，但尚未接入默认 runtime config。
-- 不存在 AI/LLM SDK 依赖。
-
----
-
-## 5. 启动方式
-
-构建：
-
-```bash
-cargo build --release --bin reading-mcp
-```
-
-默认启动：
-
-```bash
-./target/release/reading-mcp
-```
-
-此时：
-
-```text
-public HTTPS documents  → allowed by HTTP security policy
-local files             → denied by default
-```
-
-如果需要读取本地文档，必须显式配置允许访问的根目录。
-
-Unix/macOS 示例：
-
-```bash
-READING_MCP_LOCAL_ROOTS=/home/me/books:/home/me/docs \
-  ./target/release/reading-mcp
-```
-
-Windows 使用平台原生 PATH 分隔符配置多个根目录。
-
-`READING_MCP_LOCAL_ROOTS` 使用 `std::env::split_paths` 解析，因此遵循当前操作系统的 path-list 规则。
-
-MCP 客户端概念配置：
-
-```json
-{
-  "mcpServers": {
-    "reading": {
-      "command": "/absolute/path/to/reading-mcp",
-      "env": {
-        "READING_MCP_LOCAL_ROOTS": "/home/me/books:/home/me/docs"
-      }
-    }
-  }
-}
-```
-
-具体客户端的配置文件位置和环境变量字段由客户端自身决定。
-
----
-
-## 6. 本地文件安全边界
-
-本地文件不是“只要 MCP 在本机就默认全部可读”。
-
-安全链路：
-
-```text
-source path
-    ↓
-LocalFileSourcePolicy
-    ↓
-canonicalize requested path
-    ↓
-canonicalize configured roots
-    ↓
-requested path must be inside one root
-    ↓
-FileRetriever
-```
-
-因此：
-
-```text
-未配置 root
-→ 所有 local file source 拒绝
-
-配置 /home/me/books
-→ /home/me/books/os/book.md 允许
-→ /etc/passwd 拒绝
-→ /home/me/secrets/notes.md 拒绝
-```
-
-当前 policy 与 retriever 会分别 canonicalize，后续如果要覆盖对抗性本地文件系统的 symlink race，可进一步把“解析安全路径”抽象为单次 capability/handle 传递；这不是当前 stdio 单用户场景的 MVP 阻断项。
-
----
-
-## 7. 真实 stdio 验收测试
-
-`tests/phase6_mcp_stdio.rs` 不直接调用 Application UseCase，而是：
-
-```text
-integration test
-      │
-      ▼
-TokioChildProcess
-      │
-      ▼
-reading-mcp binary
-      │
-      ▼
-MCP initialize
-      │
-      ▼
-tools/list
-      │
-      ▼
 open_document
-      │
-      ▼
 get_document_structure
-      │
-      ▼
 search_document
-      │
-      ▼
 get_context
-      │
-      ▼
 read_document
 ```
 
-测试使用临时 Markdown 文档，不依赖公网，并通过：
+`open_document` 返回 document_id/source/title/media_type/content_hash/section_count；structure 返回 section tree；search 返回 owning section + source/title/snippet/score/location；context/read 从 DocumentRepository 读取规范化正文。
+
+v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location`。
+
+## 当前默认 Runtime
 
 ```text
-READING_MCP_LOCAL_ROOTS=<temporary directory>
+SourcePolicyRouter
+├── LocalFileSourcePolicy(default deny, allowed roots)
+└── PublicHttpAccessPolicy(HTTPS-only by default)
+
+RetrieverRouter
+├── LimitedFileRetriever
+└── RevalidatingHttpRetriever(HttpRetriever + Raw Cache)
+
+ParserRouter::release
+├── Text
+├── Markdown
+├── HTML/XHTML
+├── PDF
+├── EPUB
+├── DOCX
+└── OpenAPI/Swagger JSON/YAML
+
+BudgetedParser
+CachingParser
+
+Default persistent state
+├── File Raw Cache
+├── File Parsed Cache
+├── SQLite DocumentRepository
+└── SQLite FTS5 SearchIndex
 ```
 
-显式授权 fixture 所在目录。
+设置 `READING_MCP_STATE_DIR=memory` 可使用纯内存运行时。完整配置见 `runtime-configuration.md`。
 
-验收内容：
+## 本地文件安全
 
-- MCP initialize 成功；
-- `tools/list` 精确暴露 5 个 Tool；
-- Tool 参数通过真实 JSON-RPC/stdin 传递；
-- Tool 返回 structured content，并可反序列化为稳定 Contract DTO；
-- `open_document` 建立的 Repository/SearchIndex 状态能被后续 Tool 共享；
-- search 返回小粒度命中；
-- context/read 返回规范化文档正文；
-- source/location/section 信息可以通过 Tool 结果追溯；
-- stdio 子进程可以干净关闭。
+本地文件默认关闭；只有 `READING_MCP_LOCAL_ROOTS` 显式配置的 canonical root 可读。请求路径同样 canonicalize 后必须位于授权 root 内，并受最大文件字节预算限制。
 
----
+## 真实 stdio 验收
 
-## 8. 架构验收
+测试不是直接调用 UseCase，而是启动 `reading-mcp` 子进程，经 stdio 完成 MCP initialize、tools/list 和完整阅读流程。
 
-Phase 6 继续满足：
+测试覆盖：
+
+- 5 Tool discovery/调用；
+- structured DTO；
+- source/location traceability；
+- Text/Markdown/HTML/PDF acceptance matrix；
+- 持久化 state 重启后继续使用旧 document_id；
+- stderr telemetry 不污染 stdout MCP transport。
+
+## 架构约束
 
 ```text
-rmcp → mcp adapter
-
-mcp adapter → application
-application → domain + ports
+mcp → application → domain
+retrieval/security/parsing/infrastructure → application/domain ports
+```
 
 禁止：
-domain → rmcp
-application → rmcp
-parser → rmcp
-retriever → rmcp
-search index → rmcp DTO
+
+```text
+domain/application → rmcp
+parser → MCP
+retriever → MCP
+search index → MCP DTO
 ```
 
-同时验证：
+`tests/architecture_boundaries.rs` 把关键依赖方向固化为自动化测试。
 
-> 新增 MCP transport 不应改变文档领域模型和阅读 UseCase。
+## v0.1 明确非目标
 
-如果未来增加 Streamable HTTP transport，应新增 transport/runtime adapter，而不是复制 5 个业务 Tool 的实现。
-
----
-
-## 9. 当前明确限制
-
-当前 MVP 仍明确不做或未完成：
-
-- Streamable HTTP MCP transport；
-- OAuth；
-- HTTP `auth_profile` credential store / host binding；
-- HTTP ETag/Last-Modified 条件重验证；
-- 默认 runtime 的持久化 Repository/SearchIndex；
-- PDF 总页数上限；
-- Parser 全局执行 timeout / cancellation；
-- 本地文件最大大小限制；
-- MCP Resources/Prompts；
+- Streamable HTTP/public multi-user transport；
 - browser rendering；
 - OCR；
-- EPUB/DOCX；
-- AI 总结、问答、笔记；
-- 跨文档语义检索。
-
-这些限制应按真实使用优先级逐步解决，而不是继续扩大 Reading MCP 的职责边界。
+- OAuth/Cookie 交互登录；
+- 企业产品 API；
+- MCP Resources/Prompts；
+- AI 总结/问答/笔记/通用向量 RAG。

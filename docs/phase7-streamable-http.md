@@ -57,6 +57,16 @@ http://127.0.0.1:8000/mcp
 
 启动日志只写 stderr。
 
+## 协议 SDK
+
+Phase 7 使用官方 Rust MCP SDK：
+
+```text
+rmcp = 3.1.2
+```
+
+3.x transport 支持 MCP `2026-07-28` 生命周期，同时保留旧协议兼容路径。Reading MCP 不在 Application/Domain 中直接依赖协议生命周期；协议变化被限制在 MCP adapter/transport 边界。
+
 ## 安全默认
 
 Phase 7 故意不把 Reading MCP 变成公网服务。
@@ -67,6 +77,8 @@ Phase 7 故意不把 Reading MCP 变成公网服务。
 - `READING_MCP_SERVER_BIND` 只接受 loopback IP；
 - 非 loopback bind 启动时直接失败；
 - 使用 rmcp Streamable HTTP server 的 Host 校验防 DNS rebinding；
+- **显式启用 Origin 校验**，不依赖 SDK 的空 Origin allowlist 默认；
+- 默认只接受当前监听端口上的 `localhost` / `127.0.0.1` / `[::1]` Origin；
 - 不在 MCP Tool 参数中加入 transport credential；
 - 公网 TLS / 访问控制属于 tunnel / reverse proxy 的职责。
 
@@ -117,13 +129,21 @@ READING_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,my-tunnel.example.com
 
 ### Origin allowlist
 
-如果前面是浏览器型代理，可以显式开启 Origin 校验：
+Reading MCP 默认显式允许与监听端口匹配的 loopback Origin。例如默认端口 `8000`：
+
+```text
+http://localhost:8000
+http://127.0.0.1:8000
+http://[::1]:8000
+```
+
+如果受信 tunnel / reverse proxy 会发送其他 `Origin`，必须显式配置：
 
 ```text
 READING_MCP_SERVER_ALLOWED_ORIGINS=https://example.com,https://app.example.com
 ```
 
-缺省时保留 rmcp 默认行为。
+配置该变量会替换默认 loopback Origin 列表。不要为了“先跑起来”而关闭 Origin 校验。
 
 ## 与文档来源 HTTP 配置的区别
 
@@ -161,9 +181,11 @@ http://127.0.0.1:8000/mcp
 
 4. 通过 OpenAI Secure MCP Tunnel 或受信 tunnel 把本地 MCP endpoint 暴露给 ChatGPT。
 
-5. 在 ChatGPT Developer Mode / custom MCP app 中配置 tunnel 给出的 remote MCP URL。
+5. 如果 tunnel/proxy 向 MCP endpoint 转发非 loopback `Origin`，先把该 Origin 加入 `READING_MCP_SERVER_ALLOWED_ORIGINS`，而不是关闭校验。
 
-6. 使用一份测试 Markdown/PDF 验证：
+6. 在 ChatGPT Developer Mode / custom MCP app 中配置 tunnel 给出的 remote MCP URL。
+
+7. 使用一份测试 Markdown/PDF 验证：
 
 ```text
 open_document
@@ -181,6 +203,7 @@ open_document
 - `open_document` 可通过 HTTP 打开授权本地文档；
 - `search_document` 能找到逻辑 Section；
 - `read_document` 返回规范化正文；
+- hostile/non-allowlisted `Origin` 请求被拒绝；
 - HTTP transport 不要求修改任何 Application UseCase。
 
 ## 非目标

@@ -1,0 +1,33 @@
+name: Phase 7 RMCP 3 lockfile
+
+on:
+  push:
+    branches:
+      - feat/phase7-streamable-http
+    paths:
+      - Cargo.toml
+      - .github/workflows/phase7-rmcp3-lock.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/phase7-streamable-http
+          fetch-depth: 0
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Update RMCP lockfile
+        run: cargo update -p rmcp --precise 3.0.1
+      - name: Commit lockfile and remove helper workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/phase7-rmcp3-lock.yml
+          git add Cargo.lock
+          git commit -m "chore: refresh lockfile for RMCP 3.0.1"
+          git push origin HEAD:feat/phase7-streamable-http

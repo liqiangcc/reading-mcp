@@ -3,7 +3,9 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::{Map, Value, json};
 
-use reading_mcp::mcp::contracts::{OpenDocumentResponse, ReadDocumentResponse, SearchDocumentResponse};
+use reading_mcp::mcp::contracts::{
+    OpenDocumentResponse, ReadDocumentResponse, SearchDocumentResponse,
+};
 use reading_mcp::mcp::{HttpTransportConfig, ReadingMcpServer, streamable_http_router};
 use reading_mcp::runtime::{RuntimeConfig, build_server};
 
@@ -31,7 +33,9 @@ async fn streamable_http_client_completes_the_real_reading_tool_flow() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test HTTP listener should bind");
-    let address = listener.local_addr().expect("listener should have an address");
+    let address = listener
+        .local_addr()
+        .expect("listener should have an address");
     let server_task = tokio::spawn(async move {
         axum::serve(listener, router)
             .await
@@ -102,7 +106,10 @@ async fn streamable_http_client_completes_the_real_reading_tool_flow() {
         .expect("read response should be typed");
     assert!(read.content.contains("Page replacement algorithms"));
 
-    client.cancel().await.expect("HTTP MCP client should close cleanly");
+    client
+        .cancel()
+        .await
+        .expect("HTTP MCP client should close cleanly");
     server_task.abort();
 }
 

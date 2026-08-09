@@ -16,15 +16,16 @@ pub const READY_PATH: &str = "/readyz";
 pub struct HttpTransportConfig {
     pub bind: SocketAddr,
     pub allowed_hosts: Option<Vec<String>>,
-    pub allowed_origins: Option<Vec<String>>,
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for HttpTransportConfig {
     fn default() -> Self {
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000);
         Self {
-            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000),
+            bind,
             allowed_hosts: None,
-            allowed_origins: None,
+            allowed_origins: default_loopback_origins(bind.port()),
         }
     }
 }
@@ -41,7 +42,8 @@ impl HttpTransportConfig {
 
         validate_bind(config.bind)?;
         config.allowed_hosts = env_csv("READING_MCP_SERVER_ALLOWED_HOSTS");
-        config.allowed_origins = env_csv("READING_MCP_SERVER_ALLOWED_ORIGINS");
+        config.allowed_origins = env_csv("READING_MCP_SERVER_ALLOWED_ORIGINS")
+            .unwrap_or_else(|| default_loopback_origins(config.bind.port()));
 
         Ok(config)
     }
@@ -52,12 +54,10 @@ impl HttpTransportConfig {
 }
 
 pub fn streamable_http_router(server: ReadingMcpServer, config: &HttpTransportConfig) -> Router {
-    let mut transport_config = StreamableHttpServerConfig::default();
+    let mut transport_config = StreamableHttpServerConfig::default()
+        .with_allowed_origins(config.allowed_origins.clone());
     if let Some(hosts) = &config.allowed_hosts {
         transport_config = transport_config.with_allowed_hosts(hosts.clone());
-    }
-    if let Some(origins) = &config.allowed_origins {
-        transport_config = transport_config.with_allowed_origins(origins.clone());
     }
 
     let shared_server = server.clone();
@@ -121,6 +121,14 @@ fn validate_bind(bind: SocketAddr) -> Result<(), String> {
     }
 }
 
+fn default_loopback_origins(port: u16) -> Vec<String> {
+    vec![
+        format!("http://localhost:{port}"),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://[::1]:{port}"),
+    ]
+}
+
 fn env_csv(name: &str) -> Option<Vec<String>> {
     let values = std::env::var(name)
         .ok()?
@@ -137,11 +145,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_transport_is_loopback_only() {
+    fn default_transport_is_loopback_only_and_validates_origins() {
         let config = HttpTransportConfig::default();
         assert!(config.bind.ip().is_loopback());
         assert_eq!(config.bind.port(), 8000);
         assert_eq!(config.endpoint(), "http://127.0.0.1:8000/mcp");
+        assert_eq!(
+            config.allowed_origins,
+            vec![
+                "http://localhost:8000",
+                "http://127.0.0.1:8000",
+                "http://[::1]:8000",
+            ]
+        );
     }
 
     #[test]

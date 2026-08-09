@@ -60,9 +60,11 @@ Repository  SearchIndex
         ↓
  Application UseCases
         ↓
-    MCP stdio
-        ↓
-       AI
+ ReadingMcpServer
+   ┌────┴──────────────┐
+ stdio        Streamable HTTP
+   ↓                  ↓
+local client     tunnel / remote client
 ```
 
 Agent 的推荐调用顺序：
@@ -87,9 +89,65 @@ Index ≠ Document
 Search ≠ Read
 ```
 
+## MCP Transport
+
+Reading MCP 现在提供两个 binary，但共享完全相同的 5 个 Tool、Application UseCase、Repository、SearchIndex 和安全策略。
+
+### stdio
+
+适合 MCP Inspector、Claude/Cursor 等可以启动本地 MCP 进程的客户端：
+
+```bash
+cargo build --release --locked --bin reading-mcp
+./target/release/reading-mcp
+```
+
+概念配置：
+
+```json
+{
+  "mcpServers": {
+    "reading": {
+      "command": "/absolute/path/to/reading-mcp"
+    }
+  }
+}
+```
+
+### Streamable HTTP
+
+适合需要 remote MCP URL 的客户端：
+
+```bash
+cargo build --release --locked --bin reading-mcp-http
+./target/release/reading-mcp-http
+```
+
+默认 endpoint：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+Phase 7 故意只允许 loopback bind，并显式校验 Origin；默认只接受当前监听端口对应的 `localhost` / `127.0.0.1` / `[::1]` Origin。远程访问应通过受信 MCP tunnel / reverse proxy，而不是把 Reading MCP 裸露到公网。
+
+OpenAI 当前说明 ChatGPT 不能直接连接本地 MCP server；开发机、私网或 on-prem MCP 应通过 Secure MCP Tunnel 连接。因此 ChatGPT 的推荐验证路径是：
+
+```text
+ChatGPT
+   ↓
+Secure MCP Tunnel
+   ↓
+http://127.0.0.1:8000/mcp
+   ↓
+Reading MCP
+```
+
+详细步骤见 [`docs/phase7-streamable-http.md`](docs/phase7-streamable-http.md)。
+
 ## 安全默认
 
-公共网络来源默认只允许 HTTPS，并启用：
+公共网络文档来源默认只允许 HTTPS，并启用：
 
 - SSRF scheme / hostname / DNS / IP 校验；
 - 每次 redirect 重新校验；
@@ -279,16 +337,9 @@ cargo build --release --locked --bin reading-mcp
 ./target/release/reading-mcp
 ```
 
-概念上的 stdio MCP 配置：
-
-```json
-{
-  "mcpServers": {
-    "reading": {
-      "command": "/absolute/path/to/reading-mcp"
-    }
-  }
-}
+```bash
+cargo build --release --locked --bin reading-mcp-http
+./target/release/reading-mcp-http
 ```
 
 详细运行配置见 [`docs/runtime-configuration.md`](docs/runtime-configuration.md)。完整 hardening 状态见 [`docs/release-hardening-plan.md`](docs/release-hardening-plan.md)。

@@ -6,9 +6,11 @@
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
 - [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、5 个 Tool 和 stdio 子进程端到端测试。
+- [Phase 7：Streamable HTTP 与 ChatGPT 路径](phase7-streamable-http.md)：loopback Streamable HTTP、真实 HTTP MCP E2E，以及通过 Secure MCP Tunnel 连接 ChatGPT 的路径。
+- [ChatGPT 集成验收](chatgpt-acceptance.md)：本地 health/readiness、RMCP HTTP E2E、Secure MCP Tunnel、Scan Tools 和真实 Markdown/PDF 阅读验收清单。
 - [MVP Hardening Review](mvp-review.md)：发布前架构、安全、契约和真实使用 Review。
-- [Runtime Configuration](runtime-configuration.md)：持久化状态、资源预算、HTTP、auth profile、telemetry 和错误语义配置。
-- [Release Hardening Plan](release-hardening-plan.md)：v0.1.0 前的 hardening 完成矩阵、扩展格式和 Release Gate。
+- [Runtime Configuration](runtime-configuration.md)：持久化状态、资源预算、文档 HTTP、MCP HTTP transport、auth profile、telemetry 和错误语义配置。
+- [Release Hardening Plan](release-hardening-plan.md)：v0.1 hardening 完成矩阵、扩展格式和 Release Gate。
 
 ## 推荐阅读顺序
 
@@ -24,6 +26,10 @@ mvp.md
 phase5-security-cache.md
       ↓
 phase6-mcp-stdio.md
+      ↓
+phase7-streamable-http.md
+      ↓
+chatgpt-acceptance.md
       ↓
 mvp-review.md
       ↓
@@ -45,12 +51,24 @@ Reading MCP = 文档上下文基础设施
 
 ```text
 单用户
-本地 stdio
-公共 HTTPS
+├── 本地 stdio
+└── loopback Streamable HTTP + trusted MCP tunnel
+
+公共 HTTPS 文档来源
 本地文件 default-deny
 显式授权 local roots
 默认持久化状态
 ```
+
+其中：
+
+```text
+stdio               → 本地可启动 MCP 进程的客户端
+Streamable HTTP     → remote MCP / tunnel 场景
+Secure MCP Tunnel   → ChatGPT 访问开发机/私网 MCP 的推荐边界
+```
+
+Phase 7 不把 Reading MCP 定位成公网多租户服务；TLS、远程身份认证和公网入口属于 tunnel / reverse proxy / 后续独立安全模型的职责。
 
 格式能力分为两类：
 

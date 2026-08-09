@@ -1,13 +1,13 @@
 # Runtime Configuration
 
-`reading-mcp` 的 stdio binary 从环境变量构建 `RuntimeConfig`。配置只属于 composition/runtime 层，Domain/Application/Parser 不读取环境变量。
+`reading-mcp`（stdio）和 `reading-mcp-http`（Streamable HTTP）都从环境变量构建同一个文档 `RuntimeConfig`。配置只属于 composition/runtime/transport 层，Domain/Application/Parser 不读取环境变量。
 
 ## 默认行为
 
 默认：
 
 ```text
-HTTP            = HTTPS only
+Document HTTP   = HTTPS only
 Local file      = disabled
 State           = ~/.reading-mcp
 Repository      = SQLite
@@ -15,6 +15,9 @@ Search          = SQLite FTS5
 Raw cache       = persistent file cache
 Parsed cache    = persistent file cache
 Telemetry       = stderr JSON enabled
+MCP HTTP bind   = 127.0.0.1:8000（reading-mcp-http）
+MCP HTTP path   = /mcp
+MCP Origin      = loopback origins for the configured bind port
 ```
 
 Windows 上默认 state root 使用 `%USERPROFILE%\.reading-mcp`。
@@ -24,6 +27,82 @@ Windows 上默认 state root 使用 `%USERPROFILE%\.reading-mcp`。
 ```bash
 READING_MCP_STATE_DIR=memory reading-mcp
 ```
+
+## 两类 HTTP 配置不要混淆
+
+```text
+READING_MCP_SERVER_* = MCP inbound transport
+READING_MCP_HTTP_*   = document outbound retrieval
+```
+
+前者决定 MCP Client 如何连接 Reading MCP；后者决定 Reading MCP 如何下载需要阅读的在线文档。这两个关注点独立。
+
+## MCP Streamable HTTP Transport
+
+`reading-mcp-http` 默认监听：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+当前 transport SDK：
+
+```text
+rmcp 3.1.2
+```
+
+### Bind
+
+```bash
+READING_MCP_SERVER_BIND=127.0.0.1:8000 reading-mcp-http
+```
+
+Phase 7 只接受 loopback IP，例如：
+
+```text
+127.0.0.1:8000
+[::1]:8000
+```
+
+非 loopback bind 会 fail-fast。远程客户端应通过 Secure MCP Tunnel 或受信 reverse proxy 访问，而不是直接把服务暴露到公网。
+
+### Host allowlist
+
+rmcp Streamable HTTP 默认执行 Host 校验以降低 DNS rebinding 风险。某些受信 tunnel / proxy 如果需要额外 Host，可显式配置：
+
+```bash
+READING_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,my-tunnel.example.com
+```
+
+### Origin allowlist
+
+Reading MCP 不使用 rmcp 的“空 Origin allowlist = 不校验 Origin”默认行为，而是在 transport composition 层显式启用 Origin 校验。
+
+默认会根据 `READING_MCP_SERVER_BIND` 的端口生成：
+
+```text
+http://localhost:<port>
+http://127.0.0.1:<port>
+http://[::1]:<port>
+```
+
+默认端口 `8000` 即：
+
+```text
+http://localhost:8000
+http://127.0.0.1:8000
+http://[::1]:8000
+```
+
+如果受信 tunnel / reverse proxy 会发送其他 `Origin`，显式替换 allowlist：
+
+```bash
+READING_MCP_SERVER_ALLOWED_ORIGINS=https://example.com,https://app.example.com
+```
+
+不要通过清空 Origin 校验来规避接入问题；应把实际可信 Origin 加入 allowlist。
+
+详细设计和 ChatGPT 验证路径见 [`phase7-streamable-http.md`](phase7-streamable-http.md)。
 
 ## 本地文件授权
 
@@ -64,7 +143,7 @@ search_units = FTS5 SearchIndex
 
 两者可以共享数据库文件，但仍通过两个独立 Port 使用。
 
-## HTTP
+## Document HTTP Retrieval
 
 默认只允许公共 HTTPS。
 
@@ -76,7 +155,7 @@ READING_MCP_ALLOW_HTTP=true
 
 这不会关闭 SSRF 防护。DNS/IP、redirect 每跳校验仍然执行。
 
-HTTP 相关配置：
+Document HTTP 相关配置：
 
 ```text
 READING_MCP_HTTP_MAX_REDIRECTS
@@ -177,10 +256,10 @@ READING_MCP_TELEMETRY=true
 关闭：
 
 ```bash
-READING_MCP_TELEMETRY=false
+READING_MCP_TELEMETRY=false reading-mcp
 ```
 
-结构化 JSON 只写 stderr。stdout 专用于 MCP JSON-RPC。
+结构化 JSON 只写 stderr。stdio 模式下 stdout 专用于 MCP JSON-RPC。
 
 事件包括：
 

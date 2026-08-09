@@ -17,6 +17,7 @@ Parsed cache    = persistent file cache
 Telemetry       = stderr JSON enabled
 MCP HTTP bind   = 127.0.0.1:8000（reading-mcp-http）
 MCP HTTP path   = /mcp
+MCP Origin      = loopback origins for the configured bind port
 ```
 
 Windows 上默认 state root 使用 `%USERPROFILE%\.reading-mcp`。
@@ -44,6 +45,12 @@ READING_MCP_HTTP_*   = document outbound retrieval
 http://127.0.0.1:8000/mcp
 ```
 
+当前 transport SDK：
+
+```text
+rmcp 3.1.2
+```
+
 ### Bind
 
 ```bash
@@ -69,11 +76,31 @@ READING_MCP_SERVER_ALLOWED_HOSTS=localhost,127.0.0.1,my-tunnel.example.com
 
 ### Origin allowlist
 
-如果入口需要 Origin 校验：
+Reading MCP 不使用 rmcp 的“空 Origin allowlist = 不校验 Origin”默认行为，而是在 transport composition 层显式启用 Origin 校验。
+
+默认会根据 `READING_MCP_SERVER_BIND` 的端口生成：
+
+```text
+http://localhost:<port>
+http://127.0.0.1:<port>
+http://[::1]:<port>
+```
+
+默认端口 `8000` 即：
+
+```text
+http://localhost:8000
+http://127.0.0.1:8000
+http://[::1]:8000
+```
+
+如果受信 tunnel / reverse proxy 会发送其他 `Origin`，显式替换 allowlist：
 
 ```bash
 READING_MCP_SERVER_ALLOWED_ORIGINS=https://example.com,https://app.example.com
 ```
+
+不要通过清空 Origin 校验来规避接入问题；应把实际可信 Origin 加入 allowlist。
 
 详细设计和 ChatGPT 验证路径见 [`phase7-streamable-http.md`](phase7-streamable-http.md)。
 

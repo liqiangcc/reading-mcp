@@ -36,13 +36,7 @@ impl HttpTransportConfig {
             })?;
         }
 
-        if !config.bind.ip().is_loopback() {
-            return Err(
-                "READING_MCP_SERVER_BIND must use a loopback address in Phase 7; use a trusted MCP tunnel or reverse proxy for remote access"
-                    .into(),
-            );
-        }
-
+        validate_bind(config.bind)?;
         config.allowed_hosts = env_csv("READING_MCP_SERVER_ALLOWED_HOSTS");
         config.allowed_origins = env_csv("READING_MCP_SERVER_ALLOWED_ORIGINS");
 
@@ -91,6 +85,17 @@ pub async fn serve_streamable_http(
     axum::serve(listener, router).await
 }
 
+fn validate_bind(bind: SocketAddr) -> Result<(), String> {
+    if bind.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(
+            "READING_MCP_SERVER_BIND must use a loopback address in Phase 7; use a trusted MCP tunnel or reverse proxy for remote access"
+                .into(),
+        )
+    }
+}
+
 fn env_csv(name: &str) -> Option<Vec<String>> {
     let values = std::env::var(name)
         .ok()?
@@ -112,5 +117,19 @@ mod tests {
         assert!(config.bind.ip().is_loopback());
         assert_eq!(config.bind.port(), 8000);
         assert_eq!(config.endpoint(), "http://127.0.0.1:8000/mcp");
+    }
+
+    #[test]
+    fn rejects_non_loopback_bind() {
+        let public_bind = "0.0.0.0:8000".parse().expect("valid socket address");
+        assert!(validate_bind(public_bind).is_err());
+
+        let private_bind = "192.168.1.10:8000"
+            .parse()
+            .expect("valid socket address");
+        assert!(validate_bind(private_bind).is_err());
+
+        let loopback_bind = "[::1]:8000".parse().expect("valid socket address");
+        assert!(validate_bind(loopback_bind).is_ok());
     }
 }

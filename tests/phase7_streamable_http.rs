@@ -70,6 +70,16 @@ async fn streamable_http_client_completes_the_real_reading_tool_flow() {
     assert_eq!(ready["status"], "ready");
     assert_eq!(ready["mcp_path"], "/mcp");
 
+    let rejected_origin = reqwest::Client::new()
+        .post(format!("http://{address}/mcp"))
+        .header("Origin", "https://evil.example")
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("request with hostile Origin should receive an HTTP response");
+    assert_eq!(rejected_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
     let transport = StreamableHttpClientTransport::from_uri(format!("http://{address}/mcp"));
     let client = ().serve(transport).await.expect("HTTP MCP client should initialize");
 

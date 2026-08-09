@@ -42,8 +42,39 @@ async fn streamable_http_client_completes_the_real_reading_tool_flow() {
             .expect("Streamable HTTP server should run");
     });
 
+    let health_response = reqwest::get(format!("http://{address}/healthz"))
+        .await
+        .expect("health probe should respond");
+    assert!(health_response.status().is_success());
+    let health: Value = serde_json::from_str(
+        &health_response
+            .text()
+            .await
+            .expect("health response body should be readable"),
+    )
+    .expect("health response should be JSON");
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["transport"], "streamable-http");
+
+    let ready_response = reqwest::get(format!("http://{address}/readyz"))
+        .await
+        .expect("readiness probe should respond");
+    assert!(ready_response.status().is_success());
+    let ready: Value = serde_json::from_str(
+        &ready_response
+            .text()
+            .await
+            .expect("readiness response body should be readable"),
+    )
+    .expect("readiness response should be JSON");
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["mcp_path"], "/mcp");
+
     let transport = StreamableHttpClientTransport::from_uri(format!("http://{address}/mcp"));
-    let client = ().serve(transport).await.expect("HTTP MCP client should initialize");
+    let client = ()
+        .serve(transport)
+        .await
+        .expect("HTTP MCP client should initialize");
 
     let mut tool_names = client
         .list_all_tools()

@@ -92,7 +92,8 @@ pub async fn serve_streamable_http(
 }
 
 fn env_csv(name: &str) -> Option<Vec<String>> {
-    let values = std::env::var(name).ok()?
+    let values = std::env::var(name)
+        .ok()?
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())

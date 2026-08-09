@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 use reading_mcp::mcp::contracts::{
     OpenDocumentResponse, ReadDocumentResponse, SearchDocumentResponse,
 };
-use reading_mcp::mcp::{HttpTransportConfig, ReadingMcpServer, streamable_http_router};
+use reading_mcp::mcp::{HttpTransportConfig, streamable_http_router};
 use reading_mcp::runtime::{RuntimeConfig, build_server};
 
 #[tokio::test]

@@ -54,8 +54,8 @@ impl HttpTransportConfig {
 }
 
 pub fn streamable_http_router(server: ReadingMcpServer, config: &HttpTransportConfig) -> Router {
-    let mut transport_config = StreamableHttpServerConfig::default()
-        .with_allowed_origins(config.allowed_origins.clone());
+    let mut transport_config =
+        StreamableHttpServerConfig::default().with_allowed_origins(config.allowed_origins.clone());
     if let Some(hosts) = &config.allowed_hosts {
         transport_config = transport_config.with_allowed_hosts(hosts.clone());
     }

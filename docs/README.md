@@ -7,6 +7,7 @@
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
 - [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、5 个 Tool 和 stdio 子进程端到端测试。
 - [Phase 7：Streamable HTTP 与 ChatGPT 路径](phase7-streamable-http.md)：loopback Streamable HTTP、真实 HTTP MCP E2E，以及通过 Secure MCP Tunnel 连接 ChatGPT 的路径。
+- [ChatGPT 集成验收](chatgpt-acceptance.md)：本地 health/readiness、RMCP HTTP E2E、Secure MCP Tunnel、Scan Tools 和真实 Markdown/PDF 阅读验收清单。
 - [MVP Hardening Review](mvp-review.md)：发布前架构、安全、契约和真实使用 Review。
 - [Runtime Configuration](runtime-configuration.md)：持久化状态、资源预算、文档 HTTP、MCP HTTP transport、auth profile、telemetry 和错误语义配置。
 - [Release Hardening Plan](release-hardening-plan.md)：v0.1 hardening 完成矩阵、扩展格式和 Release Gate。
@@ -27,6 +28,8 @@ phase5-security-cache.md
 phase6-mcp-stdio.md
       ↓
 phase7-streamable-http.md
+      ↓
+chatgpt-acceptance.md
       ↓
 mvp-review.md
       ↓

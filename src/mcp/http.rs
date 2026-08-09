@@ -1,13 +1,16 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use axum::Router;
+use axum::{Json, Router, routing::get};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use serde_json::{Value, json};
 
 use super::ReadingMcpServer;
 
 pub const MCP_HTTP_PATH: &str = "/mcp";
+pub const HEALTH_PATH: &str = "/healthz";
+pub const READY_PATH: &str = "/readyz";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpTransportConfig {
@@ -64,7 +67,10 @@ pub fn streamable_http_router(server: ReadingMcpServer, config: &HttpTransportCo
         transport_config,
     );
 
-    Router::new().nest_service(MCP_HTTP_PATH, service)
+    Router::new()
+        .route(HEALTH_PATH, get(healthz))
+        .route(READY_PATH, get(readyz))
+        .nest_service(MCP_HTTP_PATH, service)
 }
 
 pub async fn serve_streamable_http(
@@ -79,10 +85,29 @@ pub async fn serve_streamable_http(
         serde_json::json!({
             "event": "mcp_http_listen",
             "endpoint": format!("http://{bound}{MCP_HTTP_PATH}"),
+            "health": format!("http://{bound}{HEALTH_PATH}"),
+            "ready": format!("http://{bound}{READY_PATH}"),
             "remote_access": "use a trusted MCP tunnel or reverse proxy; direct non-loopback bind is disabled"
         })
     );
     axum::serve(listener, router).await
+}
+
+async fn healthz() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "reading-mcp",
+        "transport": "streamable-http"
+    }))
+}
+
+async fn readyz() -> Json<Value> {
+    Json(json!({
+        "status": "ready",
+        "service": "reading-mcp",
+        "transport": "streamable-http",
+        "mcp_path": MCP_HTTP_PATH
+    }))
 }
 
 fn validate_bind(bind: SocketAddr) -> Result<(), String> {

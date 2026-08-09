@@ -124,9 +124,7 @@ mod tests {
         let public_bind = "0.0.0.0:8000".parse().expect("valid socket address");
         assert!(validate_bind(public_bind).is_err());
 
-        let private_bind = "192.168.1.10:8000"
-            .parse()
-            .expect("valid socket address");
+        let private_bind = "192.168.1.10:8000".parse().expect("valid socket address");
         assert!(validate_bind(private_bind).is_err());
 
         let loopback_bind = "[::1]:8000".parse().expect("valid socket address");

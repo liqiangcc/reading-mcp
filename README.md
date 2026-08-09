@@ -6,7 +6,7 @@ Reading MCP 让 MCP Client / Agent 能够**精确地与用户阅读同一份文�
 
 它只提供可靠的文档上下文，不在内核中实现 AI 总结、问答、教学、笔记或通用 RAG。
 
-## v0.1.0 候选能力
+## v0.1 核心能力
 
 统一 MCP Tools：
 
@@ -60,9 +60,11 @@ Repository  SearchIndex
         ↓
  Application UseCases
         ↓
-    MCP stdio
-        ↓
-       AI
+ ReadingMcpServer
+   ┌────┴──────────────┐
+ stdio        Streamable HTTP
+   ↓                  ↓
+local client     tunnel / remote client
 ```
 
 Agent 的推荐调用顺序：
@@ -87,9 +89,65 @@ Index ≠ Document
 Search ≠ Read
 ```
 
+## MCP Transport
+
+Reading MCP 现在提供两个 binary，但共享完全相同的 5 个 Tool、Application UseCase、Repository、SearchIndex 和安全策略。
+
+### stdio
+
+适合 MCP Inspector、Claude/Cursor 等可以启动本地 MCP 进程的客户端：
+
+```bash
+cargo build --release --locked --bin reading-mcp
+./target/release/reading-mcp
+```
+
+概念配置：
+
+```json
+{
+  "mcpServers": {
+    "reading": {
+      "command": "/absolute/path/to/reading-mcp"
+    }
+  }
+}
+```
+
+### Streamable HTTP
+
+适合需要 remote MCP URL 的客户端：
+
+```bash
+cargo build --release --locked --bin reading-mcp-http
+./target/release/reading-mcp-http
+```
+
+默认 endpoint：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+Phase 7 故意只允许 loopback bind。远程访问应通过受信 MCP tunnel / reverse proxy，而不是把 Reading MCP 裸露到公网。
+
+OpenAI 当前说明 ChatGPT 不能直接连接本地 MCP server；开发机、私网或 on-prem MCP 应通过 Secure MCP Tunnel 连接。因此 ChatGPT 的推荐验证路径是：
+
+```text
+ChatGPT
+   ↓
+Secure MCP Tunnel
+   ↓
+http://127.0.0.1:8000/mcp
+   ↓
+Reading MCP
+```
+
+详细步骤见 [`docs/phase7-streamable-http.md`](docs/phase7-streamable-http.md)。
+
 ## 安全默认
 
-公共网络来源默认只允许 HTTPS，并启用：
+公共网络文档来源默认只允许 HTTPS，并启用：
 
 - SSRF scheme / hostname / DNS / IP 校验；
 - 每次 redirect 重新校验；
@@ -108,6 +166,13 @@ READING_MCP_LOCAL_ROOTS=/home/me/books:/home/me/docs reading-mcp
 ```
 
 请求路径和授权目录都会 canonicalize，目标必须位于显式 root 内。
+
+MCP inbound HTTP 与文档 outbound HTTP 是两个独立关注点：
+
+```text
+READING_MCP_SERVER_* = MCP transport
+READING_MCP_HTTP_*   = document retrieval
+```
 
 ## 持久化状态
 
@@ -214,7 +279,7 @@ Paragraph / Search Unit
 
 ## 可观察性
 
-默认向 **stderr** 输出结构化 JSON，stdout 专用于 MCP JSON-RPC：
+默认向 **stderr** 输出结构化 JSON。stdio 模式下 stdout 专用于 MCP JSON-RPC：
 
 - Raw / Parsed cache hit/miss；
 - retrieve duration / bytes / media type；
@@ -272,36 +337,18 @@ infrastructure ────┘
 
 > 按变化原因划分职责，按数据流组合能力。
 
-## 运行
-
-```bash
-cargo build --release --locked --bin reading-mcp
-./target/release/reading-mcp
-```
-
-概念上的 stdio MCP 配置：
-
-```json
-{
-  "mcpServers": {
-    "reading": {
-      "command": "/absolute/path/to/reading-mcp"
-    }
-  }
-}
-```
-
-详细运行配置见 [`docs/runtime-configuration.md`](docs/runtime-configuration.md)。完整 hardening 状态见 [`docs/release-hardening-plan.md`](docs/release-hardening-plan.md)。
+详细运行配置见 [`docs/runtime-configuration.md`](docs/runtime-configuration.md)，文档导航见 [`docs/README.md`](docs/README.md)。
 
 ## 明确非目标
 
-v0.1.0 不包含：
+当前内核不包含：
 
 - OCR / 扫描 PDF；
 - JavaScript-heavy 页面浏览器渲染；
 - Confluence / Notion / 飞书 / 语雀等产品 API；
 - OAuth / Cookie 交互登录；
-- 公网多租户服务；
+- 公网多租户 MCP 服务；
+- 自建 TLS / 用户身份系统；
 - 通用 Web crawler；
 - AI 总结 / 问答 / 笔记；
 - 向量数据库 / 通用 RAG。

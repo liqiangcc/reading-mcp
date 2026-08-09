@@ -71,10 +71,7 @@ async fn streamable_http_client_completes_the_real_reading_tool_flow() {
     assert_eq!(ready["mcp_path"], "/mcp");
 
     let transport = StreamableHttpClientTransport::from_uri(format!("http://{address}/mcp"));
-    let client = ()
-        .serve(transport)
-        .await
-        .expect("HTTP MCP client should initialize");
+    let client = ().serve(transport).await.expect("HTTP MCP client should initialize");
 
     let mut tool_names = client
         .list_all_tools()

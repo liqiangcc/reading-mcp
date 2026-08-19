@@ -1,0 +1,82 @@
+name: Deploy reading-mcp tunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      tunnel_id:
+        description: Existing Secure MCP Tunnel ID
+        required: true
+        default: tunnel_6a8590404d5081918ac6e07ed032c75a
+      local_roots:
+        description: Colon-separated directories the MCP may read
+        required: false
+        default: /root
+
+jobs:
+  deploy:
+    # This runner must be installed on the machine that owns the local files.
+    runs-on: [self-hosted, linux, x64]
+    env:
+      CONTROL_PLANE_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
+      TUNNEL_ID: ${{ inputs.tunnel_id }}
+      READING_MCP_LOCAL_ROOTS: ${{ inputs.local_roots }}
+      READING_MCP_STATE_DIR: ${{ vars.READING_MCP_STATE_DIR || '/root/.reading-mcp' }}
+      READING_MCP_TELEMETRY: 'false'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build reading-mcp
+        run: cargo build --release --locked --bin reading-mcp
+
+      - name: Install tunnel-client
+        shell: bash
+        env:
+          TUNNEL_CLIENT_VERSION: 0.0.11
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/tunnel-client/bin"
+          mkdir -p "$install_dir"
+          archive="$RUNNER_TEMP/tunnel-client.zip"
+          curl --fail --location --silent --show-error \
+            "https://github.com/openai/tunnel-client/releases/download/v${TUNNEL_CLIENT_VERSION}/tunnel-client-v${TUNNEL_CLIENT_VERSION}-linux-amd64.zip" \
+            --output "$archive"
+          unzip -q -o "$archive" -d "$RUNNER_TEMP/tunnel-client"
+          chmod +x "$install_dir/tunnel-client" "$install_dir/cloudflared"
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Start or replace managed runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          profile_dir="$RUNNER_TEMP/tunnel-client-profile"
+          binary="$GITHUB_WORKSPACE/target/release/reading-mcp"
+          mkdir -p "$profile_dir"
+          test -n "$CONTROL_PLANE_API_KEY"
+
+          tunnel-client init \
+            --force \
+            --sample sample_mcp_stdio_local \
+            --profile reading-mcp \
+            --profile-dir "$profile_dir" \
+            --tunnel-id "$TUNNEL_ID" \
+            --mcp-command "$binary" \
+            --control-plane-api-key-ref env:CONTROL_PLANE_API_KEY
+
+          tunnel-client runtimes connect \
+            --alias reading-mcp \
+            --profile reading-mcp \
+            --profile-dir "$profile_dir" \
+            --tunnel-id "$TUNNEL_ID" \
+            --mcp-command "$binary" \
+            --runtime-api-key env:CONTROL_PLANE_API_KEY \
+            --json
+
+          tunnel-client runtimes status reading-mcp --json

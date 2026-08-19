@@ -293,6 +293,29 @@ cargo build --release --locked --bin reading-mcp
 
 详细运行配置见 [`docs/runtime-configuration.md`](docs/runtime-configuration.md)。完整 hardening 状态见 [`docs/release-hardening-plan.md`](docs/release-hardening-plan.md)。
 
+### Streamable HTTP / 隧道模式
+
+如果 GPT 或其他远程 MCP Client 需要通过 HTTPS 访问，可使用新增的 HTTP binary：
+
+```bash
+export READING_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+./target/release/reading-mcp-http
+```
+
+默认监听 `127.0.0.1:8787`，MCP 地址为 `/mcp`，请求必须携带：
+
+```text
+Authorization: Bearer <READING_MCP_HTTP_TOKEN>
+```
+
+临时隧道示例：
+
+```bash
+cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
+```
+
+将 Cloudflare 输出的 `https://...trycloudflare.com/mcp` 配置给远程 MCP Client，并配置同一个 Bearer Token。生产环境应使用稳定的命名隧道和独立认证层；Quick Tunnel 只适合临时验证。
+
 ## 明确非目标
 
 v0.1.0 不包含：
@@ -301,7 +324,7 @@ v0.1.0 不包含：
 - JavaScript-heavy 页面浏览器渲染；
 - Confluence / Notion / 飞书 / 语雀等产品 API；
 - OAuth / Cookie 交互登录；
-- 公网多租户服务；
+- 公网多租户服务；HTTP 服务本身只提供单机部署入口；
 - 通用 Web crawler；
 - AI 总结 / 问答 / 笔记；
 - 向量数据库 / 通用 RAG。

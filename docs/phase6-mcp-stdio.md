@@ -99,9 +99,13 @@ search index → MCP DTO
 
 `tests/architecture_boundaries.rs` 把关键依赖方向固化为自动化测试。
 
+## 当前支持的远程访问
+
+除 stdio 外，`reading-mcp-http` 提供带 Bearer Token 的 Streamable HTTP 单机入口，默认监听 `127.0.0.1:8787/mcp`，可通过 Cloudflare Tunnel、Tailscale Funnel 等 HTTPS 隧道供远程 MCP Client 使用。公网多租户、OAuth 和稳定生产网关仍不在 v0.1 范围内。
+
 ## v0.1 明确非目标
 
-- Streamable HTTP/public multi-user transport；
+- 公网多租户 transport；
 - browser rendering；
 - OCR；
 - OAuth/Cookie 交互登录；

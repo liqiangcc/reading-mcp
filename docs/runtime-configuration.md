@@ -166,6 +166,24 @@ A-Z a-z 0-9 - _
 
 当前 Provider 支持 Bearer Token。OAuth、Cookie Session、交互登录应使用未来独立 Credential Provider / Source Adapter，而不是扩展 Tool 参数传 Secret。
 
+## Streamable HTTP
+
+HTTP binary：
+
+```text
+target/release/reading-mcp-http
+```
+
+配置：
+
+```text
+READING_MCP_HTTP_BIND              默认 127.0.0.1:8787
+READING_MCP_HTTP_TOKEN             必填，至少 32 个字符
+READING_MCP_HTTP_ALLOWED_HOSTS     可选，逗号分隔的 Host allowlist
+```
+
+HTTP MCP endpoint 为 `/mcp`，所有请求都必须使用 `Authorization: Bearer <token>`。未设置 `READING_MCP_HTTP_ALLOWED_HOSTS` 时会关闭 rmcp 的 Host 校验，以兼容临时隧道随机域名；公网部署仍必须依赖强随机 Token，并建议配置稳定域名的 Host allowlist。
+
 ## Telemetry
 
 默认开启：

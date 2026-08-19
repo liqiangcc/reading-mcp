@@ -8,19 +8,19 @@ on:
         required: true
         default: tunnel_6a8590404d5081918ac6e07ed032c75a
       local_roots:
-        description: Colon-separated directories the MCP may read
+        description: Colon-separated directories inside the temporary cloud runner
         required: false
-        default: /root
+        default: ''
 
 jobs:
   deploy:
-    # This runner must be installed on the machine that owns the local files.
-    runs-on: [self-hosted, linux, x64]
+    # Cloud-only tunnel smoke test. Production runs locally via systemd.
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
     env:
       CONTROL_PLANE_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
       TUNNEL_ID: ${{ inputs.tunnel_id }}
       READING_MCP_LOCAL_ROOTS: ${{ inputs.local_roots }}
-      READING_MCP_STATE_DIR: ${{ vars.READING_MCP_STATE_DIR || '/root/.reading-mcp' }}
       READING_MCP_TELEMETRY: 'false'
 
     steps:
@@ -52,7 +52,7 @@ jobs:
           chmod +x "$install_dir/tunnel-client" "$install_dir/cloudflared"
           echo "$install_dir" >> "$GITHUB_PATH"
 
-      - name: Start or replace managed runtime
+      - name: Start foreground cloud test tunnel
         shell: bash
         run: |
           set -euo pipefail
@@ -60,6 +60,9 @@ jobs:
           binary="$GITHUB_WORKSPACE/target/release/reading-mcp"
           mkdir -p "$profile_dir"
           test -n "$CONTROL_PLANE_API_KEY"
+          if [[ -z "${READING_MCP_LOCAL_ROOTS:-}" ]]; then
+            export READING_MCP_LOCAL_ROOTS="$GITHUB_WORKSPACE"
+          fi
 
           tunnel-client init \
             --force \
@@ -70,13 +73,11 @@ jobs:
             --mcp-command "$binary" \
             --control-plane-api-key-ref env:CONTROL_PLANE_API_KEY
 
-          tunnel-client runtimes connect \
-            --alias reading-mcp \
+          tunnel-client doctor \
             --profile reading-mcp \
             --profile-dir "$profile_dir" \
-            --tunnel-id "$TUNNEL_ID" \
-            --mcp-command "$binary" \
-            --runtime-api-key env:CONTROL_PLANE_API_KEY \
-            --json
+            --explain
 
-          tunnel-client runtimes status reading-mcp --json
+          exec tunnel-client run \
+            --profile reading-mcp \
+            --profile-dir "$profile_dir"

@@ -318,9 +318,9 @@ cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
 
 ### Secure MCP Tunnel / GitHub Actions
 
-本项目也支持通过 OpenAI Secure MCP Tunnel 暴露 stdio MCP。先在实际存放本地文档的服务器上注册 GitHub self-hosted runner，再在仓库的 Secrets 中添加 `CONTROL_PLANE_API_KEY`，然后手动运行 `Deploy reading-mcp tunnel` workflow。该 workflow 会构建 binary、启动或替换 `reading-mcp` managed runtime，并把 `server/discover` 不兼容请求回退到标准 `initialize`。
+本项目也支持通过 OpenAI Secure MCP Tunnel 暴露 stdio MCP。仓库的 `Deploy reading-mcp tunnel` workflow 仅用于 GitHub-hosted cloud runner 临时测试；它以前台方式运行隧道，job 结束或超时后隧道也会结束。生产运行由部署服务器上的 `reading-mcp-tunnel.service` 负责，并把 `server/discover` 不兼容请求回退到标准 `initialize`。
 
-普通 GitHub-hosted runner 不适合这个部署：任务结束后运行环境会被回收，而且它看不到服务器 `/root` 下的本地文件。工作流中的 `local_roots` 必须填写 self-hosted runner 上实际允许读取的目录。
+云端 runner 是临时环境，无法读取部署服务器 `/root` 下的本地文档；`local_roots` 只能填写该临时 runner 中的目录。最终本机部署使用 `/root/.env` 和 systemd，不依赖 GitHub runner。
 
 ## 明确非目标
 

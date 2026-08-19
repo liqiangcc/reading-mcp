@@ -42,7 +42,7 @@ jobs:
           TUNNEL_CLIENT_VERSION: 0.0.11
         run: |
           set -euo pipefail
-          install_dir="$RUNNER_TEMP/tunnel-client/bin"
+          install_dir="$RUNNER_TEMP/tunnel-client"
           mkdir -p "$install_dir"
           archive="$RUNNER_TEMP/tunnel-client.zip"
           curl --fail --location --silent --show-error \

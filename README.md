@@ -316,6 +316,12 @@ cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
 
 将 Cloudflare 输出的 `https://...trycloudflare.com/mcp` 配置给远程 MCP Client，并配置同一个 Bearer Token。生产环境应使用稳定的命名隧道和独立认证层；Quick Tunnel 只适合临时验证。
 
+### Secure MCP Tunnel / GitHub Actions
+
+本项目也支持通过 OpenAI Secure MCP Tunnel 暴露 stdio MCP。先在实际存放本地文档的服务器上注册 GitHub self-hosted runner，再在仓库的 Secrets 中添加 `CONTROL_PLANE_API_KEY`，然后手动运行 `Deploy reading-mcp tunnel` workflow。该 workflow 会构建 binary、启动或替换 `reading-mcp` managed runtime，并把 `server/discover` 不兼容请求回退到标准 `initialize`。
+
+普通 GitHub-hosted runner 不适合这个部署：任务结束后运行环境会被回收，而且它看不到服务器 `/root` 下的本地文件。工作流中的 `local_roots` 必须填写 self-hosted runner 上实际允许读取的目录。
+
 ## 明确非目标
 
 v0.1.0 不包含：

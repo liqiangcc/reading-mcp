@@ -42,7 +42,9 @@ impl HttpTransportConfig {
         let bind = std::env::var("READING_MCP_HTTP_BIND")
             .unwrap_or_else(|_| format!("127.0.0.1:{DEFAULT_BIND_PORT}"))
             .parse::<SocketAddr>()
-            .map_err(|error| format!("READING_MCP_HTTP_BIND must be an IP socket address: {error}"))?;
+            .map_err(|error| {
+                format!("READING_MCP_HTTP_BIND must be an IP socket address: {error}")
+            })?;
         validate_bind(bind)?;
 
         let allowed_hosts = env_csv("READING_MCP_HTTP_ALLOWED_HOSTS");

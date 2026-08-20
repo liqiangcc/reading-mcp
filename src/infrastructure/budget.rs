@@ -92,7 +92,9 @@ impl Parser for BlockingParser {
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || runtime.block_on(inner.parse(resource)))
             .await
-            .map_err(|error| ApplicationError::ParseFailed(format!("parser worker failed: {error}")))?
+            .map_err(|error| {
+                ApplicationError::ParseFailed(format!("parser worker failed: {error}"))
+            })?
     }
 }
 

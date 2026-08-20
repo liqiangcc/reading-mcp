@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::application::ports::{
-    ApplicationError, DocumentRepository, SearchHit, SearchIndex,
-};
+use crate::application::ports::{ApplicationError, DocumentRepository, SearchHit, SearchIndex};
 use crate::domain::{Document, DocumentId, Location, Section};
 
 const MAX_SNIPPET_CHARS: usize = 320;
@@ -16,10 +14,7 @@ pub struct AdaptiveSearchIndex {
 }
 
 impl AdaptiveSearchIndex {
-    pub fn new(
-        inner: Arc<dyn SearchIndex>,
-        repository: Arc<dyn DocumentRepository>,
-    ) -> Self {
+    pub fn new(inner: Arc<dyn SearchIndex>, repository: Arc<dyn DocumentRepository>) -> Self {
         Self { inner, repository }
     }
 }
@@ -74,13 +69,7 @@ impl SearchIndex for AdaptiveSearchIndex {
         // vector database or changing the SearchIndex contract.
         let mut fallback = Vec::new();
         for section in &document.root_sections {
-            collect_fallback_hits(
-                section,
-                &document,
-                &normalized_query,
-                &terms,
-                &mut fallback,
-            );
+            collect_fallback_hits(section, &document, &normalized_query, &terms, &mut fallback);
         }
         fallback.sort_by(|left, right| {
             right
@@ -293,7 +282,12 @@ fn centered_snippet(text: &str, query: &str, terms: &[String]) -> String {
     } else {
         None
     }
-    .or_else(|| terms.iter().filter(|term| !term.is_empty()).find_map(|term| normalized.find(term)));
+    .or_else(|| {
+        terms
+            .iter()
+            .filter(|term| !term.is_empty())
+            .find_map(|term| normalized.find(term))
+    });
 
     let match_char = byte_match
         .map(|byte| normalized[..byte].chars().count())

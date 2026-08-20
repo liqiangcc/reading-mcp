@@ -104,10 +104,8 @@ pub fn build_server(
         archive_limits,
     ));
     let format_parser: Arc<dyn Parser> = Arc::new(BlockingParser::new(format_parser));
-    let parser: Arc<dyn Parser> = Arc::new(CachingParser::new(
-        format_parser,
-        components.parsed_cache,
-    ));
+    let parser: Arc<dyn Parser> =
+        Arc::new(CachingParser::new(format_parser, components.parsed_cache));
     let parser: Arc<dyn Parser> =
         Arc::new(BudgetedParser::new(parser, config.resource_budget.clone()));
     let parser: Arc<dyn Parser> = if config.telemetry {

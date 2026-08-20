@@ -40,6 +40,17 @@ async fn http_transport_enforces_auth_and_origin_while_exposing_local_probes() {
         .expect("unauthorized request should receive a response");
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
+    let hostile_host = client
+        .post(format!("{base}/mcp"))
+        .bearer_auth(TOKEN)
+        .header("Host", "evil.example")
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("hostile Host request should receive a response");
+    assert_eq!(hostile_host.status(), StatusCode::FORBIDDEN);
+
     let hostile_origin = client
         .post(format!("{base}/mcp"))
         .bearer_auth(TOKEN)

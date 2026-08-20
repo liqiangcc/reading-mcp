@@ -48,8 +48,8 @@ impl SearchIndex for AdaptiveSearchIndex {
             .ok_or(ApplicationError::DocumentNotFound)?;
         let normalized_query = normalize(query);
         let terms = query_terms(&normalized_query);
-        let should_fallback = normalized_query.chars().any(is_compact_script)
-            || indexed_hits.len() < limit;
+        let should_fallback =
+            normalized_query.chars().any(is_compact_script) || indexed_hits.len() < limit;
 
         for hit in &mut indexed_hits {
             if let Some(section) = document.find_section(&hit.section_id) {

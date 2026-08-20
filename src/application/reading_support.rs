@@ -31,7 +31,10 @@ pub(crate) fn flatten_sections<'a>(sections: &'a [Section], output: &mut Vec<&'a
     }
 }
 
-pub(crate) fn truncate_chars(content: String, requested_max_chars: Option<usize>) -> (String, bool) {
+pub(crate) fn truncate_chars(
+    content: String,
+    requested_max_chars: Option<usize>,
+) -> (String, bool) {
     let limit = requested_max_chars
         .unwrap_or(DEFAULT_CONTENT_RESPONSE_CHARS)
         .min(MAX_CONTENT_RESPONSE_CHARS);

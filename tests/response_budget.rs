@@ -30,7 +30,10 @@ async fn read_document_applies_default_budget_when_max_chars_is_omitted() {
         .await
         .expect("read should succeed");
 
-    assert_eq!(result.content.chars().count(), DEFAULT_CONTENT_RESPONSE_CHARS);
+    assert_eq!(
+        result.content.chars().count(),
+        DEFAULT_CONTENT_RESPONSE_CHARS
+    );
     assert!(result.truncated);
 }
 
@@ -82,7 +85,10 @@ async fn document_structure_is_bounded_by_server_node_limit() {
         .await
         .expect("structure should succeed");
 
-    assert_eq!(count_outline_nodes(&result.sections), MAX_STRUCTURE_RESPONSE_NODES);
+    assert_eq!(
+        count_outline_nodes(&result.sections),
+        MAX_STRUCTURE_RESPONSE_NODES
+    );
 }
 
 #[test]

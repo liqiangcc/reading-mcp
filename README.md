@@ -60,7 +60,7 @@ Repository  SearchIndex
         ↓
  Application UseCases
         ↓
-    MCP stdio
+ MCP stdio / HTTP
         ↓
        AI
 ```
@@ -87,6 +87,8 @@ Index ≠ Document
 Search ≠ Read
 ```
 
+SQLite FTS5 / BM25 是主检索路径。CJK 查询或主索引召回不足时，会在已经受资源预算约束的 canonical Document 上进行受控段落 fallback；不会因此引入向量数据库或把 Index 变成事实来源。Search snippet 会围绕真实命中位置截取。
+
 ## 安全默认
 
 公共网络来源默认只允许 HTTPS，并启用：
@@ -98,8 +100,10 @@ Search ≠ Read
 - Content-Type allowlist；
 - PDF 总页数与单页解压上限；
 - EPUB/DOCX ZIP entry 数、单 entry 和总解压大小限制；
+- 同步格式解析进入 blocking pool，避免占住 async runtime worker；
 - Parser timeout；
-- Normalized Document 字符数、Section 数和深度限制。
+- Normalized Document 字符数、Section 数和深度限制；
+- MCP response server-side hard limit，避免客户端省略限制后把超大章节注入模型上下文。
 
 本地文件默认关闭。只有部署者配置允许目录后才能读取：
 
@@ -212,6 +216,8 @@ Paragraph / Search Unit
 
 这让 Agent 能先精确定位，再读取完整逻辑上下文，而不是把孤立 chunk 当作章节。
 
+服务端还会限制 Tool response：`read_document` 默认 40,000 字符、最多 80,000；`get_context` 默认 24,000、最多 48,000；`get_document_structure` 最多返回 2,000 个可见节点。更大的结构应降低 `max_depth` 或先搜索定位。
+
 ## 可观察性
 
 默认向 **stderr** 输出结构化 JSON，stdout 专用于 MCP JSON-RPC：
@@ -295,26 +301,46 @@ cargo build --release --locked --bin reading-mcp
 
 ### Streamable HTTP / 隧道模式
 
-如果 GPT 或其他远程 MCP Client 需要通过 HTTPS 访问，可使用新增的 HTTP binary：
+如果 GPT 或其他远程 MCP Client 需要通过 HTTPS 访问，可使用 HTTP binary：
 
 ```bash
 export READING_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
 ./target/release/reading-mcp-http
 ```
 
-默认监听 `127.0.0.1:8787`，MCP 地址为 `/mcp`，请求必须携带：
+安全默认：
+
+```text
+Bind          127.0.0.1:8787 only
+Bearer        mandatory
+Host check     enabled
+Origin check   enabled
+MCP path       /mcp
+Health         /healthz
+Ready          /readyz
+```
+
+服务拒绝直接绑定 `0.0.0.0` 或 LAN 地址。所有 HTTP 端点都必须携带：
 
 ```text
 Authorization: Bearer <READING_MCP_HTTP_TOKEN>
 ```
 
-临时隧道示例：
+稳定命名隧道应配置明确 Host/Origin：
 
 ```bash
+export READING_MCP_HTTP_ALLOWED_HOSTS='reading.example.com'
+export READING_MCP_HTTP_ALLOWED_ORIGINS='https://reading.example.com'
+```
+
+如果只做临时 Quick Tunnel 验证，随机公网 Host 无法预先固定时必须**显式**关闭 Host validation，而不是默认关闭：
+
+```bash
+export READING_MCP_HTTP_DISABLE_HOST_VALIDATION=true
 cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
 ```
 
-将 Cloudflare 输出的 `https://...trycloudflare.com/mcp` 配置给远程 MCP Client，并配置同一个 Bearer Token。生产环境应使用稳定的命名隧道和独立认证层；Quick Tunnel 只适合临时验证。
+这不会关闭 Bearer 或 Origin validation。如果远程客户端发送 `Origin`，仍需将实际可信 Origin 配到 `READING_MCP_HTTP_ALLOWED_ORIGINS`。生产环境优先使用稳定命名隧道和明确 allowlist。
 
 ### Secure MCP Tunnel / GitHub Actions
 

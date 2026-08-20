@@ -1,3 +1,4 @@
+mod adaptive_search;
 mod budget;
 mod cache;
 mod file_cache;
@@ -7,7 +8,8 @@ mod noop_index;
 mod observability;
 mod sqlite;
 
-pub use budget::{BudgetedParser, BudgetedRetriever, ResourceBudget};
+pub use adaptive_search::AdaptiveSearchIndex;
+pub use budget::{BlockingParser, BudgetedParser, BudgetedRetriever, ResourceBudget};
 pub use cache::{
     CachingParser, CachingRetriever, InMemoryParsedDocumentCache, InMemoryRawResourceCache,
 };

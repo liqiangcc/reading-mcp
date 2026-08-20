@@ -10,6 +10,7 @@ fn core_layers_do_not_gain_forbidden_concrete_dependencies() {
         &[
             "crate::mcp",
             "rmcp::",
+            "axum::",
             "reqwest::",
             "lopdf::",
             "rusqlite::",
@@ -22,6 +23,7 @@ fn core_layers_do_not_gain_forbidden_concrete_dependencies() {
         &[
             "crate::mcp",
             "rmcp::",
+            "axum::",
             "reqwest::",
             "lopdf::",
             "rusqlite::",
@@ -31,17 +33,34 @@ fn core_layers_do_not_gain_forbidden_concrete_dependencies() {
     );
     assert_tree_excludes(
         &root.join("parsing"),
-        &["crate::mcp", "rmcp::", "reqwest::", "rusqlite::"],
+        &["crate::mcp", "rmcp::", "axum::", "reqwest::", "rusqlite::"],
     );
     assert_tree_excludes(
         &root.join("retrieval"),
-        &["crate::mcp", "rmcp::", "lopdf::", "scraper::", "rusqlite::"],
+        &[
+            "crate::mcp",
+            "rmcp::",
+            "axum::",
+            "lopdf::",
+            "scraper::",
+            "rusqlite::",
+        ],
     );
     assert_tree_excludes(
         &root.join("security"),
-        &["crate::mcp", "rmcp::", "lopdf::", "scraper::", "rusqlite::"],
+        &[
+            "crate::mcp",
+            "rmcp::",
+            "axum::",
+            "lopdf::",
+            "scraper::",
+            "rusqlite::",
+        ],
     );
-    assert_tree_excludes(&root.join("infrastructure"), &["crate::mcp", "rmcp::"]);
+    assert_tree_excludes(
+        &root.join("infrastructure"),
+        &["crate::mcp", "rmcp::", "axum::"],
+    );
 }
 
 fn assert_tree_excludes(root: &Path, forbidden: &[&str]) {

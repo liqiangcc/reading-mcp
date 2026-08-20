@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use reading_mcp::application::get_context::{GetContextCommand, GetContextUseCase};
 use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
-use reading_mcp::application::ports::{
-    ApplicationError, DocumentRepository, SearchIndex,
-};
+use reading_mcp::application::ports::{ApplicationError, DocumentRepository, SearchIndex};
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
@@ -13,11 +11,12 @@ use reading_mcp::domain::{
 use reading_mcp::infrastructure::{
     AdaptiveSearchIndex, InMemoryDocumentRepository, InMemorySearchIndex,
 };
+use reading_mcp::mcp::{HttpTransportConfig, streamable_http_router};
+use reading_mcp::runtime::{RuntimeConfig, build_server};
 
 #[tokio::test]
 async fn default_read_and_context_responses_are_server_bounded() {
-    let repository: Arc<dyn DocumentRepository> =
-        Arc::new(InMemoryDocumentRepository::default());
+    let repository: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
     let document = large_document();
     repository.save(document.clone()).await.unwrap();
 
@@ -48,8 +47,7 @@ async fn default_read_and_context_responses_are_server_bounded() {
 
 #[tokio::test]
 async fn oversized_structure_is_rejected_before_becoming_an_mcp_payload() {
-    let repository: Arc<dyn DocumentRepository> =
-        Arc::new(InMemoryDocumentRepository::default());
+    let repository: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
     let document = Document {
         id: DocumentId("doc:wide".into()),
         source: DocumentSource("memory:wide".into()),
@@ -80,8 +78,7 @@ async fn oversized_structure_is_rejected_before_becoming_an_mcp_payload() {
 
 #[tokio::test]
 async fn adaptive_search_recalls_cjk_natural_language_queries() {
-    let repository: Arc<dyn DocumentRepository> =
-        Arc::new(InMemoryDocumentRepository::default());
+    let repository: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
     let inner: Arc<dyn SearchIndex> = Arc::new(InMemorySearchIndex::default());
     let adaptive = AdaptiveSearchIndex::new(inner, repository.clone());
     let document = Document {
@@ -111,6 +108,72 @@ async fn adaptive_search_recalls_cjk_natural_language_queries() {
     assert!(!hits.is_empty());
     assert_eq!(hits[0].section_id.0, "section://virtual-memory");
     assert!(hits[0].snippet.contains("页面置换算法"));
+}
+
+#[tokio::test]
+async fn streamable_http_requires_bearer_and_rejects_hostile_headers() {
+    let server = build_server(RuntimeConfig {
+        state_dir: None,
+        telemetry: false,
+        ..RuntimeConfig::default()
+    })
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let token = "t".repeat(32);
+    let config = HttpTransportConfig {
+        bind: address,
+        token: token.clone(),
+        allowed_hosts: Some(vec![format!("127.0.0.1:{}", address.port())]),
+        allowed_origins: vec![format!("http://127.0.0.1:{}", address.port())],
+        disable_host_validation: false,
+    };
+    let router = streamable_http_router(server, &config);
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let unauthorized = client
+        .get(format!("http://{address}/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let authorized = client
+        .get(format!("http://{address}/healthz"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(authorized.status().is_success());
+
+    let hostile_origin = client
+        .post(format!("http://{address}/mcp"))
+        .bearer_auth(&token)
+        .header("Origin", "https://evil.example")
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hostile_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let hostile_host = client
+        .post(format!("http://{address}/mcp"))
+        .bearer_auth(&token)
+        .header("Host", "evil.example")
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hostile_host.status(), reqwest::StatusCode::FORBIDDEN);
+
+    server_task.abort();
 }
 
 fn large_document() -> Document {

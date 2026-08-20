@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
@@ -205,6 +205,8 @@ fn env_bool(name: &str, default: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use super::*;
 
     #[test]

@@ -48,6 +48,8 @@ impl SearchIndex for AdaptiveSearchIndex {
             .ok_or(ApplicationError::DocumentNotFound)?;
         let normalized_query = normalize(query);
         let terms = query_terms(&normalized_query);
+        let should_fallback = normalized_query.chars().any(is_compact_script)
+            || indexed_hits.len() < limit;
 
         for hit in &mut indexed_hits {
             if let Some(section) = document.find_section(&hit.section_id) {
@@ -67,20 +69,22 @@ impl SearchIndex for AdaptiveSearchIndex {
         // The canonical document is already bounded by ResourceBudget, so a
         // deterministic paragraph scan is a safe fallback without adding a
         // vector database or changing the SearchIndex contract.
-        let mut fallback = Vec::new();
-        for section in &document.root_sections {
-            collect_fallback_hits(section, &document, &normalized_query, &terms, &mut fallback);
-        }
-        fallback.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.section_id.0.cmp(&right.section_id.0))
-                .then_with(|| left.snippet.cmp(&right.snippet))
-        });
-        fallback.truncate(limit.saturating_mul(3).max(limit));
-        for hit in fallback {
-            merge_hit(&mut merged, hit);
+        if should_fallback {
+            let mut fallback = Vec::new();
+            for section in &document.root_sections {
+                collect_fallback_hits(section, &document, &normalized_query, &terms, &mut fallback);
+            }
+            fallback.sort_by(|left, right| {
+                right
+                    .score
+                    .total_cmp(&left.score)
+                    .then_with(|| left.section_id.0.cmp(&right.section_id.0))
+                    .then_with(|| left.snippet.cmp(&right.snippet))
+            });
+            fallback.truncate(limit.saturating_mul(3).max(limit));
+            for hit in fallback {
+                merge_hit(&mut merged, hit);
+            }
         }
 
         let mut hits = merged.into_values().collect::<Vec<_>>();

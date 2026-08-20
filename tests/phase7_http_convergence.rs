@@ -18,7 +18,9 @@ async fn http_transport_enforces_auth_and_origin_while_exposing_local_probes() {
         .await
         .expect("health endpoint should respond");
     assert_eq!(health.status(), StatusCode::OK);
-    let health_body: Value = health.json().await.expect("health response should be JSON");
+    let health_text = health.text().await.expect("health body should be readable");
+    let health_body: Value =
+        serde_json::from_str(&health_text).expect("health response should be JSON");
     assert_eq!(health_body["status"], "ok");
     assert_eq!(health_body["transport"], "streamable-http");
 
@@ -26,7 +28,9 @@ async fn http_transport_enforces_auth_and_origin_while_exposing_local_probes() {
         .await
         .expect("ready endpoint should respond");
     assert_eq!(ready.status(), StatusCode::OK);
-    let ready_body: Value = ready.json().await.expect("ready response should be JSON");
+    let ready_text = ready.text().await.expect("ready body should be readable");
+    let ready_body: Value =
+        serde_json::from_str(&ready_text).expect("ready response should be JSON");
     assert_eq!(ready_body["status"], "ready");
     assert_eq!(ready_body["mcp_path"], "/mcp");
 

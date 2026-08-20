@@ -174,21 +174,81 @@ HTTP binary：
 target/release/reading-mcp-http
 ```
 
+安全默认：
+
+```text
+Bind            = 127.0.0.1:8787
+Remote bind     = rejected
+Bearer token    = required, at least 32 characters
+Host validation = enabled
+Origin validation = enabled for loopback origins
+```
+
 配置：
 
 ```text
-READING_MCP_HTTP_BIND              默认 127.0.0.1:8787
-READING_MCP_HTTP_TOKEN             必填，至少 32 个字符
-READING_MCP_HTTP_ALLOWED_HOSTS     可选，逗号分隔的 Host allowlist
+READING_MCP_HTTP_BIND                默认 127.0.0.1:8787，仅允许 loopback
+READING_MCP_HTTP_TOKEN               必填，至少 32 个字符
+READING_MCP_HTTP_ALLOWED_HOSTS       可选，逗号分隔的精确 Host allowlist
+READING_MCP_HTTP_ALLOWED_ORIGINS     可选，逗号分隔的 Origin allowlist
 ```
 
-HTTP MCP endpoint 为 `/mcp`，所有请求都必须使用 `Authorization: Bearer <token>`。未设置 `READING_MCP_HTTP_ALLOWED_HOSTS` 时会关闭 rmcp 的 Host 校验，以兼容临时隧道随机域名；公网部署仍必须依赖强随机 Token，并建议配置稳定域名的 Host allowlist。
+启动示例：
+
+```bash
+export READING_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+./target/release/reading-mcp-http
+```
+
+MCP endpoint：
+
+```text
+/mcp
+```
+
+探针：
+
+```text
+/health     legacy plain-text health probe
+/healthz    structured liveness probe
+/readyz     structured readiness probe
+```
+
+`/mcp` 请求必须携带：
+
+```text
+Authorization: Bearer <READING_MCP_HTTP_TOKEN>
+```
+
+HTTP 服务拒绝 `0.0.0.0`、LAN 地址和其他非 loopback bind。远程访问必须通过受信任的 MCP Tunnel 或 reverse proxy；这使“网络暴露”与 Reading MCP 进程本身保持职责分离。
+
+RMCP 默认 Host 防护保持开启，不再为了动态 tunnel 域名全局关闭。若 tunnel/reverse proxy 会把公共 Host 转发到 Reading MCP，必须显式配置该 Host：
+
+```bash
+READING_MCP_HTTP_ALLOWED_HOSTS=mcp.example.com
+```
+
+Origin 校验默认允许与本地端口对应的：
+
+```text
+http://localhost:8787
+http://127.0.0.1:8787
+http://[::1]:8787
+```
+
+没有 `Origin` Header 的非浏览器 MCP 请求仍可通过；携带 `Origin` 的请求必须命中 allowlist。可信代理需要额外 Origin 时显式配置：
+
+```bash
+READING_MCP_HTTP_ALLOWED_ORIGINS=https://trusted-client.example.com
+```
+
+不要通过设置空 allowlist 来关闭 Host/Origin 防护。临时随机域名 tunnel 应在 tunnel 建立后把实际 Host/Origin 明确加入 allowlist，或优先使用 Secure MCP Tunnel 的 stdio 路径。
 
 ## Telemetry
 
 默认开启：
 
-```text
+```bash
 READING_MCP_TELEMETRY=true
 ```
 

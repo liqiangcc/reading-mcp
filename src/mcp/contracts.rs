@@ -31,6 +31,7 @@ pub struct GetDocumentStructureRequest {
 pub struct GetDocumentStructureResponse {
     pub document_id: String,
     pub sections: Vec<SectionNode>,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

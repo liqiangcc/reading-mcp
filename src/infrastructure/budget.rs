@@ -71,6 +71,31 @@ impl Retriever for BudgetedRetriever {
     }
 }
 
+/// Moves parser work onto Tokio's blocking pool so synchronous PDF/ZIP/XML
+/// parsing cannot monopolize an async runtime worker. Resource budgets remain
+/// the primary protection because an already-running blocking task cannot be
+/// forcefully killed by Tokio when an outer cooperative timeout expires.
+pub struct BlockingParser {
+    inner: Arc<dyn Parser>,
+}
+
+impl BlockingParser {
+    pub fn new(inner: Arc<dyn Parser>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl Parser for BlockingParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let inner = self.inner.clone();
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || runtime.block_on(inner.parse(resource)))
+            .await
+            .map_err(|error| ApplicationError::ParseFailed(format!("parser worker failed: {error}")))?
+    }
+}
+
 pub struct BudgetedParser {
     inner: Arc<dyn Parser>,
     budget: ResourceBudget,

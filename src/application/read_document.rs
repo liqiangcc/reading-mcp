@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
-use crate::application::reading_support::{render_section_tree, truncate_chars};
+use crate::application::reading_support::{
+    DEFAULT_READ_MAX_CHARS, MAX_READ_MAX_CHARS, render_section_tree, resolve_response_limit,
+    truncate_chars,
+};
 use crate::domain::{DocumentId, DocumentSource, Location, SectionId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +37,11 @@ impl ReadDocumentUseCase {
         &self,
         command: ReadSectionCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
+        let max_chars = resolve_response_limit(
+            command.max_chars,
+            DEFAULT_READ_MAX_CHARS,
+            MAX_READ_MAX_CHARS,
+        )?;
         let document = self
             .repository
             .get(&command.document_id)
@@ -46,7 +54,7 @@ impl ReadDocumentUseCase {
             .ok_or(ApplicationError::SectionNotFound)?;
 
         let rendered = render_section_tree(section);
-        let (content, truncated) = truncate_chars(rendered, command.max_chars);
+        let (content, truncated) = truncate_chars(rendered, max_chars);
 
         Ok(ReadSectionResult {
             document_id,

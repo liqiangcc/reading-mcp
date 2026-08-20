@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::reading_support::{
-    flatten_sections, render_section_shallow, truncate_chars,
+    DEFAULT_CONTEXT_MAX_CHARS, MAX_CONTEXT_MAX_CHARS, flatten_sections, render_section_shallow,
+    resolve_response_limit, truncate_chars,
 };
 use crate::domain::{DocumentId, DocumentSource, Location, SectionId};
 
@@ -45,6 +46,11 @@ impl GetContextUseCase {
                 "context window must not exceed {MAX_CONTEXT_WINDOW} sections on either side"
             )));
         }
+        let max_chars = resolve_response_limit(
+            command.max_chars,
+            DEFAULT_CONTEXT_MAX_CHARS,
+            MAX_CONTEXT_MAX_CHARS,
+        )?;
 
         let document = self
             .repository
@@ -69,7 +75,7 @@ impl GetContextUseCase {
             .map(|section| render_section_shallow(section))
             .collect::<Vec<_>>()
             .join("\n\n");
-        let (content, truncated) = truncate_chars(rendered, command.max_chars);
+        let (content, truncated) = truncate_chars(rendered, max_chars);
 
         Ok(GetContextResult {
             document_id,

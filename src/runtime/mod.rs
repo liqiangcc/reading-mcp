@@ -12,11 +12,11 @@ use crate::application::ports::{
 use crate::application::read_document::ReadDocumentUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
 use crate::infrastructure::{
-    BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
-    FileRawResourceCache, InMemoryDocumentRepository, InMemoryParsedDocumentCache,
-    InMemoryRawResourceCache, InMemorySearchIndex, ObservedParsedDocumentCache, ObservedParser,
-    ObservedRawResourceCache, ObservedRetriever, ObservedSearchIndex, SqliteDocumentRepository,
-    SqliteSearchIndex,
+    AdaptiveSearchIndex, BlockingParser, BudgetedParser, BudgetedRetriever, CachingParser,
+    FileParsedDocumentCache, FileRawResourceCache, InMemoryDocumentRepository,
+    InMemoryParsedDocumentCache, InMemoryRawResourceCache, InMemorySearchIndex,
+    ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
+    ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex,
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::{ArchiveLimits, ParserRouter};
@@ -41,7 +41,9 @@ impl RuntimeComponents {
             raw_cache: Arc::new(ObservedRawResourceCache::new(self.raw_cache)),
             parsed_cache: Arc::new(ObservedParsedDocumentCache::new(self.parsed_cache)),
             repository: self.repository,
-            search_index: Arc::new(ObservedSearchIndex::new(self.search_index)),
+            // AdaptiveSearchIndex is applied after composition so observability
+            // can measure the complete FTS + fallback search path.
+            search_index: self.search_index,
         }
     }
 }
@@ -97,11 +99,13 @@ pub fn build_server(
         max_entry_bytes: config.resource_budget.max_archive_entry_bytes,
         max_total_bytes: config.resource_budget.max_archive_total_bytes,
     };
+    let format_parser: Arc<dyn Parser> = Arc::new(ParserRouter::release(
+        config.resource_budget.max_pdf_pages,
+        archive_limits,
+    ));
+    let format_parser: Arc<dyn Parser> = Arc::new(BlockingParser::new(format_parser));
     let parser: Arc<dyn Parser> = Arc::new(CachingParser::new(
-        Arc::new(ParserRouter::release(
-            config.resource_budget.max_pdf_pages,
-            archive_limits,
-        )),
+        format_parser,
         components.parsed_cache,
     ));
     let parser: Arc<dyn Parser> =
@@ -113,7 +117,16 @@ pub fn build_server(
     };
 
     let repository = components.repository;
-    let search_index = components.search_index;
+    let search_index: Arc<dyn SearchIndex> = Arc::new(AdaptiveSearchIndex::new(
+        components.search_index,
+        repository.clone(),
+    ));
+    let search_index: Arc<dyn SearchIndex> = if config.telemetry {
+        Arc::new(ObservedSearchIndex::new(search_index))
+    } else {
+        search_index
+    };
+
     let open_document = Arc::new(OpenDocumentUseCase::new(
         source_policy,
         retriever,

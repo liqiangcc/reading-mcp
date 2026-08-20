@@ -3,6 +3,8 @@ use std::sync::Arc;
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::domain::{DocumentId, Location, Section, SectionId};
 
+const MAX_STRUCTURE_NODES: usize = 2_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SectionOutline {
     pub section_id: SectionId,
@@ -40,6 +42,17 @@ impl GetDocumentStructureUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
 
+        let visible_nodes = document
+            .root_sections
+            .iter()
+            .map(|section| count_visible_nodes(section, max_depth, 1))
+            .sum::<usize>();
+        if visible_nodes > MAX_STRUCTURE_NODES {
+            return Err(ApplicationError::ResourceLimitExceeded(format!(
+                "document structure would return {visible_nodes} nodes; server limit is {MAX_STRUCTURE_NODES}; request a smaller max_depth or use search_document to locate a section"
+            )));
+        }
+
         Ok(DocumentStructureResult {
             document_id: document.id.clone(),
             title: document.title,
@@ -49,6 +62,19 @@ impl GetDocumentStructureUseCase {
                 .map(|section| outline(section, max_depth, 1))
                 .collect(),
         })
+    }
+}
+
+fn count_visible_nodes(section: &Section, max_depth: Option<u8>, depth: u8) -> usize {
+    let include_children = max_depth.is_none_or(|limit| depth < limit);
+    1 + if include_children {
+        section
+            .children
+            .iter()
+            .map(|child| count_visible_nodes(child, max_depth, depth.saturating_add(1)))
+            .sum::<usize>()
+    } else {
+        0
     }
 }
 

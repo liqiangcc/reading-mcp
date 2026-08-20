@@ -82,8 +82,8 @@ async fn http_transport_refuses_non_loopback_bind() {
 }
 
 fn reserve_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("temporary port should be reserved");
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("temporary port should be reserved");
     listener
         .local_addr()
         .expect("listener should have a local address")

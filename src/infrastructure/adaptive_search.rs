@@ -81,7 +81,7 @@ impl SearchIndex for AdaptiveSearchIndex {
                     .then_with(|| left.section_id.0.cmp(&right.section_id.0))
                     .then_with(|| left.snippet.cmp(&right.snippet))
             });
-            fallback.truncate(limit.saturating_mul(3).max(limit));
+            fallback.truncate(limit.saturating_mul(3));
             for hit in fallback {
                 merge_hit(&mut merged, hit);
             }
@@ -249,9 +249,11 @@ fn score_text(haystack: &str, query: &str, terms: &[String]) -> f32 {
     if haystack.is_empty() {
         return 0.0;
     }
-    let phrase_hits = (!query.is_empty())
-        .then(|| haystack.matches(query).count())
-        .unwrap_or_default();
+    let phrase_hits = if query.is_empty() {
+        0
+    } else {
+        haystack.matches(query).count()
+    };
     let mut matched_terms = 0usize;
     let mut term_hits = 0usize;
     for term in terms {

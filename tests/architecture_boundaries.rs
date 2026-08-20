@@ -48,7 +48,14 @@ fn core_layers_do_not_gain_forbidden_concrete_dependencies() {
     );
     assert_tree_excludes(
         &root.join("security"),
-        &["crate::mcp", "rmcp::", "axum::", "lopdf::", "scraper::", "rusqlite::"],
+        &[
+            "crate::mcp",
+            "rmcp::",
+            "axum::",
+            "lopdf::",
+            "scraper::",
+            "rusqlite::",
+        ],
     );
     assert_tree_excludes(
         &root.join("infrastructure"),

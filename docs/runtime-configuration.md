@@ -103,6 +103,46 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 
 说明：Parser timeout 是 Tokio cooperative timeout。对于长时间不 yield 的同步 CPU 操作，它不是 OS 级硬抢占。因此 PDF 页数、ZIP 解压大小等前置限制仍然是资源安全的主要证据。
 
+## MCP Response Budget
+
+资源预算限制“输入和规范化文档能有多大”；Response Budget 独立限制“一次 MCP Tool 调用最多返回多少”。这两个边界不能互相替代。
+
+正文类 Tool 使用固定的服务端安全上限：
+
+```text
+read_document / get_context
+默认 max_chars = 32000
+服务端硬上限   = 64000
+```
+
+如果客户端省略 `max_chars`，服务端使用 32,000 字符默认值；如果客户端请求超过 64,000，服务端会自动封顶到 64,000。只要正文被截断，响应中的：
+
+```json
+{
+  "truncated": true
+}
+```
+
+会明确告诉调用方需要继续缩小范围或读取更具体的 Section。客户端不能通过传入超大 `max_chars` 绕过服务端硬上限。
+
+`get_document_structure` 不返回正文，但结构本身也可能非常大，因此单次响应最多返回 1,000 个 `SectionNode`。`max_depth` 仍用于主动缩小结构深度；若服务端节点预算导致树被截断，响应同样返回：
+
+```json
+{
+  "truncated": true
+}
+```
+
+这里的 `truncated` 只表示服务端 Response Budget 截断，不表示调用方主动设置 `max_depth` 后省略了更深层节点。
+
+这些限制属于 Application/MCP 输出边界，而不是 Parser、Repository 或 Domain 职责。目标是确保：
+
+```text
+按需读取 > 整篇注入
+客户端请求大小 < 服务端安全上限
+Normalized Document 大小 != 单次 MCP Response 大小
+```
+
 ## HTTP Cache Revalidation
 
 如果缓存响应包含：

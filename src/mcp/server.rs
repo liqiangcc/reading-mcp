@@ -119,6 +119,7 @@ impl ReadingMcpServer {
         Ok(Json(GetDocumentStructureResponse {
             document_id: result.document_id.0,
             sections: result.sections.iter().map(section_node).collect(),
+            truncated: result.truncated,
         }))
     }
 

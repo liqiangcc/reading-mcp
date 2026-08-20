@@ -1,5 +1,8 @@
 use crate::domain::Section;
 
+const DEFAULT_CONTENT_RESPONSE_CHARS: usize = 32_000;
+const MAX_CONTENT_RESPONSE_CHARS: usize = 64_000;
+
 pub(crate) fn render_section_tree(section: &Section) -> String {
     let mut output = String::new();
     render_tree_into(section, &mut output);
@@ -28,10 +31,13 @@ pub(crate) fn flatten_sections<'a>(sections: &'a [Section], output: &mut Vec<&'a
     }
 }
 
-pub(crate) fn truncate_chars(content: String, max_chars: Option<usize>) -> (String, bool) {
-    let Some(limit) = max_chars else {
-        return (content, false);
-    };
+pub(crate) fn truncate_chars(
+    content: String,
+    requested_max_chars: Option<usize>,
+) -> (String, bool) {
+    let limit = requested_max_chars
+        .unwrap_or(DEFAULT_CONTENT_RESPONSE_CHARS)
+        .min(MAX_CONTENT_RESPONSE_CHARS);
 
     if content.chars().count() <= limit {
         return (content, false);

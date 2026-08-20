@@ -3,6 +3,8 @@ use std::sync::Arc;
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::domain::{DocumentId, Location, Section, SectionId};
 
+const MAX_STRUCTURE_RESPONSE_NODES: usize = 1_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SectionOutline {
     pub section_id: SectionId,
@@ -18,6 +20,7 @@ pub struct DocumentStructureResult {
     pub document_id: DocumentId,
     pub title: String,
     pub sections: Vec<SectionOutline>,
+    pub truncated: bool,
 }
 
 pub struct GetDocumentStructureUseCase {
@@ -40,35 +43,84 @@ impl GetDocumentStructureUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
 
+        let mut budget = OutlineBudget::new(MAX_STRUCTURE_RESPONSE_NODES);
+        let sections = outline_sections(&document.root_sections, max_depth, 1, &mut budget);
+
         Ok(DocumentStructureResult {
             document_id: document.id.clone(),
             title: document.title,
-            sections: document
-                .root_sections
-                .iter()
-                .map(|section| outline(section, max_depth, 1))
-                .collect(),
+            sections,
+            truncated: budget.truncated,
         })
     }
 }
 
-fn outline(section: &Section, max_depth: Option<u8>, depth: u8) -> SectionOutline {
+struct OutlineBudget {
+    remaining: usize,
+    truncated: bool,
+}
+
+impl OutlineBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            remaining: limit,
+            truncated: false,
+        }
+    }
+
+    fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            self.truncated = true;
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
+fn outline_sections(
+    sections: &[Section],
+    max_depth: Option<u8>,
+    depth: u8,
+    budget: &mut OutlineBudget,
+) -> Vec<SectionOutline> {
+    let mut output = Vec::new();
+    for section in sections {
+        let Some(section) = outline(section, max_depth, depth, budget) else {
+            break;
+        };
+        output.push(section);
+    }
+    output
+}
+
+fn outline(
+    section: &Section,
+    max_depth: Option<u8>,
+    depth: u8,
+    budget: &mut OutlineBudget,
+) -> Option<SectionOutline> {
+    if !budget.take() {
+        return None;
+    }
+
     let include_children = max_depth.is_none_or(|limit| depth < limit);
 
-    SectionOutline {
+    Some(SectionOutline {
         section_id: section.id.clone(),
         parent_id: section.parent_id.clone(),
         title: section.title.clone(),
         level: section.level,
         location: section.location.clone(),
         children: if include_children {
-            section
-                .children
-                .iter()
-                .map(|child| outline(child, max_depth, depth.saturating_add(1)))
-                .collect()
+            outline_sections(
+                &section.children,
+                max_depth,
+                depth.saturating_add(1),
+                budget,
+            )
         } else {
             vec![]
         },
-    }
+    })
 }

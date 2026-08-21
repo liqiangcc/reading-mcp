@@ -55,7 +55,7 @@ normalized_document_hash
 = canonical addressing-relevant Document/Section fingerprint
 ```
 
-`normalized_document_hash/v1` 按 persisted tree/source order 覆盖：
+`normalized-document-hash/v1` 按 persisted tree/source order 覆盖：
 
 ```text
 Section id
@@ -137,8 +137,10 @@ root section_id
 read_mode = section_tree
 rendering_version
 next stream character position
-cursor schema version
+cursor schema version = read-cursor/v2
 ```
+
+`read-cursor/v2` 表示 Cursor 已绑定正式 `normalized-document-hash/v1` 语义。此前 provisional fingerprint 产生的 `read-cursor/v1` 会被明确识别为 stale，不能继续或自动重定位。
 
 `stream.start_char/end_char` 是 Unicode scalar 计数的 rendered stream coordinates，仅用于 continuation 验证；它不是 canonical source locator、normalized range 或 citation。Cursor 遇到 document/normalized facts、target、mode 或 rendering version 不匹配时 fail closed，不做 fuzzy rebasing。
 
@@ -208,6 +210,7 @@ Default persistent state
 - SectionTreeReadStream continuation 的 actionable cursor；
 - 多段拼接无 gap/overlap，并精确等于一次完整读取；
 - cursor 对 raw/normalized document identity、target 和 rendering contract 的 fail-closed 验证；
+- 旧 `read-cursor/v1` 对新正式身份契约显式 stale；
 - stderr telemetry 不污染 stdout MCP transport。
 
 ## 架构约束

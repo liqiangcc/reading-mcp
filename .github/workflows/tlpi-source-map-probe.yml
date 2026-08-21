@@ -1,4 +1,4 @@
-name: Build Reading MCP source-probe binary
+name: Build Reading MCP source-probe bundle
 
 on:
   pull_request:
@@ -25,10 +25,27 @@ jobs:
         shell: bash
         run: cargo build --release --locked --bin reading-mcp
 
-      - name: Upload executable
+      - name: Download official TLPI structural sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source-probe
+          curl --fail --location --silent --show-error \
+            https://man7.org/tlpi/toc-detailed.html \
+            --output source-probe/tlpi-toc-detailed.html
+          curl --fail --location --silent --show-error \
+            https://man7.org/tlpi/download/TLPI-00-Preface.pdf \
+            --output source-probe/TLPI-00-Preface.pdf
+          curl --fail --location --silent --show-error \
+            https://man7.org/tlpi/download/TLPI-TOC-detailed.pdf \
+            --output source-probe/TLPI-TOC-detailed.pdf
+          cp target/release/reading-mcp source-probe/reading-mcp
+          sha256sum source-probe/* > source-probe/SHA256SUMS
+
+      - name: Upload source-probe bundle
         uses: actions/upload-artifact@v4
         with:
-          name: reading-mcp-linux-amd64
-          path: target/release/reading-mcp
+          name: reading-mcp-tlpi-source-probe-bundle
+          path: source-probe/
           retention-days: 1
           if-no-files-found: error

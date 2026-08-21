@@ -49,9 +49,7 @@ struct ReadCursorEnvelope {
     checksum: String,
 }
 
-pub(crate) fn encode_read_cursor(
-    claims: ReadCursorClaims,
-) -> Result<String, ApplicationError> {
+pub(crate) fn encode_read_cursor(claims: ReadCursorClaims) -> Result<String, ApplicationError> {
     let claims_bytes = serde_json::to_vec(&claims).map_err(|error| {
         ApplicationError::CursorEncodingFailed(format!(
             "failed to serialize read cursor claims: {error}"
@@ -80,17 +78,16 @@ pub(crate) fn decode_read_cursor(cursor: &str) -> Result<ReadCursorClaims, Appli
         ));
     }
 
-    let encoded = cursor.strip_prefix(READ_CURSOR_PREFIX).ok_or_else(|| {
-        ApplicationError::InvalidCursor("read cursor prefix is invalid".into())
-    })?;
+    let encoded = cursor
+        .strip_prefix(READ_CURSOR_PREFIX)
+        .ok_or_else(|| ApplicationError::InvalidCursor("read cursor prefix is invalid".into()))?;
     let envelope_bytes = decode_hex(encoded)?;
-    let envelope: ReadCursorEnvelope = serde_json::from_slice(&envelope_bytes).map_err(|error| {
-        ApplicationError::InvalidCursor(format!("read cursor payload is invalid: {error}"))
-    })?;
+    let envelope: ReadCursorEnvelope =
+        serde_json::from_slice(&envelope_bytes).map_err(|error| {
+            ApplicationError::InvalidCursor(format!("read cursor payload is invalid: {error}"))
+        })?;
     let claims_bytes = serde_json::to_vec(&envelope.claims).map_err(|error| {
-        ApplicationError::InvalidCursor(format!(
-            "read cursor claims cannot be validated: {error}"
-        ))
+        ApplicationError::InvalidCursor(format!("read cursor claims cannot be validated: {error}"))
     })?;
 
     if envelope.checksum != cursor_checksum(&claims_bytes) {

@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
-use crate::application::read_cursor::{
-    ReadCursorClaims, decode_read_cursor, encode_read_cursor,
-};
+use crate::application::read_cursor::{ReadCursorClaims, decode_read_cursor, encode_read_cursor};
 use crate::application::reading_support::{
     SECTION_TREE_READ_MODE, SECTION_TREE_RENDERING_VERSION, content_response_limit,
     normalized_document_hash, render_section_tree, slice_chars,
@@ -67,13 +65,7 @@ impl ReadDocumentUseCase {
             .ok_or(ApplicationError::SectionNotFound)?;
         let normalized_hash = normalized_document_hash(&document);
 
-        read_segment(
-            &document,
-            section,
-            normalized_hash,
-            0,
-            command.max_chars,
-        )
+        read_segment(&document, section, normalized_hash, 0, command.max_chars)
     }
 
     pub async fn continue_read(
@@ -156,11 +148,7 @@ fn read_rendered_segment(
     start_char: usize,
     max_chars: Option<usize>,
 ) -> Result<ReadSectionResult, ApplicationError> {
-    let slice = slice_chars(
-        &rendered,
-        start_char,
-        content_response_limit(max_chars),
-    );
+    let slice = slice_chars(&rendered, start_char, content_response_limit(max_chars));
     let next_cursor = if slice.complete {
         None
     } else {

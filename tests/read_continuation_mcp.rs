@@ -48,26 +48,12 @@ Child section content is part of the legacy section-tree stream.
         .expect("open response should be typed");
     let section_id = "section://continuation";
 
-    let full = read(
-        &client,
-        &opened.document_id,
-        section_id,
-        None,
-        Some(4_000),
-    )
-    .await;
+    let full = read(&client, &opened.document_id, section_id, None, Some(4_000)).await;
     assert!(full.complete);
     assert!(!full.truncated);
     assert!(full.next_cursor.is_none());
 
-    let mut segment = read(
-        &client,
-        &opened.document_id,
-        section_id,
-        None,
-        Some(29),
-    )
-    .await;
+    let mut segment = read(&client, &opened.document_id, section_id, None, Some(29)).await;
     let total_chars = segment.stream.total_chars;
     let mut end = 0;
     let mut reconstructed = String::new();
@@ -129,9 +115,7 @@ async fn read(
     }
 
     client
-        .call_tool(
-            CallToolRequestParams::new("read_document").with_arguments(arguments(request)),
-        )
+        .call_tool(CallToolRequestParams::new("read_document").with_arguments(arguments(request)))
         .await
         .expect("read_document should succeed")
         .into_typed::<ReadDocumentResponse>()

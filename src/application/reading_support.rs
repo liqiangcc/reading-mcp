@@ -102,7 +102,10 @@ fn render_tree_into(section: &Section, output: &mut String) {
 fn hash_section(hasher: &mut Sha256, section: &Section) {
     hasher.update(b"section\0");
     hash_text(hasher, &section.id.0);
-    hash_optional_text(hasher, section.parent_id.as_ref().map(|value| value.0.as_str()));
+    hash_optional_text(
+        hasher,
+        section.parent_id.as_ref().map(|value| value.0.as_str()),
+    );
     hash_text(hasher, &section.title);
     hasher.update([section.level]);
     hash_text(hasher, &section.content);

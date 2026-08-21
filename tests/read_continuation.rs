@@ -49,10 +49,7 @@ async fn continuation_reconstructs_the_complete_section_tree_without_gap_or_over
         calls += 1;
         assert!(calls < 100, "continuation must make finite progress");
         assert_eq!(segment.stream.read_mode, "section_tree");
-        assert_eq!(
-            segment.stream.rendering_version,
-            "section-tree-markdown/v1"
-        );
+        assert_eq!(segment.stream.rendering_version, "section-tree-markdown/v1");
         assert_eq!(segment.stream.start_char, previous_end);
         assert!(segment.stream.end_char > segment.stream.start_char);
         assert_eq!(segment.stream.total_chars, expected_total);
@@ -225,10 +222,7 @@ async fn cursor_cannot_be_reused_for_another_section() {
         .await
         .expect_err("cursor target mismatch must fail");
 
-    assert!(matches!(
-        error,
-        ApplicationError::CursorTargetMismatch(_)
-    ));
+    assert!(matches!(error, ApplicationError::CursorTargetMismatch(_)));
 }
 
 #[tokio::test]

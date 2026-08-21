@@ -36,6 +36,7 @@ pub struct SearchHit {
 pub struct ParsedCacheKey {
     pub final_source: DocumentSource,
     pub raw_sha256: String,
+    pub normalization_version: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

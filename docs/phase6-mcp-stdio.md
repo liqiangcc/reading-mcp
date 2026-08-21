@@ -29,9 +29,67 @@ get_context
 read_document
 ```
 
-`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document_id/source/title/media_type/content_hash/section_count；structure 返回 section tree；search 返回 owning section + source/title/snippet/score/location；context/read 从 DocumentRepository 读取规范化正文。
+`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document/source/media type、raw/normalized identity、normalization diagnostics 与 section count；structure 返回 section tree；search 返回 owning section + source/title/snippet/score/location；context/read 从 DocumentRepository 读取规范化正文。
 
 v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location`。
+
+## Normalized document identity and text coordinates
+
+`open_document` 以 additive 方式返回：
+
+```text
+content_hash
+normalized_document_hash
+normalized_document_hash_version = normalized-document-hash/v1
+normalization_version             = reading-mcp-normalization/v1
+normalized_text_coordinate_space = section-content-unicode-scalar/v1
+```
+
+其中：
+
+```text
+content_hash
+= retrieved source bytes provenance
+
+normalized_document_hash
+= canonical addressing-relevant Document/Section fingerprint
+```
+
+`normalized-document-hash/v1` 按 persisted tree/source order 覆盖：
+
+```text
+Section id
+parent id
+Section title
+Section level
+exact Section.content
+child count/order
+```
+
+不覆盖 raw source、legacy `Location`、native provenance、MCP rendering 或 SearchIndex row。未来影响 Paragraph/Sentence segmentation 的 canonical persisted block/boundary facts 必须通过新 hash contract version 纳入。
+
+Normalized range 的唯一通用语义是：
+
+```text
+owner    = exact persisted Section.content
+base     = zero
+interval = half-open [start, end)
+unit     = Unicode scalar / Rust char
+```
+
+`Location.char_start/char_end` 保留 parser-defined legacy/source meaning，不被静默改写为 normalized range。
+
+Parsed Cache key 现在包含：
+
+```text
+final_source
+raw_sha256
+normalization_version
+```
+
+因此 normalization policy 升级可以继续复用 Raw Cache，但不会错误复用旧 Parsed Document。
+
+完整契约见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
 
 ## Section read continuation
 
@@ -54,6 +112,7 @@ cursor?
 ```text
 SectionTreeReadStream/v1
 rendering_version = section-tree-markdown/v1
+coordinate_space  = section-tree-rendered-unicode-scalar/v1
 ```
 
 当响应预算不足时，返回：
@@ -62,6 +121,7 @@ rendering_version = section-tree-markdown/v1
 truncated = true
 complete = false
 next_cursor
+stream.coordinate_space
 stream.start_char
 stream.end_char
 stream.total_chars
@@ -72,15 +132,17 @@ stream.total_chars
 ```text
 document_id
 raw content_hash
-normalized document fingerprint
+normalized_document_hash
 root section_id
 read_mode = section_tree
 rendering_version
 next stream character position
-cursor schema version
+cursor schema version = read-cursor/v2
 ```
 
-`stream.start_char/end_char` 是 Unicode scalar 计数的渲染流坐标，仅用于 continuation 验证；它不是 canonical source locator、normalized range 或 citation。Cursor 遇到 document/normalized facts、target、mode 或 rendering version 不匹配时 fail closed，不做 fuzzy rebasing。
+`read-cursor/v2` 表示 Cursor 已绑定正式 `normalized-document-hash/v1` 语义。此前 provisional fingerprint 产生的 `read-cursor/v1` 会被明确识别为 stale，不能继续或自动重定位。
+
+`stream.start_char/end_char` 是 Unicode scalar 计数的 rendered stream coordinates，仅用于 continuation 验证；它不是 canonical source locator、normalized range 或 citation。Cursor 遇到 document/normalized facts、target、mode 或 rendering version 不匹配时 fail closed，不做 fuzzy rebasing。
 
 重复 continuation 必须满足：
 
@@ -93,7 +155,7 @@ terminal complete = true
 terminal next_cursor = null
 ```
 
-为保持已有调用兼容，首次 `max_chars=0` 仍返回空的 incomplete segment，并提供从流起点继续的 `next_cursor`。带 cursor 的 continuation 若再次指定 `max_chars=0` 则被拒绝，因为该调用无法推进流；使用正数预算即可从位置 0 正常继续。
+首次 `max_chars=0` 保留旧行为，返回空 incomplete segment 和 position 0 cursor；cursor continuation 的 `max_chars=0` 被拒绝，避免产生无法前进的 continuation stream。
 
 ## 当前默认 Runtime
 
@@ -139,13 +201,16 @@ Default persistent state
 
 - 6 Tool discovery/调用；
 - structured DTO；
-- source/location traceability；
+- raw/normalized source identity 与 location traceability；
 - Text/Markdown/HTML/PDF acceptance matrix；
 - 持久化 state 重启后继续使用旧 document_id；
+- normalized hash 从 persisted canonical Document 确定性重建；
+- Section-relative Unicode-scalar normalized range validator；
+- normalization-version-scoped Parsed Cache；
 - SectionTreeReadStream continuation 的 actionable cursor；
 - 多段拼接无 gap/overlap，并精确等于一次完整读取；
 - cursor 对 raw/normalized document identity、target 和 rendering contract 的 fail-closed 验证；
-- 首次零预算调用的 legacy compatibility 与 continuation 进度保护；
+- 旧 `read-cursor/v1` 对新正式身份契约显式 stale；
 - stderr telemetry 不污染 stdout MCP transport。
 
 ## 架构约束

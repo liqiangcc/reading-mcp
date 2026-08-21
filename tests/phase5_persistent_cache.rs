@@ -1,7 +1,7 @@
 use reading_mcp::application::ports::{
     ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache, RetrievedResource,
 };
-use reading_mcp::domain::{DocumentSource, MediaType};
+use reading_mcp::domain::{DocumentSource, MediaType, NORMALIZATION_VERSION};
 use reading_mcp::infrastructure::{FileParsedDocumentCache, FileRawResourceCache};
 use reading_mcp::parsing::ParserRouter;
 use sha2::{Digest, Sha256};
@@ -44,6 +44,7 @@ async fn persistent_raw_and_parsed_caches_survive_adapter_recreation() {
     let key = ParsedCacheKey {
         final_source: resource.final_source.clone(),
         raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
+        normalization_version: NORMALIZATION_VERSION.into(),
     };
 
     let parsed_cache = FileParsedDocumentCache::new(directory.path());
@@ -60,5 +61,17 @@ async fn persistent_raw_and_parsed_caches_survive_adapter_recreation() {
             .await
             .expect("parsed cache should be readable after recreation"),
         Some(document)
+    );
+
+    let future_version_key = ParsedCacheKey {
+        normalization_version: "reading-mcp-normalization/future-test".into(),
+        ..key
+    };
+    assert_eq!(
+        reopened_parsed_cache
+            .get(&future_version_key)
+            .await
+            .expect("future normalization lookup should be a cache miss"),
+        None
     );
 }

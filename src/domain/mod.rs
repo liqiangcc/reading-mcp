@@ -1,5 +1,12 @@
 use std::collections::BTreeMap;
 
+mod normalized_text;
+
+pub use normalized_text::{
+    NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE,
+    NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DocumentId(pub String);
 
@@ -22,7 +29,11 @@ pub struct Location {
     pub section_path: Vec<String>,
     pub anchor: Option<String>,
     pub paragraph: Option<u32>,
+    /// Legacy parser-defined/source coordinate. This is not a normalized
+    /// `Section.content` range and must not be silently reinterpreted as one.
     pub char_start: Option<usize>,
+    /// Legacy parser-defined/source coordinate. This is not a normalized
+    /// `Section.content` range and must not be silently reinterpreted as one.
     pub char_end: Option<usize>,
     pub native_location: Option<String>,
 }

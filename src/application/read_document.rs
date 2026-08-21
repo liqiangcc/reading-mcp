@@ -3,10 +3,12 @@ use std::sync::Arc;
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::read_cursor::{ReadCursorClaims, decode_read_cursor, encode_read_cursor};
 use crate::application::reading_support::{
-    SECTION_TREE_READ_MODE, SECTION_TREE_RENDERING_VERSION, content_response_limit,
-    normalized_document_hash, render_section_tree, slice_chars,
+    SECTION_TREE_READ_MODE, SECTION_TREE_RENDERING_VERSION, SECTION_TREE_STREAM_COORDINATE_SPACE,
+    content_response_limit, render_section_tree, slice_rendered_stream,
 };
-use crate::domain::{Document, DocumentId, DocumentSource, Location, Section, SectionId};
+use crate::domain::{
+    Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, Section, SectionId,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSectionCommand {
@@ -27,6 +29,7 @@ pub struct ContinueReadCommand {
 pub struct ReadStreamSegment {
     pub read_mode: String,
     pub rendering_version: String,
+    pub coordinate_space: String,
     pub start_char: usize,
     pub end_char: usize,
     pub total_chars: usize,
@@ -62,7 +65,7 @@ impl ReadDocumentUseCase {
         let section = document
             .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
-        let normalized_hash = normalized_document_hash(&document);
+        let normalized_hash = document.normalized_document_hash();
 
         read_segment(&document, section, normalized_hash, 0, command.max_chars)
     }
@@ -84,8 +87,8 @@ impl ReadDocumentUseCase {
             )));
         }
 
-        let normalized_hash = normalized_document_hash(&document);
-        if normalized_hash != claims.normalized_document_hash {
+        let normalized_hash = document.normalized_document_hash();
+        if normalized_hash.as_ref() != claims.normalized_document_hash.as_str() {
             return Err(ApplicationError::StaleCursor(format!(
                 "normalized document hash changed from {} to {normalized_hash}",
                 claims.normalized_document_hash
@@ -125,7 +128,7 @@ impl ReadDocumentUseCase {
 fn read_segment(
     document: &Document,
     section: &Section,
-    normalized_hash: String,
+    normalized_hash: NormalizedDocumentHash,
     start_char: usize,
     max_chars: Option<usize>,
 ) -> Result<ReadSectionResult, ApplicationError> {
@@ -142,19 +145,19 @@ fn read_segment(
 fn read_rendered_segment(
     document: &Document,
     section: &Section,
-    normalized_hash: String,
+    normalized_hash: NormalizedDocumentHash,
     rendered: String,
     start_char: usize,
     max_chars: Option<usize>,
 ) -> Result<ReadSectionResult, ApplicationError> {
-    let slice = slice_chars(&rendered, start_char, content_response_limit(max_chars));
+    let slice = slice_rendered_stream(&rendered, start_char, content_response_limit(max_chars));
     let next_cursor = if slice.complete {
         None
     } else {
         Some(encode_read_cursor(ReadCursorClaims::new(
             document.id.0.clone(),
             document.content_hash.0.clone(),
-            normalized_hash,
+            normalized_hash.0,
             section.id.0.clone(),
             SECTION_TREE_READ_MODE,
             SECTION_TREE_RENDERING_VERSION,
@@ -174,6 +177,7 @@ fn read_rendered_segment(
         stream: ReadStreamSegment {
             read_mode: SECTION_TREE_READ_MODE.into(),
             rendering_version: SECTION_TREE_RENDERING_VERSION.into(),
+            coordinate_space: SECTION_TREE_STREAM_COORDINATE_SPACE.into(),
             start_char: slice.start_char,
             end_char: slice.end_char,
             total_chars: slice.total_chars,

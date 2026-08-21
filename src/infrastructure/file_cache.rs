@@ -311,6 +311,8 @@ fn parsed_key(key: &ParsedCacheKey) -> String {
     let mut input = key.final_source.0.as_bytes().to_vec();
     input.push(0);
     input.extend_from_slice(key.raw_sha256.as_bytes());
+    input.push(0);
+    input.extend_from_slice(key.normalization_version.as_bytes());
     digest_key(&input)
 }
 

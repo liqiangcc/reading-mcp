@@ -4,6 +4,7 @@
 - [设计原则](design-principles.md)：关注点分离（SoC）、单一职责（SRP）、变化原因矩阵、依赖方向、禁止耦合和架构评审清单。
 - [架构设计](architecture.md)：领域模型、Retriever/Parser/Search/Cache 边界、稳定定位与 SSRF 设计。
 - [Text Index & Source Locator Architecture](text-index-and-locator-design.md)：精确阅读的五级寻址、TextUnit/Locator、字符坐标、切分版本与 continuation 契约。
+- [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)：已实现的 normalized-document hash、normalization version、Section-relative Unicode-scalar range、坐标空间隔离和 Parsed Cache 版本约束。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与最终 Tool Contract；包含逐句枚举、SearchHit handoff、stale、non-prose 和 reliability/coverage。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
@@ -27,11 +28,13 @@ architecture.md
       ↓
 text-index-and-locator-design.md
       ↓
-epub-structure-reliability-design.md
-      ↓
 tool-contract-use-case-design.md
       ↓
 adr/0002-text-index-locator-identity.md
+      ↓
+normalized-text-range-contract.md
+      ↓
+epub-structure-reliability-design.md
       ↓
 adr/0003-epub-first-structure-reliability.md
       ↓

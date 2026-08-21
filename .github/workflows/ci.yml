@@ -69,3 +69,25 @@ jobs:
           path: test.log
           if-no-files-found: error
           retention-days: 1
+
+  tlpi-source-map-probe:
+    if: github.event_name == 'pull_request' && github.head_ref == 'agent/use-cloud-runner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CONTROL_PLANE_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Invoke deployed reading-mcp read-only tools
+        run: python3 .github/scripts/tlpi_source_map_probe.py
+
+      - name: Upload sanitized source result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tlpi-source-map-probe
+          path: tlpi-probe.json
+          if-no-files-found: error
+          retention-days: 1

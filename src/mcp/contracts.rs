@@ -110,6 +110,8 @@ pub struct ReadDocumentRequest {
     pub section_id: String,
     #[serde(default)]
     pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -120,6 +122,19 @@ pub struct ReadDocumentResponse {
     pub content: String,
     pub location: LocationDto,
     pub truncated: bool,
+    pub complete: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    pub stream: ReadStreamSegmentDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ReadStreamSegmentDto {
+    pub read_mode: String,
+    pub rendering_version: String,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub total_chars: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

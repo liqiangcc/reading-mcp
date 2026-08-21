@@ -1,41 +1,42 @@
-name: TLPI source map local read-only probe
+name: TLPI source map local Reading MCP probe
 
 on:
   pull_request:
     branches:
       - main
     paths:
-      - scripts/tlpi_stdio_probe.py
+      - tests/tlpi_source_map_probe.rs
       - .github/workflows/tlpi-source-map-local-probe.yml
 
 permissions:
   contents: read
 
 jobs:
-  local-probe:
+  local-reading-probe:
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
-      READING_MCP_LOCAL_ROOTS: /root
-      READING_MCP_STATE_DIR: /root/.reading-mcp
+      TLPI_READING_STATE_DIR: /root/.reading-mcp
+      TLPI_READING_LOCAL_ROOTS: /root
       READING_MCP_TELEMETRY: 'false'
-      READING_MCP_BINARY: target/release/reading-mcp
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Reading MCP
-        shell: bash
-        run: cargo build --release --locked --bin reading-mcp
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Read TLPI structure and preface through Reading MCP
-        shell: bash
-        run: python3 scripts/tlpi_stdio_probe.py
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Upload sanitized source-map result
+      - name: Call persisted TLPI through Reading MCP stdio tools
+        shell: bash
+        run: cargo test --locked --test tlpi_source_map_probe -- --nocapture
+
+      - name: Upload sanitized TLPI source map
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tlpi-source-map-stdio-probe
-          path: tlpi-stdio-probe.json
+          name: tlpi-source-map-local-reading-mcp
+          path: tlpi-source-map-probe.json
           retention-days: 1
           if-no-files-found: error

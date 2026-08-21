@@ -20,6 +20,8 @@ design-principles.md
       ↓
 architecture.md
       ↓
+text-index-and-locator-design.md
+      ↓
 mvp.md
       ↓
 phase5-security-cache.md

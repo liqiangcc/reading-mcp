@@ -58,7 +58,6 @@ impl ReadDocumentUseCase {
         &self,
         command: ReadSectionCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
-        validate_read_budget(command.max_chars)?;
         let document = self.load_document(&command.document_id).await?;
         let section = document
             .find_section(&command.section_id)
@@ -72,7 +71,7 @@ impl ReadDocumentUseCase {
         &self,
         command: ContinueReadCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
-        validate_read_budget(command.max_chars)?;
+        validate_continuation_budget(command.max_chars)?;
         let claims = decode_read_cursor(&command.cursor)?;
         validate_cursor_target(&claims, &command.document_id, &command.section_id)?;
         validate_cursor_stream_contract(&claims)?;
@@ -98,9 +97,9 @@ impl ReadDocumentUseCase {
             .ok_or(ApplicationError::SectionNotFound)?;
         let rendered = render_section_tree(section);
         let total_chars = rendered.chars().count();
-        if claims.next_char == 0 || claims.next_char >= total_chars {
+        if claims.next_char >= total_chars {
             return Err(ApplicationError::InvalidCursor(format!(
-                "next stream position {} is outside the resumable range 1..{total_chars}",
+                "next stream position {} is outside the resumable range 0..{total_chars}",
                 claims.next_char
             )));
         }
@@ -182,10 +181,10 @@ fn read_rendered_segment(
     })
 }
 
-fn validate_read_budget(max_chars: Option<usize>) -> Result<(), ApplicationError> {
+fn validate_continuation_budget(max_chars: Option<usize>) -> Result<(), ApplicationError> {
     if max_chars == Some(0) {
         return Err(ApplicationError::InvalidRequest(
-            "max_chars must be greater than zero".into(),
+            "continuation max_chars must be greater than zero".into(),
         ));
     }
     Ok(())

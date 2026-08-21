@@ -65,10 +65,13 @@ pub(crate) fn encode_read_cursor(claims: ReadCursorClaims) -> Result<String, App
         ))
     })?;
 
-    Ok(format!(
-        "{READ_CURSOR_PREFIX}{}",
-        encode_hex(&envelope_bytes)
-    ))
+    let encoded = format!("{READ_CURSOR_PREFIX}{}", encode_hex(&envelope_bytes));
+    if encoded.len() > MAX_READ_CURSOR_CHARS {
+        return Err(ApplicationError::CursorEncodingFailed(
+            "read cursor exceeds the maximum encoded size".into(),
+        ));
+    }
+    Ok(encoded)
 }
 
 pub(crate) fn decode_read_cursor(cursor: &str) -> Result<ReadCursorClaims, ApplicationError> {
@@ -186,5 +189,17 @@ mod tests {
 
         let error = decode_read_cursor(&encoded).expect_err("tampering must fail");
         assert!(matches!(error, ApplicationError::InvalidCursor(_)));
+    }
+
+    #[test]
+    fn oversized_cursor_is_not_issued() {
+        let mut claims = claims();
+        claims.section_id = "section://".to_owned() + &"x".repeat(16 * 1024);
+
+        let error = encode_read_cursor(claims).expect_err("oversized cursor must fail");
+        assert!(matches!(
+            error,
+            ApplicationError::CursorEncodingFailed(_)
+        ));
     }
 }

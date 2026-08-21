@@ -226,7 +226,7 @@ async fn cursor_cannot_be_reused_for_another_section() {
 }
 
 #[tokio::test]
-async fn tampered_cursor_and_zero_budget_are_rejected() {
+async fn zero_budget_initial_read_remains_compatible_but_zero_budget_continuation_is_rejected() {
     let document = document("sha256:raw", root_content());
     let repository = Arc::new(InMemoryDocumentRepository::default());
     repository
@@ -235,15 +235,58 @@ async fn tampered_cursor_and_zero_budget_are_rejected() {
         .expect("document should save");
     let use_case = ReadDocumentUseCase::new(repository);
 
-    let zero_error = use_case
+    let initial = use_case
         .execute(ReadSectionCommand {
             document_id: document.id.clone(),
             section_id: SectionId("section://root".into()),
             max_chars: Some(0),
         })
         .await
-        .expect_err("zero budget cannot make continuation progress");
+        .expect("legacy zero-budget initial read should remain valid");
+    assert_eq!(initial.content, "");
+    assert!(initial.truncated);
+    assert!(!initial.complete);
+    assert_eq!(initial.stream.start_char, 0);
+    assert_eq!(initial.stream.end_char, 0);
+    let cursor = initial
+        .next_cursor
+        .clone()
+        .expect("zero-budget initial read must still be actionable");
+
+    let zero_error = use_case
+        .continue_read(ContinueReadCommand {
+            document_id: document.id.clone(),
+            section_id: SectionId("section://root".into()),
+            cursor: cursor.clone(),
+            max_chars: Some(0),
+        })
+        .await
+        .expect_err("zero-budget continuation cannot make progress");
     assert!(matches!(zero_error, ApplicationError::InvalidRequest(_)));
+
+    let continued = use_case
+        .continue_read(ContinueReadCommand {
+            document_id: document.id,
+            section_id: SectionId("section://root".into()),
+            cursor,
+            max_chars: Some(15),
+        })
+        .await
+        .expect("positive continuation should resume from stream start");
+    assert_eq!(continued.stream.start_char, 0);
+    assert_eq!(continued.stream.end_char, 15);
+    assert_eq!(continued.content.chars().count(), 15);
+}
+
+#[tokio::test]
+async fn tampered_cursor_is_rejected() {
+    let document = document("sha256:raw", root_content());
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    repository
+        .save(document.clone())
+        .await
+        .expect("document should save");
+    let use_case = ReadDocumentUseCase::new(repository);
 
     let first = use_case
         .execute(ReadSectionCommand {

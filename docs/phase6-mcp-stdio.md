@@ -93,7 +93,7 @@ terminal complete = true
 terminal next_cursor = null
 ```
 
-`max_chars=0` 被拒绝，避免产生无法前进的空 continuation stream。
+为保持已有调用兼容，首次 `max_chars=0` 仍返回空的 incomplete segment，并提供从流起点继续的 `next_cursor`。带 cursor 的 continuation 若再次指定 `max_chars=0` 则被拒绝，因为该调用无法推进流；使用正数预算即可从位置 0 正常继续。
 
 ## 当前默认 Runtime
 
@@ -145,6 +145,7 @@ Default persistent state
 - SectionTreeReadStream continuation 的 actionable cursor；
 - 多段拼接无 gap/overlap，并精确等于一次完整读取；
 - cursor 对 raw/normalized document identity、target 和 rendering contract 的 fail-closed 验证；
+- 首次零预算调用的 legacy compatibility 与 continuation 进度保护；
 - stderr telemetry 不污染 stdout MCP transport。
 
 ## 架构约束

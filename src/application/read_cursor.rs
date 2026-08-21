@@ -197,9 +197,6 @@ mod tests {
         claims.section_id = "section://".to_owned() + &"x".repeat(16 * 1024);
 
         let error = encode_read_cursor(claims).expect_err("oversized cursor must fail");
-        assert!(matches!(
-            error,
-            ApplicationError::CursorEncodingFailed(_)
-        ));
+        assert!(matches!(error, ApplicationError::CursorEncodingFailed(_)));
     }
 }

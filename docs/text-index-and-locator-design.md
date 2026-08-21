@@ -326,7 +326,7 @@ Sentence segmentation must be:
 A first policy may recognize terminal punctuation such as:
 
 ```text
-. ? ! 。 ？ ！
+. ? ! 。 ？！
 ```
 
 while protecting common non-terminal forms such as abbreviations and numeric/technical punctuation.
@@ -528,7 +528,217 @@ Changing the search engine must not change Paragraph/Sentence identity.
 
 Changing segmentation policy may change Paragraph/Sentence identity and therefore requires a segmentation-version change and TextUnit/SearchIndex rebuild.
 
-## 13. Backward compatibility
+## 13. Lexical index and tokenizer architecture
+
+Precise TextUnits should also be the stable bridge between reading locators and lexical retrieval. The lexical layer is derived state and must not introduce new source-addressing levels.
+
+```text
+Normalized Section                  # canonical source
+        │
+        ├── Paragraph TextUnit      # derived, persisted/rebuildable
+        │
+        └── Sentence TextUnit       # derived, persisted/rebuildable
+                 │
+                 ▼
+          TokenizerPolicy
+                 │
+                 ▼
+      Paragraph FTS / Sentence FTS
+                 │
+                 ▼
+              BM25
+                 │
+                 ▼
+            TextLocator
+```
+
+The critical boundary is:
+
+```text
+Sentence = reading/evidence unit
+Token    = retrieval implementation detail
+FTS      = rebuildable lexical index
+```
+
+Token is therefore not L5 in the source hierarchy and does not receive stable source identity.
+
+### 13.1 Search granularity
+
+The lexical index should support both Paragraph and Sentence TextUnits. They optimize for different retrieval goals:
+
+- Sentence FTS improves precision for exact terminology, API names, definitions, and evidence localization.
+- Paragraph FTS preserves local explanatory context and improves recall when several query terms occur across one argument or explanation.
+
+The intended future search contract remains additive:
+
+```text
+granularity = auto | paragraph | sentence
+```
+
+`auto` is the default client-facing mode. Its exact ranking/fallback policy is implementation-defined, but a conforming implementation may, for example, try high-precision Sentence matches and fall back to Paragraph retrieval when results are insufficient. This is compatible with the existing FTS/BM25-first design and the current relaxed-search work.
+
+Search granularity must never change TextUnit identity. It only changes which existing TextUnits are indexed/ranked.
+
+### 13.2 Tokenizer policy
+
+Tokenization must be deterministic, non-LLM, versioned, and replaceable independently of TextUnit segmentation.
+
+Conceptually:
+
+```text
+TokenizerPolicy
+├── Latin-like text: Unicode-aware word/token strategy
+└── CJK/mixed text: deterministic CJK-capable strategy
+```
+
+The architecture does not mandate one tokenizer library today. For CJK, implementations should evaluate deterministic n-gram/trigram or another CJK-capable tokenizer before introducing dictionary-heavy NLP dependencies. The selected strategy must handle mixed technical text such as:
+
+```text
+系统调用 fork() mmap() O_CREAT virtual memory
+```
+
+without depending on whitespace-only boundaries.
+
+### 13.3 Tokenizer version is independent of segmentation version
+
+TextUnit identity is scoped by:
+
+```text
+content_hash + segmentation_version
+```
+
+Lexical-index identity additionally depends on:
+
+```text
+tokenizer_version
+```
+
+For example:
+
+```text
+content_hash         = A
+segmentation_version = text-segmentation/v1
+tokenizer_version    = lexical-tokenizer/v1
+```
+
+Changing `tokenizer_version` may change search ranking/matching and requires rebuilding the lexical index, but it must not renumber Paragraph/Sentence TextUnits or invalidate their locators.
+
+Changing `segmentation_version`, by contrast, may change TextUnit boundaries and therefore requires rebuilding both TextUnit and lexical indexes.
+
+### 13.4 Do not persist a separate token table by default
+
+The default persistence model should store Paragraph/Sentence TextUnits plus the FTS index, not one relational row per token.
+
+Avoid this unless a demonstrated feature requires it:
+
+```text
+tokens
+├── token_id
+├── sentence_id
+├── token_index
+└── token
+```
+
+SQLite FTS already materializes an inverted lexical structure internally. Duplicating every token into an application-level table increases schema/storage complexity without improving source traceability.
+
+A future feature may add token-level diagnostics, but such data remains derived retrieval metadata and still must not become a source locator level.
+
+### 13.5 Lexical persistence model
+
+The intended logical separation is:
+
+```text
+documents / sections
+────────────────────────
+canonical normalized source
+
+text_units
+────────────────────────
+unit_id
+document_id
+content_hash
+owner_section_id
+kind: paragraph | sentence
+parent_unit_id?
+paragraph_index
+sentence_index?
+normalized_range
+text
+segmentation_version
+
+text_units_fts
+────────────────────────
+unit_id
+kind
+text
+# tokenizer/version/config tracked by index metadata
+```
+
+The exact SQLite schema is deferred, but these semantics are required:
+
+1. Paragraph/Sentence text may be persisted for efficient direct reads, snippets, validation, and index rebuilds.
+2. Persisted TextUnit text is derived and must exactly correspond to the normalized source range.
+3. `text_units_fts` references TextUnits; it does not duplicate the full locator contract.
+4. Deleting/rebuilding FTS must not alter TextUnits.
+5. Deleting/rebuilding TextUnits with the same content and segmentation version must reproduce the same boundaries and deterministic identities.
+
+### 13.6 SearchHit → TextLocator
+
+Lexical search results should resolve back to the same locator contract used by reading and context expansion. A future fine-grained result may conceptually contain:
+
+```text
+SearchHit
+├── unit_id
+├── unit_kind: paragraph | sentence
+├── score
+├── snippet/text
+└── text_locator
+    ├── document/content version
+    ├── owner section
+    ├── paragraph/sentence ordinal
+    └── normalized range
+```
+
+The expected interaction is:
+
+```text
+search_document("system call")
+        ↓
+Sentence TextUnit / TextLocator
+        ↓
+get_context(target, unit=sentence, before=2, after=2)
+        ↓
+read_document(target)
+```
+
+No re-search by quoted text should be necessary to move from retrieval to reading.
+
+### 13.7 Search-index rebuild rules
+
+A lexical index is valid only for the declared inputs that produced it. Rebuild is required when any retrieval-affecting input changes, including:
+
+- indexed document content hash;
+- TextUnit segmentation version;
+- tokenizer version/configuration;
+- FTS schema/ranking configuration when the implementation cannot migrate safely.
+
+Rebuilding the lexical index is operational state maintenance, not a source-content mutation.
+
+### 13.8 Future semantic indexes remain separate
+
+Embedding, semantic, concept, claim, or entity indexes may be introduced later, but they follow the same rule:
+
+```text
+Derived retrieval index
+        ↓
+returns TextUnit/TextLocator
+        ↓
+canonical read/context path
+```
+
+They do not redefine source identity and do not bypass the Paragraph/Sentence/CharacterRange locator model.
+
+## 14. Backward compatibility
 
 The first implementation must preserve all current valid calls:
 
@@ -549,7 +759,7 @@ Compatibility rules:
 5. old `Location` data remains readable from persisted state;
 6. migrations must be explicit and tested against already-opened documents.
 
-## 14. Proposed implementation sequence after design approval
+## 15. Proposed implementation sequence after design approval
 
 Implementation should not begin on this branch. After review/merge, use short-lived feature branches in this order:
 
@@ -577,6 +787,12 @@ P1 feat/search-locator
    - search hits resolve to TextLocator
    - preserve FTS/BM25-first design
 
+P1 feat/lexical-text-unit-index
+   - persist/rebuild Paragraph + Sentence FTS
+   - version TokenizerPolicy independently from segmentation
+   - support CJK-capable deterministic tokenization
+   - keep Token outside source locator identity
+
 P2 evaluate/get-text-units-tool
    - add a new tool only if real client usage shows that paged enumeration
      of Paragraph/Sentence units cannot be expressed cleanly through existing tools
@@ -584,7 +800,7 @@ P2 evaluate/get-text-units-tool
 
 This sequence deliberately separates continuation from sentence segmentation so the current truncation problem can be solved without waiting for the full indexing architecture.
 
-## 15. Acceptance criteria for the architecture
+## 16. Acceptance criteria for the architecture
 
 A future implementation conforms to this design only if all of the following are true.
 
@@ -606,6 +822,14 @@ A future implementation conforms to this design only if all of the following are
 - Native page/anchor/spine/paragraph information remains available when the parser can provide it.
 - Human citation formatting can be derived from structured locator data.
 
+### Lexical retrieval
+
+- Paragraph and Sentence TextUnits can be indexed without becoming source truth.
+- Sentence lexical hits can be passed directly to read/context through TextLocator.
+- Tokenizer changes rebuild lexical indexes without renumbering TextUnits.
+- CJK/mixed technical text does not depend on whitespace-only tokenization.
+- No stable Word/Token locator is introduced by the FTS implementation.
+
 ### Continuation
 
 - Every truncated read has an actionable continuation.
@@ -622,7 +846,7 @@ A future implementation conforms to this design only if all of the following are
 - Fine-grained reads/context obey the same response/resource budgets as Section reads.
 - `get_document_structure` does not explode into a sentence-sized tree.
 
-## 16. Design invariants
+## 17. Design invariants
 
 The following are hard constraints unless replaced by a later ADR:
 
@@ -637,14 +861,18 @@ The following are hard constraints unless replaced by a later ADR:
 9. **Segmentation is deterministic, non-LLM, and versioned.**
 10. **Truncation without a continuation path is incomplete reading semantics.**
 11. **Existing five tools should be extended before adding granularity-specific tools.**
-12. **This design does not move AI reasoning/learning state into Reading MCP.**
+12. **Token is a retrieval implementation detail, never a stable source locator level.**
+13. **Tokenizer versioning is independent from segmentation versioning.**
+14. **Paragraph/Sentence FTS is rebuildable derived state and must resolve back to TextLocator.**
+15. **This design does not move AI reasoning/learning state into Reading MCP.**
 
-## 17. Questions intentionally deferred to implementation design
+## 18. Questions intentionally deferred to implementation design
 
 These choices need prototypes/tests but do not block the architecture:
 
 - exact Unicode sentence-boundary library or custom policy implementation;
-- physical SQLite schema for TextUnitIndex;
+- exact Latin/CJK tokenizer implementation and first `TokenizerPolicy` version;
+- physical SQLite schema for TextUnitIndex and Paragraph/Sentence FTS;
 - opaque cursor encoding/signing/checksum strategy;
 - whether `unit_id` is persisted or deterministically recomputed;
 - whether paragraph boundaries should be emitted directly by every parser or normalized in one shared segmentation layer;

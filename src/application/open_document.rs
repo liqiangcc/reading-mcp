@@ -4,7 +4,10 @@ use crate::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievalOptions, Retriever, SearchIndex,
     SourcePolicy,
 };
-use crate::domain::{ContentHash, DocumentId, DocumentSource, MediaType};
+use crate::domain::{
+    ContentHash, DocumentId, DocumentSource, MediaType, NORMALIZATION_VERSION,
+    NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE, NormalizedDocumentHash,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenDocumentCommand {
@@ -19,6 +22,10 @@ pub struct OpenDocumentResult {
     pub title: String,
     pub media_type: MediaType,
     pub content_hash: ContentHash,
+    pub normalized_document_hash: NormalizedDocumentHash,
+    pub normalized_document_hash_version: String,
+    pub normalization_version: String,
+    pub normalized_text_coordinate_space: String,
     pub section_count: usize,
 }
 
@@ -65,6 +72,10 @@ impl OpenDocumentUseCase {
             title: document.title.clone(),
             media_type: document.media_type.clone(),
             content_hash: document.content_hash.clone(),
+            normalized_document_hash: document.normalized_document_hash(),
+            normalized_document_hash_version: NORMALIZED_DOCUMENT_HASH_VERSION.into(),
+            normalization_version: NORMALIZATION_VERSION.into(),
+            normalized_text_coordinate_space: NORMALIZED_TEXT_COORDINATE_SPACE.into(),
             section_count: document.section_count(),
         };
 

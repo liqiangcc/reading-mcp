@@ -136,6 +136,10 @@ impl ReadingMcpServer {
             title: result.title,
             media_type: result.media_type.0,
             content_hash: result.content_hash.0,
+            normalized_document_hash: result.normalized_document_hash.0,
+            normalized_document_hash_version: result.normalized_document_hash_version,
+            normalization_version: result.normalization_version,
+            normalized_text_coordinate_space: result.normalized_text_coordinate_space,
             section_count: result.section_count,
         }))
     }
@@ -244,6 +248,7 @@ impl ReadingMcpServer {
             stream: ReadStreamSegmentDto {
                 read_mode: result.stream.read_mode,
                 rendering_version: result.stream.rendering_version,
+                coordinate_space: result.stream.coordinate_space,
                 start_char: result.stream.start_char,
                 end_char: result.stream.end_char,
                 total_chars: result.stream.total_chars,

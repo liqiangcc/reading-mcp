@@ -61,7 +61,7 @@ Use-Case-First 设计已经接受一个未来的通用有序 TextUnit 枚举职�
 get_text_units
 ```
 
-它用于在 Section 中按 source order 分页枚举 Paragraph / Sentence-first reading items，并返回稳定 Locator、完成状态、continuation 与 non-prose/coverage 语义。该 Tool 尚未在当前 runtime 实现；在 normalized range、TextUnit、deterministic segmentation 和 cursor invariant 完成前不得提前宣称可用。不得拆成 `get_sentences`、`get_paragraphs` 或格式专属 Tool。
+它用于在 Section 中按 source order 分页枚举 Paragraph / Sentence-first reading items，并返回稳定 Locator、完成状态、continuation 与 non-prose/coverage 语义。该 Tool 尚未在当前 runtime 实现；在 TextUnit、deterministic segmentation 和 cursor invariant 完成前不得提前宣称可用。不得拆成 `get_sentences`、`get_paragraphs` 或格式专属 Tool。
 
 ## 文档模型与搜索
 
@@ -83,12 +83,25 @@ Tool 结果必须尽可能保留：
 document_id
 source
 content_hash
-normalized_document_hash（精确定位实现后）
+normalized_document_hash
+normalized_document_hash_version / normalization_version
 section_id / parent_id / title
 page / chapter / section_path
 paragraph / sentence / normalized range（能力可用时）
 anchor / native_location / provenance
 ```
+
+当前 normalized range 基础契约已经固定为：
+
+```text
+owner    = exact persisted Section.content
+base     = zero
+interval = half-open [start, end)
+unit     = Unicode scalar / Rust char
+space    = section-content-unicode-scalar/v1
+```
+
+`Location.char_start/char_end` 继续保持 parser-defined legacy/source semantics。它们不是 normalized range。正式定义见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
 
 `TextLocator` 是 canonical source address；`ReadCursor`、`TextUnitCursor` 等 cursor 只是特定 versioned stream 的进度，不能作为引用位置。
 
@@ -123,6 +136,8 @@ SearchIndex
 
 HTTP 保存 ETag/Last-Modified，并使用 `If-None-Match` / `If-Modified-Since` 条件重验证；304 复用缓存；`force_refresh=true` 重新获取来源。
 
+Parsed Cache 必须按 `final_source + raw hash + normalization_version` 隔离。规范化策略升级可以复用未变化的 Raw Cache，但不得静默复用旧 Parsed Document。
+
 默认状态目录为 `~/.reading-mcp`，使用持久化 Raw/Parsed Cache、SQLite DocumentRepository 和 SQLite FTS5 SearchIndex。设置 `READING_MCP_STATE_DIR=memory` 可切换纯内存模式。
 
 ## auth_profile
@@ -131,7 +146,7 @@ HTTP 保存 ETag/Last-Modified，并使用 `If-None-Match` / `If-Modified-Since`
 
 ## 错误与可观察性
 
-MCP 错误必须提供稳定 `code + retryable`。精确定位实现后，stale locator/cursor 必须显式 fail closed；禁止将旧 locator 偷偷映射到新版本中“最相似”的句子。Telemetry 只写 stderr，不得记录文档正文、Bearer Token、Authorization/Cookie 或完整搜索词。
+MCP 错误必须提供稳定 `code + retryable`。stale locator/cursor 必须显式 fail closed；禁止将旧 locator 偷偷映射到新版本中“最相似”的句子。Telemetry 只写 stderr，不得记录文档正文、Bearer Token、Authorization/Cookie 或完整搜索词。
 
 ## 非目标
 
@@ -158,4 +173,4 @@ cargo test --locked --all-features
 
 测试范围包括架构边界、真实 stdio MCP E2E、持久化重启、HTTP 条件重验证、auth redirect isolation、资源预算、SQLite FTS、Text/Markdown/HTML/PDF acceptance，以及 EPUB/DOCX/OpenAPI 解析。
 
-未来精确阅读增量还必须增加：read/TextUnit continuation 的 gap/overlap、SearchHit→read/context、stale locator/cursor、non-prose、EPUB provenance/degradation/coverage 和旧客户端兼容性测试。
+未来精确阅读增量还必须增加：TextUnit continuation 的 gap/overlap、SearchHit→read/context、stale locator、non-prose、EPUB provenance/degradation/coverage 和旧客户端兼容性测试。

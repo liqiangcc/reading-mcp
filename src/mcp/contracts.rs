@@ -17,6 +17,10 @@ pub struct OpenDocumentResponse {
     pub title: String,
     pub media_type: String,
     pub content_hash: String,
+    pub normalized_document_hash: String,
+    pub normalized_document_hash_version: String,
+    pub normalization_version: String,
+    pub normalized_text_coordinate_space: String,
     pub section_count: usize,
 }
 
@@ -132,6 +136,7 @@ pub struct ReadDocumentResponse {
 pub struct ReadStreamSegmentDto {
     pub read_mode: String,
     pub rendering_version: String,
+    pub coordinate_space: String,
     pub start_char: usize,
     pub end_char: usize,
     pub total_chars: usize,

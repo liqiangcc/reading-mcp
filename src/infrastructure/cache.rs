@@ -9,7 +9,7 @@ use crate::application::ports::{
     ApplicationError, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
     RetrievalOptions, RetrievedResource, Retriever,
 };
-use crate::domain::{Document, DocumentSource};
+use crate::domain::{Document, DocumentSource, NORMALIZATION_VERSION};
 
 #[derive(Default)]
 pub struct InMemoryRawResourceCache {
@@ -99,6 +99,7 @@ impl Parser for CachingParser {
         let key = ParsedCacheKey {
             final_source: resource.final_source.clone(),
             raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
+            normalization_version: NORMALIZATION_VERSION.into(),
         };
 
         if let Some(document) = self.cache.get(&key).await? {

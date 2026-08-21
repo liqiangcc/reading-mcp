@@ -33,6 +33,68 @@ read_document
 
 v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location`。
 
+## Section read continuation
+
+`read_document` 保留现有请求：
+
+```text
+document_id
+section_id
+max_chars?
+```
+
+并以 additive 方式支持：
+
+```text
+cursor?
+```
+
+首次读取从 Section subtree 的确定性逻辑流开始：
+
+```text
+SectionTreeReadStream/v1
+rendering_version = section-tree-markdown/v1
+```
+
+当响应预算不足时，返回：
+
+```text
+truncated = true
+complete = false
+next_cursor
+stream.start_char
+stream.end_char
+stream.total_chars
+```
+
+继续调用时仍传入同一个 `document_id`、`section_id`，并附带 `next_cursor`。服务端验证 cursor 绑定：
+
+```text
+document_id
+raw content_hash
+normalized document fingerprint
+root section_id
+read_mode = section_tree
+rendering_version
+next stream character position
+cursor schema version
+```
+
+`stream.start_char/end_char` 是 Unicode scalar 计数的渲染流坐标，仅用于 continuation 验证；它不是 canonical source locator、normalized range 或 citation。Cursor 遇到 document/normalized facts、target、mode 或 rendering version 不匹配时 fail closed，不做 fuzzy rebasing。
+
+重复 continuation 必须满足：
+
+```text
+segment[n].end_char == segment[n+1].start_char
+all segments concatenated == complete SectionTreeReadStream/v1
+no gap
+no overlap
+terminal complete = true
+terminal next_cursor = null
+```
+
+`max_chars=0` 被拒绝，避免产生无法前进的空 continuation stream。
+
 ## 当前默认 Runtime
 
 ```text
@@ -80,6 +142,9 @@ Default persistent state
 - source/location traceability；
 - Text/Markdown/HTML/PDF acceptance matrix；
 - 持久化 state 重启后继续使用旧 document_id；
+- SectionTreeReadStream continuation 的 actionable cursor；
+- 多段拼接无 gap/overlap，并精确等于一次完整读取；
+- cursor 对 raw/normalized document identity、target 和 rendering contract 的 fail-closed 验证；
 - stderr telemetry 不污染 stdout MCP transport。
 
 ## 架构约束

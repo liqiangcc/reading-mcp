@@ -10,7 +10,9 @@ use crate::application::get_document_structure::{GetDocumentStructureUseCase, Se
 use crate::application::list_documents::{ListDocumentsCommand, ListDocumentsUseCase};
 use crate::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use crate::application::ports::{ApplicationError, RetrievalOptions};
-use crate::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
+use crate::application::read_document::{
+    ContinueReadCommand, ReadDocumentUseCase, ReadSectionCommand,
+};
 use crate::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
 use crate::domain::{DocumentId, DocumentSource, Location, SectionId};
 use crate::runtime::RuntimeConfig;
@@ -19,7 +21,8 @@ use super::contracts::{
     GetContextRequest, GetContextResponse, GetDocumentStructureRequest,
     GetDocumentStructureResponse, ListDocumentsRequest, ListDocumentsResponse, ListedDocumentDto,
     LocationDto, OpenDocumentRequest, OpenDocumentResponse, ReadDocumentRequest,
-    ReadDocumentResponse, SearchDocumentRequest, SearchDocumentResponse, SearchHitDto, SectionNode,
+    ReadDocumentResponse, ReadStreamSegmentDto, SearchDocumentRequest, SearchDocumentResponse,
+    SearchHitDto, SectionNode,
 };
 
 #[derive(Clone)]
@@ -192,21 +195,42 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Read one logical section, including its child sections, from the canonical parsed document"
+        description = "Read or continue one deterministic logical section-tree stream from the canonical parsed document"
     )]
     async fn read_document(
         &self,
         Parameters(request): Parameters<ReadDocumentRequest>,
     ) -> Result<Json<ReadDocumentResponse>, ErrorData> {
-        let result = self
-            .read_document
-            .execute(ReadSectionCommand {
-                document_id: DocumentId(request.document_id),
-                section_id: SectionId(request.section_id),
-                max_chars: request.max_chars,
-            })
-            .await
-            .map_err(to_mcp_error)?;
+        let ReadDocumentRequest {
+            document_id,
+            section_id,
+            max_chars,
+            cursor,
+        } = request;
+        let document_id = DocumentId(document_id);
+        let section_id = SectionId(section_id);
+        let result = match cursor {
+            Some(cursor) => {
+                self.read_document
+                    .continue_read(ContinueReadCommand {
+                        document_id,
+                        section_id,
+                        cursor,
+                        max_chars,
+                    })
+                    .await
+            }
+            None => {
+                self.read_document
+                    .execute(ReadSectionCommand {
+                        document_id,
+                        section_id,
+                        max_chars,
+                    })
+                    .await
+            }
+        }
+        .map_err(to_mcp_error)?;
 
         Ok(Json(ReadDocumentResponse {
             document_id: result.document_id.0,
@@ -215,6 +239,15 @@ impl ReadingMcpServer {
             content: result.content,
             location: location_dto(&result.location),
             truncated: result.truncated,
+            complete: result.complete,
+            next_cursor: result.next_cursor,
+            stream: ReadStreamSegmentDto {
+                read_mode: result.stream.read_mode,
+                rendering_version: result.stream.rendering_version,
+                start_char: result.stream.start_char,
+                end_char: result.stream.end_char,
+                total_chars: result.stream.total_chars,
+            },
         }))
     }
 
@@ -289,6 +322,9 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
 
     match error {
         ApplicationError::InvalidRequest(_)
+        | ApplicationError::InvalidCursor(_)
+        | ApplicationError::StaleCursor(_)
+        | ApplicationError::CursorTargetMismatch(_)
         | ApplicationError::BlockedSource(_)
         | ApplicationError::AuthenticationFailed(_)
         | ApplicationError::ResourceLimitExceeded(_)
@@ -296,7 +332,8 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::ParseFailed(_)
         | ApplicationError::DocumentNotFound
         | ApplicationError::SectionNotFound => ErrorData::invalid_params(message, data),
-        ApplicationError::RepositoryFailed(_)
+        ApplicationError::CursorEncodingFailed(_)
+        | ApplicationError::RepositoryFailed(_)
         | ApplicationError::CacheFailed(_)
         | ApplicationError::IndexFailed(_) => ErrorData::internal_error(message, data),
     }
@@ -305,6 +342,10 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
 fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
     match error {
         ApplicationError::InvalidRequest(_) => ("INVALID_REQUEST", false),
+        ApplicationError::InvalidCursor(_) => ("INVALID_CURSOR", false),
+        ApplicationError::StaleCursor(_) => ("STALE_CURSOR", false),
+        ApplicationError::CursorTargetMismatch(_) => ("CURSOR_TARGET_MISMATCH", false),
+        ApplicationError::CursorEncodingFailed(_) => ("CURSOR_ENCODING_FAILED", false),
         ApplicationError::BlockedSource(_) => ("BLOCKED_SOURCE", false),
         ApplicationError::AuthenticationFailed(_) => ("AUTHENTICATION_FAILED", false),
         ApplicationError::ResourceLimitExceeded(_) => ("RESOURCE_LIMIT_EXCEEDED", false),
@@ -336,6 +377,14 @@ mod tests {
         assert_eq!(
             error_descriptor(&ApplicationError::BlockedSource("private".into())),
             ("BLOCKED_SOURCE", false)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::StaleCursor("changed".into())),
+            ("STALE_CURSOR", false)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::CursorTargetMismatch("wrong".into())),
+            ("CURSOR_TARGET_MISMATCH", false)
         );
     }
 }

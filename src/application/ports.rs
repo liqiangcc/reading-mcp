@@ -60,6 +60,14 @@ pub enum ApplicationError {
     DocumentNotFound,
     #[error("section not found")]
     SectionNotFound,
+    #[error("invalid read cursor: {0}")]
+    InvalidCursor(String),
+    #[error("stale read cursor: {0}")]
+    StaleCursor(String),
+    #[error("read cursor target mismatch: {0}")]
+    CursorTargetMismatch(String),
+    #[error("read cursor encoding failed: {0}")]
+    CursorEncodingFailed(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 }

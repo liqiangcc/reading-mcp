@@ -1,0 +1,41 @@
+name: TLPI source map local read-only probe
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - scripts/tlpi_stdio_probe.py
+      - .github/workflows/tlpi-source-map-local-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  local-probe:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
+    env:
+      READING_MCP_LOCAL_ROOTS: /root
+      READING_MCP_STATE_DIR: /root/.reading-mcp
+      READING_MCP_TELEMETRY: 'false'
+      READING_MCP_BINARY: target/release/reading-mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Reading MCP
+        shell: bash
+        run: cargo build --release --locked --bin reading-mcp
+
+      - name: Read TLPI structure and preface through Reading MCP
+        shell: bash
+        run: python3 scripts/tlpi_stdio_probe.py
+
+      - name: Upload sanitized source-map result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tlpi-source-map-stdio-probe
+          path: tlpi-stdio-probe.json
+          retention-days: 1
+          if-no-files-found: error

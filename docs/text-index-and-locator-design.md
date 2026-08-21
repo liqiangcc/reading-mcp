@@ -1,10 +1,12 @@
 # Text Index & Source Locator Architecture
 
-> Status: Draft for design review
+> Status: Accepted architecture, amended by ADR 0002 and ADR 0004
 >
-> Branch: `design/text-index-locator`
+> Original branch: `design/text-index-locator`
 >
-> Scope: architecture and contract design only. This document does not authorize implementation changes on the design branch.
+> Scope: architecture and contract design only. This document does not authorize implementation changes on a design branch.
+>
+> Tool-surface amendment: the current runtime exposes six Tools after `list_documents` was added. ADR 0004 accepts one future generic `get_text_units` Tool based on ordered Paragraph/Sentence use cases. The future accepted surface is seven Tools; the seventh is not yet implemented.
 
 ## 1. Problem statement
 
@@ -17,7 +19,7 @@ Search              ≠ Read
 Section             ≠ Chunk
 ```
 
-The current v0.1 contracts, however, are section-centric:
+The current v0.1 reading contracts, however, are section-centric:
 
 ```text
 read_document(document_id, section_id)
@@ -32,6 +34,10 @@ This creates four gaps for precise reading:
 2. `read_document` can return `truncated=true`, but there is no continuation locator/cursor;
 3. `paragraph` is currently an index-side convention rather than a normalized, versioned textual-unit contract;
 4. `char_start` / `char_end` do not yet define one stable coordinate space across parser-native text, normalized Section content, and rendered MCP responses.
+
+Use-case review added a fifth gap:
+
+5. no current contract can discover the first Paragraph/Sentence, enumerate subsequent TextUnits in source order, or prove that a Section-level TextUnit stream is complete.
 
 The design goal is therefore not "add sentence search". It is:
 
@@ -48,7 +54,7 @@ Out of scope:
 - Word/Token as stable source-addressing levels;
 - LLM-based sentence segmentation;
 - format-specific read tools such as `read_pdf_sentence`;
-- implementation work on this design branch;
+- implementation work on a design branch;
 - replacing the current v0.1 convergence scope.
 
 ## 3. Core model: five addressing levels
@@ -65,7 +71,7 @@ L4 CharacterRange
 
 ### L0 — Document
 
-A concrete parsed document version, already identified by `DocumentId` and `content_hash`.
+A concrete parsed document version. The current `DocumentId` and raw `content_hash` identify source provenance; ADR 0002 additionally requires `normalized_document_hash` for addressing-relevant canonical normalized identity.
 
 ### L1 — StructuralNode
 
@@ -163,18 +169,19 @@ Important semantics:
 - a sentence must belong to exactly one paragraph and one owner structural node;
 - a paragraph must belong to exactly one owner structural node.
 
-Future kinds such as list item, code block, table cell, caption, or footnote may be added only when a real reading/navigation use case requires them. They must not be pre-modeled now.
+Future kinds such as list item, code block, table cell, caption, or footnote may be added only when a real reading/navigation use case requires them. ADR 0004 establishes a current non-prose use case but does not prematurely require separate code/table identity: Sentence-first enumeration may return an explicitly coarser Paragraph reading item or an explicit unsupported gap.
 
 ## 6. Unified TextLocator
 
 Fine-grained tools should converge on one locator model instead of inventing separate sentence/paragraph identifiers per tool.
 
-Proposed logical shape:
+Proposed logical shape, amended by ADR 0002:
 
 ```text
 TextLocator
 ├── document_id
-├── content_hash
+├── content_hash                  # raw-source provenance
+├── normalized_document_hash
 ├── owner_section_id
 ├── section_path
 ├── unit
@@ -184,7 +191,7 @@ TextLocator
 │   ├── start
 │   └── end
 ├── segmentation_version?
-└── native_location?
+└── native_location / provenance?
 ```
 
 ### 6.1 Index numbering
@@ -205,10 +212,10 @@ Internal arrays may remain 0-based, but DTO semantics must be explicit.
 A locator containing Paragraph/Sentence ordinals is stable only within:
 
 ```text
-content_hash + segmentation_version
+normalized_document_hash + segmentation_version
 ```
 
-The same `P4/S3` in a different content hash or segmentation version must not be assumed to identify the same source passage.
+Raw `content_hash` remains provenance. The same `P4/S3` in a different normalized hash or segmentation version must not be assumed to identify the same source passage.
 
 ### 6.3 `unit_id`
 
@@ -218,6 +225,7 @@ For transport efficiency, implementations may expose an opaque `unit_id` derived
 hash(
   document_id,
   content_hash,
+  normalized_document_hash,
   owner_section_id,
   paragraph_index,
   sentence_index,
@@ -249,7 +257,7 @@ B. normalized owner-text coordinates
    exact positions inside normalized Section.content / TextUnit text
 
 C. rendered response coordinates
-   positions inside a particular MCP response payload
+   positions inside a particular MCP response payload/read stream
 ```
 
 Only B is appropriate for general fine-grained TextLocator ranges.
@@ -290,8 +298,8 @@ Silent reinterpretation is forbidden.
 Paragraph and sentence indexes must be deterministic and versioned.
 
 ```text
-same content_hash
-+ same normalized text
+same normalized_document_hash
++ same canonical normalized text
 + same segmentation_version
 = same Paragraph/Sentence boundaries
 ```
@@ -303,7 +311,7 @@ The current SQLite implementation uses `Section.content.split("\n\n")`. That is 
 The segmentation layer should prefer, in order:
 
 ```text
-parser-preserved native paragraph boundaries, when reliable
+parser-preserved native paragraph boundaries, when reliable and persisted canonically
         ↓
 normalized blank-line/block boundaries
         ↓
@@ -337,6 +345,8 @@ Code blocks, tables, signatures, and other non-prose structures must not be forc
 
 If a normalized paragraph is non-prose, it may remain paragraph-addressable without sentence children.
 
+For a source-preserving Sentence-first stream, every non-prose region must be returned as an explicitly coarser reading item or represented as an explicit coverage gap. An eligible-only stream may skip it, but cannot claim full Section consumption.
+
 ### 8.4 Versioning
 
 Segmentation policy must carry an explicit stable version, for example:
@@ -349,40 +359,41 @@ Changing boundary rules in a way that can renumber Paragraph/Sentence locators r
 
 ## 9. Tool contract evolution
 
-The preferred direction is to strengthen the existing five MCP tools rather than multiplying format/granularity-specific tools.
+The current runtime has six MCP Tools. ADR 0004 accepts additive evolution of those six plus one generic `get_text_units` Tool. The goal is not to multiply format/granularity-specific Tools; it is to preserve independent responsibilities proven by use cases.
 
-### 9.1 `open_document`
+### 9.1 `list_documents`
 
-No required breaking change.
+Current discovery semantics remain valid: enumerate allowed local candidate sources without opening them.
 
-A future response may advertise supported location capabilities:
+Future bounded discovery should add explicit completion and continuation metadata. A `DiscoveryCursor` is progress state, not a source locator.
+
+### 9.2 `open_document`
+
+No breaking change is required. Future precise responses should advertise:
 
 ```text
-paragraph_locator
-sentence_locator
-normalized_range
-native_page
-native_anchor
+normalized_document_hash
+version/open outcome
+paragraph_locator capability
+sentence_locator capability
+normalized_range capability
+native_page/native_anchor capability
+reliability/coverage summary
 ```
 
-Capability advertisement is optional and should be added only if clients need it.
+Capability advertisement is required before a client can safely choose a precise-reading workflow; it must not be inferred solely from media type.
 
-### 9.2 `get_document_structure`
+### 9.3 `get_document_structure`
 
 Continue returning structural nodes only.
 
 Do not enumerate every Paragraph/Sentence in the TOC tree.
 
-Optional future aggregate metadata may include:
+Future bounded expansion should return actionable subtree/cursor state, child completeness, source order, provenance/resolution status, and structural coverage.
 
-```text
-paragraph_count
-sentence_count
-```
+Optional aggregate metadata may include Paragraph/Sentence counts only when it can be produced within response/resource budgets.
 
-only if it can be produced within response/resource budgets.
-
-### 9.3 `search_document`
+### 9.4 `search_document`
 
 Search continues to answer "where?", not return large reading payloads.
 
@@ -390,25 +401,26 @@ Future hit shape should resolve to a fine-grained locator:
 
 ```text
 SearchHit
+├── candidate_kind: section | paragraph | sentence
 ├── section_id
 ├── title
 ├── snippet
 ├── score
 ├── location            # backward-compatible current location
-└── text_locator?       # paragraph/sentence/range when available
+└── text_locator        # strongest truthful direct handoff
 ```
 
-Search granularity may later support:
+Search granularity may support:
 
 ```text
-auto | paragraph | sentence
+auto | section | paragraph | sentence
 ```
 
-but FTS/BM25 remains the primary search design unless evidence shows otherwise.
+Title-only structural hits remain Section candidates. FTS/BM25 remains the primary search design unless evidence shows otherwise.
 
-### 9.4 `read_document`
+### 9.5 `read_document`
 
-This is the highest-priority contract evolution.
+This remains the highest-priority contract evolution for existing truncation.
 
 Current behavior:
 
@@ -424,40 +436,69 @@ Conceptually:
 
 ```text
 read_document
-├── legacy target: section_id
-└── precise target: locator | unit_id | continuation cursor
+├── legacy known target: section_id
+├── precise known target: TextLocator / unit_id
+└── continuation: ReadCursor
 ```
 
-Responses should provide an explicit returned range and, when truncated, a continuation handle:
+Responses should provide completion, resolved target, and—when incomplete—an actionable `next_cursor`:
 
 ```text
 content
-truncated
-returned_range / returned_locator
-next_cursor? / next_locator?
+complete / truncated
+resolved_target_locator
+returned_locator?       # exact-target source range only
+read_stream_segment?    # progress metadata, not a source locator
+next_cursor?
 ```
 
-A continuation token must be bound to the same document version and logical target so it cannot silently continue into changed content.
+A `ReadCursor` must be bound to the same raw/normalized document version, logical target, read/render mode, rendering version, and cursor schema. Rendered Section-tree offsets are never canonical normalized ranges.
 
-### 9.5 `get_context`
+### 9.6 `get_context`
 
 Current Section-neighbor semantics remain valid.
 
-Future context should be able to expand around the same locator used by search/read:
+Future context uses one Tool with explicit tagged relations:
 
 ```text
-unit = section | paragraph | sentence
-before = N
- after = N
+neighbor {
+  unit: section | paragraph | sentence
+  before, after
+}
+
+container {
+  kind: paragraph | section
+}
+
+structural {
+  kind: owner_section | ancestors | siblings | children
+}
 ```
 
-Example:
+Legacy `section_id + before + after` maps only to `neighbor(unit=section)`. Context expansion must preserve source order and return locators for returned items.
+
+### 9.7 `get_text_units` (future accepted Tool)
+
+ADR 0004 resolves the earlier open question: multiple independent use cases require a generic ordered TextUnit enumeration Tool.
+
+Its responsibility is:
 
 ```text
-get_context(target=P4/S3, unit=sentence, before=2, after=2)
+Section target
++ requested kind: paragraph | sentence
++ start/anchor/direction or TextUnitCursor
++ bounded item/character budget
++ coverage policy
+        ↓
+source-ordered exact reading items
++ per-item TextLocator
++ completion / next TextUnitCursor
++ non-prose degradation / coverage
 ```
 
-Context expansion must preserve source order and return locators for the expanded boundary.
+It discovers the first/next unknown child reading unit. `read_document` instead reads an already-known target or continues one read stream. The two cursor/state machines must not be conflated.
+
+A Sentence request may return an explicitly coarser Paragraph item for non-prose under source-preserving policy. It must not fabricate Sentence identity.
 
 ## 10. Continuation and response budgets
 
@@ -465,24 +506,27 @@ Precise reading must work with the existing MCP response-budget policy rather th
 
 Requirements:
 
-1. `max_chars` remains bounded server-side;
-2. `truncated=true` must be actionable;
-3. continuation must be deterministic for one document version;
-4. clients must not be forced to restart from the beginning of a Section;
-5. continuation must not rely on rendered-response offsets as a stable source locator.
+1. `max_chars`/item limits remain bounded server-side;
+2. incomplete/truncated state must be actionable;
+3. continuation must be deterministic for one document version and stream contract;
+4. clients must not be forced to restart from the beginning;
+5. continuation must not rely on rendered-response offsets as a stable source locator;
+6. each cursor type is accepted only by its owning Tool/state machine.
 
-Recommended conceptual identity for an opaque cursor:
+Recommended conceptual identity for an opaque read cursor:
 
 ```text
-cursor binds:
-- document_id/content_hash
+ReadCursor binds:
+- document_id/content_hash/normalized_document_hash
 - target locator
-- rendering/read mode
-- next normalized position
+- rendering/read mode + version
+- next stream position
 - cursor schema version
 ```
 
-The wire encoding may be opaque; the semantic binding must be testable.
+A `TextUnitCursor` separately binds Section, segmentation version, requested kind, direction, coverage policy, and next enumeration position.
+
+The wire encoding may be opaque; semantic binding and gap/overlap behavior must be testable.
 
 ## 11. Citation and human-readable form
 
@@ -500,7 +544,7 @@ TLPI §1.1 ¶4 S3, p. 5
 
 This display string is presentation, not identity.
 
-Identity remains the structured locator scoped to document content/version.
+Identity remains the structured locator scoped to canonical normalized document content/version. A cursor is never citation identity.
 
 ## 12. Persistence and rebuildability
 
@@ -572,12 +616,12 @@ The lexical index should support both Paragraph and Sentence TextUnits. They opt
 The intended future search contract remains additive:
 
 ```text
-granularity = auto | paragraph | sentence
+granularity = auto | section | paragraph | sentence
 ```
 
-`auto` is the default client-facing mode. Its exact ranking/fallback policy is implementation-defined, but a conforming implementation may, for example, try high-precision Sentence matches and fall back to Paragraph retrieval when results are insufficient. This is compatible with the existing FTS/BM25-first design and the current relaxed-search work.
+`auto` is the default client-facing mode. Its exact ranking/fallback policy is implementation-defined, but a conforming implementation may try high-precision Sentence matches and fall back to Paragraph/Section retrieval when results are insufficient.
 
-Search granularity must never change TextUnit identity. It only changes which existing TextUnits are indexed/ranked.
+Search granularity must never change TextUnit identity. It only changes which existing candidates are indexed/ranked.
 
 ### 13.2 Tokenizer policy
 
@@ -604,7 +648,7 @@ without depending on whitespace-only boundaries.
 TextUnit identity is scoped by:
 
 ```text
-content_hash + segmentation_version
+normalized_document_hash + segmentation_version
 ```
 
 Lexical-index identity additionally depends on:
@@ -616,9 +660,9 @@ tokenizer_version
 For example:
 
 ```text
-content_hash         = A
-segmentation_version = text-segmentation/v1
-tokenizer_version    = lexical-tokenizer/v1
+normalized_document_hash = A
+segmentation_version      = text-segmentation/v1
+tokenizer_version         = lexical-tokenizer/v1
 ```
 
 Changing `tokenizer_version` may change search ranking/matching and requires rebuilding the lexical index, but it must not renumber Paragraph/Sentence TextUnits or invalidate their locators.
@@ -657,6 +701,7 @@ text_units
 unit_id
 document_id
 content_hash
+normalized_document_hash
 owner_section_id
 kind: paragraph | sentence
 parent_unit_id?
@@ -680,7 +725,7 @@ The exact SQLite schema is deferred, but these semantics are required:
 2. Persisted TextUnit text is derived and must exactly correspond to the normalized source range.
 3. `text_units_fts` references TextUnits; it does not duplicate the full locator contract.
 4. Deleting/rebuilding FTS must not alter TextUnits.
-5. Deleting/rebuilding TextUnits with the same content and segmentation version must reproduce the same boundaries and deterministic identities.
+5. Deleting/rebuilding TextUnits with the same normalized content and segmentation version must reproduce the same boundaries and deterministic identities.
 
 ### 13.6 SearchHit → TextLocator
 
@@ -688,12 +733,12 @@ Lexical search results should resolve back to the same locator contract used by 
 
 ```text
 SearchHit
-├── unit_id
-├── unit_kind: paragraph | sentence
+├── candidate_kind: section | paragraph | sentence
+├── unit_id?
 ├── score
 ├── snippet/text
 └── text_locator
-    ├── document/content version
+    ├── raw/normalized document version
     ├── owner section
     ├── paragraph/sentence ordinal
     └── normalized range
@@ -704,9 +749,9 @@ The expected interaction is:
 ```text
 search_document("system call")
         ↓
-Sentence TextUnit / TextLocator
+Sentence/Paragraph/Section TextLocator
         ↓
-get_context(target, unit=sentence, before=2, after=2)
+get_context(target, relation=neighbor/container/structural)
         ↓
 read_document(target)
 ```
@@ -717,12 +762,12 @@ No re-search by quoted text should be necessary to move from retrieval to readin
 
 A lexical index is valid only for the declared inputs that produced it. Rebuild is required when any retrieval-affecting input changes, including:
 
-- indexed document content hash;
+- indexed normalized document hash;
 - TextUnit segmentation version;
 - tokenizer version/configuration;
 - FTS schema/ranking configuration when the implementation cannot migrate safely.
 
-Rebuilding the lexical index is operational state maintenance, not a source-content mutation.
+Rebuilding the lexical index is operational state maintenance, not a source-content mutation. When locator identity inputs are unchanged, rebuilding the index does not invalidate a previously returned locator.
 
 ### 13.8 Future semantic indexes remain separate
 
@@ -743,7 +788,8 @@ They do not redefine source identity and do not bypass the Paragraph/Sentence/Ch
 The first implementation must preserve all current valid calls:
 
 ```text
-open_document
+list_documents(path?, recursive, max_results)
+open_document(source, auth_profile?, force_refresh)
 get_document_structure(document_id, max_depth?)
 search_document(document_id, query, limit)
 read_document(document_id, section_id, max_chars?)
@@ -756,19 +802,22 @@ Compatibility rules:
 2. existing response fields are not silently reinterpreted;
 3. new precise-reading fields are additive in the first version;
 4. legacy Section reads remain supported even after locator reads exist;
-5. old `Location` data remains readable from persisted state;
-6. migrations must be explicit and tested against already-opened documents.
+5. legacy Section context remains Section-neighbor semantics;
+6. old `Location` data remains readable from persisted state;
+7. migrations must be explicit and tested against already-opened documents;
+8. `get_text_units` remains unadvertised until its underlying invariants are implemented.
 
 ## 15. Proposed implementation sequence after design approval
 
-Implementation should not begin on this branch. After review/merge, use short-lived feature branches in this order:
+Implementation should not begin on a design branch. After review/merge, use short-lived feature branches in dependency order:
 
 ```text
 P0 feat/read-continuation
    - actionable continuation for truncated Section reads
-   - explicit returned range/cursor semantics
+   - deterministic SectionTreeReadStream + ReadCursor
 
 P0 feat/normalized-text-range
+   - normalized_document_hash
    - define/test normalized owner-text coordinate space
    - no silent reuse of parser-native offsets
 
@@ -779,12 +828,18 @@ P1 feat/text-unit-index
 P1 feat/sentence-locator
    - versioned deterministic sentence segmentation
    - Sentence locators
+   - prose eligibility/non-prose coverage
+
+P1 feat/text-unit-enumeration-contract
+   - `get_text_units` application/Tool contract
+   - source-order guarantee + TextUnitCursor
+   - complete Section traversal and gap/overlap tests
 
 P1 feat/context-granularity
-   - paragraph/sentence context windows
+   - tagged neighbor/container/structural context
 
 P1 feat/search-locator
-   - search hits resolve to TextLocator
+   - SearchHit resolves directly to TextLocator
    - preserve FTS/BM25-first design
 
 P1 feat/lexical-text-unit-index
@@ -792,13 +847,9 @@ P1 feat/lexical-text-unit-index
    - version TokenizerPolicy independently from segmentation
    - support CJK-capable deterministic tokenization
    - keep Token outside source locator identity
-
-P2 evaluate/get-text-units-tool
-   - add a new tool only if real client usage shows that paged enumeration
-     of Paragraph/Sentence units cannot be expressed cleanly through existing tools
 ```
 
-This sequence deliberately separates continuation from sentence segmentation so the current truncation problem can be solved without waiting for the full indexing architecture.
+This sequence deliberately separates read continuation from sentence segmentation and TextUnit enumeration so the current truncation problem can be solved without pulling later capability into `feat/read-continuation`.
 
 ## 16. Acceptance criteria for the architecture
 
@@ -812,14 +863,21 @@ A future implementation conforms to this design only if all of the following are
 
 ### Determinism
 
-- Rebuilding TextUnitIndex with the same content and segmentation version yields identical boundaries/locators.
+- Rebuilding TextUnitIndex with the same normalized content and segmentation version yields identical boundaries/locators.
 - Sentence segmentation does not call an LLM.
 - Search-engine rebuild/replacement does not renumber TextUnits.
 
+### Ordered enumeration
+
+- Given a Section, an Agent can obtain the first Paragraph/Sentence-first reading item.
+- Repeated `TextUnitCursor` continuation consumes the complete declared stream without gaps/overlap.
+- Previous/next operations are source-order navigation, not search.
+- Non-prose is returned coarsely or explicitly accounted for; it is never a fake Sentence.
+
 ### Traceability
 
-- Fine-grained locators retain owner Section and document version.
-- Native page/anchor/spine/paragraph information remains available when the parser can provide it.
+- Fine-grained locators retain owner Section and raw/normalized document version.
+- Native page/anchor/spine/paragraph/provenance information remains available when the parser can provide it.
 - Human citation formatting can be derived from structured locator data.
 
 ### Lexical retrieval
@@ -832,18 +890,18 @@ A future implementation conforms to this design only if all of the following are
 
 ### Continuation
 
-- Every truncated read has an actionable continuation.
+- Every incomplete read/enumeration has an actionable continuation or explicit unsupported state.
 - Repeated continuation can consume the complete logical target without gaps or overlap.
-- A cursor cannot silently continue against a different content hash.
+- A cursor cannot silently continue against a different normalized document or stream contract.
 
 ### Compatibility
 
-- Existing Section-based clients continue to work.
+- Existing six-Tool Section-based/discovery clients continue to work.
 - Existing persisted Location records do not become semantically invalid through silent reinterpretation.
 
 ### Resource control
 
-- Fine-grained reads/context obey the same response/resource budgets as Section reads.
+- Fine-grained enumeration/read/context obeys server response/resource budgets.
 - `get_document_structure` does not explode into a sentence-sized tree.
 
 ## 17. Design invariants
@@ -854,29 +912,34 @@ The following are hard constraints unless replaced by a later ADR:
 2. **StructuralNode is source structure; Paragraph/Sentence are textual addressing units.**
 3. **Sentence is not a child Section.**
 4. **Word/Token are not stable source locator levels.**
-5. **Paragraph/Sentence identity is scoped by content hash and segmentation version.**
+5. **Paragraph/Sentence identity is scoped by normalized document hash and segmentation version.**
 6. **Search returns locators; search results do not become reading truth.**
 7. **Normalized ranges and native/source offsets are distinct coordinate spaces.**
-8. **Rendered MCP response offsets are never stable source locators.**
+8. **Rendered MCP response/read-stream offsets are never stable source locators.**
 9. **Segmentation is deterministic, non-LLM, and versioned.**
-10. **Truncation without a continuation path is incomplete reading semantics.**
-11. **Existing five tools should be extended before adding granularity-specific tools.**
+10. **Truncation/incompletion without a continuation path is incomplete reading semantics.**
+11. **Current six valid Tools remain compatible; one generic `get_text_units` Tool is accepted by use-case evidence instead of format/granularity-specific Tool proliferation.**
 12. **Token is a retrieval implementation detail, never a stable source locator level.**
 13. **Tokenizer versioning is independent from segmentation versioning.**
 14. **Paragraph/Sentence FTS is rebuildable derived state and must resolve back to TextLocator.**
-15. **This design does not move AI reasoning/learning state into Reading MCP.**
+15. **TextLocator and every cursor type are non-interchangeable.**
+16. **Stale locator/cursor identity fails closed and is never fuzzily remapped.**
+17. **Non-prose is never force-segmented to inflate Sentence coverage.**
+18. **This design does not move AI reasoning/learning state into Reading MCP.**
 
 ## 18. Questions intentionally deferred to implementation design
 
-These choices need prototypes/tests but do not block the architecture:
+These choices need prototypes/tests but do not block the architecture or the accepted Tool-responsibility decision:
 
 - exact Unicode sentence-boundary library or custom policy implementation;
 - exact Latin/CJK tokenizer implementation and first `TokenizerPolicy` version;
 - physical SQLite schema for TextUnitIndex and Paragraph/Sentence FTS;
-- opaque cursor encoding/signing/checksum strategy;
+- opaque cursor encoding/signing/checksum/expiry strategy;
 - whether `unit_id` is persisted or deterministically recomputed;
 - whether paragraph boundaries should be emitted directly by every parser or normalized in one shared segmentation layer;
-- exact MCP DTO shape for additive locator targets;
-- whether a separate `get_text_units` tool is ever necessary.
+- exact MCP DTO shape for additive locator targets and tagged request unions;
+- exact aggregate/range representation for reliability and coverage under response budgets;
+- historical document-version retention policy;
+- whether future non-prose reading-item kinds receive independent identity after additional use-case review.
 
 They may change implementation details, but they must preserve the invariants above.

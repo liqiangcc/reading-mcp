@@ -5,8 +5,7 @@ on:
     branches:
       - main
     paths:
-      - scripts/tlpi_source_probe.py
-      - scripts/tlpi_source_probe_gateway.py
+      - scripts/tlpi_responses_probe.py
       - .github/workflows/tlpi-source-map-probe.yml
 
 permissions:
@@ -15,21 +14,21 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       CONTROL_PLANE_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run sanitized read-only probe
+      - name: Call Reading MCP through Responses native tunnel support
         shell: bash
-        run: python3 scripts/tlpi_source_probe_gateway.py
+        run: python3 scripts/tlpi_responses_probe.py
 
-      - name: Upload sanitized result
+      - name: Upload sanitized structural evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tlpi-source-map-probe
-          path: tlpi-probe.json
+          name: tlpi-source-map-responses-probe
+          path: tlpi-responses-probe.json
           retention-days: 1
           if-no-files-found: error

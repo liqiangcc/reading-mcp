@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - scripts/tlpi_source_probe.py
+      - scripts/tlpi_source_probe_gateway.py
       - .github/workflows/tlpi-source-map-probe.yml
 
 permissions:
@@ -22,7 +23,7 @@ jobs:
 
       - name: Run sanitized read-only probe
         shell: bash
-        run: python3 scripts/tlpi_source_probe.py
+        run: python3 scripts/tlpi_source_probe_gateway.py
 
       - name: Upload sanitized result
         if: always()

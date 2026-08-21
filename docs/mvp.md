@@ -4,7 +4,7 @@
 
 MVP 只验证一个核心闭环：
 
-> AI 能否通过统一 MCP 接口，安全地打开不同格式文档，查看结构，搜索内容，精确读取相关章节，并获得稳定来源定位。
+> AI 能否通过统一 MCP 接口，安全地发现/打开不同格式文档，查看结构，搜索内容，精确读取相关章节，并获得稳定来源定位。
 
 MVP 不追求支持所有文档格式，也不做 AI 总结、向量数据库或浏览器自动化。
 
@@ -12,7 +12,7 @@ MVP 的工程实现必须同时证明：
 
 > 来源、格式、搜索、读取、安全、存储和 MCP 协议可以独立演进，而不是通过一个“大 Reader”耦合在一起。
 
-实现前必须阅读并遵守 [设计原则](design-principles.md)。
+实现前必须阅读并遵守 [设计原则](design-principles.md)。新的 Tool/Contract 演进还必须遵守 [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)。
 
 ---
 
@@ -25,15 +25,22 @@ MVP 的工程实现必须同时证明：
 - Plain Text
 - PDF
 
-### MCP Tools
+### 当前 MCP Tools
+
+当前 runtime 实际暴露 6 个 Tool：
 
 ```text
+list_documents
 open_document
 get_document_structure
 search_document
 read_document
 get_context
 ```
+
+其中 `list_documents` 是后来加入的本地授权目录发现能力；它不打开或解析文档。最初 MVP 的 5 个 document-scoped Tool 仍保持原有语义。
+
+Use-Case-First 设计已经接受一个未来的通用 `get_text_units` Tool，用于 Paragraph/Sentence-first 有序枚举；它不属于当前已实现 MVP surface，必须等 normalized range、TextUnit、deterministic segmentation 和 cursor invariant 完成后再实现。
 
 ### 基础设施
 
@@ -66,10 +73,12 @@ get_context
 - 定义 SearchIndex port；
 - 定义 SecurityPolicy port；
 - 定义 Location/Citation 边界；
-- 定义 5 个 MCP Tool request/response schema；
+- 定义最初 5 个 document-scoped MCP Tool request/response schema；
 - 定义 application use cases；
 - 建立单元测试和 CI；
 - 建立禁止依赖规则或等价的架构测试。
+
+后续 `list_documents` 作为独立 `DocumentDiscovery` use case 加入，使当前 runtime surface 成为 6 个 Tool；这一事实不得与最初 Phase 0 历史范围混淆。
 
 必须先确定依赖方向：
 
@@ -171,6 +180,8 @@ search "virtual memory"
 - `search_document` 不承担长正文读取职责；
 - 更换 SearchIndex 实现不需要修改 Parser。
 
+未来精确阅读增量把 `Section + Location` handoff 演进为 version-bound `TextLocator`，但仍保持 Search ≠ Read。
+
 ### Phase 3：HTML
 
 任务：
@@ -251,10 +262,11 @@ search "virtual memory"
 3. 带 TOC 的技术 PDF；
 4. 长教材章节。
 
-让 Agent 实际执行：
+让 Agent 实际执行当前 6-Tool 粗粒度流程：
 
 ```text
-open
+list_documents（本地发现时可选）
+→ open
 → structure
 → search
 → context
@@ -272,14 +284,16 @@ open
 - 是否为了某种格式出现特殊 MCP 调用路径；
 - 是否出现搜索接口代替读取接口的趋势。
 
+这一步验证的是当前 coarse Section workflow，不等同于未来 Paragraph/Sentence complete-reading acceptance。
+
 ---
 
 ## 4. MVP 暂不实现
 
 明确延后：
 
-- EPUB；
-- DOCX；
+- 精确 Paragraph/Sentence TextUnit 枚举（已由后续设计接受，尚未实现）；
+- ReadCursor / TextUnitCursor；
 - OCR；
 - Playwright/browser rendering；
 - JavaScript-heavy 网站；
@@ -292,7 +306,9 @@ open
 - AI Q&A；
 - note generation。
 
-这些能力即使未来加入，也必须先通过“变化原因和关注点”判断：属于 Reading MCP 内核还是上层产品。
+EPUB 与 DOCX 已在当前 runtime 的格式扩展阶段实现；其精确结构可靠性与 TextUnit capability 仍属于后续增量，不应继续出现在“格式完全未实现”的旧列表中。
+
+这些能力即使未来加入，也必须先通过 Actor Goal → Use Case → Capability → Tool Contract 与“变化原因和关注点”判断：属于 Reading MCP 内核还是上层产品。
 
 ---
 
@@ -321,9 +337,11 @@ open
 - location range；
 - context expansion。
 
+未来精确阅读还必须验证 normalized range、TextUnit ownership/order、locator identity 和 cursor stream invariants。
+
 ### Parser fixture tests
 
-每种 Parser 准备固定 fixture，输出 snapshot/expected model。
+每种 Parser 准备固定 fixture，输出 snapshot/expected model。EPUB 精确能力必须覆盖 native nav/NCX/heading/spine fallback、unresolved target、non-prose 和 coverage。
 
 ### Security tests
 
@@ -350,20 +368,23 @@ open
 - error code 稳定；
 - max response size 生效；
 - Tool 不泄露内部凭据；
-- 增加 Parser/Retriever 不需要改变已有 Tool 契约。
+- 增加 Parser/Retriever 不需要改变已有 Tool 契约；
+- current Tool discovery 与真实 runtime 数量一致；
+- future additive fields/Tool 不破坏 legacy calls。
 
 ---
 
 ## 6. MVP 成功标准
 
-MVP 可以被认为成功，需要同时满足：
+当前 MVP 可以被认为成功，需要同时满足：
 
 ```text
-[ ] 4 种基础格式统一打开
+[ ] 当前支持格式统一打开
+[ ] 授权本地文档可发现
 [ ] 结构导航可用
 [ ] 全文搜索可用
 [ ] 按章节/位置读取可用
-[ ] 上下文展开可用
+[ ] Section 上下文展开可用
 [ ] 来源位置稳定
 [ ] 缓存生效
 [ ] SSRF 默认阻断
@@ -376,28 +397,38 @@ MVP 可以被认为成功，需要同时满足：
 [ ] Storage / Cache / Index 职责分离
 [ ] Security Policy 与 HTTP 实现分离
 [ ] 没有 LLM 依赖
-[ ] 真实 Agent 能完成一次完整教材辅助阅读
+[ ] 真实 Agent 能完成一次 coarse Section 教材辅助阅读
+```
+
+未来 precise-reading 成功标准另行增加：
+
+```text
+[ ] truncated read 可继续并无 gap/overlap
+[ ] Paragraph/Sentence-first stream 可完整消费 Section
+[ ] SearchHit 可直接 handoff 到 read/context
+[ ] stale locator/cursor fail closed
+[ ] non-prose 可读且不伪造 Sentence
+[ ] EPUB degradation/coverage 可判定
 ```
 
 ---
 
 ## 7. 后续优先级
 
-MVP 完成后不要立刻扩格式，先观察真实使用数据。
+MVP 完成后不要因为格式或 Tool 数量本身扩展系统，先按真实 Use Case 和依赖顺序推进。
 
 优先判断：
 
-1. HTML/PDF 结构识别是否足够准确；
-2. 全文检索是否真的不足；
-3. Agent 最常用哪个 Tool；
-4. 哪些响应最浪费 Token；
-5. location 是否足够稳定；
-6. 用户最需要 EPUB、DOCX 还是动态网页；
-7. 是否存在真实的多文档搜索需求；
-8. 新需求是否导致多个正交模块同时修改；
-9. 是否出现职责泄漏或“大 Reader”趋势。
+1. 当前 HTML/PDF/EPUB 结构识别的 reliability/coverage 是否足够准确；
+2. Section read continuation 是否先完成 gap/overlap 闭环；
+3. normalized document identity/range 是否稳定；
+4. Paragraph/Sentence TextUnit 是否能从 canonical persisted state 确定性重建；
+5. Agent 最常用哪个 Tool，哪些响应最浪费 Token；
+6. SearchHit→read/context 是否存在多余 round-trip；
+7. 新需求是否导致多个正交模块同时修改；
+8. 是否出现职责泄漏、“大 Reader”或为保持 Tool 数量而塞入参数组合的趋势。
 
-只有数据证明需要时，再引入 embedding、browser 或更多格式。
+只有数据证明需要时，再引入 embedding、browser、更多格式或新的 Tool。
 
 原则：
 

@@ -9,6 +9,8 @@ Reading MCP 的架构重点是保持边界稳定：
 ≠
 文档是什么格式
 ≠
+文档如何规范化/定位
+≠
 文档如何索引
 ≠
 MCP 如何暴露能力
@@ -16,32 +18,51 @@ MCP 如何暴露能力
 AI 如何理解内容
 ```
 
-因此系统按职责拆分，而不是按“某一种格式的完整流程”拆分。
+因此系统按职责和变化原因拆分，而不是按“某一种格式的完整流程”或“尽量少的 Tool”拆分。
+
+Tool Contract 的设计顺序必须遵守：
+
+```text
+Actor Goal → Use Case → Capability / State Machine → Tool
+```
+
+详细决策见 [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md) 与 [ADR 0004](adr/0004-use-case-first-tool-contracts.md)。
 
 ---
 
 ## 2. 总体架构
 
 ```text
-                     MCP Adapter
-                         │
-                  Document Service
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-    Retriever          Parser           Index
-        │                │                │
-        │         ┌──────┼──────┐         │
-        │        HTML   PDF  Markdown     │
-        │                │                │
-        └────────────────┼────────────────┘
-                         │
-                Normalized Document
-                         │
-              ┌──────────┴──────────┐
-              │                     │
-            Cache               Location Map
+                         MCP Adapter
+                              │
+                    Application Use Cases
+                              │
+       ┌──────────────┬───────┼──────────┬──────────────┐
+       │              │       │          │              │
+  Source Policy   Retriever  Parser  Repositories   Derived Indexes
+       │              │       │          │              │
+       │              │       │     Document facts      │
+       │              │       │          │         TextUnit/Search
+       └──────────────┴───────┴──────────┴──────────────┘
+                              │
+                    Canonical Document/Section
+                              │
+          ┌───────────────────┼───────────────────┐
+          │                   │                   │
+   Structural facts     Native provenance   Reliability/Coverage
 ```
+
+依赖方向：
+
+```text
+mcp → application → domain
+
+retrieval/security/parsing/infrastructure
+              ↓
+      application/domain ports
+```
+
+Document/Section 是 canonical normalized facts；Paragraph/Sentence TextUnit 与 SearchIndex 是可重建派生状态。
 
 ---
 
@@ -51,45 +72,82 @@ AI 如何理解内容
 
 职责：
 
-- 定义 MCP tools；
-- 参数校验；
-- 调用 Application Service；
-- 将内部错误映射为稳定 MCP 错误；
-- 控制返回大小。
+- 定义 MCP Tools 和 structured schema；
+- transport-level 参数解析；
+- 调用 Application Use Case；
+- 将内部错误映射为稳定 `code + retryable`；
+- 保持 response budget、cursor 与 backward compatibility 的外部契约。
 
 不负责：
 
 - 下载 URL；
-- 解析 PDF；
-- 搜索实现；
-- 缓存实现。
+- 解析 PDF/EPUB；
+- 直接查询 SQLite/FTS；
+- 重建 TextUnit；
+- 通过文本相似度修复 stale locator；
+- AI 总结或推理。
 
-### 3.2 Document Service
+### 3.2 Application Use Cases
 
-系统用例编排层。
-
-负责：
-
-- `open_document`；
-- `get_document_structure`；
-- `search_document`；
-- `read_document`；
-- `get_context`。
-
-它依赖抽象接口，不直接依赖具体 PDF/HTTP 实现。
-
-### 3.3 Retriever
-
-统一输入获取层。
+系统用例编排层。当前 runtime 已实现：
 
 ```text
-Retriever
-├── HttpRetriever
-├── FileRetriever
-└── BrowserRetriever    # future
+ListDocumentsUseCase
+OpenDocumentUseCase
+GetDocumentStructureUseCase
+SearchDocumentUseCase
+GetContextUseCase
+ReadDocumentUseCase
 ```
 
-输出建议：
+对应当前 6 个 MCP Tool：
+
+```text
+list_documents
+open_document
+get_document_structure
+search_document
+get_context
+read_document
+```
+
+Use-Case-First 设计接受的未来独立能力包括：
+
+```text
+OrderedTextUnitEnumeration
+SequentialContinuation
+Precise locator handoff
+Neighbor / Container / Structural context
+Reliability / Coverage inspection
+```
+
+其中 `OrderedTextUnitEnumeration` 最终映射到一个通用未来 Tool：`get_text_units`。当前 runtime 尚未实现它。
+
+Application 只依赖抽象 ports，不直接依赖具体 PDF/HTTP/SQLite/MCP SDK 实现。
+
+### 3.3 Document Discovery
+
+`list_documents` 只枚举部署者显式授权本地目录中的候选来源：
+
+- 不打开；
+- 不解析；
+- 不写入 DocumentRepository；
+- 不建立 SearchIndex；
+- 不假定公共 URL 也必须通过发现获得。
+
+未来 bounded discovery 需要 completion/continuation，但其 cursor 仍不是 source locator。
+
+### 3.4 Retriever
+
+统一输入获取层：
+
+```text
+RetrieverRouter
+├── LimitedFileRetriever
+└── RevalidatingHttpRetriever
+```
+
+概念输出：
 
 ```text
 RetrievedResource
@@ -102,23 +160,22 @@ RetrievedResource
 └── metadata
 ```
 
-Retriever 不理解章节结构。
+Retriever 不理解章节、Paragraph、Sentence 或 MCP DTO。
 
-### 3.4 Security Policy
+### 3.5 Security Policy
 
 放在 Retriever 之前/内部的独立策略组件，而不是散落在 HTTP 代码里。
 
 职责：
 
-- scheme policy；
-- host/IP policy；
-- DNS validation；
-- redirect validation；
-- max size；
-- timeout；
-- content type policy。
+- scheme/host/IP policy；
+- DNS 与每跳 redirect validation；
+- local root canonical allowlist；
+- credential profile/host isolation；
+- body/archive/parser/document resource budgets；
+- timeout/concurrency/content-type policy。
 
-建议接口：
+概念接口：
 
 ```text
 SourcePolicy
@@ -127,52 +184,79 @@ ResourceLimitPolicy
 CredentialPolicy
 ```
 
-### 3.5 Parser
+### 3.6 Parser / Normalizer
 
 统一解析器接口：
 
 ```text
-Parser
-├── HtmlParser
-├── MarkdownParser
+ParserRouter
 ├── TextParser
+├── MarkdownParser
+├── HtmlParser
 ├── PdfParser
-└── EpubParser
+├── EpubParser
+├── DocxParser
+└── OpenApiParser
 ```
 
-输入：原始资源。
+输入是 `RetrievedResource`，输出 canonical `Document / Section / Location` facts。Parser 不关心 MCP、HTTP 缓存或 FTS 查询。
 
-输出：`NormalizedDocument`。
+EPUB 精确结构必须区分 manifest、spine、navigation，保留 provenance/resolution/coverage；不能先扁平化再冒充 native structure。详见 ADR 0003。
 
-Parser 不关心 HTTP、认证和缓存。
+### 3.7 Document Repository
 
-### 3.6 Index
+保存 canonical normalized Document facts：
 
-MVP 先做全文检索。
+```text
+DocumentRepository
+└── Document / Section / addressing-relevant persisted facts
+```
 
-建议索引字段：
+它是读取事实来源。Search snippet、FTS row、rendered MCP response、Sentence rows都不能替代 canonical Document。
 
-- document id；
-- section id；
-- heading；
-- body；
-- location；
-- page；
-- source metadata。
+### 3.8 TextUnit Index（future derived state）
 
-MVP 不引入 embedding/vector DB，除非全文检索被真实场景证明不足。
+Paragraph/Sentence 是 deterministic、versioned、rebuildable TextUnits：
 
-### 3.7 Cache
+```text
+Document / Section.content
+          ↓
+TextUnit segmentation policy
+          ↓
+Paragraph / Sentence TextUnits
+```
 
-建议逻辑分层：
+TextUnit identity 必须依赖 addressing-relevant normalized identity 与 segmentation version，而不能依赖易失 SearchIndex row ID。
+
+### 3.9 Search Index
+
+搜索是 derived retrieval state：
+
+```text
+Section title candidates
+Paragraph candidates
+Sentence candidates
+        ↓
+SearchHit + TextLocator
+```
+
+当前实现以 owning Section + legacy Location handoff；未来必须返回 version-bound `TextLocator`，直接进入 read/context。
+
+Search answers “where?”，不承担 unbounded canonical body read。
+
+### 3.10 Cache / Persistent State
+
+逻辑职责保持独立：
 
 ```text
 RawResourceCache
 ParsedDocumentCache
-SearchIndexCache
+DocumentRepository
+TextUnitIndex        # future
+SearchIndex
 ```
 
-缓存 key 需要同时考虑 source 和 content version。
+实现可共享一个物理 SQLite 文件，但 ports/事实语义不能合并。
 
 ---
 
@@ -183,16 +267,17 @@ SearchIndexCache
 ```text
 Document
 ├── id: DocumentId
-├── source: Source
+├── source: DocumentSource
 ├── title
 ├── media_type
-├── content_hash
+├── content_hash                  # raw-source provenance
 ├── metadata
-├── root_sections[]
-└── assets[]
+└── root_sections[]
 ```
 
-### 4.2 Section
+精确定位实现还需要逻辑 `normalized_document_hash`。它来自 addressing-relevant persisted normalized facts，不得通过静默重定义现有 raw `content_hash` 获得。
+
+### 4.2 StructuralNode / current Section
 
 ```text
 Section
@@ -200,14 +285,31 @@ Section
 ├── parent_id
 ├── title
 ├── level
-├── content
+├── content                       # canonical normalized owner text
 ├── location
 └── children[]
 ```
 
-### 4.3 Location
+Chapter/Section/Subsection 是递归 StructuralNode，不是多个不同技术索引层。
 
-`Location` 必须是统一概念，但允许格式特定字段缺失。
+### 4.3 TextUnit（future derived）
+
+```text
+TextUnit
+├── kind: paragraph | sentence
+├── owner_section_id
+├── exact normalized range
+├── exact text slice
+├── segmentation_version
+├── content_class/provenance?
+└── TextLocator
+```
+
+Sentence 不是 child Section；canonical Section 也不能通过拼接 Sentence rows 重建。
+
+### 4.4 Location 与 TextLocator
+
+当前 legacy `Location`：
 
 ```text
 Location
@@ -221,83 +323,158 @@ Location
 └── native_location
 ```
 
-其中 `native_location` 用于保留 EPUB spine、PDF object/page 等底层定位信息。
+未来统一精确地址：
+
+```text
+TextLocator
+├── document_id
+├── content_hash
+├── normalized_document_hash
+├── owner_section_id / section_path
+├── paragraph_index?
+├── sentence_index?
+├── normalized_range?
+├── segmentation_version?
+└── native_location / provenance?
+```
+
+三个坐标空间必须分离：
+
+```text
+parser/native source coordinates
+normalized owner Section.content coordinates
+rendered MCP response/read-stream coordinates
+```
+
+只有 normalized owner coordinates 能作为通用精确 source range。
+
+### 4.5 Cursor
+
+```text
+TextLocator = canonical source address
+Cursor      = one versioned stream's progress
+```
+
+可能的 cursor 包括：
+
+```text
+DiscoveryCursor
+StructureCursor
+TextUnitCursor
+SearchCursor
+ReadCursor
+```
+
+它们彼此不可交换，也不能用于引用。rendered read-stream offset 不能转成 source locator。
 
 ---
 
-## 5. 稳定 ID 设计
+## 5. 稳定 Identity 设计
 
-### Document ID
+### Raw source identity
 
-建议：
+当前实现根据 source + raw content hash 生成 `DocumentId`，使 source bytes 变化时得到不同 ID。
+
+### Normalized document identity
+
+根据 ADR 0002，精确 Paragraph/Sentence 定位还必须引入 deterministic `normalized_document_hash`，覆盖至少：
+
+- Section identity/parentage/order；
+- title/level；
+- exact persisted `Section.content`；
+- future addressing-relevant block/boundary metadata。
+
+Parser/normalization 行为改变 canonical facts 时，即使 raw bytes 未变，旧 fine-grained locator 也必须 stale。
+
+### Section identity
+
+优先基于稳定结构路径/native target/source order，避免随机 UUID。重复标题需要 deterministic disambiguation。
+
+### Fine-grained identity
 
 ```text
-DocumentId = hash(normalized_source + content_hash)
+document/version identity
++ owner Section
++ normalized range / Paragraph/Sentence ordinal
++ segmentation version
 ```
 
-这样文档内容变化时得到新版本 ID。
-
-### Section ID
-
-优先基于结构路径生成：
-
-```text
-section://chapter-7/page-tables
-```
-
-标题冲突时加入稳定 ordinal 或内容摘要。
-
-禁止使用随机 UUID 作为唯一 section 定位，否则同一文档重新解析后位置无法复用。
+禁止旧 locator fuzzy-map 到新文档中“最相似”的句子。
 
 ---
 
-## 6. 文档切分
-
-优先级：
+## 6. Source Structure、TextUnit 与 Search Unit
 
 ```text
-native document structure
-        ↓
-heading / section boundary
-        ↓
-paragraph boundary
-        ↓
-sentence boundary
-        ↓
-hard size limit
+StructuralNode ≠ TextUnit
+TextUnit       ≠ Search candidate/index row
+Search Unit    ≠ Read stream
+Index          ≠ Document
 ```
 
-Index 可以索引较小的 search units，但 `read_document` 应尽量返回完整逻辑 section。
+结构优先保留 source/native hierarchy；Paragraph/Sentence 在 canonical persisted state 上确定性派生；SearchIndex 引用 locator；canonical read 最终回到 Document/TextUnit source facts。
 
-即：
+当前 Section read 会渲染 Section subtree。未来精确读取与有序枚举分别具有不同职责：
 
-> 搜索单元和阅读单元不必相同。
+```text
+read_document
+  = read already-known target / continue one read stream
 
-这是避免 RAG 式机械切块破坏书籍连续性的关键。
+get_text_units
+  = discover/enumerate ordered child reading items
+```
 
 ---
 
-## 7. Tool 到内部用例映射
+## 7. Tool 到内部 Capability / Use Case 映射
+
+### 当前 runtime
 
 ```text
+list_documents
+  → DocumentDiscovery
+  → configured local roots
+
 open_document
-  → OpenDocumentUseCase
-  → Retriever
-  → Parser
-  → Cache / Index
+  → DocumentOpenAndVersionResolution
+  → SourcePolicy + Retriever + Parser
+  → Repository + SearchIndex
 
 get_document_structure
+  → StructuralNavigation
   → DocumentRepository
 
 search_document
+  → LexicalSearch
   → SearchIndex
 
 read_document
-  → DocumentRepository + LocationResolver
+  → PreciseRead (current: Section subtree)
+  → DocumentRepository
 
 get_context
-  → LocationResolver + DocumentRepository
+  → NeighborContext (current: Section level)
+  → DocumentRepository
 ```
+
+### Accepted future evolution
+
+```text
+get_text_units
+  → OrderedTextUnitEnumeration
+  → TextUnitIndex + Locator validation
+
+read_document
+  → Section/TextLocator read + ReadCursor continuation
+
+get_context
+  → tagged Neighbor | Container | Structural context
+
+search_document
+  → Section/Paragraph/Sentence candidate + direct TextLocator handoff
+```
+
+Reliability/Coverage、StableCitation、FreshnessValidation 和 NativeTraceability 是跨结果契约，不自动产生额外 Tool。
 
 ---
 
@@ -306,142 +483,248 @@ get_context
 ```text
 source
   ↓
-normalize source
+validate source/auth policy
   ↓
-validate source policy
+retrieve or conditionally revalidate
   ↓
-lookup source metadata/cache
+calculate raw content hash
   ↓
-retrieve resource if needed
+parse/cache
   ↓
-validate final target/content
+validate canonical Document
   ↓
-calculate content hash
+calculate normalized identity (future precise foundation)
   ↓
-parsed cache hit?
-  ├─ yes → return
-  └─ no
-      ↓
-    choose parser
-      ↓
-    parse to NormalizedDocument
-      ↓
-    build index
-      ↓
-    persist cache
-      ↓
-    return metadata
+persist Document facts
+  ↓
+build/rebuild derived indexes
+  ↓
+return version + capability/reliability/coverage summary
 ```
+
+重复打开相同 normalized version 应保持身份稳定；source 或 canonical normalized facts 变化必须可观察。可读但 precise capability 降级时，open 成功并显式报告，不得伪造完整 native structure。
 
 ---
 
-## 9. SSRF 防护流程
+## 9. Complete Reading State Machines
+
+### Section stream
+
+```text
+read target
+  ↓
+response budget reached?
+ ├─ no  → complete
+ └─ yes → next ReadCursor
+              ↓
+          continue until complete
+```
+
+`truncated=true` 没有 continuation 不构成完整阅读语义。
+
+### TextUnit stream
+
+```text
+select Section
+  ↓
+get_text_units(requested=sentence)
+  ↓
+Sentence or explicit coarse non-prose reading item
+  ↓
+next TextUnitCursor
+  ↓
+section_complete
+```
+
+在 source-preserving policy 下，每个 source region 必须被 reading item 表示或被 coverage 显式说明。code/table 不得为了 coverage 被伪造为 Sentence。
+
+---
+
+## 10. Context Semantics
+
+必须明确区分：
+
+```text
+neighbor context    # same-level before/after
+container context   # Sentence→Paragraph, TextUnit→Section
+structural context  # owner/ancestors/siblings/children
+```
+
+可以共用 `get_context`，但请求必须是 tagged relation。不能通过一个模糊 `mode/unit/before/after` 参数袋隐式改变语义。
+
+当前 legacy Section `before/after` 只映射到 `neighbor(unit=section)`。
+
+---
+
+## 11. Search Handoff
+
+当前 coarse handoff：
+
+```text
+SearchHit → owning Section → read/context
+```
+
+未来 precise handoff：
+
+```text
+SearchHit(candidate_kind + TextLocator)
+             ├→ read_document
+             └→ get_context
+```
+
+禁止：
+
+```text
+SearchHit.snippet → copy → search again
+```
+
+Title-only Section hit 必须保留，不能伪造 Paragraph/Sentence 来统一 schema。
+
+---
+
+## 12. Reliability / Degradation / Coverage
+
+精确能力必须可分级，而不是单个 `parse_success`：
+
+```text
+native / resolved
+fallback / partial
+coarse but readable
+unsupported gap
+fatal
+```
+
+Reliability 优先返回 factual provenance/status：
+
+```text
+epub_nav / epub_ncx / xhtml_heading / spine_item
+resolved_fragment / missing_fragment / unsupported_resource
+```
+
+Coverage 需要定义清楚 denominator：
+
+- spine/resource coverage；
+- structural target coverage；
+- eligible prose Paragraph/Sentence coverage；
+- non-prose coarse/skipped counts；
+- unsupported gaps。
+
+Reliability/Coverage 信息应在 open/structure/TextUnit enumeration 等决策点返回。没有独立 Use Case 前不增加 inspection Tool。
+
+---
+
+## 13. SSRF 防护流程
 
 HTTP 请求每一跳都必须：
 
 ```text
 URL
  ↓
-validate scheme
+validate scheme/auth profile host
  ↓
 resolve DNS
  ↓
 validate all resolved IPs
  ↓
-connect
+pin/connect validated endpoint
  ↓
 redirect?
  ├─ no → continue
- └─ yes
-      ↓
-   repeat validation
+ └─ yes → repeat all checks
 ```
 
-不能只在最初 URL 检查 host 字符串。
+不能只在最初 URL 检查 host 字符串，也不能允许 proxy 破坏已验证 endpoint 的证据链。
 
 ---
 
-## 10. Browser Retriever 边界
+## 14. Browser Retriever 边界
 
-MVP 不实现浏览器渲染。
-
-未来 BrowserRetriever 只能作为可选实现：
+当前不实现浏览器渲染。未来 BrowserRetriever 只能作为显式策略允许的 Retriever 实现：
 
 ```text
-HttpRetriever failed to obtain useful document
+HTTP cannot obtain useful supported resource
            ↓
 explicit policy allows browser fallback
            ↓
 BrowserRetriever
 ```
 
-BrowserRetriever 不应改变 Parser、Document Model 和 MCP Tool。
+它不能改变 Parser、Document Model、TextLocator 或 MCP Tool responsibility。
 
 ---
 
-## 11. 错误模型
+## 15. 错误模型
 
-建议内部错误分类：
+当前稳定类别包括 source/retrieval/parse/repository/index/document/section/invalid-request 等。
+
+未来 precise contracts 至少需要逻辑错误类别：
 
 ```text
-InvalidSource
-BlockedSource
-FetchTimeout
-ResourceTooLarge
-UnsupportedMediaType
-ParseFailed
-DocumentNotFound
-SectionNotFound
-InvalidLocation
-IndexFailed
-CredentialUnavailable
+STALE_LOCATOR
+STALE_CURSOR
+CURSOR_TARGET_MISMATCH
+UNSUPPORTED_CAPABILITY
+INVALID_NORMALIZED_RANGE
+STRUCTURE_INVARIANT_FAILED
+TEXT_UNIT_INVARIANT_FAILED
+COVERAGE_INCOMPLETE
 ```
 
-MCP Adapter 将其转换为稳定错误码和用户可理解信息。
+规则：
+
+- locator/cursor identity mismatch fail closed；
+- re-open/re-parse 是显式 workflow；
+- fallback 只在 lower precision 可被真实证明时允许；
+- MCP Adapter 返回稳定 `code + retryable`，但不泄露正文/Secret。
 
 ---
 
-## 12. 推荐项目目录
+## 16. 推荐项目目录
 
-语言确定后可以映射到具体 package/crate/module。逻辑结构建议：
+逻辑结构：
 
 ```text
 src/
 ├── mcp/
 ├── application/
+│   ├── list_documents
 │   ├── open_document
+│   ├── get_document_structure
 │   ├── search_document
+│   ├── get_context
 │   └── read_document
 ├── domain/
 │   ├── document
 │   ├── section
 │   └── location
 ├── retrieval/
-│   ├── http
-│   └── file
 ├── parsing/
-│   ├── html
-│   ├── markdown
-│   ├── text
-│   └── pdf
 ├── security/
-├── search/
-├── cache/
+├── infrastructure/
+├── runtime/
 └── config/
 ```
 
+Future TextUnit/locator/cursor modules必须根据 domain/application responsibility 放置，不能把 rmcp DTO、SQLite row 或 parser-specific types 作为 domain identity。
+
 ---
 
-## 13. 核心设计原则
+## 17. 核心设计原则
 
 ```text
+Actor goal ≠ Tool call success
+Use Case precedes Tool
 Document acquisition ≠ parsing
 Parsing ≠ indexing
 Indexing ≠ reading
 Reading ≠ reasoning
-Search unit ≠ reading unit
+StructuralNode ≠ TextUnit
+Search unit ≠ canonical read target
+TextLocator ≠ Cursor
+Neighbor context ≠ Container context ≠ Structural context
 MCP transport ≠ application logic
 Security policy ≠ HTTP implementation
+Fallback ≠ native precision
 ```
 
-只要这些边界保持稳定，后续增加 EPUB、DOCX、Browser、Confluence 等能力都不需要破坏核心架构。
+只要这些边界保持稳定，后续增加 Parser、Retriever、TextUnit/FTS 或 precise-reading capability 都不需要破坏核心架构。

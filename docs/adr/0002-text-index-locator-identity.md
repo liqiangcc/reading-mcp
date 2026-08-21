@@ -5,6 +5,7 @@
 - Reviewed branch: `design/text-index-locator`
 - Reviewed against main: `e4ec0ee5a39f6c549afcf17b68d6dfa7ebfe6198`
 - Related design: `docs/text-index-and-locator-design.md`
+- Amended by: `docs/adr/0004-use-case-first-tool-contracts.md` (Tool-count and ordered TextUnit-enumeration decisions only)
 
 ## Context
 
@@ -17,7 +18,7 @@ The design review compared the proposal with the current domain, MCP contracts, 
 3. Current FTS preserves Section-title retrieval, including title-only Sections with empty body content; Paragraph/Sentence FTS must not remove this behavior or fake a Paragraph identity.
 4. Current `content_hash` is SHA-256 of retrieved source bytes. The same bytes can produce different normalized `Section.content` after parser/normalization changes, so raw `content_hash + segmentation_version` is insufficient for stable Paragraph/Sentence identity.
 
-This ADR records the accepted architecture and is normative where it clarifies or overrides the earlier draft design.
+This ADR records the accepted identity/range/index architecture and is normative where it clarifies or overrides the earlier draft design. ADR 0004 later supplied use-case evidence for one generic ordered TextUnit enumeration Tool without changing the identity decisions below.
 
 ## Decision
 
@@ -37,7 +38,7 @@ L4 CharacterRange
 
 ### 2. TextUnit persistence is derived state
 
-Paragraph/Sentence TextUnits may be persisted in SQLite for efficient reading, context expansion, validation, and retrieval, but they remain rebuildable derived state.
+Paragraph/Sentence TextUnits may be persisted in SQLite for efficient reading, context expansion, validation, enumeration, and retrieval, but they remain rebuildable derived state.
 
 A TextUnit must be reproducible from:
 
@@ -77,7 +78,7 @@ Raw `content_hash` remains available in locators/results for source provenance.
 
 ### 4. Unified TextLocator
 
-Fine-grained read, context, search, and citation paths resolve through one logical locator contract:
+Fine-grained enumeration, read, context, search, and citation paths resolve through one logical locator contract:
 
 ```text
 TextLocator
@@ -90,7 +91,7 @@ TextLocator
 ├── sentence_index?
 ├── normalized_range?
 ├── segmentation_version?
-└── native_location?
+└── native_location / provenance?
 ```
 
 Paragraph and Sentence ordinals are human-facing 1-based values.
@@ -109,13 +110,14 @@ Paragraph, Sentence, and CharacterRange do not switch to parent-local coordinate
 
 Existing `Location.char_start` / `char_end` keep their parser-defined legacy meaning until an explicit migration. Parser-native offsets, normalized ranges, and rendered-response offsets are distinct coordinate spaces.
 
-### 6. ReadCursor is not a TextLocator
+### 6. Cursor state is not a TextLocator
 
 Continuation is transport/progress state, not source identity.
 
 ```text
-TextLocator = canonical source addressing
-ReadCursor  = opaque progress through one versioned read stream
+TextLocator    = canonical source addressing
+ReadCursor     = opaque progress through one versioned read stream
+TextUnitCursor = opaque progress through one versioned enumeration stream
 ```
 
 Current legacy Section reads recursively render a subtree. Their P0 continuation contract therefore uses a deterministic logical stream:
@@ -124,7 +126,7 @@ Current legacy Section reads recursively render a subtree. Their P0 continuation
 SectionTreeReadStream/v1
 ```
 
-A legacy cursor binds at least:
+A legacy `ReadCursor` binds at least:
 
 - `document_id`;
 - raw `content_hash`;
@@ -137,7 +139,18 @@ A legacy cursor binds at least:
 
 If the implementation uses a character offset internally, it is a read-stream coordinate scoped to `rendering_version`, never a canonical source range or citation locator.
 
-Every truncated read must expose actionable continuation, and repeated continuation must consume the complete logical stream without gaps or overlap. A cursor must fail rather than silently continue when raw or normalized document identity no longer matches.
+A future `TextUnitCursor` separately binds at least:
+
+- document raw/normalized identity;
+- owner Section target;
+- segmentation version;
+- requested TextUnit kind;
+- direction/anchor policy;
+- non-prose/coverage policy;
+- next enumeration position;
+- cursor schema version.
+
+Every incomplete stream must expose actionable continuation or explicit unsupported state. Repeated continuation must consume the complete declared stream without gaps or overlap. A cursor must fail rather than silently continue when any required identity or stream contract no longer matches.
 
 ### 7. Search preserves structural title candidates
 
@@ -159,7 +172,7 @@ Client-facing granularity may evolve additively as:
 auto | section | paragraph | sentence
 ```
 
-Existing FTS/BM25-first behavior remains the baseline unless measured evidence justifies a later change.
+Existing FTS/BM25-first behavior remains the baseline unless measured evidence justifies a later change. Every precise SearchHit must carry a locator that flows directly into read/context; snippet text is preview, never identity.
 
 ### 8. Tokenization belongs only to the retrieval layer
 
@@ -177,20 +190,29 @@ tokenizer_version
 
 Changing tokenizer configuration rebuilds lexical indexes but must not renumber Paragraph/Sentence TextUnits. A separate relational token table is not required by default.
 
-### 9. Backward compatibility
+### 9. Backward compatibility and Tool-surface amendment
 
 The first implementation remains additive:
 
-- current five MCP tools remain the primary tool surface;
+- the current runtime's six MCP Tools remain valid: `list_documents`, `open_document`, `get_document_structure`, `search_document`, `get_context`, and `read_document`;
 - current Section-based requests continue to work;
 - current `content_hash` semantics remain unchanged;
 - existing `Location` fields are not silently reinterpreted;
 - new locator/cursor fields are additive;
 - persisted migrations must be explicit and tested.
 
+ADR 0004 accepts one future generic `get_text_units` Tool because Paragraph/Sentence ordered enumeration is an independent, use-case-proven responsibility that cannot be naturally expressed by read or context without conflating state machines. It does not authorize `get_sentences`, `get_paragraphs`, or format-specific Tools.
+
+The distinction is normative:
+
+```text
+current implemented surface = six Tools
+accepted future surface      = seven Tools including get_text_units
+```
+
 ## Implementation order
 
-After this ADR is merged, implementation proceeds on short-lived feature branches:
+After these design ADRs are merged, implementation proceeds on short-lived feature branches:
 
 ```text
 P0 feat/read-continuation
@@ -209,9 +231,15 @@ P1 feat/text-unit-index
 
 P1 feat/sentence-locator
    - deterministic versioned Sentence segmentation
+   - non-prose eligibility/coverage semantics
+
+P1 feat/text-unit-enumeration-contract
+   - generic get_text_units application/Tool contract
+   - source-order guarantee
+   - TextUnitCursor + complete/no-gap/no-overlap behavior
 
 P1 feat/context-granularity
-   - Paragraph/Sentence context windows
+   - tagged Paragraph/Sentence neighbor, container, and structural context
 
 P1 feat/search-locator
    - search hits resolve directly to TextLocator
@@ -222,7 +250,7 @@ P1 feat/lexical-text-unit-index
    - independently versioned CJK-capable tokenizer policy
 ```
 
-No new granularity-specific MCP tool should be added until usage demonstrates that the existing five tools cannot express the workflow cleanly.
+`feat/read-continuation` remains limited to P0 read-stream continuation. Sentence/TextUnit/FTS/enumeration work must not be pulled into that branch.
 
 ## Acceptance invariants
 
@@ -233,32 +261,39 @@ An implementation conforms only if all of these hold:
 3. TextUnit rebuilds use only persisted canonical Document state plus declared segmentation policy/version.
 4. Paragraph/Sentence ranges are exact slices of owner `Section.content`.
 5. Raw `content_hash` alone is never treated as normalized TextUnit identity.
-6. ReadCursor progress is never exposed as source identity or citation location.
-7. Every truncated read has deterministic, gap-free, overlap-free continuation.
+6. ReadCursor/TextUnitCursor progress is never exposed as source identity or citation location.
+7. Every incomplete stream has deterministic, gap-free, overlap-free continuation or explicit unsupported state.
 8. Search hits can flow into read/context without re-searching quoted text.
 9. Existing Section-title retrieval is preserved without fabricated Paragraph identity.
 10. Tokenizer changes cannot change TextUnit identity.
 11. CJK/mixed technical text does not depend on whitespace-only tokenization.
 12. Word/Token never becomes a stable source locator level.
-13. Existing Section-based clients remain valid.
+13. Existing six-Tool clients remain valid.
+14. Given a Section, the future enumeration contract can return the first/next Paragraph/Sentence-first reading item and explicit terminal completion.
+15. Code/table/non-prose remains readable or explicitly accounted for without fabricated Sentence identity.
+16. Stale locator/cursor identity fails closed and is never fuzzily remapped.
+17. `get_document_structure` never becomes a Paragraph/Sentence tree.
+18. `read_document` never hides TextUnit enumeration behind an ambiguous granularity parameter.
 
 ## Consequences
 
 Positive:
 
-- precise reading, sentence-level questioning, context recovery, and evidence citation share one locator model;
+- precise reading, sentence-level questioning, ordered traversal, context recovery, and evidence citation share one locator model;
 - reindexing/search-engine changes cannot silently redefine source identity;
 - parser upgrades that alter normalized text are detected even when raw source bytes are unchanged;
 - legacy recursive Section reads can gain continuation without contaminating canonical source ranges;
-- CJK lexical improvements remain isolated from source identity.
+- CJK lexical improvements remain isolated from source identity;
+- the new enumeration responsibility has explicit Actor/use-case evidence rather than being added for convenience.
 
 Costs:
 
 - normalized-document fingerprinting becomes a required primitive;
 - cursor/rendering versions and segmentation/tokenizer versions must be maintained explicitly;
 - future schema migrations need to preserve legacy `Location` semantics;
-- Paragraph/Sentence persistence adds storage and rebuild logic, intentionally accepted for deterministic AI reading workflows.
+- Paragraph/Sentence persistence adds storage and rebuild logic, intentionally accepted for deterministic AI reading workflows;
+- the future surface grows from six to seven Tools and requires a distinct TextUnit enumeration state machine.
 
 ## Review outcome
 
-Accepted. The architecture is sufficiently constrained to start implementation once this ADR and the supporting design branch are merged. The first implementation task is `feat/read-continuation`; Sentence/TextUnit/FTS work must not be pulled into that P0 branch.
+Accepted. ADR 0004's use-case review amends only the earlier Tool-surface/deferment statements. Locator identity, normalized range, source/index separation, tokenizer separation, stale fail-closed behavior, and P0 read-continuation boundaries remain normative. The first implementation task is still `feat/read-continuation`; Sentence/TextUnit/FTS/get_text_units work must not be pulled into that P0 branch.

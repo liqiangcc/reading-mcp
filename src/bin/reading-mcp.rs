@@ -10,9 +10,12 @@ use tokio::io::{Stdin, Stdout};
 /// `tunnel-client` may probe an MCP server with `server/discover` before the
 /// regular MCP `initialize` request. rmcp 2.2.0 rejects every pre-initialize
 /// request except `ping`, so answer the probe with JSON-RPC method-not-found
-/// and let the client fall back to the standard initialize handshake.
+/// and let the client fall back to the standard initialize handshake. Reject
+/// other pre-initialize requests without forwarding them so a stale tunnel
+/// binding cannot terminate the stdio process.
 struct DiscoveryCompatibleStdio {
     inner: AsyncRwTransport<RoleServer, Stdin, Stdout>,
+    initialized: bool,
 }
 
 impl DiscoveryCompatibleStdio {
@@ -20,6 +23,7 @@ impl DiscoveryCompatibleStdio {
         let (stdin, stdout) = stdio();
         Self {
             inner: AsyncRwTransport::new_server(stdin, stdout),
+            initialized: false,
         }
     }
 }
@@ -38,15 +42,40 @@ impl Transport<RoleServer> for DiscoveryCompatibleStdio {
         loop {
             let message = self.inner.receive().await?;
 
-            if let ClientJsonRpcMessage::Request(request) = &message
-                && request.request.method() == "server/discover"
-            {
-                let response = ServerJsonRpcMessage::error(
-                    ErrorData::new(ErrorCode::METHOD_NOT_FOUND, "Method not found", None),
-                    Some(request.id.clone()),
-                );
-                self.inner.send(response).await.ok()?;
-                continue;
+            match &message {
+                ClientJsonRpcMessage::Request(request)
+                    if request.request.method() == "server/discover" =>
+                {
+                    let response = ServerJsonRpcMessage::error(
+                        ErrorData::new(ErrorCode::METHOD_NOT_FOUND, "Method not found", None),
+                        Some(request.id.clone()),
+                    );
+                    self.inner.send(response).await.ok()?;
+                    continue;
+                }
+                ClientJsonRpcMessage::Request(request)
+                    if !self.initialized && request.request.method() == "initialize" =>
+                {
+                    self.initialized = true;
+                }
+                ClientJsonRpcMessage::Request(request)
+                    if !self.initialized && request.request.method() != "ping" =>
+                {
+                    let response = ServerJsonRpcMessage::error(
+                        ErrorData::new(ErrorCode::INVALID_REQUEST, "Server not initialized", None),
+                        Some(request.id.clone()),
+                    );
+                    self.inner.send(response).await.ok()?;
+                    continue;
+                }
+                ClientJsonRpcMessage::Notification(_)
+                | ClientJsonRpcMessage::Response(_)
+                | ClientJsonRpcMessage::Error(_)
+                    if !self.initialized =>
+                {
+                    continue;
+                }
+                _ => {}
             }
 
             return Some(message);

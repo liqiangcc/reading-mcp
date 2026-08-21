@@ -4,6 +4,7 @@
 - [设计原则](design-principles.md)：关注点分离（SoC）、单一职责（SRP）、变化原因矩阵、依赖方向、禁止耦合和架构评审清单。
 - [架构设计](architecture.md)：领域模型、Retriever/Parser/Search/Cache 边界、稳定定位与 SSRF 设计。
 - [Text Index & Source Locator Architecture](text-index-and-locator-design.md)：精确阅读的五级寻址、TextUnit/Locator、字符坐标、切分版本与 continuation 契约。
+- [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
 - [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、5 个 Tool 和 stdio 子进程端到端测试。
@@ -21,6 +22,8 @@ design-principles.md
 architecture.md
       ↓
 text-index-and-locator-design.md
+      ↓
+epub-structure-reliability-design.md
       ↓
 mvp.md
       ↓

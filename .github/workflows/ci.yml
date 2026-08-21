@@ -70,27 +70,26 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  tlpi-source-map-local-probe:
+  tlpi-source-map-probe:
     if: github.event_name == 'pull_request' && github.head_ref == 'agent/use-cloud-runner'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CONTROL_PLANE_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TLPI_PROBE_MODEL: gpt-5.6
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build isolated reading-mcp binary
-        shell: bash
-        run: |
-          cargo build --release --locked --bin reading-mcp || true
-
-      - name: Invoke local reading-mcp read-only tools
-        run: python3 .github/scripts/tlpi_source_map_local_probe.py
+      - name: Invoke reading-mcp with both product and explicit authorization
+        run: python3 .github/scripts/tlpi_source_map_explicit_auth_probe.py
 
       - name: Upload sanitized source result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tlpi-source-map-local-probe
-          path: tlpi-local-probe.json
+          name: tlpi-source-map-probe
+          path: tlpi-probe.json
           if-no-files-found: error
           retention-days: 1

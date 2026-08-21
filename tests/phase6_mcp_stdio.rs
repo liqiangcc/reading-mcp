@@ -5,8 +5,8 @@ use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
 use reading_mcp::mcp::contracts::{
-    GetContextResponse, GetDocumentStructureResponse, OpenDocumentResponse, ReadDocumentResponse,
-    SearchDocumentResponse,
+    GetContextResponse, GetDocumentStructureResponse, ListDocumentsResponse, OpenDocumentResponse,
+    ReadDocumentResponse, SearchDocumentResponse,
 };
 
 #[tokio::test]
@@ -61,11 +61,27 @@ Processes own resources and execution state.
         vec![
             "get_context",
             "get_document_structure",
+            "list_documents",
             "open_document",
             "read_document",
             "search_document",
         ]
     );
+
+    let listed = client
+        .call_tool(
+            CallToolRequestParams::new("list_documents").with_arguments(arguments(json!({
+                "path": directory.path().to_string_lossy(),
+                "recursive": true,
+                "max_results": 10
+            }))),
+        )
+        .await
+        .expect("list_documents MCP call should succeed")
+        .into_typed::<ListDocumentsResponse>()
+        .expect("list_documents should return typed structured content");
+    assert_eq!(listed.documents.len(), 1);
+    assert_eq!(listed.documents[0].name, "operating-systems.md");
 
     let opened = client
         .call_tool(

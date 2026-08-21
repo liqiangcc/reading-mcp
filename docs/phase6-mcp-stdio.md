@@ -18,9 +18,10 @@ Domain + Ports + Adapters
 
 `rmcp` 只进入 MCP adapter/binary。
 
-## 5 个 Tool
+## 6 个 Tool
 
 ```text
+list_documents
 open_document
 get_document_structure
 search_document
@@ -28,7 +29,7 @@ get_context
 read_document
 ```
 
-`open_document` 返回 document_id/source/title/media_type/content_hash/section_count；structure 返回 section tree；search 返回 owning section + source/title/snippet/score/location；context/read 从 DocumentRepository 读取规范化正文。
+`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document_id/source/title/media_type/content_hash/section_count；structure 返回 section tree；search 返回 owning section + source/title/snippet/score/location；context/read 从 DocumentRepository 读取规范化正文。
 
 v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location`。
 
@@ -74,7 +75,7 @@ Default persistent state
 
 测试覆盖：
 
-- 5 Tool discovery/调用；
+- 6 Tool discovery/调用；
 - structured DTO；
 - source/location traceability；
 - Text/Markdown/HTML/PDF acceptance matrix；

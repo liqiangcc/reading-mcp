@@ -3,9 +3,8 @@ use std::sync::Arc;
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::read_cursor::{ReadCursorClaims, decode_read_cursor, encode_read_cursor};
 use crate::application::reading_support::{
-    SECTION_TREE_READ_MODE, SECTION_TREE_RENDERING_VERSION,
-    SECTION_TREE_STREAM_COORDINATE_SPACE, content_response_limit, render_section_tree,
-    slice_rendered_stream,
+    SECTION_TREE_READ_MODE, SECTION_TREE_RENDERING_VERSION, SECTION_TREE_STREAM_COORDINATE_SPACE,
+    content_response_limit, render_section_tree, slice_rendered_stream,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, Section, SectionId,

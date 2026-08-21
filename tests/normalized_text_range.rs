@@ -54,11 +54,9 @@ fn normalized_range_preserves_exact_owner_text_without_trimming() {
     };
     let full = NormalizedTextRange::new(0, section.normalized_text_len())
         .expect("full range should be ordered");
-    let empty_at_end = NormalizedTextRange::new(
-        section.normalized_text_len(),
-        section.normalized_text_len(),
-    )
-    .expect("empty terminal range should be valid");
+    let empty_at_end =
+        NormalizedTextRange::new(section.normalized_text_len(), section.normalized_text_len())
+            .expect("empty terminal range should be valid");
 
     assert_eq!(
         section
@@ -99,7 +97,9 @@ fn normalized_hash_ignores_raw_and_legacy_location_provenance() {
     let mut second = first.clone();
     second.source = DocumentSource("file:///another/source.md".into());
     second.content_hash = ContentHash("sha256:different-raw-source".into());
-    second.metadata.insert("parser_note".into(), "changed".into());
+    second
+        .metadata
+        .insert("parser_note".into(), "changed".into());
     second.root_sections[0].location = Location {
         page: Some(99),
         chapter: Some("Different native chapter".into()),

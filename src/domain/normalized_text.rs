@@ -9,8 +9,7 @@ pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v1";
 pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v1";
 pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scalar/v1";
 
-const NORMALIZED_DOCUMENT_HASH_DOMAIN: &[u8] =
-    b"reading-mcp/normalized-document-hash/v1\0";
+const NORMALIZED_DOCUMENT_HASH_DOMAIN: &[u8] = b"reading-mcp/normalized-document-hash/v1\0";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NormalizedDocumentHash(pub String);

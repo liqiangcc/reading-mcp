@@ -3,7 +3,9 @@ use sha2::{Digest, Sha256};
 
 use crate::application::ports::ApplicationError;
 
-pub(crate) const READ_CURSOR_SCHEMA_VERSION: &str = "read-cursor/v1";
+pub(crate) const READ_CURSOR_SCHEMA_VERSION: &str = "read-cursor/v2";
+// The prefix versions the envelope encoding. The v2 schema keeps the same
+// envelope representation but changes the normalized-document hash contract.
 const READ_CURSOR_PREFIX: &str = "rc1.";
 const READ_CURSOR_CHECKSUM_DOMAIN: &[u8] = b"reading-mcp/read-cursor-checksum/v1\0";
 const MAX_READ_CURSOR_CHARS: usize = 16 * 1024;
@@ -179,6 +181,16 @@ mod tests {
         let encoded = encode_read_cursor(expected.clone()).expect("cursor should encode");
         let decoded = decode_read_cursor(&encoded).expect("cursor should decode");
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn previous_normalized_hash_cursor_schema_is_explicitly_stale() {
+        let mut legacy = claims();
+        legacy.schema_version = "read-cursor/v1".into();
+        let encoded = encode_read_cursor(legacy).expect("legacy envelope should encode");
+
+        let error = decode_read_cursor(&encoded).expect_err("old cursor schema must be stale");
+        assert!(matches!(error, ApplicationError::StaleCursor(_)));
     }
 
     #[test]

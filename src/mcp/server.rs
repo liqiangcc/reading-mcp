@@ -7,6 +7,7 @@ use serde_json::json;
 
 use crate::application::get_context::{GetContextCommand, GetContextUseCase};
 use crate::application::get_document_structure::{GetDocumentStructureUseCase, SectionOutline};
+use crate::application::list_documents::{ListDocumentsCommand, ListDocumentsUseCase};
 use crate::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use crate::application::ports::{ApplicationError, RetrievalOptions};
 use crate::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
@@ -16,14 +17,15 @@ use crate::runtime::RuntimeConfig;
 
 use super::contracts::{
     GetContextRequest, GetContextResponse, GetDocumentStructureRequest,
-    GetDocumentStructureResponse, LocationDto, OpenDocumentRequest, OpenDocumentResponse,
-    ReadDocumentRequest, ReadDocumentResponse, SearchDocumentRequest, SearchDocumentResponse,
-    SearchHitDto, SectionNode,
+    GetDocumentStructureResponse, ListDocumentsRequest, ListDocumentsResponse, ListedDocumentDto,
+    LocationDto, OpenDocumentRequest, OpenDocumentResponse, ReadDocumentRequest,
+    ReadDocumentResponse, SearchDocumentRequest, SearchDocumentResponse, SearchHitDto, SectionNode,
 };
 
 #[derive(Clone)]
 pub struct ReadingMcpServer {
     open_document: Arc<OpenDocumentUseCase>,
+    list_documents: Arc<ListDocumentsUseCase>,
     get_structure: Arc<GetDocumentStructureUseCase>,
     search_document: Arc<SearchDocumentUseCase>,
     read_document: Arc<ReadDocumentUseCase>,
@@ -57,6 +59,7 @@ impl ReadingMcpServer {
 
     pub(crate) fn from_use_cases(
         open_document: Arc<OpenDocumentUseCase>,
+        list_documents: Arc<ListDocumentsUseCase>,
         get_structure: Arc<GetDocumentStructureUseCase>,
         search_document: Arc<SearchDocumentUseCase>,
         read_document: Arc<ReadDocumentUseCase>,
@@ -64,6 +67,7 @@ impl ReadingMcpServer {
     ) -> Self {
         Self {
             open_document,
+            list_documents,
             get_structure,
             search_document,
             read_document,
@@ -74,6 +78,36 @@ impl ReadingMcpServer {
 
 #[tool_router]
 impl ReadingMcpServer {
+    #[tool(
+        description = "List readable documents under the explicitly configured local roots without opening them"
+    )]
+    async fn list_documents(
+        &self,
+        Parameters(request): Parameters<ListDocumentsRequest>,
+    ) -> Result<Json<ListDocumentsResponse>, ErrorData> {
+        let documents = self
+            .list_documents
+            .execute(ListDocumentsCommand {
+                path: request.path,
+                recursive: request.recursive,
+                max_results: request.max_results,
+            })
+            .await
+            .map_err(to_mcp_error)?;
+
+        Ok(Json(ListDocumentsResponse {
+            documents: documents
+                .into_iter()
+                .map(|document| ListedDocumentDto {
+                    path: document.path,
+                    name: document.name,
+                    media_type: document.media_type,
+                    size_bytes: document.size_bytes,
+                })
+                .collect(),
+        }))
+    }
+
     #[tool(
         description = "Open a public HTTPS document or an explicitly allowed local file, parse it, cache it, and index it for reading"
     )]

@@ -16,6 +16,7 @@ get_document_structure
 search_document
 get_context
 read_document
+list_documents
 ```
 
 独立格式 Parser：
@@ -68,6 +69,8 @@ Repository  SearchIndex
 Agent 的推荐调用顺序：
 
 ```text
+list_documents（可选，用于发现授权目录中的文档）
+      ↓
 open_document
       ↓
 get_document_structure

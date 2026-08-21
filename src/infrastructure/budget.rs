@@ -25,7 +25,7 @@ pub struct ResourceBudget {
 impl Default for ResourceBudget {
     fn default() -> Self {
         Self {
-            max_document_bytes: 32 * 1024 * 1024,
+            max_document_bytes: 128 * 1024 * 1024,
             max_pdf_pages: 2_000,
             max_archive_entries: 10_000,
             max_archive_entry_bytes: 16 * 1024 * 1024,

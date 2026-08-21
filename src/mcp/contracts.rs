@@ -21,6 +21,37 @@ pub struct OpenDocumentResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListDocumentsRequest {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_recursive")]
+    pub recursive: bool,
+    #[serde(default = "default_list_limit")]
+    pub max_results: usize,
+}
+
+fn default_recursive() -> bool {
+    true
+}
+
+fn default_list_limit() -> usize {
+    100
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListDocumentsResponse {
+    pub documents: Vec<ListedDocumentDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListedDocumentDto {
+    pub path: String,
+    pub name: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct GetDocumentStructureRequest {
     pub document_id: String,
     #[serde(default)]

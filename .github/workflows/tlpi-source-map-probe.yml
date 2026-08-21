@@ -1,34 +1,34 @@
-name: TLPI source map read-only probe
+name: Build Reading MCP source-probe binary
 
 on:
   pull_request:
     branches:
       - main
     paths:
-      - scripts/tlpi_responses_probe.py
       - .github/workflows/tlpi-source-map-probe.yml
 
 permissions:
   contents: read
 
 jobs:
-  probe:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      CONTROL_PLANE_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Call Reading MCP through Responses native tunnel support
-        shell: bash
-        run: python3 scripts/tlpi_responses_probe.py
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Upload sanitized structural evidence
-        if: always()
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the current mainline Reading MCP binary
+        shell: bash
+        run: cargo build --release --locked --bin reading-mcp
+
+      - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: tlpi-source-map-responses-probe
-          path: tlpi-responses-probe.json
+          name: reading-mcp-linux-amd64
+          path: target/release/reading-mcp
           retention-days: 1
           if-no-files-found: error

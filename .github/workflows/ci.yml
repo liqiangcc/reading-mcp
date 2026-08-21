@@ -73,24 +73,17 @@ jobs:
   tlpi-source-map-probe:
     if: github.event_name == 'pull_request' && github.head_ref == 'agent/use-cloud-runner'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       CONTROL_PLANE_API_KEY: ${{ secrets.CONTROL_PLANE_API_KEY }}
-      READING_MCP_PUBLIC_URL: ${{ secrets.READING_MCP_PUBLIC_URL || vars.READING_MCP_PUBLIC_URL }}
-      READING_MCP_URL: ${{ secrets.READING_MCP_URL || vars.READING_MCP_URL }}
-      MCP_SERVER_URL: ${{ secrets.MCP_SERVER_URL || vars.MCP_SERVER_URL }}
-      MCP_URL: ${{ secrets.MCP_URL || vars.MCP_URL }}
-      CPOLAR_URL: ${{ secrets.CPOLAR_URL || vars.CPOLAR_URL }}
-      READING_MCP_BEARER_TOKEN: ${{ secrets.READING_MCP_BEARER_TOKEN }}
-      READING_MCP_TOKEN: ${{ secrets.READING_MCP_TOKEN }}
-      MCP_BEARER_TOKEN: ${{ secrets.MCP_BEARER_TOKEN }}
-      MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TLPI_PROBE_MODEL: gpt-5.6
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Invoke deployed reading-mcp read-only tools
-        run: python3 .github/scripts/tlpi_source_map_probe_v3.py
+      - name: Invoke reading-mcp through the OpenAI product tunnel
+        run: python3 .github/scripts/tlpi_source_map_probe_v4.py
 
       - name: Upload sanitized source result
         if: always()

@@ -8,8 +8,8 @@ pub use normalized_text::{
     NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
 };
 pub use text_unit::{
-    TEXT_SEGMENTATION_VERSION, TEXT_UNIT_ID_VERSION, ParagraphSectionCoverage, ParagraphTextUnitSet,
-    TextUnit, TextUnitId, TextUnitKind,
+    ParagraphSectionCoverage, ParagraphTextUnitSet, TEXT_SEGMENTATION_VERSION,
+    TEXT_UNIT_ID_VERSION, TextUnit, TextUnitId, TextUnitKind,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

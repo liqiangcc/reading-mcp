@@ -22,7 +22,7 @@ get_context
 read_document
 ```
 
-格式扩展不增加格式专属 Tool。
+格式扩展、EPUB reconciliation 和 normalized block persistence 都不增加格式专属 Tool。
 
 ## Precise-reading foundation
 
@@ -32,18 +32,19 @@ read_document
 content_hash
 normalized_document_hash
 normalized-document-hash/v1
-reading-mcp-normalization/v3
+reading-mcp-normalization/v4
 section-content-unicode-scalar/v1
 ```
 
-Normalization version history relevant to EPUB：
+Normalization version history relevant to EPUB/HTML：
 
 ```text
 v2 → navigation-map parser facts added
 v3 → navigation/spine reconciliation can change canonical Section facts
+v4 → normalized-block-model/v1 persisted + inline HTML text normalization correction
 ```
 
-`normalized-document-hash/v1` remains the addressing hash algorithm. Reconciliation changes its value naturally when Section title/parent/level/order facts change; the hash contract itself is not redefined.
+`normalized-document-hash/v1` remains the addressing hash algorithm. Reconciliation changes its value naturally when existing Section facts change. Persisted block metadata does not silently become an input to current hash/TextUnit identity while `text-segmentation/v1` remains active.
 
 Paragraph/Sentence：
 
@@ -54,7 +55,43 @@ Section.content
 → deterministic Sentence ranges / ownership
 ```
 
-Sentence persistence 不是 enumeration/context/read/search correctness dependency。
+Sentence persistence is not enumeration/context/read/search correctness dependency.
+
+## Persisted normalized blocks
+
+HTML/XHTML now also persists:
+
+```text
+normalized-block-model/v1
+```
+
+Current body kinds:
+
+```text
+paragraph
+blockquote
+list_item
+preformatted
+table
+```
+
+Every block carries owner Section, 1-based block index, parser/source order, exact Section-relative normalized range, native anchor/location and `xhtml_native_block` provenance.
+
+Ranges are generated while rendering the exact `Section.content`; block text is never stored as a competing source copy. Heading remains canonical Section structure because heading label text is not in current Section body content.
+
+The flat v1 projection emits maximal non-overlapping selected body blocks so nested `<p>` inside `<blockquote>` etc. does not duplicate source text. Table cells receive semantic separation; inline DOM text is concatenated without adding synthetic spaces before punctuation.
+
+For EPUB, HTML block owner IDs/native locations are remapped through the same spine Section-ID scheme before the final reconciled Document is validated and persisted.
+
+Current identity boundary:
+
+```text
+normalized-block-model/v1 = persisted evidence
+text-segmentation/v1      = current TextUnit identity policy
+normalized-hash/v1        = current source-address hash contract
+```
+
+Block-aware Paragraph/Sentence identity is a future separately versioned migration.
 
 ## TextUnit enumeration
 
@@ -151,17 +188,7 @@ eligible Sentence  → Sentence TextLocator
 
 Title-only Section stays Section-level. Non-prose remains Paragraph-level and does not gain fake Sentence identity.
 
-Tokenizer version is independent of segmentation identity:
-
-```text
-text-segmentation/v1
-→ source TextUnit identity
-
-lexical-tokenizer/v1
-→ lexical projection/rebuild only
-```
-
-SQLite v2 persists candidate kind + canonical TextLocator + tokenizer/index version + source order + encoded lexemes. If lexical state is missing/incompatible but canonical Document exists, `search_document` rebuilds SearchIndex from DocumentRepository without source retrieval/reparse.
+Tokenizer version is independent of segmentation identity. SQLite v2 persists candidate kind + canonical TextLocator + tokenizer/index version + source order + encoded lexemes. Missing/incompatible lexical state can be rebuilt from persisted canonical Document without source retrieval/reparse.
 
 Historical SearchIndex adapters remain compatible through Section-level fallback.
 
@@ -174,11 +201,9 @@ search_document
         └→ get_context(target_locator, relation)
 ```
 
-SearchDocumentUseCase revalidates source, tokenizer version, candidate kind and locator identity against canonical Document before returning a precise hit。
+SearchDocumentUseCase revalidates candidate identity against canonical Document before returning a precise hit.
 
 ## EPUB navigation + structure foundation
-
-EPUB parsing now has two explicit stages:
 
 ```text
 EPUB package / manifest
@@ -194,19 +219,22 @@ spine-authoritative source order
 + spine-item fallback
 → epub-structure-reconciliation/v1
 → canonical Section tree
+        ↓
+HTML/XHTML native body blocks
+→ normalized-block-model/v1 exact ranges
 ```
 
-Reconciliation rules:
+Reconciliation rules remain:
 
-- only navigation targets that map to a real canonical Section boundary may override Section title/parentage;
+- only navigation targets that map to real canonical Section boundaries may override title/parentage;
 - non-heading DOM fragments do not fabricate Sections;
 - navigation order never reverses canonical sibling/root order against the spine;
 - multiple TOC aliases never duplicate canonical text;
 - `linear=no` supported XHTML remains addressable and is tagged auxiliary;
-- effective structural provenance is `epub_nav | epub_ncx | xhtml_heading | spine_item`;
-- missing/unsupported spine entries remain visible in structure facts instead of disappearing from the publication plane.
+- structural provenance remains explicit;
+- missing/unsupported spine entries remain visible facts.
 
-The next EPUB increment is the persisted normalized XHTML block model. Full EPUB validator/coverage remains later.
+The next EPUB increment is `feat/epub-structure-validator`, which can now validate stable package/navigation/reconciliation/block facts and produce coverage evidence.
 
 ## Default persistent state
 
@@ -214,30 +242,36 @@ The next EPUB increment is the persisted normalized XHTML block model. Full EPUB
 File Raw Cache
 File Parsed Cache
 SQLite DocumentRepository
+  └── includes reserved normalized-block-model/v1 metadata
 SQLite Paragraph TextUnitIndex
 SQLite lexical-search-index/v2
 ```
 
+No dedicated SQLite block table is required in v1 because the full canonical block map is serialized with persisted Document metadata and revalidated after repository reopen.
+
 ## 真实 stdio / release acceptance
 
-测试启动真正的 `reading-mcp` 子进程并覆盖：
+测试覆盖：
 
 - 7 Tool discovery；
 - raw/normalized identity；
 - TextUnit deterministic rebuild / cursor continuation；
 - non-prose/eligible-only coverage；
 - locator-driven context；
-- exact read + continuation + truthful returned ranges；
+- exact read + truthful returned ranges；
 - SearchHit Section/Paragraph/Sentence locator handoff；
-- Sentence SearchHit → exact read/context；
 - CJK/technical lexical retrieval；
 - SQLite lexical reopen/rebuild；
-- historical SearchIndex adapter fallback；
 - EPUB nav/NCX resolution/degradation；
-- EPUB nav→canonical Section title/parent reconciliation；
-- spine-order conflict handling；
+- EPUB canonical reconciliation and spine-order conflict handling；
 - `linear=no` preservation；
 - non-heading-fragment no-fabrication；
+- normalized body-block kind/exact range generation；
+- inline punctuation and table text normalization；
+- nested-block de-duplication；
+- normalized block SQLite reopen persistence；
+- EPUB block owner/native-location remap；
+- current Paragraph IDs/hash unchanged for block-metadata-only removal；
 - normalization-version Parsed Cache invalidation；
 - cursor/locator malformed/stale fail closed；
 - telemetry stderr only and no query/body content logging。
@@ -260,6 +294,8 @@ cursor offset → source identity
 snippet/score/index row → source identity
 lexical token → TextLocator identity
 publisher navigation order → implicit spine source reorder
+transient DOM block boundary → silent TextUnit identity change
+normalized block text copy → second source of truth
 ```
 
 ## v0.1 非目标

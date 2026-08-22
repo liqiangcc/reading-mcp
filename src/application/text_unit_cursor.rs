@@ -21,6 +21,8 @@ pub(crate) struct TextUnitCursorClaims {
     pub coverage_policy: String,
     pub next_index: usize,
     pub total_items: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_anchor_index: Option<usize>,
 }
 
 impl TextUnitCursorClaims {
@@ -49,7 +51,13 @@ impl TextUnitCursorClaims {
             coverage_policy: coverage_policy.into(),
             next_index,
             total_items,
+            origin_anchor_index: None,
         }
+    }
+
+    pub(crate) fn with_origin_anchor_index(mut self, origin_anchor_index: Option<usize>) -> Self {
+        self.origin_anchor_index = origin_anchor_index;
+        self
     }
 }
 
@@ -192,6 +200,16 @@ mod tests {
     #[test]
     fn cursor_round_trip_preserves_stream_bindings() {
         let expected = claims();
+        let encoded = encode_text_unit_cursor(expected.clone()).expect("cursor should encode");
+        assert_eq!(
+            decode_text_unit_cursor(&encoded).expect("cursor should decode"),
+            expected
+        );
+    }
+
+    #[test]
+    fn anchored_cursor_round_trip_preserves_origin_without_bumping_schema() {
+        let expected = claims().with_origin_anchor_index(Some(4));
         let encoded = encode_text_unit_cursor(expected.clone()).expect("cursor should encode");
         assert_eq!(
             decode_text_unit_cursor(&encoded).expect("cursor should decode"),

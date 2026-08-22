@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::locator_resolution::resolve_text_locator;
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::text_unit_cursor::{
     TextUnitCursorClaims, decode_text_unit_cursor, encode_text_unit_cursor,
@@ -142,6 +143,7 @@ pub struct TextUnitStreamSegment {
 pub struct GetTextUnitsResult {
     pub document_id: DocumentId,
     pub target_section_locator: TextLocator,
+    pub start_anchor_locator: Option<TextLocator>,
     pub requested_kind: RequestedTextUnitKind,
     pub direction: TextUnitDirection,
     pub coverage_policy: TextUnitCoveragePolicy,
@@ -165,6 +167,28 @@ impl GetTextUnitsUseCase {
     pub async fn execute(
         &self,
         command: GetTextUnitsCommand,
+    ) -> Result<GetTextUnitsResult, ApplicationError> {
+        self.execute_internal(command, None).await
+    }
+
+    pub async fn execute_from_anchor(
+        &self,
+        command: GetTextUnitsCommand,
+        anchor_locator: TextLocator,
+    ) -> Result<GetTextUnitsResult, ApplicationError> {
+        if command.cursor.is_some() {
+            return Err(ApplicationError::InvalidRequest(
+                "get_text_units anchor_locator cannot be combined with cursor; continue an anchored traversal with cursor alone"
+                    .into(),
+            ));
+        }
+        self.execute_internal(command, Some(anchor_locator)).await
+    }
+
+    async fn execute_internal(
+        &self,
+        command: GetTextUnitsCommand,
+        anchor_locator: Option<TextLocator>,
     ) -> Result<GetTextUnitsResult, ApplicationError> {
         validate_budget(command.max_items, command.max_chars)?;
 
@@ -209,6 +233,23 @@ impl GetTextUnitsUseCase {
             command.coverage_policy,
         )?;
         let total_items = stream_items.len();
+
+        let origin_anchor_index = if let Some(claims) = &cursor_claims {
+            validate_cursor_origin_anchor(claims.origin_anchor_index, total_items)?;
+            claims.origin_anchor_index
+        } else if let Some(anchor_locator) = anchor_locator.as_ref() {
+            Some(resolve_anchor_index(
+                &document,
+                section,
+                &stream_items,
+                anchor_locator,
+                command.requested_kind,
+                command.coverage_policy,
+            )?)
+        } else {
+            None
+        };
+
         let position = if let Some(claims) = &cursor_claims {
             if claims.total_items != total_items {
                 return Err(ApplicationError::StaleCursor(format!(
@@ -217,7 +258,17 @@ impl GetTextUnitsUseCase {
                 )));
             }
             validate_cursor_position(claims.next_index, total_items, command.direction)?;
+            validate_anchored_cursor_position(
+                claims.next_index,
+                claims.origin_anchor_index,
+                command.direction,
+            )?;
             claims.next_index
+        } else if let Some(anchor_index) = origin_anchor_index {
+            match command.direction {
+                TextUnitDirection::Forward => anchor_index + 1,
+                TextUnitDirection::Backward => anchor_index,
+            }
         } else {
             match command.direction {
                 TextUnitDirection::Forward => 0,
@@ -235,24 +286,32 @@ impl GetTextUnitsUseCase {
         let next_cursor = if page.complete {
             None
         } else {
-            Some(encode_text_unit_cursor(TextUnitCursorClaims::new(
-                document.id.0.clone(),
-                document.content_hash.0.clone(),
-                normalized_hash.0.clone(),
-                section.id.0.clone(),
-                TEXT_SEGMENTATION_VERSION,
-                command.requested_kind.as_str(),
-                command.direction.as_str(),
-                command.coverage_policy.as_str(),
-                page.next_index,
-                total_items,
-            ))?)
+            Some(encode_text_unit_cursor(
+                TextUnitCursorClaims::new(
+                    document.id.0.clone(),
+                    document.content_hash.0.clone(),
+                    normalized_hash.0.clone(),
+                    section.id.0.clone(),
+                    TEXT_SEGMENTATION_VERSION,
+                    command.requested_kind.as_str(),
+                    command.direction.as_str(),
+                    command.coverage_policy.as_str(),
+                    page.next_index,
+                    total_items,
+                )
+                .with_origin_anchor_index(origin_anchor_index),
+            )?)
         };
-        let section_complete = page.complete && coverage.source_complete;
+        let section_complete =
+            page.complete && coverage.source_complete && origin_anchor_index.is_none();
+        let start_anchor_locator = origin_anchor_index
+            .and_then(|index| stream_items.get(index))
+            .map(|item| item.locator.clone());
 
         Ok(GetTextUnitsResult {
             document_id: document.id.clone(),
             target_section_locator: TextLocator::for_section(&document, section),
+            start_anchor_locator,
             requested_kind: command.requested_kind,
             direction: command.direction,
             coverage_policy: command.coverage_policy,
@@ -330,6 +389,39 @@ fn validate_cursor_scope(
     Ok(())
 }
 
+fn validate_cursor_origin_anchor(
+    origin_anchor_index: Option<usize>,
+    total_items: usize,
+) -> Result<(), ApplicationError> {
+    if origin_anchor_index.is_some_and(|index| index >= total_items) {
+        return Err(ApplicationError::InvalidCursor(format!(
+            "text-unit cursor origin anchor is outside the current {total_items}-item stream"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_anchored_cursor_position(
+    next_index: usize,
+    origin_anchor_index: Option<usize>,
+    direction: TextUnitDirection,
+) -> Result<(), ApplicationError> {
+    let Some(anchor_index) = origin_anchor_index else {
+        return Ok(());
+    };
+    let valid = match direction {
+        TextUnitDirection::Forward => next_index > anchor_index,
+        TextUnitDirection::Backward => next_index <= anchor_index,
+    };
+    if !valid {
+        return Err(ApplicationError::InvalidCursor(format!(
+            "text-unit cursor position {next_index} crosses its origin anchor {anchor_index} in {} direction",
+            direction.as_str()
+        )));
+    }
+    Ok(())
+}
+
 fn validate_cursor_position(
     next_index: usize,
     total_items: usize,
@@ -346,6 +438,34 @@ fn validate_cursor_position(
         )));
     }
     Ok(())
+}
+
+fn resolve_anchor_index(
+    document: &Document,
+    section: &Section,
+    stream_items: &[TextUnitReadingItem],
+    anchor_locator: &TextLocator,
+    requested_kind: RequestedTextUnitKind,
+    coverage_policy: TextUnitCoveragePolicy,
+) -> Result<usize, ApplicationError> {
+    let resolved = resolve_text_locator(document, anchor_locator)?;
+    if resolved.locator.owner_section_id != section.id {
+        return Err(ApplicationError::InvalidRequest(format!(
+            "get_text_units anchor belongs to section {}, requested section is {}",
+            resolved.locator.owner_section_id.0, section.id.0
+        )));
+    }
+    stream_items
+        .iter()
+        .position(|item| item.locator == resolved.locator)
+        .ok_or_else(|| {
+            ApplicationError::InvalidRequest(format!(
+                "{} anchor is not part of the declared {} / {} TextUnit stream",
+                resolved.kind.as_str(),
+                requested_kind.as_str(),
+                coverage_policy.as_str()
+            ))
+        })
 }
 
 fn build_declared_stream(

@@ -1,46 +1,36 @@
 # TextUnit Enumeration Contract
 
-> Status: Implemented P1 enumeration foundation
+> Status: Implemented precise enumeration with anchor continuation
 >
-> Branch: `feat/text-unit-enumeration-contract`
+> Foundation branch: `feat/text-unit-enumeration-contract`
 >
-> Related: `docs/tool-contract-use-case-design.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/paragraph-text-unit-index.md`, `docs/sentence-locator-contract.md`
+> Current anchor extension: `feat/text-unit-anchor-enumeration`
+>
+> Related: `docs/tool-contract-use-case-design.md`, `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/paragraph-text-unit-index.md`, `docs/sentence-locator-contract.md`, `docs/context-granularity-contract.md`
 
 ## 1. Goal
 
-This increment realizes the use-case-approved `OrderedTextUnitEnumeration` capability as the seventh runtime MCP Tool:
-
-```text
-get_text_units
-```
-
-It answers a different question from `read_document`:
+`get_text_units` is the ordered discovery/continuation capability for canonical Paragraph/Sentence reading items.
 
 ```text
 read_document
-= read an already-known target / continue one read stream
+= read an already-known exact target / continue one exact read
 
-get_text_units
-= discover and enumerate first/next Paragraph or Sentence-first reading items
-```
-
-The runtime Tool surface is now:
-
-```text
-list_documents
-open_document
-get_document_structure
-get_text_units
-search_document
 get_context
-read_document
+= bounded expansion around one known target
+
+get_text_units
+= enumerate a Section stream from a boundary or continue before/after one known TextLocator
 ```
 
-## 2. Current v1 request
+Runtime Tool count remains seven.
+
+## 2. Current request
 
 ```text
 document_id
 section_id
+anchor_locator?                             # initial anchored start only
 requested_kind: paragraph | sentence       # default sentence
 direction: forward | backward              # default forward
 coverage_policy: preserve_source | eligible_only
@@ -49,144 +39,156 @@ max_chars?                                  # default 32768, max 65536
 cursor?
 ```
 
-The initial runtime starts from the selected Section boundary. Cursor continuation is implemented in both directions.
+`anchor_locator` and `cursor` are mutually exclusive.
 
-The accepted design also allows future anchor starts such as `after(locator)` / `before(locator)`. Those are intentionally deferred until locator-input/context handoff is implemented; they are not required for the core complete-Section state machine.
+A continuation request uses the returned cursor alone; it does not repeat the anchor.
 
-A cursor request may change page budgets (`max_items` / `max_chars`) but cannot redefine document, Section, requested kind, direction, coverage policy, or segmentation semantics.
+## 3. Section scope
 
-## 3. Target scope
-
-`section_id` owns exactly one Section's `Section.content` stream.
+The declared stream belongs to exactly one `section_id`:
 
 ```text
 get_text_units(section=A)
-→ A's Paragraph/Sentence units only
+→ A's Paragraph/Sentence-first items only
 ```
 
-It does not recursively include child Sections. Structural traversal remains the responsibility of `get_document_structure` and the Agent's selected workflow.
+Child Sections are not absorbed implicitly. Structural traversal remains a separate capability.
 
-This avoids conflating:
+An anchor must resolve to the same owner Section as `section_id`.
+
+## 4. Current TextUnit identity
+
+Current identity inputs:
 
 ```text
-Section tree traversal
-≠
-TextUnit enumeration inside one Section
+normalized-document-hash/v2
++ text-segmentation/v2
++ optional valid normalized-block-model/v1 evidence
 ```
 
-## 4. TextLocator output
-
-Enumeration introduces the canonical `TextLocator` domain/wire output foundation:
-
-```text
-TextLocator
-├── document_id
-├── content_hash                    # raw-source provenance
-├── normalized_document_hash
-├── owner_section_id
-├── section_path
-├── paragraph_index?
-├── sentence_index?
-├── normalized_range?
-├── segmentation_version?
-└── native_location?
-```
+Every precise item contains the canonical current `TextLocator`.
 
 Paragraph/Sentence ranges use:
 
 ```text
 section-content-unicode-scalar/v1
 zero-based
-half-open [start, end)
+half-open [start,end)
 ```
 
-For every precise item:
+Invariant:
 
 ```text
 item.text
-==
-owner_section.normalized_text_slice(item.locator.normalized_range)
+== owner_section.normalized_text_slice(item.locator.normalized_range)
 ```
 
-The locator is source identity. It is not a cursor and does not contain pagination progress.
-
-The current increment emits locators but does not yet accept them as `read_document` / `get_context` input; direct locator handoff is a later short-lived increment.
+No snippet search, nearest-text match, ordinal repair, or fuzzy rebasing participates in enumeration.
 
 ## 5. Declared stream
 
 ### Paragraph request
 
+The stream contains current Paragraph-level reading units in exact Section source order.
+
+Under block-aware v2 this can include:
+
 ```text
-Section
-  ↓
-¶1
-  ↓
-¶2
-  ↓
-...
-  ↓
-¶N
+native paragraph
+coarse blockquote
+coarse list_item
+coarse preformatted
+table
+fallback Paragraph
 ```
+
+`eligible_only` may remove coarse Paragraphs according to the current eligibility policy.
 
 ### Sentence request with `preserve_source`
 
-```text
-Section
-  ↓
-¶1 S1
-  ↓
-¶1 S2
-  ↓
-...
-  ↓
-recognized non-prose ¶ as coarse Paragraph item
-  ↓
-...
-  ↓
-¶N SM
-```
-
-A Sentence request never invents Sentence identity for code/table content. Strong non-prose Paragraphs use:
+The declared stream interleaves:
 
 ```text
-effective_kind = paragraph
-content_class = non_prose
-degradation = requested_sentence_but_non_prose_is_paragraph_only
+eligible Sentence items
++ coarse Paragraph items where Sentence identity is not justified
 ```
 
-## 6. Coverage policies
+Current coarse behavior:
+
+```text
+blockquote / list_item
+→ effective_kind = paragraph
+→ flat_native_container_no_nested_textunit_evidence
+
+preformatted / table / fallback code-table
+→ effective_kind = paragraph
+→ requested_sentence_but_non_prose_is_paragraph_only
+```
+
+No fake Sentence identity is generated.
+
+## 6. Anchor semantics
+
+An `anchor_locator` is a canonical source address and is validated through the shared TextLocator resolver used by read/context.
+
+The resolved locator must also be an **actual member of the requested declared stream**.
+
+This means stream policy matters:
+
+```text
+Paragraph anchor + requested_kind=paragraph
+→ valid when that Paragraph is present
+
+Sentence anchor + requested_kind=sentence
+→ valid when that Sentence is present
+
+coarse Paragraph anchor + sentence/preserve_source
+→ valid because the coarse Paragraph is a real declared stream item
+
+coarse Paragraph anchor + sentence/eligible_only
+→ invalid request because that item is intentionally absent from the declared stream
+
+Section / CharacterRange locator
+→ valid locator kinds elsewhere, but not TextUnit stream anchors
+```
+
+The anchor is **exclusive**:
+
+```text
+direction = forward
+→ enumerate strictly after anchor
+
+direction = backward
+→ enumerate strictly before anchor
+```
+
+Backward pages are still returned in canonical source order.
+
+## 7. Anchor identity failures
+
+Anchor validation distinguishes locator identity failure from stream-membership mismatch:
+
+```text
+malformed locator        → INVALID_LOCATOR
+stale hash/version/range → STALE_LOCATOR
+wrong owner Section      → INVALID_REQUEST
+valid locator not in requested declared stream
+                         → INVALID_REQUEST
+```
+
+A historical `text-segmentation/v1` TextLocator is never reinterpreted against the current v2 stream.
+
+## 8. Coverage policies
 
 ### `preserve_source`
 
-Default complete-reading policy.
-
-Recognized non-prose remains in the declared stream as a coarse Paragraph item. A terminal response may claim:
-
-```text
-complete = true
-source_complete = true
-section_complete = true
-```
-
-only when the declared stream is exhausted and there are no intentionally skipped regions/unsupported gaps.
+The full declared Section stream preserves every represented coarse/fine region.
 
 ### `eligible_only`
 
-This policy intentionally narrows the stream to eligible fine-grained content.
+The stream intentionally omits coarse regions and therefore never claims all-source completion.
 
-Even when a particular Section happens to contain only prose, `eligible_only` does **not** claim all-source completion by contract:
-
-```text
-complete = true             # eligible stream consumed
-source_complete = false     # all-source guarantee not provided
-section_complete = false
-```
-
-When recognized non-prose exists, `intentionally_skipped` reports the number of skipped coarse Paragraph regions.
-
-## 7. Coverage result
-
-Current factual coverage:
+Current coverage includes:
 
 ```text
 owner_chars
@@ -195,178 +197,143 @@ sentence_separator_chars
 paragraph_count
 sentence_eligible_paragraphs
 non_prose_paragraphs
+coarse_structural_paragraphs
 represented_paragraphs
 represented_sentences
 coarse_non_prose_items
+coarse_structural_items
 intentionally_skipped
 unsupported_gaps
 source_complete
 ```
 
-Coverage describes the full declared Section stream, while `stream.start_index/end_index` describes only the current response page.
+Coverage describes the whole declared Section policy, not only the current page or anchored suffix/prefix.
 
-`unsupported_gaps` is currently zero for the canonical normalized Section stream implemented here. Publication/resource coverage gaps remain a separate parser/reliability concern.
+## 9. Cursor semantics
 
-## 8. TextUnitCursor
-
-Current schema:
+Current schema remains:
 
 ```text
 text-unit-cursor/v1
 ```
 
-Cursor claims bind:
+Existing claims bind:
 
 ```text
 document_id
 raw content_hash
 normalized_document_hash
 section_id
-text-segmentation/v1
+text-segmentation/v2
 requested_kind
 direction
 coverage_policy
 next_index
 total_items
-cursor schema version
 ```
 
-The cursor uses the same versioned opaque-envelope pattern as `ReadCursor`, with bounded encoding and checksum validation.
+Anchor continuation adds one backward-compatible optional claim:
 
-Rules:
+```text
+origin_anchor_index?
+```
 
+When absent, it is omitted from serialized JSON. Therefore previously issued unanchored `text-unit-cursor/v1` payloads retain their original serialized claim bytes/checksum behavior and remain decodable.
+
+When present, the cursor proves that traversal originated from an internal anchor and preserves that fact across later pages.
+
+Cursor rules remain fail-closed:
+
+- changed raw/normalized identity → `STALE_CURSOR`;
+- changed segmentation version → `STALE_CURSOR`;
 - wrong document/Section/kind/direction/policy → `CURSOR_TARGET_MISMATCH`;
-- changed raw/normalized identity or segmentation contract → stale/fail closed;
-- invalid/tampered/terminal position → invalid cursor;
-- no fuzzy rebasing;
-- cursor is never citation identity.
+- impossible/tampered position or anchor origin → `INVALID_CURSOR`;
+- no fuzzy rebasing.
 
-## 9. Pagination invariants
+## 10. Completion semantics
 
-For forward pages:
+`complete` means the **requested traversal** is exhausted.
+
+For a boundary-origin traversal:
 
 ```text
-page[n].end_index == page[n+1].start_index
+complete + preserve_source
+→ section_complete may become true
 ```
 
-For backward continuation:
+For an anchor-origin traversal:
 
 ```text
-page[n+1].end_index == page[n].start_index
-```
-
-Each individual response always returns its items in canonical source order, including backward traversal.
-
-Every incomplete response has `next_cursor`.
-
-Terminal response:
-
-```text
-complete = true
-next_cursor = null
-```
-
-Repeated pages consume the declared stream without gap or overlap when the returned cursor is used as-is.
-
-## 10. Response budgets
-
-Server limits:
-
-```text
-max_items default = 32
-max_items max     = 256
-
-max_chars default = 32768
-max_chars max     = 65536
-```
-
-`max_chars` budgets canonical item text. One TextUnit is atomic for enumeration:
-
-```text
-one item > max_chars
-→ RESOURCE_LIMIT_EXCEEDED
-```
-
-The implementation does not split a Sentence/Paragraph and then pretend the fragment is the same TextUnit locator.
-
-Continuation may choose a different page budget without changing stream identity.
-
-## 11. Sentence persistence decision
-
-Sentence rows are not added to SQLite in this increment.
-
-Correctness evidence shows the enumeration stream can be rebuilt from:
-
-```text
-persisted canonical Document
-+ deterministic Paragraph segmentation
-+ deterministic Sentence segmentation
-+ text-segmentation/v1
-```
-
-and `TextUnitCursor` successfully continues after `SqliteDocumentRepository` reopen without Sentence persistence.
-
-Therefore:
-
-```text
-Sentence persistence = performance optimization candidate
-not source truth
-not current correctness dependency
-```
-
-The existing Paragraph `TextUnitIndex` remains available as independent derived state. SearchIndex/FTS remains unchanged.
-
-A future Sentence persistence migration requires measured performance evidence and must remain rebuildable.
-
-## 12. MCP response
-
-Conceptual shape:
-
-```text
-document_id
-target_section_locator
-requested_kind
-direction
-coverage_policy
-items[]:
-  text
-  locator
-  effective_kind
-  content_class
-  content_class_detail
-  degradation?
 complete
+= reached the requested directional Section boundary
+
 section_complete
-next_cursor?
-coverage
-stream:
-  direction
-  start_index
-  end_index
-  total_items
+= false
 ```
 
-This is additive relative to the previous six-Tool runtime.
+The latter is intentional: an exclusive anchor traversal did not enumerate the anchor itself or the opposite side of the Section, so it must not claim full-Section completion.
+
+`start_anchor_locator` in the response is populated for every anchored page, including cursor continuation pages, so the origin remains auditable.
+
+## 11. Pagination
+
+The stream indexes remain indexes in the complete declared Section stream.
+
+Forward:
+
+```text
+anchor index = A
+initial position = A + 1
+```
+
+Backward:
+
+```text
+anchor index = A
+initial exclusive end = A
+```
+
+Continuation invariants remain:
+
+```text
+forward page[n].end_index == page[n+1].start_index
+backward page[n+1].end_index == page[n].start_index
+```
+
+Every response page is source ordered and one TextUnit remains atomic under `max_chars`.
+
+## 12. MCP handoff
+
+The same locator can now flow through all precise-reading capabilities:
+
+```text
+get_text_units ──┐
+search_document ─┼→ TextLocator ─┬→ read_document
+                 │               ├→ get_context
+                 └───────────────└→ get_text_units(anchor_locator)
+```
+
+This removes the previous requirement to restart enumeration from a Section boundary after search/context/read has already identified an exact TextUnit.
+
+No new Tool is introduced.
 
 ## 13. Acceptance evidence
 
 Tests cover:
 
-- seven-Tool MCP discovery;
-- real stdio Sentence enumeration and cursor continuation;
-- forward gap-free/overlap-free pages;
-- backward traversal with source-ordered response pages;
-- exact Paragraph/Sentence locators;
-- Section scope does not absorb child Sections;
-- source-preserving non-prose coarse items;
-- eligible-only no all-source completion claim;
-- raw/normalized stale cursor validation;
-- cursor stream-contract mismatch;
-- bounded response behavior without TextUnit splitting;
-- repository restart continuation without Sentence persistence;
-- existing Search/Context/Read contracts remain operational.
+- forward exclusive anchor start;
+- backward exclusive anchor start with source-ordered pages;
+- anchored cursor continuation preserving origin;
+- anchored terminal response never falsely claiming `section_complete`;
+- anchor + cursor mutual exclusion;
+- shared stale locator validation;
+- valid locator rejected when absent from requested declared stream;
+- existing forward/backward boundary pagination unchanged;
+- old cursor behavior remains compatible when no origin anchor claim exists;
+- real stdio `get_text_units → TextLocator → get_text_units(anchor_locator)` handoff;
+- runtime Tool count remains seven.
 
-Release gate:
+Release gate remains:
 
 ```text
 cargo fmt --all -- --check
@@ -374,18 +341,16 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-## 14. Explicit non-goals / next steps
-
-Not implemented here:
+## 14. Explicit non-goals
 
 ```text
-anchor-based before/after TextUnit start
-TextLocator input to read_document
-Paragraph/Sentence context relations
-SearchHit → TextLocator
-Paragraph/Sentence FTS
+cross-Section TextUnit traversal
+inclusive anchor mode
+CharacterRange anchor enumeration
+fuzzy anchor relocation
+caller-selected historical segmentation
 Sentence SQLite persistence
-EPUB block/structure redesign
+new MCP Tool
 ```
 
-The next dependency step is `feat/context-granularity`: consume TextLocator as an anchor and implement explicit tagged neighbor/container/structural context without changing enumeration cursor semantics.
+Cross-Section reading should remain an explicit composition of `get_document_structure` plus per-Section TextUnit enumeration rather than silently changing one Section-scoped stream into a document traversal API.

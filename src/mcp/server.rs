@@ -187,30 +187,51 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Enumerate bounded Paragraph or Sentence-first reading items in one section with deterministic source-order continuation"
+        description = "Enumerate bounded Paragraph or Sentence-first reading items in one section from the section boundary or exclusively after/before a precise anchor, with deterministic cursor continuation"
     )]
     async fn get_text_units(
         &self,
         Parameters(request): Parameters<GetTextUnitsRequest>,
     ) -> Result<Json<GetTextUnitsResponse>, ErrorData> {
-        let result = self
-            .get_text_units
-            .execute(GetTextUnitsCommand {
-                document_id: DocumentId(request.document_id),
-                section_id: SectionId(request.section_id),
-                requested_kind: requested_kind(request.requested_kind),
-                direction: text_unit_direction(request.direction),
-                coverage_policy: coverage_policy(request.coverage_policy),
-                max_items: request.max_items,
-                max_chars: request.max_chars,
-                cursor: request.cursor,
-            })
-            .await
-            .map_err(to_mcp_error)?;
+        let GetTextUnitsRequest {
+            document_id,
+            section_id,
+            anchor_locator,
+            requested_kind: requested_kind_value,
+            direction,
+            coverage_policy: requested_coverage_policy,
+            max_items,
+            max_chars,
+            cursor,
+        } = request;
+        let command = GetTextUnitsCommand {
+            document_id: DocumentId(document_id),
+            section_id: SectionId(section_id),
+            requested_kind: requested_kind(requested_kind_value),
+            direction: text_unit_direction(direction),
+            coverage_policy: coverage_policy(requested_coverage_policy),
+            max_items,
+            max_chars,
+            cursor,
+        };
+
+        let result = match anchor_locator {
+            Some(locator) => {
+                self.get_text_units
+                    .execute_from_anchor(
+                        command,
+                        text_locator_from_dto(locator).map_err(to_mcp_error)?,
+                    )
+                    .await
+            }
+            None => self.get_text_units.execute(command).await,
+        }
+        .map_err(to_mcp_error)?;
 
         Ok(Json(GetTextUnitsResponse {
             document_id: result.document_id.0,
             target_section_locator: text_locator_dto(&result.target_section_locator),
+            start_anchor_locator: result.start_anchor_locator.as_ref().map(text_locator_dto),
             requested_kind: requested_kind_dto(result.requested_kind),
             direction: text_unit_direction_dto(result.direction),
             coverage_policy: coverage_policy_dto(result.coverage_policy),

@@ -317,9 +317,7 @@ fn build_zip(entries: Vec<(&str, String)>) -> Vec<u8> {
     let options = SimpleFileOptions::default();
     for (name, content) in entries {
         writer.start_file(name, options).expect("ZIP entry");
-        writer
-            .write_all(content.as_bytes())
-            .expect("ZIP content");
+        writer.write_all(content.as_bytes()).expect("ZIP content");
     }
     writer.finish().expect("ZIP finish").into_inner()
 }

@@ -271,10 +271,90 @@ pub struct ReadStreamSegmentDto {
     pub total_chars: usize,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextUnitDto {
+    Section,
+    Paragraph,
+    Sentence,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextContainerKindDto {
+    Paragraph,
+    Section,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralContextKindDto {
+    OwnerSection,
+    Ancestors,
+    Siblings,
+    Children,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContextRelationDto {
+    Neighbor {
+        unit: ContextUnitDto,
+        #[serde(default = "default_context_window")]
+        before: usize,
+        #[serde(default = "default_context_window")]
+        after: usize,
+    },
+    Container {
+        kind: ContextContainerKindDto,
+    },
+    Structural {
+        kind: StructuralContextKindDto,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextItemRoleDto {
+    Before,
+    Anchor,
+    After,
+    Container,
+    Structural,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextItemKindDto {
+    Section,
+    Paragraph,
+    Sentence,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ContextItemDto {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    pub locator: TextLocatorDto,
+    pub role: ContextItemRoleDto,
+    pub effective_kind: ContextItemKindDto,
+    #[serde(default)]
+    pub content_class: Option<String>,
+    #[serde(default)]
+    pub degradation: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct GetContextRequest {
     pub document_id: String,
-    pub section_id: String,
+    #[serde(default)]
+    pub section_id: Option<String>,
+    #[serde(default)]
+    pub target_locator: Option<TextLocatorDto>,
+    #[serde(default)]
+    pub relation: Option<ContextRelationDto>,
     #[serde(default = "default_context_window")]
     pub before: usize,
     #[serde(default = "default_context_window")]
@@ -295,6 +375,10 @@ pub struct GetContextResponse {
     pub content: String,
     pub location: LocationDto,
     pub truncated: bool,
+    pub complete: bool,
+    pub anchor_locator: TextLocatorDto,
+    pub relation: ContextRelationDto,
+    pub items: Vec<ContextItemDto>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -97,10 +97,12 @@ impl SearchIndex for SqliteSearchIndex {
                 .map_err(index_error)?;
 
             for candidate in candidates {
-                let location_json = serde_json::to_string(&StoredLocation::from(&candidate.location))
-                    .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
-                let locator_json = serde_json::to_string(&StoredTextLocator::from(&candidate.text_locator))
-                    .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
+                let location_json =
+                    serde_json::to_string(&StoredLocation::from(&candidate.location))
+                        .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
+                let locator_json =
+                    serde_json::to_string(&StoredTextLocator::from(&candidate.text_locator))
+                        .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
                 statement
                     .execute(params![
                         &document.id.0,
@@ -213,24 +215,27 @@ impl SearchIndex for SqliteSearchIndex {
                     bm25(lexical_search_units_v2)
                  FROM lexical_search_units_v2
                  WHERE lexical_search_units_v2 MATCH ?1 AND document_id = ?2
-                 ORDER BY bm25(lexical_search_units_v2) ASC, source_order ASC
+                 ORDER BY bm25(lexical_search_units_v2) ASC, CAST(source_order AS INTEGER) ASC
                  LIMIT ?3",
             )
             .map_err(index_error)?;
         let rows = statement
-            .query_map(params![fts_query, &document_id.0, usize_to_i64(limit)?], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, f64>(8)?,
-                ))
-            })
+            .query_map(
+                params![fts_query, &document_id.0, usize_to_i64(limit)?],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, f64>(8)?,
+                    ))
+                },
+            )
             .map_err(index_error)?;
 
         let mut hits = Vec::new();
@@ -311,7 +316,11 @@ fn ensure_schema(connection: &Connection) -> Result<(), ApplicationError> {
         .map_err(index_error)?;
 
     set_meta(connection, META_INDEX_VERSION, LEXICAL_SEARCH_INDEX_VERSION)?;
-    set_meta(connection, META_TOKENIZER_VERSION, LEXICAL_TOKENIZER_VERSION)?;
+    set_meta(
+        connection,
+        META_TOKENIZER_VERSION,
+        LEXICAL_TOKENIZER_VERSION,
+    )?;
     Ok(())
 }
 
@@ -441,11 +450,11 @@ impl TryFrom<StoredTextLocator> for TextLocator {
     fn try_from(value: StoredTextLocator) -> Result<Self, Self::Error> {
         let normalized_range = match (value.range_start, value.range_end) {
             (None, None) => None,
-            (Some(start), Some(end)) => Some(
-                NormalizedTextRange::new(start, end).map_err(|error| {
+            (Some(start), Some(end)) => {
+                Some(NormalizedTextRange::new(start, end).map_err(|error| {
                     ApplicationError::IndexFailed(format!("invalid stored locator range: {error}"))
-                })?,
-            ),
+                })?)
+            }
             _ => {
                 return Err(ApplicationError::IndexFailed(
                     "stored locator has incomplete normalized range".into(),

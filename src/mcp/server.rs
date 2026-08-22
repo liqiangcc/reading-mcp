@@ -23,8 +23,8 @@ use crate::application::read_document::{
 };
 use crate::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
 use crate::domain::{
-    ContentHash, DocumentId, DocumentSource, Location, NormalizedDocumentHash,
-    NormalizedTextRange, SectionId, TextLocator,
+    ContentHash, DocumentId, DocumentSource, Location, NormalizedDocumentHash, NormalizedTextRange,
+    SectionId, TextLocator,
 };
 use crate::runtime::RuntimeConfig;
 

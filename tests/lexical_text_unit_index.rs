@@ -163,7 +163,10 @@ async fn missing_derived_lexical_state_rebuilds_from_persisted_canonical_documen
     let database = directory.path().join("rebuild.sqlite");
     let document = fixture();
     let repository = Arc::new(SqliteDocumentRepository::open(&database).expect("repository"));
-    repository.save(document.clone()).await.expect("save canonical document");
+    repository
+        .save(document.clone())
+        .await
+        .expect("save canonical document");
     let index = Arc::new(SqliteSearchIndex::open(&database).expect("empty lexical index"));
 
     let result = SearchDocumentUseCase::new(index, repository)

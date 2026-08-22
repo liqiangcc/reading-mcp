@@ -4,9 +4,8 @@ use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievedResou
 use reading_mcp::domain::{DocumentSource, MediaType};
 use reading_mcp::infrastructure::SqliteDocumentRepository;
 use reading_mcp::parsing::{
-    ArchiveLimits, EPUB_VALIDATION_REPORT_METADATA_KEY, EPUB_VALIDATION_REPORT_VERSION,
-    EpubParser, EpubValidationIntegrity, EpubValidationReport, EpubValidationSeverity,
-    validate_epub_document,
+    ArchiveLimits, EPUB_VALIDATION_REPORT_METADATA_KEY, EPUB_VALIDATION_REPORT_VERSION, EpubParser,
+    EpubValidationIntegrity, EpubValidationReport, EpubValidationSeverity, validate_epub_document,
 };
 use tempfile::tempdir;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -67,7 +66,10 @@ async fn source_gaps_are_degradations_not_integrity_errors() {
     assert!(report.degradation_count >= 4);
     assert_eq!(report.coverage.package_spine.spine_items_total, 2);
     assert_eq!(report.coverage.package_spine.spine_items_parsed, 1);
-    assert_eq!(report.coverage.package_spine.spine_items_unsupported_media, 1);
+    assert_eq!(
+        report.coverage.package_spine.spine_items_unsupported_media,
+        1
+    );
     assert_eq!(report.coverage.navigation.nodes_total, 2);
     assert_eq!(report.coverage.navigation.missing_fragment, 1);
     assert_eq!(report.coverage.navigation.unsupported_resource, 1);

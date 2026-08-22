@@ -36,6 +36,9 @@ Processes own resources and execution state.
     )
     .await
     .expect("Markdown fixture should be written");
+    tokio::fs::write(directory.path().join("appendix.md"), "Appendix")
+        .await
+        .expect("second Markdown fixture should be written");
 
     let local_roots = std::env::join_paths([directory.path()])
         .expect("temporary directory should be a valid local root list");
@@ -74,7 +77,7 @@ Processes own resources and execution state.
             CallToolRequestParams::new("list_documents").with_arguments(arguments(json!({
                 "path": directory.path().to_string_lossy(),
                 "recursive": true,
-                "max_results": 10
+                "max_results": 1
             }))),
         )
         .await
@@ -82,7 +85,29 @@ Processes own resources and execution state.
         .into_typed::<ListDocumentsResponse>()
         .expect("list_documents should return typed structured content");
     assert_eq!(listed.documents.len(), 1);
-    assert_eq!(listed.documents[0].name, "operating-systems.md");
+    assert_eq!(listed.documents[0].name, "appendix.md");
+    assert!(!listed.complete);
+    let listing_cursor = listed
+        .next_cursor
+        .clone()
+        .expect("listing should provide continuation");
+    let continued_listing = client
+        .call_tool(
+            CallToolRequestParams::new("list_documents").with_arguments(arguments(json!({
+                "path": directory.path().to_string_lossy(),
+                "recursive": true,
+                "max_results": 10,
+                "cursor": listing_cursor
+            }))),
+        )
+        .await
+        .expect("list_documents continuation should succeed")
+        .into_typed::<ListDocumentsResponse>()
+        .expect("continued list response should deserialize");
+    assert_eq!(continued_listing.documents.len(), 1);
+    assert_eq!(continued_listing.documents[0].name, "operating-systems.md");
+    assert!(continued_listing.complete);
+    assert!(continued_listing.next_cursor.is_none());
 
     let opened = client
         .call_tool(

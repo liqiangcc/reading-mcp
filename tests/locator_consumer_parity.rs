@@ -54,7 +54,10 @@ async fn sentence_locator_is_resolved_consistently_by_read_and_context() {
         .expect("context accepts same locator");
     assert_eq!(context.anchor_locator, locator);
     assert_eq!(context.items.len(), 1);
-    assert_eq!(context.items[0].content.as_deref(), Some(sentence.text.as_str()));
+    assert_eq!(
+        context.items[0].content.as_deref(),
+        Some(sentence.text.as_str())
+    );
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@
 >
 > Branch: `feat/normalized-block-model`
 >
-> Related: `docs/adr/0003-epub-first-structure-reliability.md`, `docs/epub-structure-reconciliation-contract.md`, `docs/normalized-text-range-contract.md`, `docs/epub-structure-validator-contract.md`
+> Related: `docs/adr/0003-epub-first-structure-reliability.md`, `docs/epub-structure-reconciliation-contract.md`, `docs/normalized-text-range-contract.md`, `docs/epub-structure-validator-contract.md`, `docs/block-aware-text-unit-identity-migration.md`
 
 ## 1. Goal
 
@@ -45,7 +45,7 @@ Current parser/cache policy after the subsequent EPUB validator increment is:
 reading-mcp-normalization/v5
 ```
 
-Current source-address identity remains:
+Current implemented source-address identity remains:
 
 ```text
 normalized-document-hash/v1
@@ -53,6 +53,15 @@ text-segmentation/v1
 ```
 
 The v4 normalization bump invalidated Parsed Cache entries created before persisted block facts existed. The subsequent v5 bump adds persisted validator/coverage output without changing the block schema or current TextUnit identity.
+
+ADR 0005 has accepted the next migration target:
+
+```text
+normalized-document-hash/v2
+text-segmentation/v2
+```
+
+That target is designed but not yet implemented on `main`.
 
 ## 3. Persisted shape
 
@@ -166,6 +175,8 @@ outer selected block
 
 For example, a `<blockquote>` containing `<p>` elements is represented as one `blockquote` block rather than a BlockQuote plus duplicated Paragraph rows containing the same source text.
 
+The accepted segmentation-v2 migration respects this evidence boundary: one persisted BlockQuote becomes one Paragraph-level reading unit and may have Sentence children, but v2 does not invent nested Paragraphs that block-model/v1 did not persist.
+
 A future nested block-tree contract would require explicit parent/child identity and overlap semantics; it is not inferred in v1.
 
 ## 8. Source order vs structural hierarchy
@@ -250,9 +261,11 @@ native pre/table overlap with current Sentence units
 
 Integrity violations are errors; source/model coverage gaps are degradations. Neither validator clamps, rebases or searches for replacement text.
 
+The accepted v2 migration keeps the same distinction: an absent block map is supported fallback evidence, but a declared invalid block map must fail closed rather than silently becoming fallback segmentation.
+
 ## 12. Identity boundary in v1
 
-The block map is persisted canonical normalization evidence, but existing precise TextUnit identity deliberately remains unchanged:
+The block map is persisted canonical normalization evidence, but the currently implemented precise TextUnit identity deliberately remains unchanged:
 
 ```text
 normalized-document-hash/v1
@@ -260,7 +273,7 @@ normalized-document-hash/v1
 → current Paragraph / Sentence / TextLocator identity
 ```
 
-Consequently:
+Consequently on current `main`:
 
 - adding/removing only block/validation metadata does not alter the current normalized hash;
 - current Paragraph TextUnit IDs do not change solely because block rows are present;
@@ -268,11 +281,52 @@ Consequently:
 
 This is an intentional migration boundary, not permission to ignore the block map forever.
 
-Before a future block-aware Paragraph/Sentence policy can become identity-bearing, that increment must explicitly version the new identity inputs, for example through a new segmentation contract and any required normalized-hash contract revision. It must not silently reinterpret existing `text-segmentation/v1` locators.
+ADR 0005 now defines the explicit follow-up identity migration. It advances both segmentation and normalized identity so old v1 locators/cursors fail stale rather than being reinterpreted.
 
-## 13. Acceptance evidence
+## 13. Accepted block-aware projection
 
-Block-model tests cover:
+The next implementation consumes block-model/v1 as follows:
+
+```text
+paragraph    → one sentence-eligible Paragraph
+blockquote   → one sentence-eligible Paragraph
+list_item    → one sentence-eligible Paragraph
+preformatted → one coarse Paragraph, no Sentence children
+table        → one coarse Paragraph, no Sentence children
+```
+
+For uncovered Section ranges:
+
+```text
+whitespace-only → separator coverage
+non-whitespace  → deterministic v1-style fallback scoped to the gap
+```
+
+Native evidence outranks text heuristics. Existing fenced/indented-code and Markdown-table heuristics remain only for fallback/no-block regions.
+
+Paragraph ordinals are assigned by exact Section source position after native and fallback candidates are merged. `block_index` remains a native-block ordinal and is not reused as `paragraph_index`.
+
+## 14. Accepted normalized identity projection
+
+`normalized-document-hash/v2` will bind the block facts that can affect TextUnit addressing:
+
+```text
+block-map presence/absence
+schema version
+owner_section_id
+block_index
+source_order
+kind
+normalized_range
+```
+
+It will not bind provenance-only/diagnostic facts such as native anchor/location, validator report, coverage counters, or lexical state.
+
+This is required because a block kind/range/order change can alter Paragraph/Sentence boundaries while `Section.content` itself remains byte-for-byte identical.
+
+## 15. Acceptance evidence
+
+Existing block-model tests cover:
 
 - Paragraph / BlockQuote / ListItem / Preformatted / Table kinds;
 - exact Unicode-scalar Section-relative slices;
@@ -287,9 +341,11 @@ Block-model tests cover:
 
 The subsequent EPUB validator additionally proves that the persisted block map can participate in deterministic coverage/revalidation after repository reopen without reparsing source.
 
-## 14. Explicit non-goals
+The v2 implementation must add migration evidence for native/fallback Paragraph projection, coarse pre/table Sentence behavior, hash-v2 block sensitivity, old locator/cursor staleness, lexical-index/v3 rebuild, and restart determinism.
 
-The block-model increment does not itself implement:
+## 16. Explicit non-goals
+
+The block-model increment itself does not implement:
 
 ```text
 block-aware Paragraph segmentation
@@ -302,21 +358,30 @@ SVG/fixed-layout precise blocks
 new MCP Tools
 ```
 
-The EPUB validator is now implemented separately rather than hidden inside the block model.
+The first four items above are now accepted by ADR 0005 as the next implementation target; they remain unimplemented until `feat/block-aware-text-unit-identity` lands.
 
-## 15. Next decision
+The EPUB validator is already implemented separately rather than hidden inside the block model.
 
-With persisted block facts and validator coverage now available, the next independent unit is an explicit block-aware TextUnit identity migration decision.
+## 17. Next implementation
 
-Before implementation it must answer:
+The design decision is complete.
+
+Next branch:
 
 ```text
-Which block kinds become Paragraph candidates?
-How do blockquote/list_item preserve source semantics?
-How do pre/table become coarse non-prose?
-Does segmentation advance to text-segmentation/v2?
-Does normalized-document-hash require v2 block inputs?
-How do existing v1 locators/cursors fail stale instead of being silently reinterpreted?
+feat/block-aware-text-unit-identity
 ```
 
-No current v1 identity changes until those decisions are versioned and tested.
+Implementation order is:
+
+```text
+normalized-document-hash/v2
+→ text-segmentation/v2 native/fallback Paragraph projection
+→ Sentence eligibility/coverage
+→ locator/cursor stale gates
+→ derived TextUnit replacement
+→ lexical-search-index/v3 rebuild
+→ stdio direct-handoff regression
+```
+
+No new MCP Tool is introduced.

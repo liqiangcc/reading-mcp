@@ -178,7 +178,7 @@ pub trait TextUnitIndex: Send + Sync {
 #[async_trait]
 pub trait SearchIndex: Send + Sync {
     fn supports_precise_lexical_candidates(&self) -> bool {
-        false
+        self.tokenizer_version() != LEGACY_SEARCH_TOKENIZER_VERSION
     }
 
     fn tokenizer_version(&self) -> &'static str {

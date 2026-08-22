@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, SectionId, TextUnit,
+    Document, DocumentId, DocumentSource, Location, MediaType, SectionId, TextLocator, TextUnit,
 };
+
+pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetrievalOptions {
@@ -24,6 +26,23 @@ pub struct RetrievedResource {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SearchHitKind {
+    Section,
+    Paragraph,
+    Sentence,
+}
+
+impl SearchHitKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Section => "section",
+            Self::Paragraph => "paragraph",
+            Self::Sentence => "sentence",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchHit {
     pub section_id: SectionId,
@@ -32,6 +51,9 @@ pub struct SearchHit {
     pub snippet: String,
     pub score: f32,
     pub location: Location,
+    pub candidate_kind: SearchHitKind,
+    pub text_locator: TextLocator,
+    pub tokenizer_version: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -144,6 +166,10 @@ pub trait TextUnitIndex: Send + Sync {
 
 #[async_trait]
 pub trait SearchIndex: Send + Sync {
+    fn tokenizer_version(&self) -> &'static str {
+        LEXICAL_TOKENIZER_VERSION
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError>;
 
     async fn search(

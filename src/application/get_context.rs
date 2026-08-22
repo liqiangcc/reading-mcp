@@ -410,7 +410,9 @@ fn paragraph_container_result(
         ApplicationError::InvalidLocator("text locator has no paragraph ownership".into())
     })?;
 
-    let paragraph_set = document.paragraph_text_units();
+    let paragraph_set = document
+        .try_paragraph_text_units()
+        .map_err(text_unit_materialization_error)?;
     let paragraph = paragraph_set
         .units
         .iter()
@@ -421,7 +423,9 @@ fn paragraph_container_result(
                 section.id.0
             ))
         })?;
-    let sentence_set = document.sentence_text_units();
+    let sentence_set = document
+        .try_sentence_text_units()
+        .map_err(text_unit_materialization_error)?;
     let coverage = sentence_set
         .coverage
         .iter()
@@ -581,8 +585,12 @@ fn paragraph_context_stream(
     document: &Document,
     section: &Section,
 ) -> Result<Vec<ContextItem>, ApplicationError> {
-    let paragraph_set = document.paragraph_text_units();
-    let sentence_set = document.sentence_text_units();
+    let paragraph_set = document
+        .try_paragraph_text_units()
+        .map_err(text_unit_materialization_error)?;
+    let sentence_set = document
+        .try_sentence_text_units()
+        .map_err(text_unit_materialization_error)?;
     let coverage = sentence_set
         .coverage
         .iter()
@@ -618,8 +626,12 @@ fn sentence_context_stream(
     document: &Document,
     section: &Section,
 ) -> Result<Vec<ContextItem>, ApplicationError> {
-    let paragraph_set = document.paragraph_text_units();
-    let sentence_set = document.sentence_text_units();
+    let paragraph_set = document
+        .try_paragraph_text_units()
+        .map_err(text_unit_materialization_error)?;
+    let sentence_set = document
+        .try_sentence_text_units()
+        .map_err(text_unit_materialization_error)?;
     let coverage_by_paragraph = sentence_set
         .coverage
         .iter()
@@ -656,8 +668,7 @@ fn sentence_context_stream(
 
         if coverage.eligibility == SentenceEligibility::CoarseParagraphOnly {
             let mut item = paragraph_context_item(document, section, paragraph, coverage);
-            item.degradation =
-                Some("requested_sentence_context_but_non_prose_is_paragraph_only".into());
+            item.degradation = Some(coarse_sentence_context_degradation(coverage.content_class).into());
             result.push(item);
             continue;
         }
@@ -673,7 +684,7 @@ fn sentence_context_stream(
                 locator: TextLocator::for_sentence(document, section, sentence),
                 role: ContextItemRole::Anchor,
                 effective_kind: ContextItemKind::Sentence,
-                content_class: Some(ParagraphContentClass::ProseOrUnknown.as_str().into()),
+                content_class: Some(coverage.content_class.as_str().into()),
                 degradation: None,
             });
         }
@@ -697,6 +708,28 @@ fn paragraph_context_item(
         content_class: Some(coverage.content_class.as_str().into()),
         degradation: None,
     }
+}
+
+fn coarse_sentence_context_degradation(content_class: ParagraphContentClass) -> &'static str {
+    match content_class {
+        ParagraphContentClass::BlockQuote | ParagraphContentClass::ListItem => {
+            "flat_native_container_no_nested_textunit_evidence"
+        }
+        ParagraphContentClass::CodeBlock
+        | ParagraphContentClass::Table
+        | ParagraphContentClass::Preformatted => {
+            "requested_sentence_context_but_non_prose_is_paragraph_only"
+        }
+        ParagraphContentClass::ProseOrUnknown | ParagraphContentClass::NativeParagraph => {
+            "requested_sentence_context_but_paragraph_is_coarse_only"
+        }
+    }
+}
+
+fn text_unit_materialization_error(error: impl std::fmt::Display) -> ApplicationError {
+    ApplicationError::TextUnitIndexFailed(format!(
+        "cannot build context from persisted block evidence: {error}"
+    ))
 }
 
 fn section_context_item(

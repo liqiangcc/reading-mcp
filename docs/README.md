@@ -12,6 +12,7 @@
 - [Precise Read Locator Contract](precise-read-locator-contract.md)：已实现的 TextLocator → exact `read_document`、CharacterRange、exact-target ReadCursor continuation 与 returned source locator。
 - [Search Locator Handoff Contract](search-locator-contract.md)：已实现的 SearchHit → TextLocator direct handoff 与 shared locator resolver。
 - [Lexical TextUnit Index Contract](lexical-text-unit-index.md)：canonical Section/Paragraph/Sentence lexical candidates、`lexical-tokenizer/v1`、CJK/技术标识检索、SQLite v2 migration/rebuild。
+- [EPUB Navigation Map Contract](epub-navigation-map-contract.md)：已实现的 EPUB 3 `properties=nav` discovery、TOC/NCX hierarchy、href/fragment resolution、provenance 与 Parsed Cache v2 invalidation；尚未重写 canonical Section hierarchy。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与 Tool Contract。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
@@ -54,6 +55,8 @@ precise-read-locator-contract.md
 search-locator-contract.md
       ↓
 lexical-text-unit-index.md
+      ↓
+epub-navigation-map-contract.md
       ↓
 epub-structure-reliability-design.md
       ↓
@@ -115,6 +118,7 @@ lexical-tokenizer/v1
 CJK + mixed technical lexical projection
 lexical-search-index/v2 SQLite rebuildable state
 search → precise TextLocator → read/context direct handoff
+EPUB navigation-map/v1 parser facts
 INVALID_LOCATOR / STALE_LOCATOR fail-closed validation
 ```
 
@@ -129,6 +133,18 @@ lexical-tokenizer/v1
 ```
 
 Tokenizer 变化不得重编号 TextUnit 或改变 TextLocator。SQLite lexical index version/tokenizer version 不匹配时，仅丢弃并重建 derived lexical state，不触碰 canonical Document/TextUnit facts；若 persisted Document 存在但 lexical rows 缺失，搜索可直接从 canonical repository 重建，不重新下载/解析来源。
+
+EPUB 当前已经能把 publisher navigation 单独映射为持久化 parser fact：
+
+```text
+manifest properties=nav
+→ EPUB 3 toc nav
+→ legacy NCX fallback
+→ archive-safe href / fragment resolution
+→ epub-navigation-map/v1
+```
+
+本阶段仍没有把 navigation hierarchy 写入 canonical Section tree；`get_document_structure` 看到的 EPUB Section 仍来自 spine + XHTML heading。下一独立增量是 nav/spine/heading 的结构 reconciliation，而不是提前修改 Paragraph/Sentence identity。
 
 当前 direct handoff：
 

@@ -172,12 +172,7 @@ impl Parser for EpubParser {
                 .into_iter()
                 .map(|section| remap_epub_section(section, ordinal, &entry_path, None))
                 .collect::<Vec<_>>();
-            append_remapped_blocks(
-                parsed_blocks,
-                ordinal,
-                &entry_path,
-                &mut normalized_blocks,
-            );
+            append_remapped_blocks(parsed_blocks, ordinal, &entry_path, &mut normalized_blocks);
             parsed_spine_documents.push(ParsedSpineDocument {
                 spine_index: ordinal,
                 linear,

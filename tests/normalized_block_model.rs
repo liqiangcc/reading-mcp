@@ -2,8 +2,8 @@ use std::io::{Cursor, Write};
 
 use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievedResource};
 use reading_mcp::domain::{
-    DocumentSource, MediaType, NormalizedBlockKind, NormalizedBlockMap, NormalizedTextRange,
-    NORMALIZED_BLOCK_MODEL_VERSION,
+    DocumentSource, MediaType, NORMALIZED_BLOCK_MODEL_VERSION, NormalizedBlockKind,
+    NormalizedBlockMap, NormalizedTextRange,
 };
 use reading_mcp::infrastructure::SqliteDocumentRepository;
 use reading_mcp::parsing::{ArchiveLimits, EpubParser, HtmlParser};
@@ -34,7 +34,10 @@ line2</pre>
     assert_eq!(map.schema_version, NORMALIZED_BLOCK_MODEL_VERSION);
     assert_eq!(map.blocks.len(), 5);
     assert_eq!(
-        map.blocks.iter().map(|block| block.kind).collect::<Vec<_>>(),
+        map.blocks
+            .iter()
+            .map(|block| block.kind)
+            .collect::<Vec<_>>(),
         vec![
             NormalizedBlockKind::Paragraph,
             NormalizedBlockKind::BlockQuote,
@@ -60,9 +63,7 @@ line2</pre>
         "let x = 1;\nline2",
         "A B",
     ];
-    for (source_order, (block, expected_text)) in
-        map.blocks.iter().zip(expected).enumerate()
-    {
+    for (source_order, (block, expected_text)) in map.blocks.iter().zip(expected).enumerate() {
         assert_eq!(block.source_order, source_order);
         assert_eq!(block.block_index, source_order + 1);
         assert_eq!(
@@ -73,10 +74,7 @@ line2</pre>
         );
     }
     assert_eq!(map.blocks[0].native_anchor.as_deref(), Some("p1"));
-    assert_eq!(
-        map.blocks[0].native_location.as_deref(),
-        Some("html:#p1")
-    );
+    assert_eq!(map.blocks[0].native_location.as_deref(), Some("html:#p1"));
 }
 
 #[tokio::test]
@@ -183,7 +181,9 @@ async fn block_map_is_persisted_but_does_not_change_current_hash_or_text_unit_id
 
     let mut without_blocks = document.clone();
     without_blocks.metadata.remove("normalized_block_map");
-    without_blocks.metadata.remove("normalized_block_map_version");
+    without_blocks
+        .metadata
+        .remove("normalized_block_map_version");
     without_blocks.metadata.remove("normalized_blocks");
 
     assert_eq!(without_blocks.normalized_document_hash(), hash);

@@ -106,20 +106,40 @@ async fn stdio_open_returns_reading_profile_without_expanding_tool_surface() {
     assert_eq!(coverage.native_non_prose_chars, 0);
     assert!(coverage.fallback_chars > 0);
     assert_eq!(coverage.coarse_paragraphs, 0);
-    assert!(!opened
-        .reading_profile
-        .capabilities
-        .sentence_first_enumeration
-        .source_preserving_coarse_regions);
+    assert!(
+        !opened
+            .reading_profile
+            .capabilities
+            .sentence_first_enumeration
+            .source_preserving_coarse_regions
+    );
 
     assert_eq!(opened.reading_profile.reliability.evidence.len(), 1);
     assert_eq!(
         opened.reading_profile.reliability.evidence[0].integrity,
         ReliabilityIntegrityDto::NotApplicable
     );
-    assert!(opened.reading_profile.reliability.publication_coverage.is_none());
-    assert!(opened.reading_profile.reliability.structure_provenance.is_none());
-    assert!(opened.reading_profile.reliability.navigation_resolution.is_none());
+    assert!(
+        opened
+            .reading_profile
+            .reliability
+            .publication_coverage
+            .is_none()
+    );
+    assert!(
+        opened
+            .reading_profile
+            .reliability
+            .structure_provenance
+            .is_none()
+    );
+    assert!(
+        opened
+            .reading_profile
+            .reliability
+            .navigation_resolution
+            .is_none()
+    );
 
     client
         .cancel()

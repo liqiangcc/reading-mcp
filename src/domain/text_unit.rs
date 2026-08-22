@@ -386,7 +386,9 @@ fn sentence_ranges(paragraph: &TextUnit) -> Vec<NormalizedTextRange> {
 fn sentence_boundary_end(chars: &[char], index: usize) -> Option<usize> {
     match chars[index] {
         '。' | '！' | '？' | '!' | '?' => Some(extend_terminal_cluster(chars, index)),
-        '.' if ascii_period_is_terminal(chars, index) => Some(extend_terminal_cluster(chars, index)),
+        '.' if ascii_period_is_terminal(chars, index) => {
+            Some(extend_terminal_cluster(chars, index))
+        }
         _ => None,
     }
 }
@@ -396,11 +398,12 @@ fn ascii_period_is_terminal(chars: &[char], index: usize) -> bool {
         return false;
     }
 
-    let previous = index.checked_sub(1).and_then(|position| chars.get(position));
+    let previous = index
+        .checked_sub(1)
+        .and_then(|position| chars.get(position));
     let next = chars.get(index + 1);
 
-    if previous.is_some_and(|ch| ch.is_ascii_digit())
-        && next.is_some_and(|ch| ch.is_ascii_digit())
+    if previous.is_some_and(|ch| ch.is_ascii_digit()) && next.is_some_and(|ch| ch.is_ascii_digit())
     {
         return false;
     }
@@ -576,7 +579,10 @@ fn looks_like_markdown_table(text: &str) -> bool {
         .map(str::trim)
         .collect::<Vec<_>>();
 
-    delimiter_cells.len() >= 2 && delimiter_cells.iter().all(|cell| is_table_delimiter_cell(cell))
+    delimiter_cells.len() >= 2
+        && delimiter_cells
+            .iter()
+            .all(|cell| is_table_delimiter_cell(cell))
 }
 
 fn is_table_delimiter_cell(cell: &str) -> bool {

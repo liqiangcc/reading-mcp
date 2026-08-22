@@ -19,7 +19,10 @@ fn sentence_units_are_exact_section_relative_slices_with_paragraph_ownership() {
     assert_eq!(paragraphs.units.len(), 1);
     assert_eq!(set.units.len(), 4);
     assert_eq!(
-        set.units.iter().map(|unit| unit.text.as_str()).collect::<Vec<_>>(),
+        set.units
+            .iter()
+            .map(|unit| unit.text.as_str())
+            .collect::<Vec<_>>(),
         vec![
             "Dr. Smith uses mmap().",
             "Next uses version 3.14 and e.g. fork().",
@@ -47,7 +50,10 @@ fn sentence_units_are_exact_section_relative_slices_with_paragraph_ownership() {
     }
 
     let coverage = &set.coverage[0];
-    assert_eq!(coverage.content_class, ParagraphContentClass::ProseOrUnknown);
+    assert_eq!(
+        coverage.content_class,
+        ParagraphContentClass::ProseOrUnknown
+    );
     assert_eq!(coverage.eligibility, SentenceEligibility::Eligible);
     assert_eq!(coverage.sentence_count, 4);
     assert_eq!(coverage.coarse_only_chars, 0);
@@ -65,7 +71,10 @@ fn technical_periods_do_not_create_false_sentence_boundaries() {
     let set = document.sentence_text_units();
 
     assert_eq!(
-        set.units.iter().map(|unit| unit.text.as_str()).collect::<Vec<_>>(),
+        set.units
+            .iter()
+            .map(|unit| unit.text.as_str())
+            .collect::<Vec<_>>(),
         vec![
             "Run ./configure and read README.md before calling foo.bar().",
             "Then use v3.14.",
@@ -80,7 +89,10 @@ fn cjk_terminal_punctuation_does_not_require_ascii_whitespace() {
     let set = document.sentence_text_units();
 
     assert_eq!(
-        set.units.iter().map(|unit| unit.text.as_str()).collect::<Vec<_>>(),
+        set.units
+            .iter()
+            .map(|unit| unit.text.as_str())
+            .collect::<Vec<_>>(),
         vec!["第一句。", "第二句？", "第三句！", "Final sentence."]
     );
 }
@@ -100,13 +112,19 @@ fn obvious_code_and_table_paragraphs_are_coarse_only_not_fake_sentences() {
     assert_eq!(set.units[0].text, "Real prose.");
     assert_eq!(set.units[1].text, "Next sentence.");
 
-    assert_eq!(set.coverage[0].content_class, ParagraphContentClass::CodeBlock);
+    assert_eq!(
+        set.coverage[0].content_class,
+        ParagraphContentClass::CodeBlock
+    );
     assert_eq!(
         set.coverage[0].eligibility,
         SentenceEligibility::CoarseParagraphOnly
     );
     assert_eq!(set.coverage[0].sentence_count, 0);
-    assert_eq!(set.coverage[0].coarse_only_chars, set.coverage[0].paragraph_chars);
+    assert_eq!(
+        set.coverage[0].coarse_only_chars,
+        set.coverage[0].paragraph_chars
+    );
 
     assert_eq!(set.coverage[1].content_class, ParagraphContentClass::Table);
     assert_eq!(
@@ -114,9 +132,15 @@ fn obvious_code_and_table_paragraphs_are_coarse_only_not_fake_sentences() {
         SentenceEligibility::CoarseParagraphOnly
     );
     assert_eq!(set.coverage[1].sentence_count, 0);
-    assert_eq!(set.coverage[1].coarse_only_chars, set.coverage[1].paragraph_chars);
+    assert_eq!(
+        set.coverage[1].coarse_only_chars,
+        set.coverage[1].paragraph_chars
+    );
 
-    assert_eq!(set.coverage[2].content_class, ParagraphContentClass::ProseOrUnknown);
+    assert_eq!(
+        set.coverage[2].content_class,
+        ParagraphContentClass::ProseOrUnknown
+    );
     assert_eq!(set.coverage[2].eligibility, SentenceEligibility::Eligible);
 
     for coverage in &set.coverage {
@@ -134,7 +158,10 @@ fn indented_code_is_kept_as_a_coarse_paragraph() {
 
     assert!(set.units.is_empty());
     assert_eq!(set.coverage.len(), 1);
-    assert_eq!(set.coverage[0].content_class, ParagraphContentClass::CodeBlock);
+    assert_eq!(
+        set.coverage[0].content_class,
+        ParagraphContentClass::CodeBlock
+    );
     assert_eq!(
         set.coverage[0].eligibility,
         SentenceEligibility::CoarseParagraphOnly
@@ -163,10 +190,16 @@ fn sentence_identity_is_deterministic_and_scoped_to_normalized_facts() {
             .map(|unit| unit.id.clone())
             .collect::<Vec<_>>()
     );
-    assert_ne!(first_set.units[0].content_hash, raw_changed_set.units[0].content_hash);
+    assert_ne!(
+        first_set.units[0].content_hash,
+        raw_changed_set.units[0].content_hash
+    );
 
     let changed = document_with_content("First sentence changed. Second sentence.");
-    assert_ne!(first_set.units[0].id, changed.sentence_text_units().units[0].id);
+    assert_ne!(
+        first_set.units[0].id,
+        changed.sentence_text_units().units[0].id
+    );
 }
 
 #[test]

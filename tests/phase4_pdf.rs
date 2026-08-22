@@ -66,7 +66,7 @@ async fn pdf_toc_reuses_existing_open_structure_search_and_read_flow() {
     );
     assert_eq!(structure.sections[1].section_id.0, "section://processes");
 
-    let searched = SearchDocumentUseCase::new(index)
+    let searched = SearchDocumentUseCase::new(index, repository.clone())
         .execute(SearchDocumentCommand {
             document_id: opened.document_id.clone(),
             query: "physical frames".into(),

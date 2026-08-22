@@ -66,7 +66,7 @@ async fn canonical_sentence_search_hands_off_exact_text_locator() {
     assert!(hit.text_locator.normalized_range.is_some());
     assert_eq!(
         hit.text_locator.segmentation_version.as_deref(),
-        Some("text-segmentation/v1")
+        Some("text-segmentation/v2")
     );
 
     let read = ReadDocumentUseCase::new(repository)

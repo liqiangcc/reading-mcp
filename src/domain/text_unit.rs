@@ -1,11 +1,11 @@
 use sha2::{Digest, Sha256};
 
 use super::{
-    ContentHash, Document, DocumentId, NormalizedDocumentHash, NormalizedTextRange, Section,
-    SectionId,
+    ContentHash, Document, DocumentId, NormalizedBlockKind, NormalizedBlockMap,
+    NormalizedBlockMapError, NormalizedDocumentHash, NormalizedTextRange, Section, SectionId,
 };
 
-pub const TEXT_SEGMENTATION_VERSION: &str = "text-segmentation/v1";
+pub const TEXT_SEGMENTATION_VERSION: &str = "text-segmentation/v2";
 pub const TEXT_UNIT_ID_VERSION: &str = "text-unit-id/v1";
 
 const TEXT_UNIT_ID_DOMAIN: &[u8] = b"reading-mcp/text-unit-id/v1\0";
@@ -51,10 +51,18 @@ pub struct TextUnit {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ParagraphContentClass {
-    /// Persisted text has no strong non-prose signal. This is intentionally not a claim of
+    /// Persisted text has no strong native/non-prose signal. This is intentionally not a claim of
     /// parser-native prose provenance; it only enables deterministic fallback segmentation.
     ProseOrUnknown,
+    NativeParagraph,
+    /// Flat `normalized-block-model/v1` may suppress nested leaf blocks, so BlockQuote remains
+    /// coarse until stronger nested/leaf evidence is persisted.
+    BlockQuote,
+    /// Flat `normalized-block-model/v1` may suppress nested leaf blocks, so ListItem remains
+    /// coarse until stronger nested/leaf evidence is persisted.
+    ListItem,
     CodeBlock,
+    Preformatted,
     Table,
 }
 
@@ -62,7 +70,11 @@ impl ParagraphContentClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ProseOrUnknown => "prose_or_unknown",
+            Self::NativeParagraph => "native_paragraph",
+            Self::BlockQuote => "blockquote",
+            Self::ListItem => "list_item",
             Self::CodeBlock => "code_block",
+            Self::Preformatted => "preformatted",
             Self::Table => "table",
         }
     }
@@ -110,6 +122,10 @@ pub struct ParagraphSectionCoverage {
     pub paragraph_chars: usize,
     pub separator_chars: usize,
     pub paragraph_count: usize,
+    pub native_paragraph_chars: usize,
+    pub native_structural_container_chars: usize,
+    pub native_non_prose_chars: usize,
+    pub fallback_chars: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,8 +156,50 @@ pub struct SentenceTextUnitSet {
     pub coverage: Vec<SentenceParagraphCoverage>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParagraphBoundarySource {
+    NativeParagraph,
+    NativeBlockQuote,
+    NativeListItem,
+    NativePreformatted,
+    NativeTable,
+    Fallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParagraphCandidate {
+    range: NormalizedTextRange,
+    source: ParagraphBoundarySource,
+}
+
 impl Document {
+    pub fn try_paragraph_text_units(
+        &self,
+    ) -> Result<ParagraphTextUnitSet, NormalizedBlockMapError> {
+        let block_map = self.normalized_block_map()?;
+        Ok(self.build_paragraph_text_units(block_map.as_ref()))
+    }
+
     pub fn paragraph_text_units(&self) -> ParagraphTextUnitSet {
+        self.try_paragraph_text_units()
+            .expect("canonical normalized block map must be valid for TextUnit materialization")
+    }
+
+    pub fn try_sentence_text_units(&self) -> Result<SentenceTextUnitSet, NormalizedBlockMapError> {
+        let block_map = self.normalized_block_map()?;
+        let paragraph_set = self.build_paragraph_text_units(block_map.as_ref());
+        Ok(self.build_sentence_text_units(&paragraph_set, block_map.as_ref()))
+    }
+
+    pub fn sentence_text_units(&self) -> SentenceTextUnitSet {
+        self.try_sentence_text_units()
+            .expect("canonical normalized block map must be valid for Sentence materialization")
+    }
+
+    fn build_paragraph_text_units(
+        &self,
+        block_map: Option<&NormalizedBlockMap>,
+    ) -> ParagraphTextUnitSet {
         let normalized_document_hash = self.normalized_document_hash();
         let mut units = Vec::new();
         let mut coverage = Vec::new();
@@ -150,6 +208,7 @@ impl Document {
             collect_section_paragraphs(
                 self,
                 &normalized_document_hash,
+                block_map,
                 section,
                 &mut units,
                 &mut coverage,
@@ -163,19 +222,26 @@ impl Document {
         }
     }
 
-    pub fn sentence_text_units(&self) -> SentenceTextUnitSet {
-        let paragraph_set = self.paragraph_text_units();
+    fn build_sentence_text_units(
+        &self,
+        paragraph_set: &ParagraphTextUnitSet,
+        block_map: Option<&NormalizedBlockMap>,
+    ) -> SentenceTextUnitSet {
         let normalized_document_hash = paragraph_set.normalized_document_hash.clone();
         let mut units = Vec::new();
         let mut coverage = Vec::with_capacity(paragraph_set.units.len());
 
         for paragraph in &paragraph_set.units {
-            let content_class = classify_paragraph_content(&paragraph.text);
+            let content_class = paragraph_content_class(block_map, paragraph);
             let eligibility = match content_class {
-                ParagraphContentClass::ProseOrUnknown => SentenceEligibility::Eligible,
-                ParagraphContentClass::CodeBlock | ParagraphContentClass::Table => {
-                    SentenceEligibility::CoarseParagraphOnly
+                ParagraphContentClass::ProseOrUnknown | ParagraphContentClass::NativeParagraph => {
+                    SentenceEligibility::Eligible
                 }
+                ParagraphContentClass::BlockQuote
+                | ParagraphContentClass::ListItem
+                | ParagraphContentClass::CodeBlock
+                | ParagraphContentClass::Preformatted
+                | ParagraphContentClass::Table => SentenceEligibility::CoarseParagraphOnly,
             };
 
             if eligibility == SentenceEligibility::CoarseParagraphOnly {
@@ -261,27 +327,67 @@ impl Document {
 fn collect_section_paragraphs(
     document: &Document,
     normalized_document_hash: &NormalizedDocumentHash,
+    block_map: Option<&NormalizedBlockMap>,
     section: &Section,
     units: &mut Vec<TextUnit>,
     coverage: &mut Vec<ParagraphSectionCoverage>,
 ) {
-    let ranges = paragraph_ranges(&section.content);
-    let paragraph_chars = ranges.iter().map(|range| range.len()).sum::<usize>();
+    let candidates = section_paragraph_candidates(section, block_map);
+    let paragraph_chars = candidates
+        .iter()
+        .map(|candidate| candidate.range.len())
+        .sum::<usize>();
     let owner_chars = section.normalized_text_len();
+    let native_paragraph_chars = candidates
+        .iter()
+        .filter(|candidate| candidate.source == ParagraphBoundarySource::NativeParagraph)
+        .map(|candidate| candidate.range.len())
+        .sum::<usize>();
+    let native_structural_container_chars = candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.source,
+                ParagraphBoundarySource::NativeBlockQuote | ParagraphBoundarySource::NativeListItem
+            )
+        })
+        .map(|candidate| candidate.range.len())
+        .sum::<usize>();
+    let native_non_prose_chars = candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.source,
+                ParagraphBoundarySource::NativePreformatted | ParagraphBoundarySource::NativeTable
+            )
+        })
+        .map(|candidate| candidate.range.len())
+        .sum::<usize>();
+    let fallback_chars = candidates
+        .iter()
+        .filter(|candidate| candidate.source == ParagraphBoundarySource::Fallback)
+        .map(|candidate| candidate.range.len())
+        .sum::<usize>();
 
     coverage.push(ParagraphSectionCoverage {
         owner_section_id: section.id.clone(),
         owner_chars,
         paragraph_chars,
-        separator_chars: owner_chars.saturating_sub(paragraph_chars),
-        paragraph_count: ranges.len(),
+        separator_chars: owner_chars
+            .checked_sub(paragraph_chars)
+            .expect("paragraph candidates must remain inside the owner Section"),
+        paragraph_count: candidates.len(),
+        native_paragraph_chars,
+        native_structural_container_chars,
+        native_non_prose_chars,
+        fallback_chars,
     });
 
-    for (offset, range) in ranges.into_iter().enumerate() {
+    for (offset, candidate) in candidates.into_iter().enumerate() {
         let paragraph_index = offset + 1;
         let source_order = units.len();
         let text = section
-            .normalized_text_slice(range)
+            .normalized_text_slice(candidate.range)
             .expect("generated paragraph range must be a valid owner slice")
             .to_string();
         let id = paragraph_text_unit_id(
@@ -289,7 +395,7 @@ fn collect_section_paragraphs(
             normalized_document_hash,
             &section.id,
             paragraph_index,
-            range,
+            candidate.range,
         );
 
         units.push(TextUnit {
@@ -301,15 +407,122 @@ fn collect_section_paragraphs(
             kind: TextUnitKind::Paragraph,
             paragraph_index,
             source_order,
-            normalized_range: range,
+            normalized_range: candidate.range,
             text,
             segmentation_version: TEXT_SEGMENTATION_VERSION.into(),
         });
     }
 
     for child in &section.children {
-        collect_section_paragraphs(document, normalized_document_hash, child, units, coverage);
+        collect_section_paragraphs(
+            document,
+            normalized_document_hash,
+            block_map,
+            child,
+            units,
+            coverage,
+        );
     }
+}
+
+fn section_paragraph_candidates(
+    section: &Section,
+    block_map: Option<&NormalizedBlockMap>,
+) -> Vec<ParagraphCandidate> {
+    let Some(block_map) = block_map else {
+        return fallback_paragraph_candidates(
+            &section.content,
+            NormalizedTextRange::new(0, section.normalized_text_len())
+                .expect("whole Section range must be ordered"),
+        );
+    };
+
+    let blocks = block_map
+        .blocks
+        .iter()
+        .filter(|block| block.owner_section_id == section.id)
+        .collect::<Vec<_>>();
+    if blocks.is_empty() {
+        return fallback_paragraph_candidates(
+            &section.content,
+            NormalizedTextRange::new(0, section.normalized_text_len())
+                .expect("whole Section range must be ordered"),
+        );
+    }
+
+    let mut candidates = Vec::new();
+    let mut cursor = 0usize;
+    for block in blocks {
+        if cursor < block.normalized_range.start() {
+            let gap = NormalizedTextRange::new(cursor, block.normalized_range.start())
+                .expect("validated block gap must be ordered");
+            candidates.extend(fallback_paragraph_candidates(&section.content, gap));
+        }
+        candidates.push(ParagraphCandidate {
+            range: block.normalized_range,
+            source: match block.kind {
+                NormalizedBlockKind::Paragraph => ParagraphBoundarySource::NativeParagraph,
+                NormalizedBlockKind::BlockQuote => ParagraphBoundarySource::NativeBlockQuote,
+                NormalizedBlockKind::ListItem => ParagraphBoundarySource::NativeListItem,
+                NormalizedBlockKind::Preformatted => ParagraphBoundarySource::NativePreformatted,
+                NormalizedBlockKind::Table => ParagraphBoundarySource::NativeTable,
+            },
+        });
+        cursor = block.normalized_range.end();
+    }
+
+    if cursor < section.normalized_text_len() {
+        let tail = NormalizedTextRange::new(cursor, section.normalized_text_len())
+            .expect("validated trailing gap must be ordered");
+        candidates.extend(fallback_paragraph_candidates(&section.content, tail));
+    }
+
+    candidates
+}
+
+fn fallback_paragraph_candidates(
+    content: &str,
+    owner_range: NormalizedTextRange,
+) -> Vec<ParagraphCandidate> {
+    let slice = owner_range
+        .slice(content)
+        .expect("fallback range must be a valid Section slice");
+    paragraph_ranges(slice)
+        .into_iter()
+        .map(|range| {
+            let range = NormalizedTextRange::new(
+                owner_range.start() + range.start(),
+                owner_range.start() + range.end(),
+            )
+            .expect("offset fallback paragraph range must be ordered");
+            ParagraphCandidate {
+                range,
+                source: ParagraphBoundarySource::Fallback,
+            }
+        })
+        .collect()
+}
+
+fn paragraph_content_class(
+    block_map: Option<&NormalizedBlockMap>,
+    paragraph: &TextUnit,
+) -> ParagraphContentClass {
+    if let Some(block) = block_map.and_then(|map| {
+        map.blocks.iter().find(|block| {
+            block.owner_section_id == paragraph.owner_section_id
+                && block.normalized_range == paragraph.normalized_range
+        })
+    }) {
+        return match block.kind {
+            NormalizedBlockKind::Paragraph => ParagraphContentClass::NativeParagraph,
+            NormalizedBlockKind::BlockQuote => ParagraphContentClass::BlockQuote,
+            NormalizedBlockKind::ListItem => ParagraphContentClass::ListItem,
+            NormalizedBlockKind::Preformatted => ParagraphContentClass::Preformatted,
+            NormalizedBlockKind::Table => ParagraphContentClass::Table,
+        };
+    }
+
+    classify_fallback_paragraph_content(&paragraph.text)
 }
 
 fn paragraph_ranges(content: &str) -> Vec<NormalizedTextRange> {
@@ -531,7 +744,7 @@ fn trim_trailing_whitespace(chars: &[char], mut end: usize) -> usize {
     end
 }
 
-fn classify_paragraph_content(text: &str) -> ParagraphContentClass {
+fn classify_fallback_paragraph_content(text: &str) -> ParagraphContentClass {
     if looks_like_fenced_code(text) || looks_like_indented_code(text) {
         ParagraphContentClass::CodeBlock
     } else if looks_like_markdown_table(text) {

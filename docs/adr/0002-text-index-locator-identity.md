@@ -4,12 +4,12 @@
 - Date: 2026-08-21
 - Reviewed branch: `design/text-index-locator`
 - Reviewed against main: `e4ec0ee5a39f6c549afcf17b68d6dfa7ebfe6198`
-- Amended by: ADR 0004 for Tool-surface / ordered-enumeration decisions; ADR 0005 for the accepted block-aware identity migration.
-- Current implementation status: normalized identity/range, Paragraph/Sentence TextUnits, TextUnit enumeration, locator-driven context/read, shared locator resolution, direct SearchHit handoff, and canonical Section/Paragraph/Sentence lexical candidates are implemented under v1 identity. ADR 0005 v2 identity is accepted but not yet implemented.
+- Amended by: ADR 0004 for Tool-surface / ordered-enumeration decisions; ADR 0005 for block-aware identity migration.
+- Current implementation status: normalized hash v2/ranges, block-aware Paragraph/Sentence TextUnits, TextUnit enumeration, locator-driven context/read, shared locator resolution, direct SearchHit handoff, and Section/Paragraph/eligible-Sentence lexical candidates are implemented.
 
 ## Context
 
-Reading MCP treats `Document / Section` as canonical normalized source facts and TextUnit/Search structures as rebuildable derived state. Precise reading requires finer source addressing than Section without letting indexes, rendered streams, or retrieval rows redefine source identity.
+Reading MCP treats `Document / Section` as canonical normalized source facts and TextUnit/Search structures as rebuildable derived state. Precise reading requires finer source addressing than Section without letting indexes, rendered streams, parser-transient objects, or retrieval rows redefine source identity.
 
 ## Decision
 
@@ -27,22 +27,16 @@ Word/model Token is not a stable source-addressing level.
 
 ### 2. TextUnits are deterministic derived state
 
-Paragraph/Sentence identity must rebuild from persisted canonical normalized facts plus the current segmentation policy.
-
-Current runtime:
+Current runtime rebuild contract:
 
 ```text
-persisted canonical Document
-+ text-segmentation/v1
-```
-
-Accepted ADR 0005 target:
-
-```text
-persisted canonical Document
+persisted canonical Document / Section.content
 + optional valid normalized-block-model/v1
 + text-segmentation/v2
+→ Paragraph / Sentence TextUnits
 ```
+
+An absent block map uses deterministic fallback. A declared invalid block map fails closed rather than being silently ignored.
 
 Current runtime persists Paragraph TextUnits; Sentence facts are deterministically materialized and do not require Sentence SQLite persistence for correctness.
 
@@ -56,9 +50,27 @@ normalized_document_hash
 = addressing-relevant persisted normalized facts
 ```
 
-Paragraph/Sentence addressing is scoped by normalized identity + segmentation version. Raw `content_hash` remains provenance and is not silently redefined.
+Current normalized identity:
 
-Current runtime uses `normalized-document-hash/v1` over canonical Section facts. ADR 0005 accepts `normalized-document-hash/v2`, which additionally binds the identity-bearing native block projection because segmentation v2 depends on it.
+```text
+normalized-document-hash/v2
+```
+
+Hash v2 includes canonical Section identity plus the block-map facts that can alter Paragraph/Sentence addressing:
+
+```text
+block-map presence/absence
+block schema version
+owner_section_id
+block_index
+source_order
+kind
+normalized_range
+```
+
+It excludes provenance/diagnostic-only facts such as native location/anchor, validator diagnostics/coverage and lexical state.
+
+Paragraph/Sentence addressing is scoped by normalized identity + segmentation version. Raw `content_hash` remains provenance and is not silently redefined.
 
 ### 4. Unified TextLocator
 
@@ -92,9 +104,9 @@ get_context
 ← Section / Paragraph / Sentence
 ```
 
-Title-only SearchHit remains Section-level. Non-prose Paragraph may be a Paragraph candidate but never receives fake Sentence identity.
+Title-only SearchHit remains Section-level. Coarse structural/non-prose content may remain Paragraph-level but never receives fake Sentence identity.
 
-ADR 0005 does not add block-specific locator kinds. Native `blockquote/list_item/preformatted/table` remain persisted block evidence projected into Paragraph/Sentence policy and coverage.
+Native `blockquote/list_item/preformatted/table` do not become new locator kinds. They remain persisted block evidence projected into Paragraph/Sentence eligibility and coverage.
 
 ### 5. Normalized ranges
 
@@ -107,9 +119,38 @@ Unicode scalar positions
 section-content-unicode-scalar/v1
 ```
 
-Legacy parser/native offsets, legacy search-unit locations, and rendered/read-stream offsets are separate coordinate spaces.
+Legacy parser/native offsets, legacy search-unit locations and rendered/read-stream offsets are separate coordinate spaces.
 
-### 6. Shared locator resolver
+### 6. Block-aware Paragraph/Sentence policy
+
+Current segmentation:
+
+```text
+text-segmentation/v2
+```
+
+Native mapping under flat `normalized-block-model/v1` evidence:
+
+```text
+paragraph    → exact sentence-eligible Paragraph
+blockquote   → typed coarse Paragraph-level unit; no Sentence
+list_item    → typed coarse Paragraph-level unit; no Sentence
+preformatted → coarse Paragraph-level unit; no Sentence
+table        → coarse Paragraph-level unit; no Sentence
+```
+
+BlockQuote/ListItem stay coarse because block-model/v1 is a flat maximal projection and may suppress nested leaf boundaries. This is evidence sufficiency, not a claim that quote/list text is inherently non-prose.
+
+Uncovered gaps:
+
+```text
+whitespace-only → separator coverage
+non-whitespace  → deterministic blank-line fallback scoped to exact gap
+```
+
+Fallback strong code/table heuristics apply only where native evidence is absent. No Sentence crosses a Paragraph boundary.
+
+### 7. Shared locator resolver
 
 Locator-consuming application paths share one resolver for:
 
@@ -127,9 +168,11 @@ The resolver decides locator validity; each capability separately decides which 
 
 No fuzzy relocation or snippet-based identity repair is allowed.
 
-Under ADR 0005, v1 Paragraph/Sentence locators become `STALE_LOCATOR` after the v2 migration even when text/range happens to match. Because normalized-document identity itself changes, old Section/CharacterRange locators also fail closed on the old normalized hash.
+The resolver uses fallible block-aware TextUnit materialization. Invalid persisted block evidence produces an application error instead of a process panic or fallback locator.
 
-### 7. Cursor is not locator
+Historical v1 Paragraph/Sentence locators fail `STALE_LOCATOR` even when their old range still matches a current v2 range. Old normalized-hash-bound state also fails closed on normalized identity mismatch.
+
+### 8. Cursor is not locator
 
 ```text
 TextLocator    = source address
@@ -148,11 +191,11 @@ rendering_version = exact-normalized-source/v1
 
 and returns a separate `returned_locator` CharacterRange for each response segment.
 
-ADR 0005 keeps the existing cursor claim shapes unless implementation needs new fields: current TextUnitCursor already binds normalized hash + segmentation version, and ReadCursor already binds normalized identity. Old state therefore fails stale rather than resuming against a v2 stream.
+TextUnitCursor already binds normalized hash + segmentation version; ReadCursor binds normalized identity. Historical v1 stream state therefore fails stale rather than resuming against a v2 stream.
 
-### 8. Search candidate identity
+### 9. Search candidate identity
 
-Accepted and implemented candidate kinds:
+Implemented candidate kinds:
 
 ```text
 section | paragraph | sentence
@@ -166,64 +209,58 @@ Paragraph TextUnit   → Paragraph locator
 eligible Sentence    → Sentence locator
 ```
 
+Coarse BlockQuote/ListItem/Preformatted/Table regions are Paragraph candidates only.
+
 SearchIndex row/snippet/score remains derived retrieval state. Every precise hit locator is revalidated against current canonical Document before handoff.
 
-ADR 0005 requires persistent lexical state to advance from `lexical-search-index/v2` to `lexical-search-index/v3` when v2 TextUnit identity lands, because stored Paragraph/Sentence locators become stale. `lexical-tokenizer/v1` remains unchanged.
+### 10. Segmentation and tokenization are independent
 
-### 9. Segmentation and tokenization are independent
-
-Current runtime:
+Current contracts:
 
 ```text
-normalized-document-hash/v1 + text-segmentation/v1
+normalized-document-hash/v2 + text-segmentation/v2
 → TextUnit / TextLocator identity
 
 lexical-tokenizer/v1
 → lexical projection / matching only
 ```
 
-Accepted next identity migration:
-
-```text
-normalized-document-hash/v2 + text-segmentation/v2
-→ block-aware TextUnit / TextLocator identity
-
-lexical-tokenizer/v1
-→ unchanged lexical projection / matching policy
-```
-
 Changing tokenizer policy rebuilds lexical state but must not renumber TextUnits or alter TextLocator identity.
 
 Current tokenizer is deterministic/non-LLM and supports CJK/mixed technical text without whitespace-only assumptions.
 
-### 10. Lexical index is versioned derived state
+### 11. Lexical index is versioned derived state
 
 Current persistent search contract:
 
 ```text
-lexical-search-index/v2
+lexical-search-index/v3
 lexical-tokenizer/v1
 ```
 
-SQLite rows store candidate kind + canonical TextLocator + tokenizer version + source order + encoded lexemes. Incompatible index/tokenizer versions invalidate only rebuildable lexical state.
+SQLite rows store candidate kind + canonical TextLocator + tokenizer version + source order + encoded lexemes. A semantic index-version mismatch invalidates only rebuildable lexical state.
 
-If a canonical persisted Document exists but lexical rows are absent, `SearchDocumentUseCase` can rebuild the derived index from that Document and retry without retrieve/reparse.
+The v2→v3 migration discards old precise locator rows and rebuilds from canonical persisted Document facts without source retrieval/reparse. Tokenizer remains v1.
 
-Historical SearchIndex adapters remain runtime-compatible through Section-level fallback. An adapter that does not advertise an independently versioned precise lexical contract continues to use legacy `search()` plus canonical Section enrichment.
+If canonical persisted Document exists but lexical rows are absent, `SearchDocumentUseCase` can rebuild the derived index and retry.
 
-ADR 0005 extends this rule: segmentation/normalized-identity migration also invalidates stored precise lexical rows, so v2 index state is rebuilt as v3 while tokenizer v1 remains independent.
+Historical SearchIndex adapters remain runtime-compatible through truthful Section-level fallback when they do not advertise the precise lexical contract.
 
-### 11. Backward compatibility
+### 12. TextUnit persistence remains derived
 
-- existing MCP Tool count remains seven;
-- existing `search_document(document_id, query, limit)` request is unchanged;
-- old SearchHit preview fields remain;
-- `candidate_kind + text_locator` are additive;
-- legacy `Location` semantics remain legacy;
-- historical Rust SearchIndex adapters that only implement `search()` continue to work at Section precision;
-- precise-capable adapters may return Paragraph/Sentence candidates.
+`open_document` validates block-aware Paragraph materialization before replacing the derived TextUnitIndex.
 
-Identity migrations are fail-closed rather than wire-mode compatible: callers cannot request old segmentation interpretation after the server advances to v2.
+Sentence SQLite persistence remains optional performance optimization rather than correctness/source truth. Sentence enumeration, read/context resolution and lexical candidate materialization can rebuild from canonical persisted facts.
+
+### 13. Backward compatibility
+
+- runtime Tool count remains seven;
+- `search_document(document_id, query, limit)` request remains unchanged;
+- existing SearchHit preview fields remain;
+- `candidate_kind + text_locator` remain additive precise fields;
+- legacy `Location` remains provenance/preview rather than canonical identity;
+- historical Rust SearchIndex adapters remain usable at Section precision;
+- identity migrations are fail-closed rather than caller-selectable historical modes.
 
 ## Implementation status
 
@@ -238,20 +275,13 @@ P1 exact TextLocator read                   ✓
 P1 shared locator resolver                  ✓
 P1 SearchHit → TextLocator                  ✓
 P1 lexical-text-unit-index                  ✓
-   - Section title candidates
-   - canonical Paragraph candidates
-   - canonical Sentence candidates
-   - lexical-tokenizer/v1
-   - CJK/mixed technical lexical terms
-   - lexical-search-index/v2
-   - persistent rebuild/migration semantics
-
-Accepted next migration (ADR 0005)            design ✓ / runtime pending
+P1 block-aware TextUnit identity            ✓
    - normalized-document-hash/v2
    - text-segmentation/v2
-   - native paragraph/blockquote/list-item boundaries
-   - native pre/table coarse Sentence policy
-   - fallback gaps + coverage
+   - native paragraph exact boundaries
+   - blockquote/list_item coarse structural handling
+   - pre/table coarse non-prose handling
+   - native/fallback gap projection
    - old locator/cursor stale behavior
    - lexical-search-index/v3 rebuild
 ```
@@ -262,44 +292,43 @@ Accepted next migration (ADR 0005)            design ✓ / runtime pending
 2. Paragraph/Sentence identity rebuilds deterministically from persisted canonical facts + segmentation version.
 3. Paragraph/Sentence ranges are exact Section.content slices.
 4. Raw hash alone is not normalized TextUnit identity.
-5. Cursor progress is not source identity.
-6. Exact-read returned ranges reproduce response content exactly.
-7. SearchHit locator flows directly to read/context.
-8. Title-only Section search remains available without fake Paragraph identity.
-9. Non-prose never gains fake Sentence identity.
-10. Tokenizer changes cannot change TextUnit identity.
-11. CJK/mixed technical search does not depend on whitespace-only splitting.
-12. Search rows/snippets/legacy search-unit offsets never become canonical identity.
-13. Search candidate kind must equal the resolved canonical locator kind.
-14. Precise search locators are fail-closed validated against current Document.
-15. Missing/incompatible derived lexical state can be rebuilt without source retrieval or reparsing.
-16. Historical SearchIndex adapters remain usable through Section-level fallback.
-17. Sentence persistence remains optional optimization, not source truth.
-18. Once block facts drive segmentation, identity-bearing block kind/range/order must be bound by normalized identity.
-19. Absent block evidence may degrade to deterministic fallback; invalid declared block evidence must not be silently ignored.
-20. Identity migration never fuzzy-rebases old locators/cursors.
+5. Identity-bearing block facts are bound by normalized hash v2.
+6. Provenance-only block fields do not redefine normalized identity.
+7. Absent block evidence may use deterministic fallback; invalid declared evidence fails closed.
+8. Cursor progress is not source identity.
+9. Exact-read returned ranges reproduce response content exactly.
+10. SearchHit locator flows directly to read/context.
+11. Title-only Section search remains available without fake Paragraph identity.
+12. Coarse structural/non-prose content never gains fake Sentence identity.
+13. Tokenizer changes cannot change TextUnit identity.
+14. CJK/mixed technical search does not depend on whitespace-only splitting.
+15. Search rows/snippets/legacy search-unit offsets never become canonical identity.
+16. Search candidate kind must equal the resolved canonical locator kind.
+17. Precise search locators are fail-closed validated against current Document.
+18. Missing/incompatible derived lexical state can rebuild without source retrieval/reparse.
+19. Historical SearchIndex adapters remain usable through Section-level fallback.
+20. Sentence persistence remains optional optimization, not source truth.
+21. Identity migration never fuzzy-rebases old locators/cursors.
 
 ## Consequences
 
 Positive:
 
-- enumeration, search, read, and context share one source-addressing model;
-- precise search can hand Paragraph/Sentence evidence directly into exact read/context;
-- tokenizer/index changes are isolated from source identity;
-- CJK and technical-token improvements remain rebuildable retrieval concerns;
-- old adapter compatibility does not force fabricated fine-grained identity;
-- the accepted v2 migration can consume persisted native EPUB/HTML structure without making transient parser state canonical.
+- enumeration, search, read and context share one source-addressing model;
+- EPUB/HTML native Paragraph evidence can improve precision without transient parser state becoming canonical;
+- flat composite containers are preserved truthfully rather than over-claimed;
+- precise search can hand canonical Paragraph/Sentence evidence directly into exact read/context;
+- tokenizer/index changes remain isolated rebuildable concerns;
+- old adapter compatibility does not force fabricated fine-grained identity.
 
 Costs:
 
-- normalized identity, segmentation version, tokenizer version, and lexical-index version must all be maintained explicitly;
-- SearchDocumentUseCase validates derived hits against DocumentRepository;
-- persistent lexical state requires migration/rebuild logic;
-- ranking policy remains a separate evidence-driven concern;
-- ADR 0005 intentionally stales old normalized-hash-bound locator/cursor state when v2 lands.
+- normalized identity, segmentation version, tokenizer version and lexical-index version must all be maintained explicitly;
+- v2 normalized identity intentionally stales old normalized-hash-bound state;
+- persistent lexical state requires migration/rebuild semantics;
+- quote/list Sentence precision remains deferred until stronger nested/leaf evidence exists;
+- ranking remains a separate evidence-driven optimization problem.
 
 ## Review outcome
 
-Accepted. The implementation now realizes the originally accepted `section | paragraph | sentence` lexical candidate model without reusing historical paragraph-like search-unit boundaries as source identity. `lexical-tokenizer/v1` is explicitly independent of `text-segmentation/v1`, and legacy SearchIndex adapters retain a truthful Section-level compatibility path.
-
-ADR 0005 additionally accepts the next block-aware identity migration: native block evidence becomes a versioned segmentation input, `normalized-document-hash/v2` binds the identity-bearing block projection, old precise state fails stale, and persistent lexical rows rebuild under `lexical-search-index/v3`. That migration remains pending implementation.
+Accepted and current. ADR 0005 has now been implemented: persisted native block evidence is an identity-bearing segmentation input; `normalized-document-hash/v2` binds the addressing-relevant block projection; `text-segmentation/v2` materializes native/fallback Paragraphs conservatively; historical precise state fails stale; and persistent lexical state rebuilds under `lexical-search-index/v3` while `lexical-tokenizer/v1` remains independent.

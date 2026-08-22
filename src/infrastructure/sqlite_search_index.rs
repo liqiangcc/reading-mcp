@@ -64,7 +64,7 @@ impl SearchIndex for SqliteSearchIndex {
     }
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
-        let candidates = build_lexical_candidates(document);
+        let candidates = build_lexical_candidates(document)?;
         let mut connection = self
             .connection
             .lock()

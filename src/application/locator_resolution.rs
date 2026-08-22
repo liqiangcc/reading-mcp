@@ -94,7 +94,8 @@ pub(crate) fn resolve_text_locator(
                 ));
             }
             let paragraph = document
-                .paragraph_text_units()
+                .try_paragraph_text_units()
+                .map_err(text_unit_materialization_error)?
                 .units
                 .into_iter()
                 .find(|unit| {
@@ -126,7 +127,8 @@ pub(crate) fn resolve_text_locator(
                 ));
             }
             let sentence = document
-                .sentence_text_units()
+                .try_sentence_text_units()
+                .map_err(text_unit_materialization_error)?
                 .units
                 .into_iter()
                 .find(|unit| {
@@ -164,4 +166,10 @@ fn validate_segmentation_version(version: &str) -> Result<(), ApplicationError> 
         )));
     }
     Ok(())
+}
+
+fn text_unit_materialization_error(error: impl std::fmt::Display) -> ApplicationError {
+    ApplicationError::TextUnitIndexFailed(format!(
+        "cannot resolve locator against persisted block evidence: {error}"
+    ))
 }

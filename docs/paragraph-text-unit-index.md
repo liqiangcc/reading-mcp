@@ -1,206 +1,131 @@
 # Paragraph TextUnit Index Contract
 
-> Status: Implemented P1 foundation
+> Status: Implemented block-aware Paragraph contract
 >
-> Branch: `feat/text-unit-index`
+> Foundation branch: `feat/text-unit-index`
 >
-> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/normalized-text-range-contract.md`, `docs/tool-contract-use-case-design.md`
+> Current identity branch: `feat/block-aware-text-unit-identity`
+>
+> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0005-block-aware-text-unit-identity.md`, `docs/normalized-text-range-contract.md`, `docs/normalized-block-model-contract.md`
 
 ## 1. Goal
 
-This increment establishes deterministic, rebuildable Paragraph TextUnits without changing the MCP Tool surface or the current SearchIndex behavior.
+Paragraph TextUnits are deterministic, exact, rebuildable reading/addressing units derived only from persisted canonical facts.
 
-The dependency chain is:
+Current dependency chain：
 
 ```text
-persisted canonical Document / Section.content
+persisted Document / Section.content
++ optional valid normalized-block-model/v1
         ↓
-text-segmentation/v1
+normalized-document-hash/v2
++ text-segmentation/v2
         ↓
 Paragraph TextUnits
         ↓
 exact NormalizedTextRange
         ↓
-TextUnitIndex (derived, rebuildable)
+TextUnitIndex / TextLocator / search
 ```
 
-`Document / Section` remain source truth. `TextUnitIndex` is never a replacement canonical store.
+`Document / Section` remain source truth. `TextUnitIndex` remains rebuildable derived state.
 
-## 2. Paragraph boundary policy
+## 2. Current Paragraph boundary policy
 
-Paragraph v1 derives only from exact persisted `Section.content`. It does not depend on parser-native block objects, transient parser state, FTS rows, or rendered MCP responses.
-
-A Paragraph is a maximal contiguous run of non-blank lines. A blank line is a line whose content, excluding its line ending, is whitespace-only.
-
-Rules:
+Current segmentation：
 
 ```text
-blank line              → paragraph separator
-leading blank lines     → separators, not Paragraphs
-trailing blank lines    → separators, not Paragraphs
-multiple non-blank lines→ one Paragraph, preserving internal line endings
-first/last line content → preserved exactly, including indentation/trailing spaces
-terminal line ending    → separator, not part of Paragraph text
+text-segmentation/v2
 ```
 
-The implementation computes boundaries in Unicode-scalar coordinates and then resolves the exact slice through `NormalizedTextRange`.
+### Native block projection
 
-It never trims or rewrites the TextUnit text after deciding the range.
-
-## 3. Versioning
-
-Current segmentation version:
+When a valid block map is present：
 
 ```text
-text-segmentation/v1
+paragraph    → exact Paragraph
+blockquote   → typed coarse Paragraph-level unit
+list_item    → typed coarse Paragraph-level unit
+preformatted → coarse Paragraph-level unit
+table        → coarse Paragraph-level unit
 ```
 
-Any change that can alter Paragraph ordinals or ranges requires a new segmentation version.
+Every native Paragraph-level unit uses the exact persisted block range.
 
-Current TextUnit ID contract:
+BlockQuote/ListItem are intentionally coarse under flat `normalized-block-model/v1`; nested leaf boundaries may have been suppressed and therefore cannot be reconstructed as canonical Paragraphs.
+
+### Uncovered gaps
+
+For source text not covered by native ranges：
 
 ```text
+whitespace-only gap → separator coverage
+non-whitespace gap  → deterministic blank-line fallback scoped to exact gap
+```
+
+Fallback Paragraphs retain v1 blank-line semantics within the gap：
+
+- blank lines separate fallback Paragraphs;
+- internal non-blank line endings are preserved;
+- exact first/last content is retained;
+- terminal separator line endings are not fabricated into Paragraph text.
+
+Fallback ranges are translated back into owner-Section Unicode-scalar coordinates.
+
+If no block map exists, the entire Section uses deterministic fallback. A declared invalid block map fails closed.
+
+## 3. Versioning and identity
+
+Current versions：
+
+```text
+normalized-document-hash/v2
+text-segmentation/v2
 text-unit-id/v1
 ```
 
-The deterministic unit ID is derived from:
+`text-unit-id/v1` remains valid because its derivation algorithm already includes：
 
 ```text
 document_id
-+ normalized_document_hash
-+ owner_section_id
-+ kind = paragraph
-+ 1-based paragraph_index
-+ normalized_range [start, end)
-+ segmentation_version
-```
-
-Raw `content_hash` is retained on the TextUnit as source provenance but is not an independent Paragraph-boundary identity input. This follows ADR 0002: actual normalized facts plus segmentation policy define fine-grained identity.
-
-## 4. TextUnit model
-
-Implemented Paragraph TextUnit fields:
-
-```text
-TextUnit
-├── id: TextUnitId
-├── document_id
-├── content_hash                  # raw provenance
-├── normalized_document_hash
-├── owner_section_id
-├── kind = paragraph
-├── paragraph_index               # human-facing, 1-based within Section
-├── source_order                  # deterministic document traversal order
-├── normalized_range              # Section.content-relative
-├── text                          # exact normalized slice
-└── segmentation_version
-```
-
-The current source-order traversal is:
-
-```text
-root Sections in persisted order
-  ↓
-Paragraphs in owner Section order
-  ↓
-child Sections depth-first in persisted order
-```
-
-Because Section order is part of `normalized_document_hash`, a structural reorder also changes the normalized identity.
-
-## 5. Coverage
-
-Paragraph segmentation reports per-Section factual coverage:
-
-```text
-owner_chars
-paragraph_chars
-separator_chars
-paragraph_count
-```
-
-Invariant:
-
-```text
-owner_chars = paragraph_chars + separator_chars
-```
-
-Whitespace separators are intentionally not fabricated as Paragraph TextUnits. They are known structural separators, not unsupported gaps.
-
-The subsequent `feat/sentence-locator` increment now implements deterministic Sentence identity plus conservative persisted-text classification for obvious fenced/indented code and Markdown tables. Those non-prose Paragraphs remain Paragraph-addressable and are reported as coarse-only rather than receiving fabricated Sentence children. See [Sentence Locator and Coverage Contract](sentence-locator-contract.md).
-
-The persisted Paragraph TextUnitIndex itself remains Paragraph-only; Sentence persistence and pagination are intentionally left to the enumeration contract.
-
-## 6. TextUnitIndex boundary
-
-A separate application port now stores derived units:
-
-```text
-TextUnitIndex
-├── replace_document(document_id, units)
-└── list_document(document_id)
-```
-
-`replace_document` means an atomic derived-state rebuild for one document version.
-
-Two adapters exist:
-
-```text
-InMemoryTextUnitIndex
-SqliteTextUnitIndex
-```
-
-The SQLite adapter persists:
-
-```text
-unit_id
-source_order
-document_id
-raw content_hash
 normalized_document_hash
 owner_section_id
-kind
-paragraph_index
-normalized range
-exact text
+kind = paragraph
+1-based paragraph_index
+normalized_range [start,end)
 segmentation_version
 ```
 
-The table is separate from FTS `search_units`. TextUnitIndex and SearchIndex may share one physical SQLite file, but they remain separate logical stores and ports.
+Hash v2 and segmentation v2 therefore produce new IDs without redefining the ID derivation namespace.
 
-## 7. Open workflow integration
+Raw `content_hash` remains source provenance rather than an independent Paragraph-boundary identity input.
 
-The production runtime builds Paragraph TextUnits during `open_document` after parsing canonical Document facts:
-
-```text
-retrieve
-  ↓
-parse canonical Document
-  ↓
-derive Paragraph TextUnits from Section.content
-  ↓
-save DocumentRepository
-  ↓
-replace TextUnitIndex
-  ↓
-update existing SearchIndex
-```
-
-The existing SearchIndex implementation is intentionally unchanged in this increment. It does not consume TextUnitIndex yet.
-
-A compatibility constructor for direct application tests can still instantiate `OpenDocumentUseCase` without a TextUnitIndex. The production runtime uses the TextUnit-indexed constructor.
-
-## 8. Rebuildability invariant
-
-For the same canonical persisted Document and segmentation version:
+## 4. Paragraph model
 
 ```text
-build(document).units
-==
-build(repository_round_trip(document)).units
+TextUnit
+├── id
+├── document_id
+├── content_hash                  # raw provenance
+├── normalized_document_hash      # v2 identity
+├── owner_section_id
+├── kind = paragraph
+├── paragraph_index               # 1-based within owner Section
+├── source_order                  # deterministic document order
+├── normalized_range              # Section.content-relative
+├── text                          # exact slice
+└── segmentation_version          # text-segmentation/v2
 ```
 
-For every Paragraph TextUnit:
+Paragraph indices are assigned after native and fallback candidates are merged by exact Section source position.
+
+`NormalizedBlock.block_index` is not reused as `paragraph_index` because fallback ranges can occur before/between/after native blocks.
+
+Document `source_order` remains deterministic root/child traversal with Paragraphs in each Section's source order.
+
+## 5. Exact-text invariant
+
+For every Paragraph：
 
 ```text
 unit.text
@@ -208,67 +133,132 @@ unit.text
 owner_section.normalized_text_slice(unit.normalized_range)
 ```
 
-No derived row may be required to reconstruct canonical `Section.content`.
+The materializer never trims or rewrites TextUnit text after deciding a range.
 
-## 9. Persistence semantics
+## 6. Coverage
 
-`SqliteTextUnitIndex::replace_document` deletes the prior derived units for that document id and inserts the new deterministic set in one transaction.
-
-It validates:
+Current per-Section Paragraph coverage：
 
 ```text
-every unit belongs to the requested document_id
-source_order is contiguous and matches input order
-paragraph ordinal is non-zero
-persisted numeric fields are representable
-persisted normalized ranges are ordered
-persisted range length equals exact Unicode-scalar text length
-persisted kind is supported
+owner_chars
+paragraph_chars
+separator_chars
+paragraph_count
+native_paragraph_chars
+native_structural_container_chars
+native_non_prose_chars
+fallback_chars
 ```
 
-Reopening the SQLite adapter must reproduce the same ordered Paragraph TextUnit values.
-
-## 10. Acceptance evidence
-
-Tests cover:
-
-- 1-based Paragraph ordinals;
-- Unicode-scalar normalized ranges;
-- exact text slicing;
-- internal multiline Paragraph preservation;
-- leading/trailing whitespace preservation inside Paragraph content;
-- blank-line separator accounting;
-- whitespace-only Section behavior;
-- deterministic TextUnit IDs;
-- raw provenance changes not redefining identical normalized Paragraph identity;
-- normalized text changes invalidating TextUnit IDs;
-- deterministic cross-Section source order;
-- rebuild equality after canonical Document SQLite round-trip;
-- InMemory/OpenDocument integration;
-- SQLite TextUnitIndex persistence and replacement;
-- rejection of malformed derived Paragraph rows.
-
-The normal repository release gate remains:
+Accounting invariant：
 
 ```text
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
+owner_chars = paragraph_chars + separator_chars
 ```
 
-## 11. Current boundary and next step
+Native structural containers currently mean BlockQuote/ListItem under flat block evidence. Native non-prose means Preformatted/Table. Fallback classification remains separate.
 
-Paragraph indexing is complete for this foundation. Sentence locator identity and non-prose coverage are now implemented separately, but the following remain intentionally unimplemented:
+Whitespace separators are factual source coverage, not fake Paragraphs or unsupported gaps.
+
+## 7. Sentence eligibility handoff
+
+Paragraph content class is derived from persisted native evidence when available, otherwise fallback text heuristics：
 
 ```text
-Sentence persistence migration
-TextLocator wire DTOs
-get_text_units
-TextUnitCursor
-Paragraph/Sentence MCP context
-SearchHit → TextLocator
-Paragraph/Sentence FTS
-EPUB structure/parser changes
+NativeParagraph  → Sentence eligible
+BlockQuote       → coarse only
+ListItem         → coarse only
+Preformatted     → coarse only
+Table            → coarse only
+fallback prose   → eligible
+fallback code    → coarse only
+fallback table   → coarse only
 ```
 
-The next dependency step is `feat/text-unit-enumeration-contract`.
+A Paragraph is always addressable even when it is not Sentence-eligible.
+
+## 8. Fallible materialization boundary
+
+Domain exposes：
+
+```text
+try_paragraph_text_units()
+```
+
+A declared corrupt/invalid block map returns an error. Capability boundaries such as `open_document`, `get_text_units`, locator resolution and lexical indexing use the fallible path so invalid persisted evidence cannot silently become fallback identity.
+
+The infallible convenience wrapper remains for internal call sites that already operate on validated canonical Documents.
+
+## 9. TextUnitIndex persistence
+
+Application port：
+
+```text
+TextUnitIndex
+├── replace_document(document_id, units)
+└── list_document(document_id)
+```
+
+Adapters：
+
+```text
+InMemoryTextUnitIndex
+SqliteTextUnitIndex
+```
+
+SQLite persists unit ID, source order, document/raw/normalized identity, owner, kind, paragraph index, exact range/text and segmentation version.
+
+`replace_document` atomically replaces one document's derived Paragraph rows.
+
+`open_document` validates current block-aware Paragraph materialization before replacing TextUnitIndex state.
+
+## 10. Rebuildability
+
+For the same persisted canonical Document and current segmentation policy：
+
+```text
+build(document).units
+==
+build(repository_round_trip(document)).units
+```
+
+No TextUnitIndex row is required to reconstruct `Section.content` or `NormalizedBlockMap`.
+
+## 11. Acceptance evidence
+
+Tests cover：
+
+- exact native Paragraph ranges;
+- BlockQuote/ListItem coarse Paragraph projection;
+- Preformatted/Table coarse projection;
+- mixed native/fallback source ordering;
+- exact fallback offset translation;
+- separator accounting;
+- 1-based merged Paragraph ordinals;
+- Unicode-scalar exact slicing;
+- deterministic IDs under hash-v2/segmentation-v2;
+- block kind/presence changing identity;
+- provenance-only native location not changing hash;
+- invalid declared block evidence fail closed;
+- SQLite TextUnit persistence/replacement/reopen;
+- old v1 locator/cursor stale migration;
+- existing read/context/search/EPUB suites.
+
+CI #876 passed the implementation head before final documentation-only synchronization：
+
+```text
+Format  success
+Clippy  success
+Test    success
+```
+
+## 12. Current non-goals
+
+```text
+nested/leaf BlockQuote/ListItem Paragraph identity
+Sentence SQLite persistence
+heading-title body ranges
+SVG/fixed-layout precise blocks
+block-specific MCP Tools
+fuzzy source rebasing
+```

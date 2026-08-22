@@ -120,9 +120,11 @@ pub struct TextUnitEnumerationCoverage {
     pub paragraph_count: usize,
     pub sentence_eligible_paragraphs: usize,
     pub non_prose_paragraphs: usize,
+    pub coarse_structural_paragraphs: usize,
     pub represented_paragraphs: usize,
     pub represented_sentences: usize,
     pub coarse_non_prose_items: usize,
+    pub coarse_structural_items: usize,
     pub intentionally_skipped: usize,
     pub unsupported_gaps: usize,
     pub source_complete: bool,
@@ -352,8 +354,16 @@ fn build_declared_stream(
     requested_kind: RequestedTextUnitKind,
     coverage_policy: TextUnitCoveragePolicy,
 ) -> Result<(Vec<TextUnitReadingItem>, TextUnitEnumerationCoverage), ApplicationError> {
-    let paragraph_set = document.paragraph_text_units();
-    let sentence_set = document.sentence_text_units();
+    let paragraph_set = document.try_paragraph_text_units().map_err(|error| {
+        ApplicationError::TextUnitIndexFailed(format!(
+            "cannot materialize Paragraph TextUnits from persisted block evidence: {error}"
+        ))
+    })?;
+    let sentence_set = document.try_sentence_text_units().map_err(|error| {
+        ApplicationError::TextUnitIndexFailed(format!(
+            "cannot materialize Sentence TextUnits from persisted block evidence: {error}"
+        ))
+    })?;
     let paragraphs = paragraph_set
         .units
         .iter()
@@ -394,7 +404,11 @@ fn build_declared_stream(
         .count();
     let non_prose_paragraphs = coverage_by_paragraph
         .values()
-        .filter(|coverage| coverage.eligibility == SentenceEligibility::CoarseParagraphOnly)
+        .filter(|coverage| is_non_prose_class(coverage.content_class))
+        .count();
+    let coarse_structural_paragraphs = coverage_by_paragraph
+        .values()
+        .filter(|coverage| is_coarse_structural_class(coverage.content_class))
         .count();
     let sentence_separator_chars = coverage_by_paragraph
         .values()
@@ -405,6 +419,7 @@ fn build_declared_stream(
     let mut represented_paragraphs = 0usize;
     let mut represented_sentences = 0usize;
     let mut coarse_non_prose_items = 0usize;
+    let mut coarse_structural_items = 0usize;
     let mut intentionally_skipped = 0usize;
 
     for paragraph in paragraphs {
@@ -417,12 +432,11 @@ fn build_declared_stream(
                     paragraph.paragraph_index, section.id.0
                 ))
             })?;
-        let is_non_prose =
-            paragraph_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly;
+        let is_coarse = paragraph_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly;
 
         match requested_kind {
             RequestedTextUnitKind::Paragraph => {
-                if coverage_policy == TextUnitCoveragePolicy::EligibleOnly && is_non_prose {
+                if coverage_policy == TextUnitCoveragePolicy::EligibleOnly && is_coarse {
                     intentionally_skipped += 1;
                     continue;
                 }
@@ -435,20 +449,26 @@ fn build_declared_stream(
                 ));
                 represented_paragraphs += 1;
             }
-            RequestedTextUnitKind::Sentence if is_non_prose => {
+            RequestedTextUnitKind::Sentence if is_coarse => {
                 if coverage_policy == TextUnitCoveragePolicy::EligibleOnly {
                     intentionally_skipped += 1;
                     continue;
                 }
+                let degradation = if is_coarse_structural_class(paragraph_coverage.content_class) {
+                    coarse_structural_items += 1;
+                    "flat_native_container_no_nested_textunit_evidence"
+                } else {
+                    coarse_non_prose_items += 1;
+                    "requested_sentence_but_non_prose_is_paragraph_only"
+                };
                 items.push(paragraph_item(
                     document,
                     section,
                     paragraph,
                     paragraph_coverage,
-                    Some("requested_sentence_but_non_prose_is_paragraph_only".into()),
+                    Some(degradation.into()),
                 ));
                 represented_paragraphs += 1;
-                coarse_non_prose_items += 1;
             }
             RequestedTextUnitKind::Sentence => {
                 for sentence in sentences_by_paragraph
@@ -456,7 +476,12 @@ fn build_declared_stream(
                     .into_iter()
                     .flatten()
                 {
-                    items.push(sentence_item(document, section, sentence));
+                    items.push(sentence_item(
+                        document,
+                        section,
+                        sentence,
+                        paragraph_coverage.content_class,
+                    ));
                     represented_sentences += 1;
                 }
             }
@@ -474,9 +499,11 @@ fn build_declared_stream(
             paragraph_count: section_coverage.paragraph_count,
             sentence_eligible_paragraphs,
             non_prose_paragraphs,
+            coarse_structural_paragraphs,
             represented_paragraphs,
             represented_sentences,
             coarse_non_prose_items,
+            coarse_structural_items,
             intentionally_skipped,
             unsupported_gaps: 0,
             source_complete,
@@ -506,24 +533,45 @@ fn sentence_item(
     document: &Document,
     section: &Section,
     sentence: &SentenceTextUnit,
+    paragraph_class: ParagraphContentClass,
 ) -> TextUnitReadingItem {
+    let (content_class, detail) = content_class(paragraph_class);
     TextUnitReadingItem {
         text: sentence.text.clone(),
         locator: TextLocator::for_sentence(document, section, sentence),
         effective_kind: EffectiveTextUnitKind::Sentence,
-        content_class: TextUnitContentClass::Unknown,
-        content_class_detail: ParagraphContentClass::ProseOrUnknown.as_str().into(),
+        content_class,
+        content_class_detail: detail.into(),
         degradation: None,
     }
 }
 
 fn content_class(class: ParagraphContentClass) -> (TextUnitContentClass, &'static str) {
     match class {
-        ParagraphContentClass::ProseOrUnknown => (TextUnitContentClass::Unknown, class.as_str()),
-        ParagraphContentClass::CodeBlock | ParagraphContentClass::Table => {
-            (TextUnitContentClass::NonProse, class.as_str())
-        }
+        ParagraphContentClass::ProseOrUnknown
+        | ParagraphContentClass::NativeParagraph
+        | ParagraphContentClass::BlockQuote
+        | ParagraphContentClass::ListItem => (TextUnitContentClass::Unknown, class.as_str()),
+        ParagraphContentClass::CodeBlock
+        | ParagraphContentClass::Preformatted
+        | ParagraphContentClass::Table => (TextUnitContentClass::NonProse, class.as_str()),
     }
+}
+
+fn is_non_prose_class(class: ParagraphContentClass) -> bool {
+    matches!(
+        class,
+        ParagraphContentClass::CodeBlock
+            | ParagraphContentClass::Preformatted
+            | ParagraphContentClass::Table
+    )
+}
+
+fn is_coarse_structural_class(class: ParagraphContentClass) -> bool {
+    matches!(
+        class,
+        ParagraphContentClass::BlockQuote | ParagraphContentClass::ListItem
+    )
 }
 
 #[derive(Debug)]

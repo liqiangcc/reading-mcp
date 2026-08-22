@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use crate::application::ports::SearchHitKind;
+use crate::application::ports::{ApplicationError, SearchHitKind};
 use crate::domain::{Document, Location, Section, SentenceTextUnit, TextLocator, TextUnit};
 
-pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v2";
+pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v3";
 const MAX_SNIPPET_CHARS: usize = 320;
 
 #[derive(Clone, Debug)]
@@ -20,9 +20,19 @@ pub(crate) struct LexicalCandidate {
     pub(crate) source_order: usize,
 }
 
-pub(crate) fn build_lexical_candidates(document: &Document) -> Vec<LexicalCandidate> {
-    let paragraphs = document.paragraph_text_units().units;
-    let sentences = document.sentence_text_units().units;
+pub(crate) fn build_lexical_candidates(
+    document: &Document,
+) -> Result<Vec<LexicalCandidate>, ApplicationError> {
+    let paragraphs = document.try_paragraph_text_units().map_err(|error| {
+        ApplicationError::IndexFailed(format!(
+            "cannot build lexical Paragraph candidates from persisted block evidence: {error}"
+        ))
+    })?;
+    let sentences = document.try_sentence_text_units().map_err(|error| {
+        ApplicationError::IndexFailed(format!(
+            "cannot build lexical Sentence candidates from persisted block evidence: {error}"
+        ))
+    })?;
     let mut candidates = Vec::new();
     let mut source_order = 0usize;
 
@@ -30,14 +40,14 @@ pub(crate) fn build_lexical_candidates(document: &Document) -> Vec<LexicalCandid
         collect_section_candidates(
             document,
             section,
-            &paragraphs,
-            &sentences,
+            &paragraphs.units,
+            &sentences.units,
             &mut candidates,
             &mut source_order,
         );
     }
 
-    candidates
+    Ok(candidates)
 }
 
 fn collect_section_candidates(

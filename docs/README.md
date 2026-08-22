@@ -5,24 +5,24 @@
 - [架构设计](architecture.md)：领域模型、Retriever/Parser/Search/Cache 边界、稳定定位与 SSRF 设计。
 - [Text Index & Source Locator Architecture](text-index-and-locator-design.md)：精确阅读的五级寻址、TextUnit/Locator、字符坐标、切分版本与 continuation 契约。
 - [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)：已实现的 normalized-document hash、normalization version、Section-relative Unicode-scalar range、坐标空间隔离和 Parsed Cache 版本约束。
-- [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md)：已实现的 Paragraph v1 确定性分段、stable TextUnit identity、source order、coverage 与 SQLite/InMemory derived TextUnitIndex。
-- [Sentence Locator and Coverage Contract](sentence-locator-contract.md)：已实现的 deterministic Sentence locator foundation、Paragraph ownership、technical-punctuation protection 与 non-prose coarse coverage。
+- [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md)：已实现的 block-aware Paragraph 确定性分段、stable TextUnit identity、source order、coverage 与 SQLite/InMemory derived TextUnitIndex。
+- [Sentence Locator and Coverage Contract](sentence-locator-contract.md)：已实现的 deterministic Sentence locator、Paragraph ownership、technical-punctuation protection 与 native/coarse coverage。
 - [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)：已实现的 `get_text_units`、TextLocator、TextUnitCursor、Paragraph/Sentence source-order pagination 与 coverage/completion 语义。
-- [Context Granularity Contract](context-granularity-contract.md)：已实现的 TextLocator-driven `neighbor / container / structural` context、stale validation、non-prose coarse context 与 legacy Section compatibility。
+- [Context Granularity Contract](context-granularity-contract.md)：已实现的 TextLocator-driven `neighbor / container / structural` context、stale validation、coarse source-preserving context 与 legacy Section compatibility。
 - [Precise Read Locator Contract](precise-read-locator-contract.md)：已实现的 TextLocator → exact `read_document`、CharacterRange、exact-target ReadCursor continuation 与 returned source locator。
 - [Search Locator Handoff Contract](search-locator-contract.md)：已实现的 SearchHit → TextLocator direct handoff 与 shared locator resolver。
-- [Lexical TextUnit Index Contract](lexical-text-unit-index.md)：canonical Section/Paragraph/Sentence lexical candidates、`lexical-tokenizer/v1`、CJK/技术标识检索、SQLite v2 migration/rebuild。
+- [Lexical TextUnit Index Contract](lexical-text-unit-index.md)：canonical Section/Paragraph/Sentence lexical candidates、`lexical-tokenizer/v1`、CJK/技术标识检索、SQLite lexical-index v3 migration/rebuild。
 - [EPUB Navigation Map Contract](epub-navigation-map-contract.md)：已实现的 EPUB 3 `properties=nav` discovery、TOC/NCX hierarchy、href/fragment resolution 与 provenance parser facts。
 - [EPUB Structure Reconciliation Contract](epub-structure-reconciliation-contract.md)：已实现的 nav/NCX/heading/spine precedence、spine-authoritative source order、`linear=no` 与 structural provenance。
-- [Normalized Block Model Contract](normalized-block-model-contract.md)：已实现的 HTML/XHTML native body-block kinds、exact Section-relative ranges、EPUB remap、持久化/重启验证与 identity migration 边界。
+- [Normalized Block Model Contract](normalized-block-model-contract.md)：已实现的 HTML/XHTML native body-block kinds、exact Section-relative ranges、EPUB remap、持久化/重启验证与 block-aware identity 输入。
 - [EPUB Structure Validator Contract](epub-structure-validator-contract.md)：已实现的 persisted-fact integrity validation、error/degradation taxonomy、spine/navigation/structure/block/TextUnit coverage 与 SQLite reopen revalidation。
-- [Block-Aware TextUnit Identity Migration](block-aware-text-unit-identity-migration.md)：已接受、待实现的 native-block-aware Paragraph/Sentence、`text-segmentation/v2`、`normalized-document-hash/v2`、stale 与 lexical v3 migration 设计。
+- [Block-Aware TextUnit Identity Migration](block-aware-text-unit-identity-migration.md)：已实现的 native-block-aware Paragraph/Sentence、`text-segmentation/v2`、`normalized-document-hash/v2`、stale 与 lexical v3 migration。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与 Tool Contract。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
 - [ADR 0003：EPUB-First Structure Reliability](adr/0003-epub-first-structure-reliability.md)：EPUB 结构优先级、provenance、degradation、validator 和 coverage 的稳定决策。
 - [ADR 0004：Use-Case-First MCP Tool Contracts](adr/0004-use-case-first-tool-contracts.md)：从 6 Tool 推导出的第 7 个独立职责 `get_text_units`，以及 read/enumeration/context/search 的责任边界。
-- [ADR 0005：Block-Aware TextUnit Identity Migration](adr/0005-block-aware-text-unit-identity.md)：接受 block-aware segmentation/hash identity、旧 locator/cursor fail-closed 与 lexical-index/v3 rebuild 决策。
+- [ADR 0005：Block-Aware TextUnit Identity Migration](adr/0005-block-aware-text-unit-identity.md)：已实现 block-aware segmentation/hash identity、旧 locator/cursor fail-closed、Parsed Cache v6 与 lexical-index/v3 rebuild 决策。
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
 - [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、当前 7 个 Tool 和 stdio 子进程端到端测试。
@@ -116,10 +116,10 @@ read_document
 当前 precise-reading / retrieval foundation：
 
 ```text
-normalized_document_hash / normalized range
+normalized-document-hash/v2 / normalized range
 ReadCursor continuation
-Paragraph TextUnit + Paragraph TextUnitIndex
-Sentence locator + Paragraph ownership + non-prose coverage
+block-aware Paragraph TextUnit + Paragraph TextUnitIndex
+Sentence locator + Paragraph ownership + native/coarse coverage
 TextLocator + shared resolver
 TextUnitCursor + source-order pagination
 get_text_units Paragraph/Sentence enumeration
@@ -128,10 +128,10 @@ TextLocator → exact read_document
 SearchHit → candidate_kind + TextLocator
 canonical Section title lexical candidates
 canonical Paragraph lexical candidates
-canonical Sentence lexical candidates
+canonical eligible Sentence lexical candidates
 lexical-tokenizer/v1
 CJK + mixed technical lexical projection
-lexical-search-index/v2 SQLite rebuildable state
+lexical-search-index/v3 SQLite rebuildable state
 search → precise TextLocator → read/context direct handoff
 EPUB navigation-map/v1 parser facts
 EPUB structure-reconciliation/v1 canonical hierarchy
@@ -143,44 +143,49 @@ INVALID_LOCATOR / STALE_LOCATOR fail-closed validation
 当前运行时身份、解析策略与检索版本继续分离：
 
 ```text
-normalized-document-hash/v1 + text-segmentation/v1
+normalized-document-hash/v2 + text-segmentation/v2
++ normalized-block-model/v1 identity projection
 → 当前 Paragraph/Sentence/TextLocator identity
 
 normalized-block-model/v1
 → persisted HTML/XHTML native block evidence
-→ 当前尚不改变 TextUnit identity
+→ identity-bearing kind/range/order 进入 hash v2 与 segmentation v2
 
 epub-structure-validator/v1
 → persisted-fact validation / coverage evidence
 → 不成为 source identity
 
-reading-mcp-normalization/v5
+reading-mcp-normalization/v6
 → Parsed Document policy/cache invalidation
+→ v5 cache 不可复用，因为 EPUB validator 的 persisted TextUnit coverage 已切换到 segmentation v2
+
+lexical-search-index/v3
+→ precise lexical derived-state schema/version
 
 lexical-tokenizer/v1
 → search projection / rebuild only
 ```
 
-ADR 0005 已接受下一次显式 identity migration，但尚未进入 runtime：
+Block-aware v2 的 source-first 规则：
 
 ```text
-normalized-document-hash/v2
-+ text-segmentation/v2
-+ normalized-block-model/v1 identity projection
-→ block-aware Paragraph/Sentence/TextLocator identity
+native paragraph    → exact sentence-eligible Paragraph
+native blockquote   → typed coarse Paragraph-level item, no Sentence
+native list_item    → typed coarse Paragraph-level item, no Sentence
+native preformatted → coarse Paragraph-level item, no Sentence
+native table        → coarse Paragraph-level item, no Sentence
 
-lexical-search-index/v2
-→ lexical-search-index/v3 rebuild
-
-lexical-tokenizer/v1
-→ 保持不变
+uncovered whitespace-only gap → separator coverage
+uncovered non-whitespace gap  → deterministic fallback Paragraph segmentation
 ```
 
-迁移后旧 v1 Paragraph/Sentence locator 必须 `STALE_LOCATOR`，旧 TextUnitCursor 必须 `STALE_CURSOR`；不会因为文本仍匹配就静默重解释。因为 normalized-document identity 本身升级，旧 Section/CharacterRange locator 与 ReadCursor 也通过旧 normalized hash fail closed。
+`blockquote/list_item` 之所以保持 coarse，不是因为它们必然不是 prose，而是 `normalized-block-model/v1` 使用 flat maximal projection：外层容器可能吞掉嵌套 `<p>/<pre>/<table>` 的 leaf boundary。没有持久化证据时不恢复、不猜测这些边界。
 
-Tokenizer 变化不得重编号 TextUnit 或改变 TextLocator。SQLite lexical index version/tokenizer version 不匹配时，仅丢弃并重建 derived lexical state，不触碰 canonical Document/TextUnit facts；若 persisted Document 存在但 lexical rows 缺失，搜索可直接从 canonical repository 重建，不重新下载/解析来源。
+旧 `text-segmentation/v1` Paragraph/Sentence locator 必须 `STALE_LOCATOR`，旧 TextUnitCursor 必须 `STALE_CURSOR`；旧 normalized-hash-bound Section/CharacterRange locator 与 ReadCursor 也通过 normalized identity mismatch fail closed。不会因为文本仍匹配就静默重解释或 fuzzy rebase。
 
-EPUB 当前已经完成 navigation extraction、canonical structure reconciliation、native body-block 持久化与 persisted-fact validator：
+Persistent lexical state 从 `lexical-search-index/v2` 升级为 v3。旧 v2 derived rows 被丢弃并从 canonical persisted Document 重建；`lexical-tokenizer/v1` 保持不变，不重新下载/解析来源。
+
+EPUB 当前已经完成 navigation extraction、canonical structure reconciliation、native body-block 持久化、persisted-fact validator 与 block-aware TextUnit materialization：
 
 ```text
 manifest properties=nav
@@ -200,7 +205,10 @@ HTML/XHTML p / blockquote / li / pre / table
 → exact Section.content ranges
 → normalized-block-model/v1
         ↓
-persisted navigation / structure / block / canonical TextUnit evidence
+normalized-document-hash/v2 + text-segmentation/v2
+→ block-aware Paragraph/Sentence identity
+        ↓
+persisted navigation / structure / block / current TextUnit evidence
 → epub-structure-validator/v1
 → integrity errors + readable degradations + factual coverage
 ```
@@ -209,9 +217,7 @@ Publisher navigation 只有在能映射到真实 canonical Section boundary 时�
 
 NormalizedBlock v1 不复制正文：每个 block 都是 owner Section 的 exact normalized range。Heading 继续由 canonical `Section.title/id/parent/level` 表示，因为 heading label 当前不属于 `Section.content`，所以不会伪造 heading body range。Block source order 是 parser/spine source order，独立于 reconciliation 后的 Section-tree DFS。
 
-Validator 不重新打开 ZIP/DOM，只消费持久化事实。内部一致性冲突是 `error` 并使 EPUB parser fail closed；missing fragment、unsupported media、fallback、native block 与当前 v1 TextUnit 的差异属于 `degradation`，保留 readable Document 与明确 coverage。报告可随 Document 持久化并在 SQLite reopen 后得到相同 revalidation 结果。
-
-当前 `text-segmentation/v1` 仍未消费 block map。block-aware identity 设计已经完成，下一独立实现分支是 `feat/block-aware-text-unit-identity`：先实现 hash/segmentation v2，再迁移 locator/cursor/derived lexical state，不从 MCP Tool 或 ranking 层倒推实现。
+Validator 不重新打开 ZIP/DOM，只消费持久化事实。内部一致性冲突是 `error` 并使 EPUB parser fail closed；missing fragment、unsupported media、fallback 或能力覆盖不足属于 `degradation`，保留 readable Document 与明确 coverage。报告可随 Document 持久化并在 SQLite reopen 后得到相同 revalidation 结果。
 
 当前 direct handoff：
 
@@ -223,17 +229,17 @@ search_document → SearchHit.text_locator ─┬→ read_document
                                          └→ get_context
 ```
 
-SearchHit 现在可以真实返回：
+SearchHit 可以真实返回：
 
 ```text
 candidate_kind = section | paragraph | sentence
 ```
 
-其中 Section title candidates 始终保留；non-prose 可以是 Paragraph candidate，但不会伪造 Sentence candidate。Legacy `location/search-unit` 只作为 preview/provenance，canonical identity 始终来自 `text_locator`。
+Section title candidates 始终保留；coarse structural/non-prose region 可以是 Paragraph candidate，但不会伪造 Sentence candidate。Legacy `location/search-unit` 只作为 preview/provenance，canonical identity 始终来自 `text_locator`。
 
-Sentence persistence 仍不是当前正确性依赖：Sentence enumeration/context/read/search facts 都可以从 canonical persisted Document + deterministic segmentation 重建。只有真实性能证据出现时才增加 Sentence derived persistence。
+Sentence persistence 仍不是正确性依赖：Sentence enumeration/context/read/search facts 都可以从 canonical persisted Document + deterministic segmentation 重建。只有真实性能证据出现时才增加 Sentence derived persistence。
 
-当前 `get_text_units` v1 仍从 Section 边界起读；anchor-based `before/after(locator)` 是独立后续扩展。
+当前 `get_text_units` 仍从 Section 边界起读；anchor-based `before/after(locator)` 是独立后续扩展。
 
 格式能力分为两类：
 

@@ -51,7 +51,7 @@ async fn in_memory_search_emits_truthful_section_paragraph_and_sentence_candidat
     assert!(sentence_hit.text_locator.normalized_range.is_some());
     assert_eq!(
         sentence_hit.text_locator.segmentation_version.as_deref(),
-        Some("text-segmentation/v1")
+        Some("text-segmentation/v2")
     );
 
     let technical = search

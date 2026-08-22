@@ -185,9 +185,7 @@ impl Document {
             .expect("canonical normalized block map must be valid for TextUnit materialization")
     }
 
-    pub fn try_sentence_text_units(
-        &self,
-    ) -> Result<SentenceTextUnitSet, NormalizedBlockMapError> {
+    pub fn try_sentence_text_units(&self) -> Result<SentenceTextUnitSet, NormalizedBlockMapError> {
         let block_map = self.normalized_block_map()?;
         let paragraph_set = self.build_paragraph_text_units(block_map.as_ref());
         Ok(self.build_sentence_text_units(&paragraph_set, block_map.as_ref()))
@@ -350,8 +348,7 @@ fn collect_section_paragraphs(
         .filter(|candidate| {
             matches!(
                 candidate.source,
-                ParagraphBoundarySource::NativeBlockQuote
-                    | ParagraphBoundarySource::NativeListItem
+                ParagraphBoundarySource::NativeBlockQuote | ParagraphBoundarySource::NativeListItem
             )
         })
         .map(|candidate| candidate.range.len())

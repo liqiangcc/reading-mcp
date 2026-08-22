@@ -7,8 +7,8 @@ use crate::application::reading_support::{
 };
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, ParagraphContentClass, Section, SectionId,
-    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TextLocator, TextUnit,
-    TEXT_SEGMENTATION_VERSION,
+    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION,
+    TextLocator, TextUnit,
 };
 
 const MAX_CONTEXT_WINDOW: usize = 20;
@@ -313,12 +313,7 @@ fn validate_locator(
                 kind: ContextItemKind::Paragraph,
             })
         }
-        (
-            Some(paragraph_index),
-            Some(sentence_index),
-            Some(range),
-            Some(segmentation_version),
-        ) => {
+        (Some(paragraph_index), Some(sentence_index), Some(range), Some(segmentation_version)) => {
             validate_segmentation_version(segmentation_version)?;
             if paragraph_index == 0 || sentence_index == 0 {
                 return Err(ApplicationError::InvalidLocator(
@@ -526,9 +521,7 @@ fn paragraph_container_result(
     let paragraph = paragraph_set
         .units
         .iter()
-        .find(|unit| {
-            unit.owner_section_id == section.id && unit.paragraph_index == paragraph_index
-        })
+        .find(|unit| unit.owner_section_id == section.id && unit.paragraph_index == paragraph_index)
         .ok_or_else(|| {
             ApplicationError::StaleLocator(format!(
                 "paragraph {paragraph_index} no longer exists in section {}",
@@ -540,8 +533,7 @@ fn paragraph_container_result(
         .coverage
         .iter()
         .find(|coverage| {
-            coverage.owner_section_id == section.id
-                && coverage.paragraph_index == paragraph_index
+            coverage.owner_section_id == section.id && coverage.paragraph_index == paragraph_index
         })
         .ok_or_else(|| {
             ApplicationError::InvalidRequest(format!(
@@ -870,10 +862,7 @@ fn ensure_precise_item_budget(
     Ok(())
 }
 
-fn ensure_string_budget(
-    content: &str,
-    max_chars: Option<usize>,
-) -> Result<(), ApplicationError> {
+fn ensure_string_budget(content: &str, max_chars: Option<usize>) -> Result<(), ApplicationError> {
     let limit = content_response_limit(max_chars);
     let chars = content.chars().count();
     if chars > limit {

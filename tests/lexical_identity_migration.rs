@@ -21,7 +21,10 @@ async fn lexical_v2_state_is_invalidated_and_rebuilt_under_v3_identity() {
         assert!(matches!(error, ApplicationError::DocumentNotFound));
 
         let document = fixture();
-        index.index(&document).await.expect("rebuild v3 lexical state");
+        index
+            .index(&document)
+            .await
+            .expect("rebuild v3 lexical state");
         let hits = index
             .search_lexical(&document.id, "current", 10)
             .await

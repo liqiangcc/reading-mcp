@@ -119,8 +119,14 @@ async fn native_block_context_preserves_enumeration_content_class_and_degradatio
         enumeration.items[0].degradation.as_deref(),
         Some("flat_native_container_no_nested_textunit_evidence")
     );
-    assert_eq!(enumeration.items[1].content_class_detail, "native_paragraph");
-    assert_eq!(enumeration.items[2].content_class_detail, "native_paragraph");
+    assert_eq!(
+        enumeration.items[1].content_class_detail,
+        "native_paragraph"
+    );
+    assert_eq!(
+        enumeration.items[2].content_class_detail,
+        "native_paragraph"
+    );
     assert_eq!(
         enumeration.items[3].degradation.as_deref(),
         Some("requested_sentence_but_non_prose_is_paragraph_only")

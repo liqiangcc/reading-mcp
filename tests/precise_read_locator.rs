@@ -75,7 +75,10 @@ async fn exact_sentence_paragraph_and_character_range_reads_return_canonical_sli
         })
         .await
         .expect("character range exact read");
-    assert_eq!(range_read.content, section.normalized_text_slice(range).unwrap());
+    assert_eq!(
+        range_read.content,
+        section.normalized_text_slice(range).unwrap()
+    );
     assert_eq!(range_read.resolved_target_locator, range_locator);
     assert_source_segment_matches(&document, &range_read);
 }
@@ -295,7 +298,10 @@ fn assert_source_segment_matches(
         .find_section(&returned.owner_section_id)
         .expect("returned owner section");
     let range = returned.normalized_range.expect("returned range");
-    assert_eq!(section.normalized_text_slice(range).unwrap(), result.content);
+    assert_eq!(
+        section.normalized_text_slice(range).unwrap(),
+        result.content
+    );
 }
 
 fn document_fixture() -> Document {

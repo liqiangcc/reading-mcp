@@ -91,6 +91,28 @@ normalization_version
 
 完整契约见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
 
+## Paragraph TextUnit derived index
+
+当前 runtime 已在 `open_document` 后从 persisted-compatible `Section.content` 确定性派生 Paragraph TextUnit：
+
+```text
+text-segmentation/v1
+Paragraph ordinal = 1-based within owner Section
+range             = exact Section-relative Unicode-scalar [start, end)
+source_order      = root/child source order + Paragraph order
+```
+
+这些 TextUnit 写入独立的 derived `TextUnitIndex`：
+
+```text
+memory mode     → InMemoryTextUnitIndex
+persistent mode → SQLite text_units table
+```
+
+`TextUnitIndex` 与 `SearchIndex` 是两个职责。当前 FTS/search contract 不读取 TextUnitIndex，MCP Tool 数量仍然是 6。Sentence TextUnit、TextUnitCursor 与 `get_text_units` 尚未实现。
+
+完整契约见 [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md)。
+
 ## Section read continuation
 
 `read_document` 保留现有请求：
@@ -184,6 +206,7 @@ Default persistent state
 ├── File Raw Cache
 ├── File Parsed Cache
 ├── SQLite DocumentRepository
+├── SQLite TextUnitIndex (Paragraph v1)
 └── SQLite FTS5 SearchIndex
 ```
 
@@ -207,6 +230,8 @@ Default persistent state
 - normalized hash 从 persisted canonical Document 确定性重建；
 - Section-relative Unicode-scalar normalized range validator；
 - normalization-version-scoped Parsed Cache；
+- Paragraph TextUnit exact-slice / source-order / deterministic rebuild；
+- SQLite TextUnitIndex persistence/replacement；
 - SectionTreeReadStream continuation 的 actionable cursor；
 - 多段拼接无 gap/overlap，并精确等于一次完整读取；
 - cursor 对 raw/normalized document identity、target 和 rendering contract 的 fail-closed 验证；

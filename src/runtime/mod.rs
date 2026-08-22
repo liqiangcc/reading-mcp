@@ -8,16 +8,16 @@ use crate::application::list_documents::ListDocumentsUseCase;
 use crate::application::open_document::OpenDocumentUseCase;
 use crate::application::ports::{
     DocumentRepository, ParsedDocumentCache, Parser, RawResourceCache, Retriever, SearchIndex,
-    SourcePolicy,
+    SourcePolicy, TextUnitIndex,
 };
 use crate::application::read_document::ReadDocumentUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
     FileRawResourceCache, InMemoryDocumentRepository, InMemoryParsedDocumentCache,
-    InMemoryRawResourceCache, InMemorySearchIndex, ObservedParsedDocumentCache, ObservedParser,
-    ObservedRawResourceCache, ObservedRetriever, ObservedSearchIndex, SqliteDocumentRepository,
-    SqliteSearchIndex,
+    InMemoryRawResourceCache, InMemorySearchIndex, InMemoryTextUnitIndex,
+    ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
+    ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex, SqliteTextUnitIndex,
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::{ArchiveLimits, ParserRouter};
@@ -33,6 +33,7 @@ struct RuntimeComponents {
     raw_cache: Arc<dyn RawResourceCache>,
     parsed_cache: Arc<dyn ParsedDocumentCache>,
     repository: Arc<dyn DocumentRepository>,
+    text_unit_index: Arc<dyn TextUnitIndex>,
     search_index: Arc<dyn SearchIndex>,
 }
 
@@ -42,6 +43,7 @@ impl RuntimeComponents {
             raw_cache: Arc::new(ObservedRawResourceCache::new(self.raw_cache)),
             parsed_cache: Arc::new(ObservedParsedDocumentCache::new(self.parsed_cache)),
             repository: self.repository,
+            text_unit_index: self.text_unit_index,
             search_index: Arc::new(ObservedSearchIndex::new(self.search_index)),
         }
     }
@@ -114,12 +116,14 @@ pub fn build_server(
     };
 
     let repository = components.repository;
+    let text_unit_index = components.text_unit_index;
     let search_index = components.search_index;
-    let open_document = Arc::new(OpenDocumentUseCase::new(
+    let open_document = Arc::new(OpenDocumentUseCase::with_text_unit_index(
         source_policy,
         retriever,
         parser,
         repository.clone(),
+        text_unit_index,
         search_index.clone(),
     ));
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
@@ -155,6 +159,7 @@ fn build_state_components(
                 raw_cache: Arc::new(FileRawResourceCache::new(&cache_root)),
                 parsed_cache: Arc::new(FileParsedDocumentCache::new(&cache_root)),
                 repository: Arc::new(SqliteDocumentRepository::open(&database)?),
+                text_unit_index: Arc::new(SqliteTextUnitIndex::open(&database)?),
                 search_index: Arc::new(SqliteSearchIndex::open(&database)?),
             })
         }
@@ -162,6 +167,7 @@ fn build_state_components(
             raw_cache: Arc::new(InMemoryRawResourceCache::default()),
             parsed_cache: Arc::new(InMemoryParsedDocumentCache::default()),
             repository: Arc::new(InMemoryDocumentRepository::default()),
+            text_unit_index: Arc::new(InMemoryTextUnitIndex::default()),
             search_index: Arc::new(InMemorySearchIndex::default()),
         }),
     }

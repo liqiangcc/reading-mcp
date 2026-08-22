@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::domain::{Document, DocumentId, DocumentSource, Location, MediaType, SectionId};
+use crate::domain::{
+    Document, DocumentId, DocumentSource, Location, MediaType, SectionId, TextUnit,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetrievalOptions {
@@ -57,6 +59,8 @@ pub enum ApplicationError {
     CacheFailed(String),
     #[error("search index failed: {0}")]
     IndexFailed(String),
+    #[error("text unit index failed: {0}")]
+    TextUnitIndexFailed(String),
     #[error("document not found")]
     DocumentNotFound,
     #[error("section not found")]
@@ -118,6 +122,20 @@ pub trait DocumentRepository: Send + Sync {
     async fn save(&self, document: Document) -> Result<(), ApplicationError>;
 
     async fn get(&self, id: &DocumentId) -> Result<Option<Document>, ApplicationError>;
+}
+
+#[async_trait]
+pub trait TextUnitIndex: Send + Sync {
+    async fn replace_document(
+        &self,
+        document_id: &DocumentId,
+        units: &[TextUnit],
+    ) -> Result<(), ApplicationError>;
+
+    async fn list_document(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<TextUnit>, ApplicationError>;
 }
 
 #[async_trait]

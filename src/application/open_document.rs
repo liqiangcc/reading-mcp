@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievalOptions, Retriever, SearchIndex,
-    SourcePolicy,
+    SourcePolicy, TextUnitIndex,
 };
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, MediaType, NORMALIZATION_VERSION,
@@ -34,6 +34,7 @@ pub struct OpenDocumentUseCase {
     retriever: Arc<dyn Retriever>,
     parser: Arc<dyn Parser>,
     repository: Arc<dyn DocumentRepository>,
+    text_unit_index: Option<Arc<dyn TextUnitIndex>>,
     search_index: Arc<dyn SearchIndex>,
 }
 
@@ -50,6 +51,25 @@ impl OpenDocumentUseCase {
             retriever,
             parser,
             repository,
+            text_unit_index: None,
+            search_index,
+        }
+    }
+
+    pub fn with_text_unit_index(
+        source_policy: Arc<dyn SourcePolicy>,
+        retriever: Arc<dyn Retriever>,
+        parser: Arc<dyn Parser>,
+        repository: Arc<dyn DocumentRepository>,
+        text_unit_index: Arc<dyn TextUnitIndex>,
+        search_index: Arc<dyn SearchIndex>,
+    ) -> Self {
+        Self {
+            source_policy,
+            retriever,
+            parser,
+            repository,
+            text_unit_index: Some(text_unit_index),
             search_index,
         }
     }
@@ -66,6 +86,10 @@ impl OpenDocumentUseCase {
             .await?;
 
         let document = self.parser.parse(resource).await?;
+        let paragraph_units = self
+            .text_unit_index
+            .as_ref()
+            .map(|_| document.paragraph_text_units());
         let result = OpenDocumentResult {
             document_id: document.id.clone(),
             source: document.source.clone(),
@@ -80,6 +104,11 @@ impl OpenDocumentUseCase {
         };
 
         self.repository.save(document.clone()).await?;
+        if let (Some(index), Some(paragraph_units)) = (&self.text_unit_index, paragraph_units) {
+            index
+                .replace_document(&document.id, &paragraph_units.units)
+                .await?;
+        }
         self.search_index.index(&document).await?;
 
         Ok(result)

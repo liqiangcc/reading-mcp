@@ -214,7 +214,7 @@ DocumentRepository
 
 它是读取事实来源。Search snippet、FTS row、rendered MCP response、Sentence rows都不能替代 canonical Document。
 
-### 3.8 TextUnit Index（future derived state）
+### 3.8 TextUnit Index（Paragraph implemented; Sentence future）
 
 Paragraph/Sentence 是 deterministic、versioned、rebuildable TextUnits：
 
@@ -225,6 +225,19 @@ TextUnit segmentation policy
           ↓
 Paragraph / Sentence TextUnits
 ```
+
+当前已实现 Paragraph v1：
+
+```text
+text-segmentation/v1
+Section.content
+  → exact Paragraph NormalizedTextRange
+  → deterministic TextUnitId
+  → source_order
+  → TextUnitIndex
+```
+
+`TextUnitIndex` 已有独立 application port，以及 InMemory / SQLite adapter。它是 derived state；`DocumentRepository` 仍是 source truth。Sentence TextUnit、TextUnitCursor 与 MCP enumeration 仍属于后续增量。
 
 TextUnit identity 必须依赖 addressing-relevant normalized identity 与 segmentation version，而不能依赖易失 SearchIndex row ID。
 
@@ -242,6 +255,8 @@ SearchHit + TextLocator
 
 当前实现以 owning Section + legacy Location handoff；未来必须返回 version-bound `TextLocator`，直接进入 read/context。
 
+当前 FTS `SearchIndex` 尚未改用 Paragraph TextUnitIndex；两者职责和迁移节奏保持独立。
+
 Search answers “where?”，不承担 unbounded canonical body read。
 
 ### 3.10 Cache / Persistent State
@@ -252,7 +267,7 @@ Search answers “where?”，不承担 unbounded canonical body read。
 RawResourceCache
 ParsedDocumentCache
 DocumentRepository
-TextUnitIndex        # future
+TextUnitIndex        # Paragraph implemented; Sentence future
 SearchIndex
 ```
 
@@ -275,7 +290,7 @@ Document
 └── root_sections[]
 ```
 
-精确定位实现还需要逻辑 `normalized_document_hash`。它来自 addressing-relevant persisted normalized facts，不得通过静默重定义现有 raw `content_hash` 获得。
+精确定位基础已实现逻辑 `normalized_document_hash`。它来自 addressing-relevant persisted normalized facts，不得通过静默重定义现有 raw `content_hash` 获得。
 
 ### 4.2 StructuralNode / current Section
 
@@ -292,20 +307,28 @@ Section
 
 Chapter/Section/Subsection 是递归 StructuralNode，不是多个不同技术索引层。
 
-### 4.3 TextUnit（future derived）
+### 4.3 TextUnit（Paragraph implemented; Sentence future）
+
+当前 Paragraph TextUnit：
 
 ```text
 TextUnit
-├── kind: paragraph | sentence
+├── id: TextUnitId
+├── document_id
+├── content_hash                  # raw provenance
+├── normalized_document_hash
 ├── owner_section_id
-├── exact normalized range
-├── exact text slice
-├── segmentation_version
-├── content_class/provenance?
-└── TextLocator
+├── kind: paragraph
+├── paragraph_index               # 1-based
+├── source_order
+├── normalized_range              # exact Section.content slice
+├── text                          # exact slice
+└── segmentation_version
 ```
 
-Sentence 不是 child Section；canonical Section 也不能通过拼接 Sentence rows 重建。
+未来 Sentence 会复用相同 normalized identity/range 基础，并增加 Paragraph ownership / sentence ordinal 与 non-prose eligibility 语义。TextLocator wire contract 仍未实现。
+
+Sentence 不是 child Section；canonical Section 也不能通过拼接 TextUnit rows 重建。
 
 ### 4.4 Location 与 TextLocator
 
@@ -377,12 +400,13 @@ ReadCursor
 
 ### Normalized document identity
 
-根据 ADR 0002，精确 Paragraph/Sentence 定位还必须引入 deterministic `normalized_document_hash`，覆盖至少：
+已实现 deterministic `normalized_document_hash`，覆盖当前 addressing-relevant persisted normalized facts：
 
 - Section identity/parentage/order；
 - title/level；
-- exact persisted `Section.content`；
-- future addressing-relevant block/boundary metadata。
+- exact persisted `Section.content`。
+
+未来若加入影响 segmentation 的 canonical persisted block/boundary metadata，需要升级 normalized hash contract version。
 
 Parser/normalization 行为改变 canonical facts 时，即使 raw bytes 未变，旧 fine-grained locator 也必须 stale。
 
@@ -398,6 +422,8 @@ document/version identity
 + normalized range / Paragraph/Sentence ordinal
 + segmentation version
 ```
+
+当前 Paragraph TextUnitId 已按上述原则确定性生成；未来 TextLocator 继续复用该身份基础。
 
 禁止旧 locator fuzzy-map 到新文档中“最相似”的句子。
 
@@ -424,6 +450,8 @@ get_text_units
   = discover/enumerate ordered child reading items
 ```
 
+当前 Paragraph TextUnitIndex 只是底层派生索引，不等于 `get_text_units` 已可用。
+
 ---
 
 ## 7. Tool 到内部 Capability / Use Case 映射
@@ -438,7 +466,7 @@ list_documents
 open_document
   → DocumentOpenAndVersionResolution
   → SourcePolicy + Retriever + Parser
-  → Repository + SearchIndex
+  → DocumentRepository + Paragraph TextUnitIndex + SearchIndex
 
 get_document_structure
   → StructuralNavigation
@@ -493,11 +521,13 @@ parse/cache
   ↓
 validate canonical Document
   ↓
-calculate normalized identity (future precise foundation)
+calculate normalized identity
   ↓
 persist Document facts
   ↓
-build/rebuild derived indexes
+derive/rebuild Paragraph TextUnitIndex
+  ↓
+build/rebuild SearchIndex
   ↓
 return version + capability/reliability/coverage summary
 ```
@@ -537,6 +567,8 @@ section_complete
 ```
 
 在 source-preserving policy 下，每个 source region 必须被 reading item 表示或被 coverage 显式说明。code/table 不得为了 coverage 被伪造为 Sentence。
+
+上述 TextUnit stream 是已接受的未来 Tool workflow；当前只实现了 Paragraph TextUnit 底层派生索引。
 
 ---
 
@@ -609,6 +641,8 @@ Coverage 需要定义清楚 denominator：
 - non-prose coarse/skipped counts；
 - unsupported gaps。
 
+当前 Paragraph v1 额外维护每个 Section 的 `owner_chars / paragraph_chars / separator_chars / paragraph_count`，只说明 Paragraph 与分隔符的确定性覆盖；它不提前宣称 Sentence/non-prose eligibility coverage。
+
 Reliability/Coverage 信息应在 open/structure/TextUnit enumeration 等决策点返回。没有独立 Use Case 前不增加 inspection Tool。
 
 ---
@@ -655,7 +689,7 @@ BrowserRetriever
 
 ## 15. 错误模型
 
-当前稳定类别包括 source/retrieval/parse/repository/index/document/section/invalid-request 等。
+当前稳定类别包括 source/retrieval/parse/repository/index/text-unit-index/document/section/invalid-request 等。
 
 未来 precise contracts 至少需要逻辑错误类别：
 
@@ -669,6 +703,8 @@ STRUCTURE_INVARIANT_FAILED
 TEXT_UNIT_INVARIANT_FAILED
 COVERAGE_INCOMPLETE
 ```
+
+当前 TextUnitIndex adapter 的持久化/派生错误映射到独立 `TEXT_UNIT_INDEX_FAILED`，不与 SearchIndex 错误混为一类。
 
 规则：
 
@@ -696,6 +732,8 @@ src/
 ├── domain/
 │   ├── document
 │   ├── section
+│   ├── normalized_text
+│   ├── text_unit
 │   └── location
 ├── retrieval/
 ├── parsing/
@@ -705,7 +743,7 @@ src/
 └── config/
 ```
 
-Future TextUnit/locator/cursor modules必须根据 domain/application responsibility 放置，不能把 rmcp DTO、SQLite row 或 parser-specific types 作为 domain identity。
+TextUnit/locator/cursor 模块必须根据 domain/application responsibility 放置，不能把 rmcp DTO、SQLite row 或 parser-specific types 作为 domain identity。
 
 ---
 

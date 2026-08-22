@@ -22,7 +22,9 @@ use crate::application::read_document::{
     ContinueExactReadCommand, ContinueReadCommand, ReadDocumentUseCase, ReadExactTargetCommand,
     ReadSectionCommand,
 };
-use crate::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
+use crate::application::search_document::{
+    SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
+};
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, Location, NormalizedDocumentHash, NormalizedTextRange,
     SectionId, TextLocator,
@@ -35,10 +37,11 @@ use super::contracts::{
     GetDocumentStructureRequest, GetDocumentStructureResponse, GetTextUnitsRequest,
     GetTextUnitsResponse, ListDocumentsRequest, ListDocumentsResponse, ListedDocumentDto,
     LocationDto, NormalizedRangeDto, OpenDocumentRequest, OpenDocumentResponse,
-    ReadDocumentRequest, ReadDocumentResponse, ReadStreamSegmentDto, SearchDocumentRequest,
-    SearchDocumentResponse, SearchHitDto, SectionNode, StructuralContextKindDto, TextLocatorDto,
-    TextUnitContentClassDto, TextUnitCoverageDto, TextUnitCoveragePolicyDto, TextUnitDirectionDto,
-    TextUnitItemDto, TextUnitKindDto, TextUnitStreamSegmentDto,
+    ReadDocumentRequest, ReadDocumentResponse, ReadStreamSegmentDto, SearchCandidateKindDto,
+    SearchDocumentRequest, SearchDocumentResponse, SearchHitDto, SectionNode,
+    StructuralContextKindDto, TextLocatorDto, TextUnitContentClassDto, TextUnitCoverageDto,
+    TextUnitCoveragePolicyDto, TextUnitDirectionDto, TextUnitItemDto, TextUnitKindDto,
+    TextUnitStreamSegmentDto,
 };
 
 #[derive(Clone)]
@@ -250,7 +253,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Search within one opened document and return small matches that point back to owning sections and exact locations"
+        description = "Search within one opened document and return bounded candidates with direct canonical TextLocator handoff"
     )]
     async fn search_document(
         &self,
@@ -278,6 +281,8 @@ impl ReadingMcpServer {
                     snippet: hit.snippet,
                     score: hit.score,
                     location: location_dto(&hit.location),
+                    candidate_kind: search_candidate_kind_dto(hit.candidate_kind),
+                    text_locator: text_locator_dto(&hit.text_locator),
                 })
                 .collect(),
         }))
@@ -553,6 +558,14 @@ fn content_class_dto(value: TextUnitContentClass) -> TextUnitContentClassDto {
     match value {
         TextUnitContentClass::Unknown => TextUnitContentClassDto::Unknown,
         TextUnitContentClass::NonProse => TextUnitContentClassDto::NonProse,
+    }
+}
+
+fn search_candidate_kind_dto(value: SearchCandidateKind) -> SearchCandidateKindDto {
+    match value {
+        SearchCandidateKind::Section => SearchCandidateKindDto::Section,
+        SearchCandidateKind::Paragraph => SearchCandidateKindDto::Paragraph,
+        SearchCandidateKind::Sentence => SearchCandidateKindDto::Sentence,
     }
 }
 

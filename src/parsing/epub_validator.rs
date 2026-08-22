@@ -2,9 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{
-    Document, NormalizedBlockKind, Section, SectionId, SentenceEligibility, TextUnit,
-};
+use crate::domain::{Document, NormalizedBlockKind, Section, SectionId, SentenceEligibility};
 
 use super::epub_navigation::{
     EPUB_NAVIGATION_MAP_VERSION, EpubNavigationMap, EpubNavigationNode, EpubNavigationProvenance,
@@ -842,6 +840,11 @@ fn validate_structure(
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
+    let spine_linearity = map
+        .spine
+        .iter()
+        .map(|spine| (spine.spine_index, spine.linear))
+        .collect::<HashMap<_, _>>();
 
     let mut fact_by_id = HashMap::new();
     let mut previous_spine = 0usize;
@@ -869,6 +872,27 @@ fn validate_structure(
             );
         }
         previous_spine = fact.spine_index;
+        match spine_linearity.get(&fact.spine_index) {
+            Some(linear) if *linear == fact.linear => {}
+            Some(_) => push_error(
+                findings,
+                "structure",
+                "section_linearity_mismatch",
+                format!(
+                    "Section {:?} linear={} disagrees with spine {}",
+                    fact.section_id, fact.linear, fact.spine_index
+                ),
+            ),
+            None => push_error(
+                findings,
+                "structure",
+                "section_unknown_spine_index",
+                format!(
+                    "Section {:?} references unknown spine index {}",
+                    fact.section_id, fact.spine_index
+                ),
+            ),
+        }
         if fact_by_id.insert(fact.section_id.clone(), fact).is_some() {
             push_error(
                 findings,
@@ -907,7 +931,8 @@ fn validate_structure(
             );
         }
 
-        if section.chapter.as_deref() != Some(format!("spine-{}", fact.spine_index).as_str()) {
+        let expected_chapter = format!("spine-{}", fact.spine_index);
+        if section.chapter.as_deref() != Some(expected_chapter.as_str()) {
             push_error(
                 findings,
                 "structure",

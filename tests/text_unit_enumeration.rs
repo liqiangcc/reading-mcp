@@ -156,14 +156,20 @@ async fn paragraph_enumeration_returns_exact_locators_and_does_not_cross_into_ch
         ))
         .await
         .expect("paragraph enumeration should succeed");
-    assert_eq!(texts(&result), vec!["Root paragraph one.", "Root paragraph two."]);
+    assert_eq!(
+        texts(&result),
+        vec!["Root paragraph one.", "Root paragraph two."]
+    );
     assert!(result.items.iter().all(|item| {
         item.locator.owner_section_id.0 == "section://root"
             && item.locator.sentence_index.is_none()
             && item.locator.paragraph_index.is_some()
             && item.locator.normalized_range.is_some()
     }));
-    assert_eq!(result.target_section_locator.owner_section_id.0, "section://root");
+    assert_eq!(
+        result.target_section_locator.owner_section_id.0,
+        "section://root"
+    );
 }
 
 #[tokio::test]

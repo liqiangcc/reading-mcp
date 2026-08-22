@@ -33,6 +33,25 @@ impl TextLocator {
         }
     }
 
+    pub fn for_character_range(
+        document: &Document,
+        section: &Section,
+        normalized_range: NormalizedTextRange,
+    ) -> Self {
+        Self {
+            document_id: document.id.clone(),
+            content_hash: document.content_hash.clone(),
+            normalized_document_hash: document.normalized_document_hash(),
+            owner_section_id: section.id.clone(),
+            section_path: section.location.section_path.clone(),
+            paragraph_index: None,
+            sentence_index: None,
+            normalized_range: Some(normalized_range),
+            segmentation_version: None,
+            native_location: section.location.native_location.clone(),
+        }
+    }
+
     pub fn for_paragraph(document: &Document, section: &Section, paragraph: &TextUnit) -> Self {
         Self {
             document_id: document.id.clone(),

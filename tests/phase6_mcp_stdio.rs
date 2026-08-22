@@ -183,7 +183,10 @@ Processes own resources and execution state.
         continued_units.items[0].text,
         "Page replacement algorithms decide which resident page should be evicted."
     );
-    assert_eq!(text_units.stream.end_index, continued_units.stream.start_index);
+    assert_eq!(
+        text_units.stream.end_index,
+        continued_units.stream.start_index
+    );
     assert!(continued_units.complete);
     assert!(continued_units.section_complete);
     assert!(continued_units.next_cursor.is_none());

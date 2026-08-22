@@ -27,10 +27,11 @@ impl SearchIndex for InMemorySearchIndex {
     }
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
+        let candidates = build_lexical_candidates(document)?;
         self.documents
             .write()
             .map_err(|_| ApplicationError::IndexFailed("search index lock poisoned".into()))?
-            .insert(document.id.clone(), build_lexical_candidates(document));
+            .insert(document.id.clone(), candidates);
         Ok(())
     }
 

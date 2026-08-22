@@ -1,14 +1,14 @@
 # EPUB Navigation Map Contract
 
-> Status: Implemented P1 navigation-map foundation
+> Status: Implemented P1 navigation-map foundation; consumed by the later structure-reconciliation stage
 >
 > Branch: `feat/epub-navigation-map`
 >
-> Related: `docs/adr/0003-epub-first-structure-reliability.md`, `docs/epub-structure-reliability-design.md`
+> Related: `docs/epub-structure-reconciliation-contract.md`, `docs/adr/0003-epub-first-structure-reliability.md`, `docs/epub-structure-reliability-design.md`
 
 ## 1. Goal
 
-The first EPUB reliability increment separates publisher navigation facts from spine order and from the current XHTML-heading-derived Section hierarchy.
+The navigation-map stage separates publisher navigation facts from spine order and from canonical Section structure.
 
 ```text
 EPUB package
@@ -17,7 +17,7 @@ EPUB package
 └── navigation
 ```
 
-This increment maps navigation faithfully enough for later structural reconciliation, but deliberately does not rewrite canonical `Document.root_sections` yet.
+The map remains an independent provenance plane even though the subsequent `feat/epub-structure-reconciliation` stage now consumes it to upgrade canonical Section hierarchy at proven boundaries.
 
 ## 2. Versioned map
 
@@ -36,7 +36,7 @@ epub_package_path
 epub_package_version
 epub_manifest_items
 epub_spine_items_total
-epub_spine_items                  # historical parsed-readable count
+epub_spine_items
 epub_navigation_map_version
 epub_navigation_provenance
 epub_navigation_source_path?
@@ -48,7 +48,7 @@ epub_navigation_map
 
 ## 3. Package facts
 
-The package parser records enough facts for navigation discovery and the next reconciliation increment:
+The package parser records enough facts for navigation discovery and reconciliation:
 
 ```text
 package version
@@ -123,7 +123,7 @@ diagnostic?
 children[]
 ```
 
-`source_order` is deterministic pre-order within the chosen navigation source. It is navigation-source order only; it is not yet canonical Section/source reading order.
+`source_order` is deterministic pre-order within the chosen navigation source. It remains **navigation-source order**, not canonical spine/source order. The reconciliation stage is explicitly required to preserve this distinction.
 
 Labels are constructed only from actual text nodes so XML element/text APIs cannot duplicate navigation labels.
 
@@ -168,8 +168,6 @@ malformed_resource
 unlinked
 ```
 
-The first six cover the minimum ADR 0003 resolution contract. `malformed_resource` and `unlinked` make additional degradation explicit instead of collapsing it into a generic parse failure.
-
 A missing fragment may leave the publication readable while showing that the publisher navigation target lost fragment precision.
 
 ## 9. Fragment evidence
@@ -184,7 +182,7 @@ Unsupported top-level media such as SVG is currently reported as:
 unsupported_resource
 ```
 
-This increment does not claim reflowable-XHTML precision for SVG/fixed-layout/foreign content.
+This navigation stage does not claim reflowable-XHTML precision for SVG/fixed-layout/foreign content.
 
 ## 10. Fatal vs recoverable behavior
 
@@ -211,72 +209,74 @@ navigation unavailable
 
 Resource-limit failures remain fatal even when encountered while reading navigation or fragment evidence; reliability code cannot bypass archive budgets.
 
-## 11. Canonical Section boundary in this increment
+## 11. Relationship to canonical Section reconciliation
 
-This PR intentionally preserves the historical Section construction:
-
-```text
-spine order
-→ readable XHTML/XML resource
-→ HtmlParser heading hierarchy
-→ remapped EPUB Section ids/native locations
-```
-
-The publisher navigation map is persisted in metadata but does not yet modify:
+The navigation-map stage itself only produces navigation facts. The now-implemented reconciliation stage consumes them under an explicit boundary:
 
 ```text
-Document.root_sections
-Section ids/parentage/order/content
-Paragraph/Sentence TextUnits
-TextLocator identity
-normalized-document-hash/v1
+spine / XHTML
+→ existing canonical Section boundaries
+
+navigation map
+→ publisher labels / parent hierarchy / target evidence
+
+reconciliation
+→ apply stronger nav/NCX evidence only when it maps to a proven Section boundary
+→ keep canonical sibling/root order in spine/source order
 ```
 
-That separation prevents this navigation-extraction increment from silently performing the next architectural step.
+Consequences:
 
-## 12. Parsed Cache invalidation
+- `resolved_fragment` at an existing Section anchor can upgrade title/parentage;
+- a DOM fragment that is not a Section boundary does not fabricate a Section;
+- duplicate TOC targets remain aliases instead of duplicate text;
+- unresolved/unsupported nodes remain diagnostic facts;
+- navigation order never becomes source order by implication.
 
-Adding the navigation map changes persisted Parser output even though Section addressing facts remain unchanged.
+The canonical result is documented by `epub-structure-reconciliation/v1`.
 
-Therefore the parser/cache diagnostic version is bumped to:
+## 12. Parsed Cache / normalization history
+
+Navigation-map output originally advanced parser/cache policy to:
 
 ```text
 reading-mcp-normalization/v2
 ```
 
-Parsed Cache identity remains:
+because old Parsed Documents lacked navigation metadata.
+
+The subsequent structure-reconciliation stage advances policy again to:
 
 ```text
-final_source + raw_sha256 + normalization_version
+reading-mcp-normalization/v3
 ```
 
-Old v1 Parsed Documents become cache misses, ensuring previously cached EPUBs are reparsed and receive navigation metadata.
+because reconciliation may change addressing-relevant canonical Section facts.
 
-The normalized source hash remains:
+The normalized hash contract remains:
 
 ```text
 normalized-document-hash/v1
 ```
 
-because this increment does not change addressing-relevant Section facts. A future reconciliation that changes canonical Section hierarchy will naturally change normalized facts/hash outputs; a future persisted addressing-relevant block model may require a hash-contract version bump.
+Its existing Section inputs naturally produce a different hash when reconciliation changes title/parent/level/order. The navigation map itself is metadata/provenance and is not directly injected into the hash.
 
 ## 13. Acceptance evidence
 
-Tests cover:
+Navigation-map tests cover:
 
 - EPUB 3 package version and `properties=nav` discovery;
-- nested TOC hierarchy and deterministic source order;
+- nested TOC hierarchy and deterministic navigation source order;
 - resolved and missing fragments;
 - malformed EPUB 3 nav → explicit NCX fallback;
 - invalid archive-root escape;
 - missing manifest target;
 - unsupported SVG target;
-- no-navigation readable degradation;
-- heading-derived Section hierarchy remains unchanged in this increment;
-- prior normalization-version Parsed Cache entries miss after the v2 bump;
-- existing EPUB/general format acceptance remains green.
+- no-navigation readable degradation.
 
-Release gate:
+The later reconciliation tests additionally prove that the same map can upgrade canonical heading Sections at proven boundaries without conflating navigation order with spine order.
+
+Release gate remains:
 
 ```text
 cargo fmt --all -- --check
@@ -284,37 +284,27 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-## 14. Explicit non-goals
+## 14. Navigation-map non-goals
 
-This increment does not implement:
+The map itself does not define:
 
 ```text
-nav/spine → canonical Section reconciliation
-linear=yes/no traversal semantics
-heading/spine fallback provenance on canonical Sections
-persisted normalized XHTML block boundaries
-EPUB reliability validator / complete coverage report
+normalized XHTML block boundaries
+Paragraph/Sentence segmentation
+EPUB validator / complete coverage report
 SVG/fixed-layout precise reading
-Paragraph/Sentence segmentation changes
-SearchIndex changes
-new MCP Tools
+SearchIndex policy
+MCP Tool surface
 ```
 
-## 15. Next dependency
+Canonical reconciliation is a separate consumer and remains separately versioned from `epub-navigation-map/v1`.
 
-The next independent increment is:
+## 15. Current downstream dependency
+
+`feat/epub-structure-reconciliation` is now implemented. The next ADR 0003 dependency is:
 
 ```text
-feat/epub-structure-reconciliation
+feat/normalized-block-model
 ```
 
-It may consume `epub-navigation-map/v1` and spine facts to establish canonical structural precedence:
-
-```text
-EPUB 3 toc nav
-→ legacy NCX
-→ XHTML heading fallback
-→ spine-item fallback
-```
-
-That next increment must also make structural provenance and `linear=no` semantics explicit. It must not silently treat navigation order as spine/source reading order.
+Publisher/native block evidence must become persisted, addressing-relevant normalized facts before Paragraph/Sentence identity may depend on transient XHTML block boundaries.

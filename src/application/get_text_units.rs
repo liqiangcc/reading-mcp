@@ -463,7 +463,8 @@ fn build_declared_stream(
         }
     }
 
-    let source_complete = intentionally_skipped == 0;
+    let source_complete = coverage_policy == TextUnitCoveragePolicy::PreserveSource
+        && intentionally_skipped == 0;
     Ok((
         items,
         TextUnitEnumerationCoverage {

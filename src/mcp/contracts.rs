@@ -116,6 +116,8 @@ pub struct GetTextUnitsRequest {
     pub document_id: String,
     pub section_id: String,
     #[serde(default)]
+    pub anchor_locator: Option<TextLocatorDto>,
+    #[serde(default)]
     pub requested_kind: TextUnitKindDto,
     #[serde(default)]
     pub direction: TextUnitDirectionDto,
@@ -137,6 +139,8 @@ fn default_text_unit_max_items() -> usize {
 pub struct GetTextUnitsResponse {
     pub document_id: String,
     pub target_section_locator: TextLocatorDto,
+    #[serde(default)]
+    pub start_anchor_locator: Option<TextLocatorDto>,
     pub requested_kind: TextUnitKindDto,
     pub direction: TextUnitDirectionDto,
     pub coverage_policy: TextUnitCoveragePolicyDto,

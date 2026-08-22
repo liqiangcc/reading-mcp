@@ -176,6 +176,20 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     unit.id.0, unit.source_order, expected_source_order
                 )));
             }
+            if unit.paragraph_index == 0 {
+                return Err(ApplicationError::TextUnitIndexFailed(format!(
+                    "unit {} has invalid zero paragraph index",
+                    unit.id.0
+                )));
+            }
+            if unit.normalized_range.len() != unit.text.chars().count() {
+                return Err(ApplicationError::TextUnitIndexFailed(format!(
+                    "unit {} range length {} does not match text length {}",
+                    unit.id.0,
+                    unit.normalized_range.len(),
+                    unit.text.chars().count()
+                )));
+            }
         }
 
         let mut connection = self
@@ -302,11 +316,20 @@ impl TextUnitIndex for SqliteTextUnitIndex {
             };
             let range_start = i64_to_usize(range_start, "range_start")?;
             let range_end = i64_to_usize(range_end, "range_end")?;
-            let normalized_range = NormalizedTextRange::new(range_start, range_end).map_err(|error| {
-                ApplicationError::TextUnitIndexFailed(format!(
-                    "invalid persisted normalized range: {error}"
-                ))
-            })?;
+            let normalized_range =
+                NormalizedTextRange::new(range_start, range_end).map_err(|error| {
+                    ApplicationError::TextUnitIndexFailed(format!(
+                        "invalid persisted normalized range: {error}"
+                    ))
+                })?;
+
+            if normalized_range.len() != text.chars().count() {
+                return Err(ApplicationError::TextUnitIndexFailed(format!(
+                    "persisted unit {unit_id} range length {} does not match text length {}",
+                    normalized_range.len(),
+                    text.chars().count()
+                )));
+            }
 
             units.push(TextUnit {
                 id: TextUnitId(unit_id),

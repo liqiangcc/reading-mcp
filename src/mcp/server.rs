@@ -456,7 +456,9 @@ impl ReadingMcpServer {
 struct GetReadDocumentResponse;
 
 impl GetReadDocumentResponse {
-    fn from_result(result: crate::application::read_document::ReadSectionResult) -> ReadDocumentResponse {
+    fn from_result(
+        result: crate::application::read_document::ReadSectionResult,
+    ) -> ReadDocumentResponse {
         ReadDocumentResponse {
             document_id: result.document_id.0,
             source: result.source.0,

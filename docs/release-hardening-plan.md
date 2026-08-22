@@ -49,6 +49,10 @@
 - [x] resource budget tests
 - [x] SQLite reopen/FTS tests
 - [x] architecture dependency-boundary test
+- [x] StructureCursor and DiscoveryCursor continuation
+- [x] whole-document body-order composition and multi-Section evidence
+- [x] TextLocator restart/resume after MCP/server restart
+- [x] Streamable HTTP full reading lifecycle E2E
 
 ## Merge Review
 
@@ -66,6 +70,7 @@
 [x] real stdio acceptance matrix
 [x] architecture boundary tests
 [x] README/runtime/requirements aligned
+[x] current runtime exposes exactly seven MCP Tools
 [x] no build artifacts or temporary release workflows
 ```
 

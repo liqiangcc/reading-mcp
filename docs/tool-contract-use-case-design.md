@@ -5,6 +5,10 @@
 > Branch: `design/tool-contract-use-cases`
 >
 > Scope: MCP/application contract design only. This document does not authorize Rust runtime, parser, index, storage, or schema changes on this branch.
+
+> Historical design baseline: current runtime has now implemented the accepted seventh
+> Tool `get_text_units`, TextLocator handoff, Structure/Discovery continuation and
+> whole-document composition. Verify current facts in `docs/requirements.md`.
 >
 > Related: `docs/design-principles.md`, `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0003-epub-first-structure-reliability.md`
 

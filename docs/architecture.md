@@ -189,7 +189,7 @@ Legacy `Location.char_start/char_end` 不被静默解释为 normalized range。
 
 ```text
 Section.content
-  ↓ text-segmentation/v1
+  ↓ text-segmentation/v2
 Paragraph TextUnit
   ├── owner_section_id
   ├── paragraph_index
@@ -355,7 +355,7 @@ Non-prose Paragraph 可检索，但不会伪造 Sentence candidate。
 ### Version separation
 
 ```text
-normalized_document_hash + text-segmentation/v1
+normalized_document_hash/v2 + text-segmentation/v2
 → TextUnit / TextLocator identity
 
 lexical-tokenizer/v1
@@ -375,7 +375,7 @@ Deterministic、non-LLM：
 ### SQLite v2
 
 ```text
-lexical-search-index/v2
+lexical-search-index/v3
 ```
 
 FTS row 保存：
@@ -452,7 +452,7 @@ RawResourceCache
 ParsedDocumentCache
 DocumentRepository
 TextUnitIndex            # Paragraph derived
-SearchIndex              # lexical-search-index/v2
+SearchIndex              # lexical-search-index/v3
 ```
 
 物理上可以共享 SQLite 文件，逻辑 ports/事实语义必须独立。

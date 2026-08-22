@@ -6,7 +6,9 @@
 >
 > Scope: architecture and contract design only. This document does not authorize implementation changes on a design branch.
 >
-> Tool-surface amendment: the current runtime exposes six Tools after `list_documents` was added. ADR 0004 accepts one future generic `get_text_units` Tool based on ordered Paragraph/Sentence use cases. The future accepted surface is seven Tools; the seventh is not yet implemented.
+> Historical snapshot: sections below retain the pre-implementation six-Tool/future-
+> `get_text_units` discussion. Current runtime has seven Tools; use `docs/requirements.md`,
+> the current contract documents, and `tools/list` tests for implemented behavior.
 
 ## 1. Problem statement
 

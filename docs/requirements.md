@@ -70,7 +70,9 @@ one Section.content
 → completion + coverage
 ```
 
-当前 v1 支持 Section-boundary start、forward/backward 和 cursor continuation。anchor-based `before/after(locator)` 是后续兼容扩展。
+当前 v1 支持 Section-boundary start、forward/backward、cursor continuation 和
+exact `anchor_locator` continuation。anchor 是独立 TextLocator 语义，不会被解释成
+nearest-text relocation。
 
 ### `get_context`
 
@@ -267,14 +269,14 @@ content == owner_section.normalized_text_slice(returned_locator.normalized_range
 当前精确 lexical contract：
 
 ```text
-lexical-search-index/v2
+lexical-search-index/v3
 lexical-tokenizer/v1
 ```
 
 版本职责严格分离：
 
 ```text
-normalized_document_hash + text-segmentation/v1
+normalized_document_hash/v2 + text-segmentation/v2
 → TextUnit / TextLocator identity
 
 lexical-tokenizer/v1
@@ -323,7 +325,7 @@ Index/tokenizer version 不兼容时，只清理/重建 lexical derived state，
 
 如果 persisted canonical Document 存在但 lexical state 缺失，`search_document` 可从该 Document 重建 SearchIndex 后重试；禁止为此重新下载或 reparse 来源。
 
-历史 SQLite search adapter 仅保留隐藏 compatibility alias；runtime `SqliteSearchIndex` 使用 lexical v2。
+历史 SQLite search adapter 仅保留隐藏 compatibility alias；runtime `SqliteSearchIndex` 使用 lexical v3。
 
 ## TextUnit completion / non-prose
 
@@ -369,7 +371,12 @@ final_source + raw hash + normalization_version
 
 隔离。规范化策略升级不得静默复用旧 Parsed Document。
 
-默认状态目录 `~/.reading-mcp` 使用持久化 Raw/Parsed Cache、SQLite DocumentRepository、SQLite Paragraph TextUnitIndex 与 SQLite lexical-search-index/v2。`READING_MCP_STATE_DIR=memory` 切换纯内存模式。
+默认状态目录 `~/.reading-mcp` 使用持久化 Raw/Parsed Cache、SQLite DocumentRepository、SQLite Paragraph TextUnitIndex 与 SQLite lexical-search-index/v3。`READING_MCP_STATE_DIR=memory` 切换纯内存模式。
+
+Structure continuation 使用 `structure-cursor/v1` / `structure-preorder/v1`；discovery
+continuation 使用 `discovery-cursor/v1`。整本正文组合额外使用
+`body-order/v1`，并要求 structure complete、每个 body-owning Section 一次、每个
+preserve-source stream complete 且 reliability 没有隐藏 unsupported gap。
 
 ## auth_profile 与 telemetry
 

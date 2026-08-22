@@ -388,9 +388,11 @@ fn read_exact_segment(
     let section = document
         .find_section(&target.locator.owner_section_id)
         .ok_or(ApplicationError::SectionNotFound)?;
-    let target_text = section.normalized_text_slice(target.range).map_err(|error| {
-        ApplicationError::InvalidLocator(format!("resolved target range is invalid: {error}"))
-    })?;
+    let target_text = section
+        .normalized_text_slice(target.range)
+        .map_err(|error| {
+            ApplicationError::InvalidLocator(format!("resolved target range is invalid: {error}"))
+        })?;
     let slice = slice_rendered_stream(target_text, start_char, content_response_limit(max_chars));
     let next_cursor = if slice.complete {
         None
@@ -449,8 +451,14 @@ fn exact_cursor_claims(
         target.kind.as_str(),
         target.locator.paragraph_index,
         target.locator.sentence_index,
-        target.locator.normalized_range.map(NormalizedTextRange::start),
-        target.locator.normalized_range.map(NormalizedTextRange::end),
+        target
+            .locator
+            .normalized_range
+            .map(NormalizedTextRange::start),
+        target
+            .locator
+            .normalized_range
+            .map(NormalizedTextRange::end),
         target.locator.segmentation_version.clone(),
     )
 }
@@ -459,8 +467,14 @@ fn validate_exact_cursor_binding(
     claims: &ReadCursorClaims,
     target: &ResolvedExactTarget,
 ) -> Result<(), ApplicationError> {
-    let expected_start = target.locator.normalized_range.map(NormalizedTextRange::start);
-    let expected_end = target.locator.normalized_range.map(NormalizedTextRange::end);
+    let expected_start = target
+        .locator
+        .normalized_range
+        .map(NormalizedTextRange::start);
+    let expected_end = target
+        .locator
+        .normalized_range
+        .map(NormalizedTextRange::end);
     if claims.target_kind.as_deref() != Some(target.kind.as_str())
         || claims.target_paragraph_index != target.locator.paragraph_index
         || claims.target_sentence_index != target.locator.sentence_index
@@ -533,7 +547,9 @@ fn validate_cursor_document_identity(
     Ok(())
 }
 
-fn validate_section_tree_cursor_contract(claims: &ReadCursorClaims) -> Result<(), ApplicationError> {
+fn validate_section_tree_cursor_contract(
+    claims: &ReadCursorClaims,
+) -> Result<(), ApplicationError> {
     if claims.read_mode != SECTION_TREE_READ_MODE {
         return Err(ApplicationError::StaleCursor(format!(
             "cursor read mode {} is incompatible with {SECTION_TREE_READ_MODE}",
@@ -581,7 +597,10 @@ fn validate_exact_cursor_contract(claims: &ReadCursorClaims) -> Result<(), Appli
     Ok(())
 }
 
-fn validate_resumable_position(next_char: usize, total_chars: usize) -> Result<(), ApplicationError> {
+fn validate_resumable_position(
+    next_char: usize,
+    total_chars: usize,
+) -> Result<(), ApplicationError> {
     if next_char >= total_chars {
         return Err(ApplicationError::InvalidCursor(format!(
             "next stream position {next_char} is outside the resumable range 0..{total_chars}"

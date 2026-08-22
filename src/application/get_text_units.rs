@@ -7,7 +7,7 @@ use crate::application::text_unit_cursor::{
 };
 use crate::domain::{
     Document, DocumentId, ParagraphContentClass, Section, SectionId, SentenceEligibility,
-    SentenceParagraphCoverage, SentenceTextUnit, TextLocator, TextUnit, TEXT_SEGMENTATION_VERSION,
+    SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
 };
 
 pub const DEFAULT_TEXT_UNIT_MAX_ITEMS: usize = 32;
@@ -417,7 +417,8 @@ fn build_declared_stream(
                     paragraph.paragraph_index, section.id.0
                 ))
             })?;
-        let is_non_prose = paragraph_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly;
+        let is_non_prose =
+            paragraph_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly;
 
         match requested_kind {
             RequestedTextUnitKind::Paragraph => {
@@ -425,7 +426,13 @@ fn build_declared_stream(
                     intentionally_skipped += 1;
                     continue;
                 }
-                items.push(paragraph_item(document, section, paragraph, paragraph_coverage, None));
+                items.push(paragraph_item(
+                    document,
+                    section,
+                    paragraph,
+                    paragraph_coverage,
+                    None,
+                ));
                 represented_paragraphs += 1;
             }
             RequestedTextUnitKind::Sentence if is_non_prose => {
@@ -511,9 +518,7 @@ fn sentence_item(
 
 fn content_class(class: ParagraphContentClass) -> (TextUnitContentClass, &'static str) {
     match class {
-        ParagraphContentClass::ProseOrUnknown => {
-            (TextUnitContentClass::Unknown, class.as_str())
-        }
+        ParagraphContentClass::ProseOrUnknown => (TextUnitContentClass::Unknown, class.as_str()),
         ParagraphContentClass::CodeBlock | ParagraphContentClass::Table => {
             (TextUnitContentClass::NonProse, class.as_str())
         }

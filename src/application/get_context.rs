@@ -479,13 +479,12 @@ fn text_unit_neighbor_result(
         item.role = relative_role(start + offset, anchor_index);
     }
     ensure_precise_item_budget(&items, max_chars)?;
-    let content = join_item_content(&items);
 
     Ok(GetContextResult {
         document_id: document.id.clone(),
         source: document.source.clone(),
         owner_section_id: section.id.clone(),
-        content,
+        content: String::new(),
         location: section.location.clone(),
         truncated: false,
         complete: true,
@@ -550,7 +549,7 @@ fn paragraph_container_result(
         document_id: document.id.clone(),
         source: document.source.clone(),
         owner_section_id: section.id.clone(),
-        content: paragraph.text.clone(),
+        content: String::new(),
         location: section.location.clone(),
         truncated: false,
         complete: true,
@@ -615,12 +614,12 @@ fn structural_result(
         )));
     }
 
-    let content = sections
+    let metadata_projection = sections
         .iter()
         .map(|section| section.title.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    ensure_string_budget(&content, max_chars)?;
+    ensure_string_budget(&metadata_projection, max_chars)?;
     let items = sections
         .iter()
         .map(|section| section_context_item(document, section, ContextItemRole::Structural))
@@ -630,7 +629,7 @@ fn structural_result(
         document_id: document.id.clone(),
         source: document.source.clone(),
         owner_section_id: owner.id.clone(),
-        content,
+        content: String::new(),
         location: owner.location.clone(),
         truncated: false,
         complete: true,
@@ -871,12 +870,4 @@ fn ensure_string_budget(content: &str, max_chars: Option<usize>) -> Result<(), A
         )));
     }
     Ok(())
-}
-
-fn join_item_content(items: &[ContextItem]) -> String {
-    items
-        .iter()
-        .filter_map(|item| item.content.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }

@@ -102,32 +102,64 @@ Rules:
 
 For each Section, v2 partitions the exact Section-relative coordinate space into native block ranges and gaps.
 
-### 5.1 Native prose-like blocks
+### 5.1 Native `paragraph`
 
 ```text
 paragraph
-blockquote
-list_item
+→ exactly one Paragraph TextUnit at the exact native range
+→ sentence-eligible
 ```
 
-Each becomes exactly one Paragraph TextUnit at the exact native block range.
+Native paragraph evidence is stronger than text heuristics. A `<p>` that merely looks table-like or code-like from punctuation remains a native prose Paragraph unless a future parser contract supplies stronger contradictory evidence.
 
-This is intentional even for `blockquote`: `normalized-block-model/v1` is a flat maximal non-overlapping projection. If a blockquote contains nested `<p>` elements, v1 does not persist a nested block tree, so segmentation v2 must not invent nested Paragraph identity that the persisted evidence cannot prove.
+### 5.2 Structural container blocks: `blockquote` and `list_item`
 
-`blockquote` and `list_item` remain sentence-eligible. Their native kind remains available as block evidence/content-class detail rather than being erased into an unqualified `prose_or_unknown` claim.
+```text
+blockquote
+list_item
+→ exactly one typed coarse Paragraph-level reading unit
+→ no Sentence children under normalized-block-model/v1
+```
 
-### 5.2 Native non-prose blocks
+This conservative rule is required by the current persisted evidence.
+
+`normalized-block-model/v1` uses a **flat maximal non-overlapping projection**. A persisted BlockQuote/ListItem may therefore contain nested native paragraphs, lists, preformatted regions, or tables whose individual kinds/ranges were suppressed to prevent overlapping copied source.
+
+A real current fixture demonstrates the limitation:
+
+```html
+<blockquote>
+  <p>Quoted text.</p>
+  <p>Second paragraph.</p>
+</blockquote>
+```
+
+is persisted as one `blockquote` range rather than two nested Paragraph rows. The normalized body may no longer contain a reliable separator that proves the two original `<p>` boundaries.
+
+Therefore v2 must not:
+
+```text
+flat blockquote/list_item
+→ assume prose-only internals
+→ fabricate Sentence children
+```
+
+The native kind is preserved as content-class/provenance detail so the Agent can distinguish a quoted/list reading unit from ordinary prose.
+
+Recovering precise Paragraph/Sentence identity inside composite BlockQuote/ListItem content requires stronger persisted nested/leaf block evidence and a later explicit identity migration. It is not guessed from transient DOM state.
+
+### 5.3 Native non-prose blocks
 
 ```text
 preformatted
 table
 ```
 
-Each becomes exactly one coarse Paragraph TextUnit at its exact block range and is ineligible for Sentence children.
+Each becomes exactly one coarse Paragraph-level reading unit at its exact block range and is ineligible for Sentence children.
 
 Punctuation inside code/preformatted/table content never creates fake Sentence identity merely because it resembles prose.
 
-### 5.3 Gaps between native blocks
+### 5.4 Gaps between native blocks
 
 A gap is content in `Section.content` not covered by any persisted native block.
 
@@ -149,16 +181,19 @@ Examples:
 native <pre> containing "Done. Next."
 → coarse Paragraph only
 
+native <blockquote> containing nested <p>/<pre>
+→ typed coarse BlockQuote item; no fabricated Sentences
+
 native <p> containing table-like punctuation
-→ prose-like Paragraph; native evidence wins
+→ sentence-eligible native Paragraph; native evidence wins
 
 no block map + fenced code
 → fallback coarse Paragraph through current text heuristic
 ```
 
-### 5.4 Paragraph ordinal and order
+### 5.5 Paragraph ordinal and order
 
-Paragraphs are ordered by exact owner-Section source position after native and fallback candidates are merged.
+Paragraph-level reading units are ordered by exact owner-Section source position after native and fallback candidates are merged.
 
 ```text
 paragraph_index
@@ -170,6 +205,8 @@ source_order
 
 `NormalizedBlock.block_index` is native-block identity and is not reused as `paragraph_index`; uncovered fallback ranges may exist between native blocks.
 
+The existing public `Paragraph` level remains a reading/addressing level. `content_class_detail`/block provenance distinguishes ordinary Paragraph from coarse BlockQuote/ListItem/Preformatted/Table without adding new locator kinds.
+
 ## 6. Sentence policy
 
 Sentence boundary punctuation/technical protections remain the current deterministic algorithm unless changed by a separately versioned future policy.
@@ -177,14 +214,16 @@ Sentence boundary punctuation/technical protections remain the current determini
 Eligibility under v2 is evidence-driven:
 
 ```text
-native paragraph   → eligible
-native blockquote  → eligible
-native list_item   → eligible
-native preformatted→ coarse Paragraph only
-native table       → coarse Paragraph only
-fallback prose/unknown → eligible
-fallback code/table    → coarse Paragraph only
+native paragraph      → eligible
+native blockquote     → coarse Paragraph only
+native list_item      → coarse Paragraph only
+native preformatted   → coarse Paragraph only
+native table          → coarse Paragraph only
+fallback prose/unknown→ eligible
+fallback code/table   → coarse Paragraph only
 ```
+
+The conservative BlockQuote/ListItem rule is about **persisted evidence sufficiency**, not a claim that quoted/list text is inherently non-prose.
 
 Sentence ranges remain exact Section-relative Unicode-scalar slices and remain owned by one Paragraph.
 
@@ -195,18 +234,26 @@ No Sentence crosses a Paragraph boundary.
 The v2 materializer must make the boundary source measurable. At minimum Paragraph/Sentence coverage must distinguish:
 
 ```text
-native_prose_like_chars
-native_non_prose_chars
+native_paragraph_chars
+native_structural_container_chars   # blockquote/list_item under flat v1 evidence
+native_non_prose_chars              # preformatted/table
 fallback_chars
 separator_chars
 paragraph_count
 sentence_eligible_paragraphs
-coarse_non_prose_paragraphs
+coarse_structural_items
+coarse_non_prose_items
 ```
 
-For source-preserving enumeration, every non-whitespace represented region is either a Paragraph/Sentence item or an explicit coarse Paragraph. Unsupported/invalid declared native evidence is not hidden as ordinary fallback.
+For source-preserving enumeration, every non-whitespace represented region is either a Paragraph/Sentence item or an explicit coarse Paragraph-level item. Unsupported/invalid declared native evidence is not hidden as ordinary fallback.
 
-`eligible_only` continues to be allowed to skip coarse non-prose and therefore cannot claim all-source completion.
+A BlockQuote/ListItem returned coarsely because nested leaf evidence is unavailable should carry an explicit degradation/detail such as:
+
+```text
+flat_native_container_no_nested_textunit_evidence
+```
+
+`eligible_only` continues to be allowed to skip coarse structural/non-prose items and therefore cannot claim all-source completion.
 
 ## 8. Normalized identity v2
 
@@ -322,6 +369,8 @@ An incompatible v2 lexical index is discarded/rebuilt from the current persisted
 
 Section-title candidates are rebuilt too so the index is one coherent version rather than a mixture of old/new locator identity.
 
+Coarse BlockQuote/ListItem/Preformatted/Table units remain searchable as Paragraph candidates but do not emit Sentence candidates under block-model/v1 evidence.
+
 ## 11. Parser/cache boundary
 
 This migration changes derived TextUnit/address identity, not the parser output contract itself.
@@ -365,7 +414,7 @@ The implementation should be one bounded dependency chain:
 
 ```text
 1. normalized-document-hash/v2 block identity projection
-2. text-segmentation/v2 block-aware Paragraph materialization
+2. text-segmentation/v2 block-aware Paragraph-level materialization
 3. native-evidence Sentence eligibility + coverage
 4. shared locator/cursor stale tests
 5. TextUnitIndex v2-row replacement semantics
@@ -380,25 +429,28 @@ Do not start by changing SearchIndex or MCP DTOs before the canonical TextUnit b
 
 Implementation is accepted only if tests prove all of the following:
 
-1. native `paragraph` / `blockquote` / `list_item` ranges become exact Paragraph TextUnits;
-2. native `preformatted` / `table` become coarse Paragraph-only units with zero fake Sentences;
-3. native evidence outranks text heuristics;
-4. uncovered non-whitespace gaps use deterministic offset-correct fallback segmentation;
-5. whitespace gaps remain separator coverage rather than fake Paragraphs;
-6. mixed native/fallback Paragraph ordinals are deterministic by Section source position;
-7. no Sentence crosses a v2 Paragraph boundary;
-8. absent block map remains a supported deterministic fallback;
-9. malformed declared block map fails closed rather than silently falling back;
-10. hash v2 changes when identity-bearing block kind/range/order facts change;
-11. hash v2 does not change solely because native location/validator diagnostics change;
-12. old v1 Paragraph/Sentence locators fail `STALE_LOCATOR`;
-13. old v1 TextUnit cursors fail `STALE_CURSOR`;
-14. old read cursors fail stale through normalized identity mismatch;
-15. lexical-search-index/v2 is rebuilt as v3 while tokenizer remains v1;
-16. restart/reopen reproduces the same v2 TextUnits and locators from persisted facts;
-17. exact read/context/search direct handoff continues without snippet relocation;
-18. runtime Tool count remains seven;
-19. no transient parser state or LLM decision enters identity.
+1. native `paragraph` ranges become exact sentence-eligible Paragraph TextUnits;
+2. native `blockquote` / `list_item` become typed coarse Paragraph-level units with zero fabricated Sentences under flat block-model/v1 evidence;
+3. nested BlockQuote/ListItem fixtures do not recover or invent suppressed child Paragraph/Sentence boundaries;
+4. native `preformatted` / `table` become coarse Paragraph-only units with zero fake Sentences;
+5. native evidence outranks text heuristics;
+6. uncovered non-whitespace gaps use deterministic offset-correct fallback segmentation;
+7. whitespace gaps remain separator coverage rather than fake Paragraphs;
+8. mixed native/fallback Paragraph ordinals are deterministic by Section source position;
+9. no Sentence crosses a v2 Paragraph boundary;
+10. absent block map remains a supported deterministic fallback;
+11. malformed declared block map fails closed rather than silently falling back;
+12. hash v2 changes when identity-bearing block kind/range/order facts change;
+13. hash v2 does not change solely because native location/validator diagnostics change;
+14. old v1 Paragraph/Sentence locators fail `STALE_LOCATOR`;
+15. old v1 TextUnit cursors fail `STALE_CURSOR`;
+16. old read cursors fail stale through normalized identity mismatch;
+17. lexical-search-index/v2 is rebuilt as v3 while tokenizer remains v1;
+18. coarse structural/non-prose units are Paragraph search candidates only, never fake Sentence candidates;
+19. restart/reopen reproduces the same v2 TextUnits and locators from persisted facts;
+20. exact read/context/search direct handoff continues without snippet relocation;
+21. runtime Tool count remains seven;
+22. no transient parser state or LLM decision enters identity.
 
 ## 15. Explicit non-goals
 
@@ -416,7 +468,7 @@ semantic/vector retrieval
 lexical tokenizer changes
 ```
 
-A future nested block model may refine `blockquote` internals only through another explicit versioned identity migration.
+A future nested/leaf block model may refine `blockquote` / `list_item` internals only through another explicit versioned identity migration. Until such evidence exists, coarse source preservation is preferred over fabricated precision.
 
 ## 16. Next implementation branch
 

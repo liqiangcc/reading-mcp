@@ -488,6 +488,7 @@ fn parse_ncx_children(parent: Node<'_, '_>) -> Vec<RawNavigationNode> {
 
 fn normalized_node_text(node: Node<'_, '_>) -> String {
     node.descendants()
+        .filter(|descendant| descendant.is_text())
         .filter_map(|descendant| descendant.text())
         .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()

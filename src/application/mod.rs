@@ -1,3 +1,4 @@
+mod discovery_cursor;
 pub mod get_context;
 pub mod get_document_structure;
 pub mod get_text_units;

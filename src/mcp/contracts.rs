@@ -158,6 +158,8 @@ pub struct ListDocumentsRequest {
     pub recursive: bool,
     #[serde(default = "default_list_limit")]
     pub max_results: usize,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 fn default_recursive() -> bool {
@@ -171,6 +173,9 @@ fn default_list_limit() -> usize {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ListDocumentsResponse {
     pub documents: Vec<ListedDocumentDto>,
+    pub complete: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

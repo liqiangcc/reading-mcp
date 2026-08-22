@@ -17,7 +17,9 @@ use crate::application::get_text_units::{
     EffectiveTextUnitKind, GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind,
     TextUnitContentClass, TextUnitCoveragePolicy, TextUnitDirection,
 };
-use crate::application::list_documents::{ListDocumentsCommand, ListDocumentsUseCase};
+use crate::application::list_documents::{
+    ListDocumentsCommand, ListDocumentsResult, ListDocumentsUseCase,
+};
 use crate::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use crate::application::ports::{ApplicationError, RetrievalOptions};
 use crate::application::read_document::{
@@ -112,15 +114,21 @@ impl ReadingMcpServer {
         &self,
         Parameters(request): Parameters<ListDocumentsRequest>,
     ) -> Result<Json<ListDocumentsResponse>, ErrorData> {
-        let documents = self
+        let result = self
             .list_documents
             .execute(ListDocumentsCommand {
                 path: request.path,
                 recursive: request.recursive,
                 max_results: request.max_results,
+                cursor: request.cursor,
             })
             .await
             .map_err(to_mcp_error)?;
+        let ListDocumentsResult {
+            documents,
+            complete,
+            next_cursor,
+        } = result;
 
         Ok(Json(ListDocumentsResponse {
             documents: documents
@@ -132,6 +140,8 @@ impl ReadingMcpServer {
                     size_bytes: document.size_bytes,
                 })
                 .collect(),
+            complete,
+            next_cursor,
         }))
     }
 

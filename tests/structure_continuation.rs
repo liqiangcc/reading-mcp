@@ -8,6 +8,7 @@ use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
 use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::SqliteDocumentRepository;
 
 #[tokio::test]
 async fn paginates_more_than_one_thousand_roots_without_gap_or_overlap() {
@@ -35,7 +36,10 @@ async fn paginates_more_than_one_thousand_roots_without_gap_or_overlap() {
             .expect("structure page should succeed");
 
         let ids = flatten_outline_ids(&result.sections);
-        assert_eq!(ids.len(), result.stream.end_index - result.stream.start_index);
+        assert_eq!(
+            ids.len(),
+            result.stream.end_index - result.stream.start_index
+        );
         all_ids.extend(ids);
         page += 1;
 
@@ -73,7 +77,10 @@ async fn continuation_page_is_a_page_forest_without_repeated_ancestors() {
         .await
         .expect("first page should succeed");
 
-    assert_eq!(flatten_outline_ids(&first.sections), vec!["section://a", "section://a/a1"]);
+    assert_eq!(
+        flatten_outline_ids(&first.sections),
+        vec!["section://a", "section://a/a1"]
+    );
     assert_eq!(first.sections.len(), 1);
     assert!(!first.sections[0].children_complete);
     assert_eq!(first.sections[0].children.len(), 1);
@@ -96,11 +103,17 @@ async fn continuation_page_is_a_page_forest_without_repeated_ancestors() {
     );
     assert_eq!(second.sections.len(), 2);
     assert_eq!(
-        second.sections[0].parent_id.as_ref().map(|id| id.0.as_str()),
+        second.sections[0]
+            .parent_id
+            .as_ref()
+            .map(|id| id.0.as_str()),
         Some("section://a/a1")
     );
     assert_eq!(
-        second.sections[1].parent_id.as_ref().map(|id| id.0.as_str()),
+        second.sections[1]
+            .parent_id
+            .as_ref()
+            .map(|id| id.0.as_str()),
         Some("section://a")
     );
     assert!(second.sections.iter().all(|node| node.children_complete));
@@ -123,11 +136,23 @@ async fn subtree_scope_and_relative_max_depth_are_deterministic() {
         .await
         .expect("subtree structure should succeed");
 
-    assert_eq!(flatten_outline_ids(&result.sections), vec!["section://a/a1"]);
-    assert_eq!(result.sections[0].parent_id.as_ref().map(|id| id.0.as_str()), Some("section://a"));
+    assert_eq!(
+        flatten_outline_ids(&result.sections),
+        vec!["section://a/a1"]
+    );
+    assert_eq!(
+        result.sections[0]
+            .parent_id
+            .as_ref()
+            .map(|id| id.0.as_str()),
+        Some("section://a")
+    );
     assert!(result.sections[0].children_complete);
     assert!(result.complete);
-    assert_eq!(result.stream.root_section_id, Some(SectionId("section://a/a1".into())));
+    assert_eq!(
+        result.stream.root_section_id,
+        Some(SectionId("section://a/a1".into()))
+    );
     assert_eq!(result.stream.max_depth, Some(1));
 
     let legacy_zero = use_case
@@ -141,7 +166,10 @@ async fn subtree_scope_and_relative_max_depth_are_deterministic() {
         .await
         .expect("max_depth=0 should retain legacy root-only behavior");
     assert_eq!(legacy_zero.stream.max_depth, Some(1));
-    assert_eq!(flatten_outline_ids(&legacy_zero.sections), vec!["section://a/a1"]);
+    assert_eq!(
+        flatten_outline_ids(&legacy_zero.sections),
+        vec!["section://a/a1"]
+    );
 }
 
 #[tokio::test]
@@ -213,6 +241,94 @@ async fn normalized_document_change_makes_cursor_stale() {
         .await
         .expect_err("normalized identity change must stale the cursor");
     assert!(matches!(error, ApplicationError::StaleCursor(_)));
+}
+
+#[tokio::test]
+async fn raw_document_change_makes_cursor_stale_even_when_normalized_text_matches() {
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    repository
+        .save(deep_document())
+        .await
+        .expect("fixture document should save");
+    let use_case = GetDocumentStructureUseCase::new(repository.clone());
+
+    let first = use_case
+        .execute_command(GetDocumentStructureCommand {
+            document_id: DocumentId("doc:structure".into()),
+            root_section_id: None,
+            max_depth: None,
+            max_nodes: Some(1),
+            cursor: None,
+        })
+        .await
+        .expect("first page should succeed");
+    let cursor = first.next_cursor.expect("first page should continue");
+
+    let mut changed = deep_document();
+    changed.content_hash = ContentHash("sha256:raw-changed".into());
+    repository
+        .save(changed)
+        .await
+        .expect("changed raw document should replace fixture");
+
+    let error = use_case
+        .execute_command(GetDocumentStructureCommand {
+            document_id: DocumentId("doc:structure".into()),
+            root_section_id: None,
+            max_depth: None,
+            max_nodes: Some(1),
+            cursor: Some(cursor),
+        })
+        .await
+        .expect_err("raw identity change must stale the cursor");
+    assert!(matches!(error, ApplicationError::StaleCursor(_)));
+}
+
+#[tokio::test]
+async fn structure_cursor_survives_sqlite_repository_reopen() {
+    let directory = tempfile::tempdir().expect("temporary state directory should be created");
+    let database = directory.path().join("reading-mcp.sqlite");
+    let repository =
+        Arc::new(SqliteDocumentRepository::open(&database).expect("SQLite repository should open"));
+    repository
+        .save(deep_document())
+        .await
+        .expect("fixture document should save");
+    let first = GetDocumentStructureUseCase::new(repository)
+        .execute_command(GetDocumentStructureCommand {
+            document_id: DocumentId("doc:structure".into()),
+            root_section_id: None,
+            max_depth: None,
+            max_nodes: Some(1),
+            cursor: None,
+        })
+        .await
+        .expect("first page should succeed");
+    let cursor = first.next_cursor.expect("first page should continue");
+
+    let reopened = Arc::new(
+        SqliteDocumentRepository::open(&database).expect("SQLite repository should reopen"),
+    );
+    let second = GetDocumentStructureUseCase::new(reopened)
+        .execute_command(GetDocumentStructureCommand {
+            document_id: DocumentId("doc:structure".into()),
+            root_section_id: None,
+            max_depth: None,
+            max_nodes: Some(10),
+            cursor: Some(cursor),
+        })
+        .await
+        .expect("continuation should survive repository reopen");
+    assert_eq!(
+        flatten_outline_ids(&second.sections),
+        [
+            "section://a/a1",
+            "section://a/a1/a1a",
+            "section://a/a2",
+            "section://b"
+        ]
+    );
+    assert_eq!(second.stream.start_index, 1);
 }
 
 #[tokio::test]

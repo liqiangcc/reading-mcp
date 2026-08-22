@@ -42,7 +42,8 @@ Second body.
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", "memory")
         .env("READING_MCP_TELEMETRY", "false");
-    let transport = TokioChildProcess::new(command).expect("reading-mcp child process should start");
+    let transport =
+        TokioChildProcess::new(command).expect("reading-mcp child process should start");
     let client = ().serve(transport).await.expect("MCP initialization should succeed");
 
     let mut tool_names = client
@@ -54,7 +55,11 @@ Second body.
         .collect::<Vec<_>>();
     tool_names.sort();
     assert_eq!(tool_names.len(), 7);
-    assert!(tool_names.iter().any(|name| name == "get_document_structure"));
+    assert!(
+        tool_names
+            .iter()
+            .any(|name| name == "get_document_structure")
+    );
 
     let opened = client
         .call_tool(
@@ -111,7 +116,9 @@ Second body.
     assert!(second.sections.iter().all(|node| node.parent_id.is_some()));
     assert!(second.sections.iter().all(|node| node.children_complete));
     assert!(!second.complete);
-    let cursor = second.next_cursor.expect("second page should provide cursor");
+    let cursor = second
+        .next_cursor
+        .expect("second page should provide cursor");
 
     let third = client
         .call_tool(

@@ -198,7 +198,10 @@ fn resolve_scope(
         )));
     }
 
-    let cursor_root = cursor.root_section_id.as_ref().map(|id| SectionId(id.clone()));
+    let cursor_root = cursor
+        .root_section_id
+        .as_ref()
+        .map(|id| SectionId(id.clone()));
     if let Some(requested_root) = command.root_section_id.as_ref()
         && cursor_root.as_ref() != Some(requested_root)
     {
@@ -288,7 +291,11 @@ fn flatten_section(
         level: section.level,
         location: section.location.clone(),
         in_scope_child_ids: if include_children {
-            section.children.iter().map(|child| child.id.clone()).collect()
+            section
+                .children
+                .iter()
+                .map(|child| child.id.clone())
+                .collect()
         } else {
             Vec::new()
         },

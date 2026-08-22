@@ -57,6 +57,11 @@ struct StructureCursorEnvelope {
 pub(crate) fn encode_structure_cursor(
     claims: StructureCursorClaims,
 ) -> Result<String, ApplicationError> {
+    validate_cursor_claims(&claims).map_err(|message| {
+        ApplicationError::CursorEncodingFailed(format!(
+            "structure cursor claims are impossible: {message}"
+        ))
+    })?;
     let claims_bytes = serde_json::to_vec(&claims).map_err(|error| {
         ApplicationError::CursorEncodingFailed(format!(
             "failed to serialize structure cursor claims: {error}"
@@ -90,7 +95,9 @@ pub(crate) fn decode_structure_cursor(
     }
     let encoded = cursor
         .strip_prefix(STRUCTURE_CURSOR_PREFIX)
-        .ok_or_else(|| ApplicationError::InvalidCursor("structure cursor prefix is invalid".into()))?;
+        .ok_or_else(|| {
+            ApplicationError::InvalidCursor("structure cursor prefix is invalid".into())
+        })?;
     let envelope_bytes = decode_hex(encoded)?;
     let envelope: StructureCursorEnvelope =
         serde_json::from_slice(&envelope_bytes).map_err(|error| {
@@ -118,7 +125,19 @@ pub(crate) fn decode_structure_cursor(
             envelope.claims.traversal_version
         )));
     }
+    validate_cursor_claims(&envelope.claims)
+        .map_err(|message| ApplicationError::InvalidCursor(message.to_string()))?;
     Ok(envelope.claims)
+}
+
+fn validate_cursor_claims(claims: &StructureCursorClaims) -> Result<(), &'static str> {
+    if claims.total_nodes == 0 {
+        return Err("structure cursor cannot target an empty stream");
+    }
+    if claims.next_index >= claims.total_nodes {
+        return Err("structure cursor position must be before the end of the stream");
+    }
+    Ok(())
 }
 
 fn cursor_checksum(payload: &[u8]) -> String {
@@ -202,5 +221,14 @@ mod tests {
         encoded.push(if last == '0' { '1' } else { '0' });
         let error = decode_structure_cursor(&encoded).expect_err("tampering must fail");
         assert!(matches!(error, ApplicationError::InvalidCursor(_)));
+    }
+
+    #[test]
+    fn impossible_terminal_cursor_is_rejected() {
+        let mut impossible = claims();
+        impossible.next_index = impossible.total_nodes;
+        let error =
+            encode_structure_cursor(impossible).expect_err("terminal cursor must not be encoded");
+        assert!(matches!(error, ApplicationError::CursorEncodingFailed(_)));
     }
 }

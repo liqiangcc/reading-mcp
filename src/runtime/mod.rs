@@ -21,7 +21,7 @@ use crate::infrastructure::{
     ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex, SqliteTextUnitIndex,
 };
 use crate::mcp::ReadingMcpServer;
-use crate::parsing::{ArchiveLimits, ParserRouter};
+use crate::parsing::{ArchiveLimits, ParserRouter, PersistedDocumentReliabilityInspector};
 use crate::retrieval::{
     EnvironmentCredentialProvider, HttpRetriever, LimitedFileRetriever, RetrieverRouter,
     RevalidatingHttpRetriever, SourcePolicyRouter,
@@ -119,14 +119,17 @@ pub fn build_server(
     let repository = components.repository;
     let text_unit_index = components.text_unit_index;
     let search_index = components.search_index;
-    let open_document = Arc::new(OpenDocumentUseCase::with_text_unit_index(
-        source_policy,
-        retriever,
-        parser,
-        repository.clone(),
-        text_unit_index,
-        search_index.clone(),
-    ));
+    let open_document = Arc::new(
+        OpenDocumentUseCase::with_text_unit_index(
+            source_policy,
+            retriever,
+            parser,
+            repository.clone(),
+            text_unit_index,
+            search_index.clone(),
+        )
+        .with_reliability_inspector(Arc::new(PersistedDocumentReliabilityInspector)),
+    );
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
     let get_structure = Arc::new(GetDocumentStructureUseCase::new(repository.clone()));
     let get_text_units = Arc::new(GetTextUnitsUseCase::new(repository.clone()));

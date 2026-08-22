@@ -7,6 +7,8 @@ use crate::domain::{
     Document, DocumentId, DocumentSource, Location, MediaType, SectionId, TextLocator, TextUnit,
 };
 
+use super::reading_profile::ReliabilitySummary;
+
 pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
 pub const LEGACY_SEARCH_TOKENIZER_VERSION: &str = "legacy-search-tokenizer/unversioned";
 
@@ -131,6 +133,10 @@ pub trait Retriever: Send + Sync {
 #[async_trait]
 pub trait Parser: Send + Sync {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError>;
+}
+
+pub trait DocumentReliabilityInspector: Send + Sync {
+    fn inspect(&self, document: &Document) -> Result<ReliabilitySummary, ApplicationError>;
 }
 
 #[async_trait]

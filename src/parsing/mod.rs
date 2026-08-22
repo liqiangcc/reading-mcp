@@ -10,6 +10,7 @@ mod limited_pdf;
 mod markdown;
 mod openapi;
 mod pdf;
+mod reliability;
 mod router;
 mod text;
 
@@ -28,5 +29,6 @@ pub use limited_pdf::LimitedPdfParser;
 pub use markdown::MarkdownParser;
 pub use openapi::OpenApiParser;
 pub use pdf::PdfParser;
+pub use reliability::PersistedDocumentReliabilityInspector;
 pub use router::ParserRouter;
 pub use text::TextParser;

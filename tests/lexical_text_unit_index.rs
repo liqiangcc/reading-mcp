@@ -157,6 +157,32 @@ async fn sqlite_lexical_candidates_and_tokenizer_version_survive_reopen() {
     );
 }
 
+#[tokio::test]
+async fn missing_derived_lexical_state_rebuilds_from_persisted_canonical_document() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("rebuild.sqlite");
+    let document = fixture();
+    let repository = Arc::new(SqliteDocumentRepository::open(&database).expect("repository"));
+    repository.save(document.clone()).await.expect("save canonical document");
+    let index = Arc::new(SqliteSearchIndex::open(&database).expect("empty lexical index"));
+
+    let result = SearchDocumentUseCase::new(index, repository)
+        .execute(SearchDocumentCommand {
+            document_id: document.id,
+            query: "物理帧".into(),
+            limit: 10,
+        })
+        .await
+        .expect("search should rebuild missing derived state without re-opening source");
+
+    assert!(
+        result
+            .hits
+            .iter()
+            .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence)
+    );
+}
+
 fn fixture() -> Document {
     Document {
         id: DocumentId("doc:lexical-v2".into()),

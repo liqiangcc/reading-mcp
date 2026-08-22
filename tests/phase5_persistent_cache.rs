@@ -64,7 +64,7 @@ async fn persistent_raw_and_parsed_caches_survive_adapter_recreation() {
     );
 
     let previous_version_key = ParsedCacheKey {
-        normalization_version: "reading-mcp-normalization/v3".into(),
+        normalization_version: "reading-mcp-normalization/v4".into(),
         ..key.clone()
     };
     assert_eq!(

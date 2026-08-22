@@ -197,7 +197,7 @@ impl ReadingMcpServer {
             document_id,
             section_id,
             anchor_locator,
-            requested_kind,
+            requested_kind: requested_kind_value,
             direction,
             coverage_policy: requested_coverage_policy,
             max_items,
@@ -207,7 +207,7 @@ impl ReadingMcpServer {
         let command = GetTextUnitsCommand {
             document_id: DocumentId(document_id),
             section_id: SectionId(section_id),
-            requested_kind: requested_kind(requested_kind),
+            requested_kind: requested_kind(requested_kind_value),
             direction: text_unit_direction(direction),
             coverage_policy: coverage_policy(requested_coverage_policy),
             max_items,
@@ -218,7 +218,10 @@ impl ReadingMcpServer {
         let result = match anchor_locator {
             Some(locator) => {
                 self.get_text_units
-                    .execute_from_anchor(command, text_locator_from_dto(locator).map_err(to_mcp_error)?)
+                    .execute_from_anchor(
+                        command,
+                        text_locator_from_dto(locator).map_err(to_mcp_error)?,
+                    )
                     .await
             }
             None => self.get_text_units.execute(command).await,
@@ -570,7 +573,7 @@ fn coverage_policy(value: TextUnitCoveragePolicyDto) -> TextUnitCoveragePolicy {
 fn coverage_policy_dto(value: TextUnitCoveragePolicy) -> TextUnitCoveragePolicyDto {
     match value {
         TextUnitCoveragePolicy::PreserveSource => TextUnitCoveragePolicyDto::PreserveSource,
-        TextUnitCoveragePolicy::EligibleOnly => TextUnitCoveragePolicyDto::EligibleOnly,
+        TextUnitCoveragePolicyDto::EligibleOnly => TextUnitCoveragePolicy::EligibleOnly,
     }
 }
 

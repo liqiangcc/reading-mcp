@@ -124,10 +124,7 @@ fn validate_count_metadata(
     Ok(())
 }
 
-fn required_metadata<'a>(
-    document: &'a Document,
-    key: &str,
-) -> Result<&'a str, ApplicationError> {
+fn required_metadata<'a>(document: &'a Document, key: &str) -> Result<&'a str, ApplicationError> {
     document
         .metadata
         .get(key)

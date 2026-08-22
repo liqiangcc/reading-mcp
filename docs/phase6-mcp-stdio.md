@@ -32,11 +32,18 @@ read_document
 content_hash
 normalized_document_hash
 normalized-document-hash/v1
-reading-mcp-normalization/v2
+reading-mcp-normalization/v3
 section-content-unicode-scalar/v1
 ```
 
-`reading-mcp-normalization/v2` invalidates Parsed Cache entries created before the EPUB navigation-map parser output was introduced; it does not change `normalized-document-hash/v1` while canonical Section addressing facts remain unchanged.
+Normalization version history relevant to EPUB：
+
+```text
+v2 → navigation-map parser facts added
+v3 → navigation/spine reconciliation can change canonical Section facts
+```
+
+`normalized-document-hash/v1` remains the addressing hash algorithm. Reconciliation changes its value naturally when Section title/parent/level/order facts change; the hash contract itself is not redefined.
 
 Paragraph/Sentence：
 
@@ -154,26 +161,9 @@ lexical-tokenizer/v1
 → lexical projection/rebuild only
 ```
 
-Tokenizer v1 supports:
+SQLite v2 persists candidate kind + canonical TextLocator + tokenizer/index version + source order + encoded lexemes. If lexical state is missing/incompatible but canonical Document exists, `search_document` rebuilds SearchIndex from DocumentRepository without source retrieval/reparse.
 
-- normalized full + component tokens for technical identifiers；
-- Han/Hiragana/Katakana/Hangul unigram + adjacent bigram；
-- mixed CJK/technical text；
-- encoded SQLite lexemes so FTS does not reinterpret logical token boundaries。
-
-SQLite v2 persists candidate kind + canonical TextLocator + tokenizer/index version + source order + encoded lexemes.
-
-If lexical state is missing/incompatible but canonical Document exists：
-
-```text
-search_document
-→ rebuild derived SearchIndex from DocumentRepository
-→ retry
-```
-
-No source retrieve/reparse is required.
-
-Historical SearchIndex adapters remain compatible through Section-level fallback. Runtime `SqliteSearchIndex` is v2；historical SQLite search implementation remains hidden compatibility only。
+Historical SearchIndex adapters remain compatible through Section-level fallback.
 
 ## Direct SearchHit handoff
 
@@ -186,11 +176,9 @@ search_document
 
 SearchDocumentUseCase revalidates source, tokenizer version, candidate kind and locator identity against canonical Document before returning a precise hit。
 
-Legacy preview fields remain available；`location/search-unit` never becomes canonical identity。
+## EPUB navigation + structure foundation
 
-## EPUB navigation-map parser foundation
-
-`feat/epub-navigation-map` adds parser-internal, persisted EPUB navigation facts without changing the seven-Tool surface or rewriting canonical Section hierarchy yet:
+EPUB parsing now has two explicit stages:
 
 ```text
 EPUB package / manifest
@@ -198,10 +186,27 @@ EPUB package / manifest
 → EPUB 3 toc nav hierarchy
 → legacy NCX fallback
 → href / fragment resolution diagnostics
-→ epub-navigation-map/v1 in Document.metadata
+→ epub-navigation-map/v1
+        ↓
+spine-authoritative source order
++ publisher nav/NCX labels/hierarchy
++ XHTML heading fallback
++ spine-item fallback
+→ epub-structure-reconciliation/v1
+→ canonical Section tree
 ```
 
-The map is an input to the later nav/spine reconciliation increment. It is not yet exposed as a new MCP Tool or treated as canonical Section identity.
+Reconciliation rules:
+
+- only navigation targets that map to a real canonical Section boundary may override Section title/parentage;
+- non-heading DOM fragments do not fabricate Sections;
+- navigation order never reverses canonical sibling/root order against the spine;
+- multiple TOC aliases never duplicate canonical text;
+- `linear=no` supported XHTML remains addressable and is tagged auxiliary;
+- effective structural provenance is `epub_nav | epub_ncx | xhtml_heading | spine_item`;
+- missing/unsupported spine entries remain visible in structure facts instead of disappearing from the publication plane.
+
+The next EPUB increment is the persisted normalized XHTML block model. Full EPUB validator/coverage remains later.
 
 ## Default persistent state
 
@@ -224,14 +229,16 @@ SQLite lexical-search-index/v2
 - locator-driven context；
 - exact read + continuation + truthful returned ranges；
 - SearchHit Section/Paragraph/Sentence locator handoff；
-- Sentence SearchHit → exact read；
-- Sentence SearchHit → Sentence neighbor context；
-- CJK substring lexical retrieval；
-- technical identifier lexical retrieval；
-- non-prose Paragraph search without fake Sentence；
-- SQLite lexical reopen；
-- missing derived-index rebuild from persisted canonical Document；
-- historical SearchIndex adapter Section fallback；
+- Sentence SearchHit → exact read/context；
+- CJK/technical lexical retrieval；
+- SQLite lexical reopen/rebuild；
+- historical SearchIndex adapter fallback；
+- EPUB nav/NCX resolution/degradation；
+- EPUB nav→canonical Section title/parent reconciliation；
+- spine-order conflict handling；
+- `linear=no` preservation；
+- non-heading-fragment no-fabrication；
+- normalization-version Parsed Cache invalidation；
 - cursor/locator malformed/stale fail closed；
 - telemetry stderr only and no query/body content logging。
 
@@ -252,6 +259,7 @@ parser/retriever/index → MCP DTO
 cursor offset → source identity
 snippet/score/index row → source identity
 lexical token → TextLocator identity
+publisher navigation order → implicit spine source reorder
 ```
 
 ## v0.1 非目标

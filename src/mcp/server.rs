@@ -646,7 +646,6 @@ fn context_relation_dto(value: &ContextRelation) -> ContextRelationDto {
                 ContextContainerKind::Section => ContextContainerKindDto::Section,
             },
         },
-        ContextRelationDto::Structural { kind } => unreachable!("DTO variant cannot occur here: {kind:?}"),
         ContextRelation::Structural { kind } => ContextRelationDto::Structural {
             kind: match kind {
                 StructuralContextKind::OwnerSection => StructuralContextKindDto::OwnerSection,

@@ -32,7 +32,7 @@ read_document
 content_hash
 normalized_document_hash
 normalized-document-hash/v2
-reading-mcp-normalization/v5
+reading-mcp-normalization/v6
 section-content-unicode-scalar/v1
 ```
 
@@ -43,9 +43,10 @@ v2 → navigation-map parser facts added
 v3 → navigation/spine reconciliation can change canonical Section facts
 v4 → normalized-block-model/v1 persisted + inline HTML text normalization correction
 v5 → epub-structure-validator/v1 persisted report + coverage evidence
+v6 → block-aware segmentation v2 changes persisted validator TextUnit coverage
 ```
 
-Parser/cache normalization remains v5 because the block-aware migration changes normalized addressing/TextUnit derived identity rather than canonical parser-output policy.
+`CachingParser` returns Parsed Cache hits without rerunning parser/validator work. Because the persisted EPUB validation report contains current Paragraph/Sentence coverage, v5 cache entries must miss once TextUnit semantics advance to v2. Raw Resource Cache remains independently reusable.
 
 Current precise identity：
 
@@ -347,7 +348,7 @@ Validator rules include：
 
 ```text
 File Raw Cache
-File Parsed Cache
+File Parsed Cache (reading-mcp-normalization/v6)
 SQLite DocumentRepository
   ├── normalized-block-model/v1 metadata
   └── epub-structure-validator/v1 report metadata
@@ -363,6 +364,7 @@ No dedicated SQLite block/validator table is required: map/report serialize with
 
 - 7 Tool discovery；
 - raw/normalized hash-v2 identity；
+- normalization-v5 Parsed Cache miss under v6；
 - block-map identity/provenance separation；
 - block-aware Paragraph materialization；
 - native Paragraph exact Sentence eligibility；
@@ -385,11 +387,10 @@ No dedicated SQLite block/validator table is required: map/report serialize with
 - normalized block SQLite reopen persistence；
 - EPUB block owner/native-location remap；
 - validator clean/degradation/tamper/reopen evidence；
-- normalization-version Parsed Cache invalidation；
 - cursor/locator malformed/stale fail closed；
 - telemetry stderr only and no query/body content logging。
 
-Implementation CI #876：
+Implementation CI #898：
 
 ```text
 Format  success

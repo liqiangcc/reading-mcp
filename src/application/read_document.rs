@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::application::locator_resolution::{ResolvedTextLocator, resolve_text_locator};
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::read_cursor::{ReadCursorClaims, decode_read_cursor, encode_read_cursor};
 use crate::application::reading_support::{
@@ -8,7 +9,7 @@ use crate::application::reading_support::{
 };
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, NormalizedTextRange,
-    Section, SectionId, TEXT_SEGMENTATION_VERSION, TextLocator,
+    Section, SectionId, TextLocator,
 };
 
 pub const EXACT_TARGET_READ_MODE: &str = "exact_target";
@@ -127,7 +128,7 @@ impl ReadDocumentUseCase {
         command: ReadExactTargetCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
         let document = self.load_document(&command.document_id).await?;
-        let target = resolve_exact_target(&document, &command.target_locator)?;
+        let target = resolve_text_locator(&document, &command.target_locator)?;
         read_exact_segment(&document, target, 0, command.max_chars)
     }
 
@@ -146,7 +147,7 @@ impl ReadDocumentUseCase {
 
         let document = self.load_document(&command.document_id).await?;
         validate_cursor_document_identity(&claims, &document)?;
-        let target = resolve_exact_target(&document, &command.target_locator)?;
+        let target = resolve_text_locator(&document, &command.target_locator)?;
         validate_exact_cursor_binding(&claims, &target)?;
 
         let target_chars = target.range.len();
@@ -224,164 +225,9 @@ fn read_rendered_section_segment(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExactTargetKind {
-    Section,
-    CharacterRange,
-    Paragraph,
-    Sentence,
-}
-
-impl ExactTargetKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Section => "section",
-            Self::CharacterRange => "character_range",
-            Self::Paragraph => "paragraph",
-            Self::Sentence => "sentence",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ResolvedExactTarget {
-    locator: TextLocator,
-    kind: ExactTargetKind,
-    range: NormalizedTextRange,
-}
-
-fn resolve_exact_target(
-    document: &Document,
-    locator: &TextLocator,
-) -> Result<ResolvedExactTarget, ApplicationError> {
-    if locator.document_id != document.id {
-        return Err(ApplicationError::InvalidLocator(format!(
-            "locator document {} does not match requested document {}",
-            locator.document_id.0, document.id.0
-        )));
-    }
-    if locator.content_hash != document.content_hash {
-        return Err(ApplicationError::StaleLocator(format!(
-            "raw content hash changed from {} to {}",
-            locator.content_hash.0, document.content_hash.0
-        )));
-    }
-    let normalized_hash = document.normalized_document_hash();
-    if locator.normalized_document_hash != normalized_hash {
-        return Err(ApplicationError::StaleLocator(format!(
-            "normalized document hash changed from {} to {}",
-            locator.normalized_document_hash.0, normalized_hash.0
-        )));
-    }
-
-    let section = document
-        .find_section(&locator.owner_section_id)
-        .ok_or_else(|| {
-            ApplicationError::InvalidLocator(format!(
-                "locator owner section {} does not exist",
-                locator.owner_section_id.0
-            ))
-        })?;
-
-    match (
-        locator.paragraph_index,
-        locator.sentence_index,
-        locator.normalized_range,
-        locator.segmentation_version.as_deref(),
-    ) {
-        (None, None, None, None) => {
-            let range = NormalizedTextRange::new(0, section.normalized_text_len())
-                .expect("zero-to-length normalized range is valid");
-            Ok(ResolvedExactTarget {
-                locator: TextLocator::for_section(document, section),
-                kind: ExactTargetKind::Section,
-                range,
-            })
-        }
-        (None, None, Some(range), None) => {
-            section.validate_normalized_range(range).map_err(|error| {
-                ApplicationError::InvalidLocator(format!("invalid character range: {error}"))
-            })?;
-            Ok(ResolvedExactTarget {
-                locator: TextLocator::for_character_range(document, section, range),
-                kind: ExactTargetKind::CharacterRange,
-                range,
-            })
-        }
-        (Some(paragraph_index), None, Some(range), Some(segmentation_version)) => {
-            validate_segmentation_version(segmentation_version)?;
-            if paragraph_index == 0 {
-                return Err(ApplicationError::InvalidLocator(
-                    "paragraph_index must be 1-based".into(),
-                ));
-            }
-            let paragraph = document
-                .paragraph_text_units()
-                .units
-                .into_iter()
-                .find(|unit| {
-                    unit.owner_section_id == locator.owner_section_id
-                        && unit.paragraph_index == paragraph_index
-                })
-                .ok_or_else(|| {
-                    ApplicationError::StaleLocator(format!(
-                        "paragraph {paragraph_index} no longer exists in section {}",
-                        locator.owner_section_id.0
-                    ))
-                })?;
-            if paragraph.normalized_range != range {
-                return Err(ApplicationError::StaleLocator(format!(
-                    "paragraph {paragraph_index} normalized range changed"
-                )));
-            }
-            Ok(ResolvedExactTarget {
-                locator: TextLocator::for_paragraph(document, section, &paragraph),
-                kind: ExactTargetKind::Paragraph,
-                range,
-            })
-        }
-        (Some(paragraph_index), Some(sentence_index), Some(range), Some(segmentation_version)) => {
-            validate_segmentation_version(segmentation_version)?;
-            if paragraph_index == 0 || sentence_index == 0 {
-                return Err(ApplicationError::InvalidLocator(
-                    "paragraph_index and sentence_index must be 1-based".into(),
-                ));
-            }
-            let sentence = document
-                .sentence_text_units()
-                .units
-                .into_iter()
-                .find(|unit| {
-                    unit.owner_section_id == locator.owner_section_id
-                        && unit.paragraph_index == paragraph_index
-                        && unit.sentence_index == sentence_index
-                })
-                .ok_or_else(|| {
-                    ApplicationError::StaleLocator(format!(
-                        "sentence {paragraph_index}.{sentence_index} no longer exists in section {}",
-                        locator.owner_section_id.0
-                    ))
-                })?;
-            if sentence.normalized_range != range {
-                return Err(ApplicationError::StaleLocator(format!(
-                    "sentence {paragraph_index}.{sentence_index} normalized range changed"
-                )));
-            }
-            Ok(ResolvedExactTarget {
-                locator: TextLocator::for_sentence(document, section, &sentence),
-                kind: ExactTargetKind::Sentence,
-                range,
-            })
-        }
-        _ => Err(ApplicationError::InvalidLocator(
-            "locator Section/CharacterRange/Paragraph/Sentence fields form an invalid shape".into(),
-        )),
-    }
-}
-
 fn read_exact_segment(
     document: &Document,
-    target: ResolvedExactTarget,
+    target: ResolvedTextLocator,
     start_char: usize,
     max_chars: Option<usize>,
 ) -> Result<ReadSectionResult, ApplicationError> {
@@ -437,7 +283,7 @@ fn read_exact_segment(
 
 fn exact_cursor_claims(
     document: &Document,
-    target: &ResolvedExactTarget,
+    target: &ResolvedTextLocator,
     next_char: usize,
 ) -> ReadCursorClaims {
     ReadCursorClaims::new_exact(
@@ -465,7 +311,7 @@ fn exact_cursor_claims(
 
 fn validate_exact_cursor_binding(
     claims: &ReadCursorClaims,
-    target: &ResolvedExactTarget,
+    target: &ResolvedTextLocator,
 ) -> Result<(), ApplicationError> {
     let expected_start = target
         .locator
@@ -485,15 +331,6 @@ fn validate_exact_cursor_binding(
         return Err(ApplicationError::CursorTargetMismatch(
             "read cursor exact target does not match requested TextLocator".into(),
         ));
-    }
-    Ok(())
-}
-
-fn validate_segmentation_version(version: &str) -> Result<(), ApplicationError> {
-    if version != TEXT_SEGMENTATION_VERSION {
-        return Err(ApplicationError::StaleLocator(format!(
-            "locator segmentation version {version} is incompatible with {TEXT_SEGMENTATION_VERSION}"
-        )));
     }
     Ok(())
 }

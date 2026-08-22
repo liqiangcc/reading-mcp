@@ -206,6 +206,7 @@ impl ReadingMcpServer {
             next_cursor: result.next_cursor,
             stream: StructureStreamSegmentDto {
                 traversal_version: result.stream.traversal_version,
+                body_order_version: result.stream.body_order_version,
                 root_section_id: result.stream.root_section_id.map(|id| id.0),
                 max_depth: result.stream.max_depth,
                 start_index: result.stream.start_index,
@@ -553,6 +554,7 @@ fn section_node(section: &SectionOutline) -> SectionNode {
         title: section.title.clone(),
         level: section.level,
         location: location_dto(&section.location),
+        body_order: section.body_order,
         children_complete: section.children_complete,
         children: section.children.iter().map(section_node).collect(),
     }

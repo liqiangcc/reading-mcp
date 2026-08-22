@@ -15,8 +15,7 @@ fn normalized_block_wire_names_are_stable() {
         "\"list_item\""
     );
     assert_eq!(
-        serde_json::to_string(&NormalizedBlockKind::Preformatted)
-            .expect("serialize preformatted"),
+        serde_json::to_string(&NormalizedBlockKind::Preformatted).expect("serialize preformatted"),
         "\"preformatted\""
     );
     assert_eq!(

@@ -4,8 +4,11 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, SectionId, TextUnit,
+    Document, DocumentId, DocumentSource, Location, MediaType, SectionId, TextLocator, TextUnit,
 };
+
+pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
+pub const LEGACY_SEARCH_TOKENIZER_VERSION: &str = "legacy-search-tokenizer/unversioned";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetrievalOptions {
@@ -32,6 +35,36 @@ pub struct SearchHit {
     pub snippet: String,
     pub score: f32,
     pub location: Location,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SearchHitKind {
+    Section,
+    Paragraph,
+    Sentence,
+}
+
+impl SearchHitKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Section => "section",
+            Self::Paragraph => "paragraph",
+            Self::Sentence => "sentence",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LexicalSearchHit {
+    pub section_id: SectionId,
+    pub title: String,
+    pub source: DocumentSource,
+    pub snippet: String,
+    pub score: f32,
+    pub location: Location,
+    pub candidate_kind: SearchHitKind,
+    pub text_locator: TextLocator,
+    pub tokenizer_version: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -144,6 +177,14 @@ pub trait TextUnitIndex: Send + Sync {
 
 #[async_trait]
 pub trait SearchIndex: Send + Sync {
+    fn supports_precise_lexical_candidates(&self) -> bool {
+        self.tokenizer_version() != LEGACY_SEARCH_TOKENIZER_VERSION
+    }
+
+    fn tokenizer_version(&self) -> &'static str {
+        LEGACY_SEARCH_TOKENIZER_VERSION
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError>;
 
     async fn search(
@@ -152,4 +193,15 @@ pub trait SearchIndex: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>, ApplicationError>;
+
+    async fn search_lexical(
+        &self,
+        _document_id: &DocumentId,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        Err(ApplicationError::IndexFailed(
+            "search adapter does not implement canonical lexical candidates".into(),
+        ))
+    }
 }

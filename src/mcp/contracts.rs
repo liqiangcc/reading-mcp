@@ -221,6 +221,14 @@ fn default_search_limit() -> usize {
     10
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchCandidateKindDto {
+    Section,
+    Paragraph,
+    Sentence,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct SearchDocumentResponse {
     pub document_id: String,
@@ -235,6 +243,8 @@ pub struct SearchHitDto {
     pub snippet: String,
     pub score: f32,
     pub location: LocationDto,
+    pub candidate_kind: SearchCandidateKindDto,
+    pub text_locator: TextLocatorDto,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

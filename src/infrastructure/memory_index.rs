@@ -4,11 +4,12 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use crate::application::ports::{
-    ApplicationError, SearchHit, SearchIndex, LEXICAL_TOKENIZER_VERSION,
+    ApplicationError, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit, SearchHit, SearchHitKind,
+    SearchIndex,
 };
 use crate::domain::{Document, DocumentId};
 
-use super::lexical::{build_lexical_candidates, score_candidate, LexicalCandidate};
+use super::lexical::{LexicalCandidate, build_lexical_candidates, score_candidate};
 
 #[derive(Default)]
 pub struct InMemorySearchIndex {
@@ -35,6 +36,27 @@ impl SearchIndex for InMemorySearchIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>, ApplicationError> {
+        Ok(self
+            .search_lexical(document_id, query, limit)
+            .await?
+            .into_iter()
+            .map(|hit| SearchHit {
+                section_id: hit.section_id,
+                title: hit.title,
+                source: hit.source,
+                snippet: hit.snippet,
+                score: hit.score,
+                location: hit.location,
+            })
+            .collect())
+    }
+
+    async fn search_lexical(
+        &self,
+        document_id: &DocumentId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
         if query.trim().is_empty() {
             return Err(ApplicationError::InvalidRequest(
                 "search query must not be empty".into(),
@@ -55,7 +77,7 @@ impl SearchIndex for InMemorySearchIndex {
         let mut scored = candidates
             .iter()
             .filter_map(|candidate| {
-                score_candidate(candidate, query).map(|score| SearchHit {
+                score_candidate(candidate, query).map(|score| LexicalSearchHit {
                     section_id: candidate.section_id.clone(),
                     title: candidate.title.clone(),
                     source: candidate.source.clone(),
@@ -73,7 +95,10 @@ impl SearchIndex for InMemorySearchIndex {
             right
                 .score
                 .total_cmp(&left.score)
-                .then_with(|| candidate_kind_order(left.candidate_kind).cmp(&candidate_kind_order(right.candidate_kind)))
+                .then_with(|| {
+                    candidate_kind_order(left.candidate_kind)
+                        .cmp(&candidate_kind_order(right.candidate_kind))
+                })
                 .then_with(|| left.section_id.0.cmp(&right.section_id.0))
                 .then_with(|| {
                     left.text_locator
@@ -94,10 +119,10 @@ impl SearchIndex for InMemorySearchIndex {
     }
 }
 
-const fn candidate_kind_order(kind: crate::application::ports::SearchHitKind) -> u8 {
+const fn candidate_kind_order(kind: SearchHitKind) -> u8 {
     match kind {
-        crate::application::ports::SearchHitKind::Sentence => 0,
-        crate::application::ports::SearchHitKind::Paragraph => 1,
-        crate::application::ports::SearchHitKind::Section => 2,
+        SearchHitKind::Sentence => 0,
+        SearchHitKind::Paragraph => 1,
+        SearchHitKind::Section => 2,
     }
 }

@@ -68,7 +68,10 @@ async fn backward_anchor_is_exclusive_and_returns_source_order() {
     assert_eq!(anchored.start_anchor_locator.as_ref(), Some(&anchor));
     assert!(anchored.complete);
     assert!(!anchored.section_complete);
-    assert_eq!((anchored.stream.start_index, anchored.stream.end_index), (0, 2));
+    assert_eq!(
+        (anchored.stream.start_index, anchored.stream.end_index),
+        (0, 2)
+    );
 }
 
 #[tokio::test]

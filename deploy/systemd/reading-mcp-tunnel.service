@@ -1,0 +1,24 @@
+[Unit]
+Description=Reading MCP OpenAI Secure MCP Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__WORKING_DIRECTORY__
+EnvironmentFile=__ENV_FILE__
+ExecStart=__TUNNEL_CLIENT__ run --profile-dir __TUNNEL_PROFILE_DIR__ --profile __TUNNEL_PROFILE__
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__STATE_DIR__ __TUNNEL_PROFILE_DIR__
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

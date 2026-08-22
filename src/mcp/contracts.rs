@@ -185,7 +185,13 @@ pub struct ListedDocumentDto {
 pub struct GetDocumentStructureRequest {
     pub document_id: String,
     #[serde(default)]
+    pub root_section_id: Option<String>,
+    #[serde(default)]
     pub max_depth: Option<u8>,
+    #[serde(default)]
+    pub max_nodes: Option<usize>,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -193,6 +199,22 @@ pub struct GetDocumentStructureResponse {
     pub document_id: String,
     pub sections: Vec<SectionNode>,
     pub truncated: bool,
+    pub complete: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    pub stream: StructureStreamSegmentDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct StructureStreamSegmentDto {
+    pub traversal_version: String,
+    #[serde(default)]
+    pub root_section_id: Option<String>,
+    #[serde(default)]
+    pub max_depth: Option<u8>,
+    pub start_index: usize,
+    pub end_index: usize,
+    pub total_nodes: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -203,6 +225,7 @@ pub struct SectionNode {
     pub title: String,
     pub level: u8,
     pub location: LocationDto,
+    pub children_complete: bool,
     pub children: Vec<SectionNode>,
 }
 

@@ -10,7 +10,9 @@ use crate::application::get_context::{
     ContextUnit, GetContextCommand, GetContextUseCase, GetStructuredContextCommand,
     StructuralContextKind,
 };
-use crate::application::get_document_structure::{GetDocumentStructureUseCase, SectionOutline};
+use crate::application::get_document_structure::{
+    GetDocumentStructureCommand, GetDocumentStructureUseCase, SectionOutline,
+};
 use crate::application::get_text_units::{
     EffectiveTextUnitKind, GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind,
     TextUnitContentClass, TextUnitCoveragePolicy, TextUnitDirection,
@@ -39,9 +41,9 @@ use super::contracts::{
     LocationDto, NormalizedRangeDto, OpenDocumentRequest, OpenDocumentResponse,
     ReadDocumentRequest, ReadDocumentResponse, ReadStreamSegmentDto, SearchCandidateKindDto,
     SearchDocumentRequest, SearchDocumentResponse, SearchHitDto, SectionNode,
-    StructuralContextKindDto, TextLocatorDto, TextUnitContentClassDto, TextUnitCoverageDto,
-    TextUnitCoveragePolicyDto, TextUnitDirectionDto, TextUnitItemDto, TextUnitKindDto,
-    TextUnitStreamSegmentDto,
+    StructuralContextKindDto, StructureStreamSegmentDto, TextLocatorDto, TextUnitContentClassDto,
+    TextUnitCoverageDto, TextUnitCoveragePolicyDto, TextUnitDirectionDto, TextUnitItemDto,
+    TextUnitKindDto, TextUnitStreamSegmentDto,
 };
 
 #[derive(Clone)]
@@ -168,7 +170,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Return the section hierarchy and source locations for an opened document without returning full body text"
+        description = "Return a bounded page of the canonical section hierarchy with deterministic StructureCursor continuation and source locations, without returning full body text"
     )]
     async fn get_document_structure(
         &self,
@@ -176,7 +178,13 @@ impl ReadingMcpServer {
     ) -> Result<Json<GetDocumentStructureResponse>, ErrorData> {
         let result = self
             .get_structure
-            .execute(DocumentId(request.document_id), request.max_depth)
+            .execute_command(GetDocumentStructureCommand {
+                document_id: DocumentId(request.document_id),
+                root_section_id: request.root_section_id.map(SectionId),
+                max_depth: request.max_depth,
+                max_nodes: request.max_nodes,
+                cursor: request.cursor,
+            })
             .await
             .map_err(to_mcp_error)?;
 
@@ -184,6 +192,16 @@ impl ReadingMcpServer {
             document_id: result.document_id.0,
             sections: result.sections.iter().map(section_node).collect(),
             truncated: result.truncated,
+            complete: result.complete,
+            next_cursor: result.next_cursor,
+            stream: StructureStreamSegmentDto {
+                traversal_version: result.stream.traversal_version,
+                root_section_id: result.stream.root_section_id.map(|id| id.0),
+                max_depth: result.stream.max_depth,
+                start_index: result.stream.start_index,
+                end_index: result.stream.end_index,
+                total_nodes: result.stream.total_nodes,
+            },
         }))
     }
 
@@ -525,6 +543,7 @@ fn section_node(section: &SectionOutline) -> SectionNode {
         title: section.title.clone(),
         level: section.level,
         location: location_dto(&section.location),
+        children_complete: section.children_complete,
         children: section.children.iter().map(section_node).collect(),
     }
 }

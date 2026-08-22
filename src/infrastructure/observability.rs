@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::application::ports::{
-    ApplicationError, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
-    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex,
+    ApplicationError, LexicalSearchHit, ParsedCacheKey, ParsedDocumentCache, Parser,
+    RawResourceCache, RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex,
 };
 use crate::domain::{Document, DocumentId, DocumentSource};
 
@@ -185,6 +185,10 @@ impl ObservedSearchIndex {
 
 #[async_trait]
 impl SearchIndex for ObservedSearchIndex {
+    fn tokenizer_version(&self) -> &'static str {
+        self.inner.tokenizer_version()
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let started = Instant::now();
         let result = self.inner.index(document).await;
@@ -205,16 +209,32 @@ impl SearchIndex for ObservedSearchIndex {
     ) -> Result<Vec<SearchHit>, ApplicationError> {
         let started = Instant::now();
         let result = self.inner.search(document_id, query, limit).await;
-        emit(json!({
-            "event": "search",
-            "duration_ms": started.elapsed().as_millis(),
-            "query_chars": query.chars().count(),
-            "limit": limit,
-            "hits": result.as_ref().map(Vec::len).unwrap_or_default(),
-            "success": result.is_ok()
-        }));
+        emit_search_event(started, query, limit, result.as_ref().map(Vec::len).unwrap_or_default(), result.is_ok());
         result
     }
+
+    async fn search_lexical(
+        &self,
+        document_id: &DocumentId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.search_lexical(document_id, query, limit).await;
+        emit_search_event(started, query, limit, result.as_ref().map(Vec::len).unwrap_or_default(), result.is_ok());
+        result
+    }
+}
+
+fn emit_search_event(started: Instant, query: &str, limit: usize, hits: usize, success: bool) {
+    emit(json!({
+        "event": "search",
+        "duration_ms": started.elapsed().as_millis(),
+        "query_chars": query.chars().count(),
+        "limit": limit,
+        "hits": hits,
+        "success": success
+    }));
 }
 
 fn error_class(error: &ApplicationError) -> &'static str {

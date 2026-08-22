@@ -12,7 +12,8 @@
 - [Precise Read Locator Contract](precise-read-locator-contract.md)：已实现的 TextLocator → exact `read_document`、CharacterRange、exact-target ReadCursor continuation 与 returned source locator。
 - [Search Locator Handoff Contract](search-locator-contract.md)：已实现的 SearchHit → TextLocator direct handoff 与 shared locator resolver。
 - [Lexical TextUnit Index Contract](lexical-text-unit-index.md)：canonical Section/Paragraph/Sentence lexical candidates、`lexical-tokenizer/v1`、CJK/技术标识检索、SQLite v2 migration/rebuild。
-- [EPUB Navigation Map Contract](epub-navigation-map-contract.md)：已实现的 EPUB 3 `properties=nav` discovery、TOC/NCX hierarchy、href/fragment resolution、provenance 与 Parsed Cache v2 invalidation；尚未重写 canonical Section hierarchy。
+- [EPUB Navigation Map Contract](epub-navigation-map-contract.md)：已实现的 EPUB 3 `properties=nav` discovery、TOC/NCX hierarchy、href/fragment resolution 与 provenance parser facts。
+- [EPUB Structure Reconciliation Contract](epub-structure-reconciliation-contract.md)：已实现的 nav/NCX/heading/spine precedence、spine-authoritative source order、`linear=no` 与 structural provenance。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与 Tool Contract。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
@@ -57,6 +58,8 @@ search-locator-contract.md
 lexical-text-unit-index.md
       ↓
 epub-navigation-map-contract.md
+      ↓
+epub-structure-reconciliation-contract.md
       ↓
 epub-structure-reliability-design.md
       ↓
@@ -119,14 +122,18 @@ CJK + mixed technical lexical projection
 lexical-search-index/v2 SQLite rebuildable state
 search → precise TextLocator → read/context direct handoff
 EPUB navigation-map/v1 parser facts
+EPUB structure-reconciliation/v1 canonical hierarchy
 INVALID_LOCATOR / STALE_LOCATOR fail-closed validation
 ```
 
-身份与检索版本继续分离：
+身份、解析策略与检索版本继续分离：
 
 ```text
 normalized_document_hash + text-segmentation/v1
 → Paragraph/Sentence/TextLocator identity
+
+reading-mcp-normalization/v3
+→ Parsed Document policy/cache invalidation
 
 lexical-tokenizer/v1
 → search projection / rebuild only
@@ -134,7 +141,7 @@ lexical-tokenizer/v1
 
 Tokenizer 变化不得重编号 TextUnit 或改变 TextLocator。SQLite lexical index version/tokenizer version 不匹配时，仅丢弃并重建 derived lexical state，不触碰 canonical Document/TextUnit facts；若 persisted Document 存在但 lexical rows 缺失，搜索可直接从 canonical repository 重建，不重新下载/解析来源。
 
-EPUB 当前已经能把 publisher navigation 单独映射为持久化 parser fact：
+EPUB 当前已经完成 navigation extraction 与 canonical structure reconciliation：
 
 ```text
 manifest properties=nav
@@ -142,9 +149,16 @@ manifest properties=nav
 → legacy NCX fallback
 → archive-safe href / fragment resolution
 → epub-navigation-map/v1
+        ↓
+spine-authoritative source order
++ nav/NCX hierarchy/labels
++ XHTML heading fallback
++ spine-item fallback
+→ epub-structure-reconciliation/v1
+→ canonical Section tree
 ```
 
-本阶段仍没有把 navigation hierarchy 写入 canonical Section tree；`get_document_structure` 看到的 EPUB Section 仍来自 spine + XHTML heading。下一独立增量是 nav/spine/heading 的结构 reconciliation，而不是提前修改 Paragraph/Sentence identity。
+Publisher navigation 只有在能映射到真实 canonical Section boundary 时才可升级 title/parentage；navigation 顺序不能反转 spine/source order。`linear=no` 作为 auxiliary content 仍保持可寻址，不被静默删除。下一独立增量是 persisted normalized XHTML block model，而不是继续修改 Paragraph/Sentence 规则。
 
 当前 direct handoff：
 

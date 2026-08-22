@@ -82,18 +82,27 @@ Those fields remain valuable provenance or derived state, but they do not define
 Current diagnostic/cache version:
 
 ```text
-normalization_version = reading-mcp-normalization/v2
+normalization_version = reading-mcp-normalization/v3
 ```
 
 `normalization_version` identifies parser/normalization policy for cache invalidation, diagnostics, and migration. It is not a substitute for the actual normalized fingerprint.
 
-The v2 bump invalidates Parsed Cache entries created before the EPUB navigation-map parser output was introduced. The navigation map is currently persisted as `Document.metadata` and does not yet alter Section addressing facts, so this cache-version bump does not require changing `normalized-document-hash/v1`.
+Relevant EPUB policy history:
 
-A policy version may change while producing identical canonical facts; in that case the actual `normalized_document_hash` can remain identical. Conversely, canonical facts changing must change the normalized hash even when raw bytes remain identical.
+```text
+v2 = EPUB navigation-map parser facts added to Document metadata
+v3 = navigation/spine reconciliation may change canonical Section structure
+```
+
+The v3 bump invalidates Parsed Cache entries from v2 so identical raw EPUB bytes are reparsed under the new structural policy.
+
+`normalized-document-hash/v1` does not need a new algorithm/version for reconciliation: it already includes Section title, parentage, level and child order. When reconciliation changes those canonical facts, the hash value changes naturally. When reconciliation produces identical canonical facts, the hash may remain identical even though normalization policy advanced.
+
+A policy version may therefore change while producing identical canonical facts; conversely, canonical facts changing must change the normalized hash even when raw bytes remain identical.
 
 ## 3. Parsed-cache identity
 
-Parsed cache identity is now scoped by:
+Parsed cache identity is scoped by:
 
 ```text
 final_source
@@ -104,7 +113,7 @@ final_source
 Consequences:
 
 - unchanged raw bytes can still reuse Raw Cache;
-- a normalization-policy upgrade does not reuse an old Parsed Document accidentally;
+- a parser/normalization-policy upgrade does not reuse an old Parsed Document accidentally;
 - old parsed cache files become harmless misses rather than being silently reinterpreted;
 - DocumentRepository and SearchIndex responsibilities remain unchanged.
 
@@ -181,7 +190,7 @@ For example, Markdown currently derives them from positions in the source Markdo
 section-content-unicode-scalar/v1
 ```
 
-This is the only general coordinate space accepted for future Paragraph, Sentence, CharacterRange, and exact TextLocator ranges.
+This is the only general coordinate space accepted for Paragraph, Sentence, CharacterRange, and exact TextLocator ranges.
 
 ### 6.3 Rendered read-stream coordinates
 
@@ -219,11 +228,9 @@ This makes the rendered-stream/non-source nature of continuation positions expli
 
 ## 8. ReadCursor integration
 
-`ReadCursor` continues to bind the normalized-document hash in addition to raw source hash, Section target, read mode, rendering version, and next stream position.
+`ReadCursor` binds the normalized-document hash in addition to raw source hash, Section target, read mode, rendering version, and next stream position.
 
-The previous continuation implementation used a provisional private fingerprint. This increment replaces it with the formal domain `normalized_document_hash` contract.
-
-A normalized identity mismatch fails closed. No cursor is rebased by text similarity.
+A normalized identity mismatch fails closed. No cursor is rebased by text similarity. Because EPUB reconciliation can change canonical Section facts, a cursor/locator issued for a pre-reconciliation normalized hash correctly becomes stale when the reconciled normalized hash differs.
 
 ## 9. Persistence and rebuildability
 
@@ -237,7 +244,7 @@ hash(document before repository save)
 hash(document restored from repository)
 ```
 
-No SQLite Document schema migration is required for this increment. Future addressing-relevant canonical fields must be persisted first and then added to a new hash contract version.
+A future persisted block/boundary model that becomes addressing-relevant must be persisted first and then incorporated through an explicit normalized-hash contract-version decision.
 
 ## 10. Acceptance evidence
 
@@ -250,25 +257,11 @@ Tests cover:
 - hash changes for Section id, parentage, title, level, content, and order;
 - hash stability across raw source/provenance and legacy Location changes;
 - hash rebuild after SQLite persistence;
-- parsed cache misses across normalization versions;
+- parsed cache misses across normalization versions, including v2 → v3;
 - additive MCP schema fields;
 - explicit rendered read-stream coordinate space;
 - existing continuation stale/no-gap/no-overlap behavior.
 
-## 11. Non-goals
+## 11. Non-goals of the original P0 contract
 
-This increment does not implement:
-
-```text
-Paragraph TextUnits
-Sentence TextUnits
-TextLocator wire DTOs
-get_text_units
-exact range read Tool mode
-sentence segmentation
-TextUnit persistence
-FTS changes
-EPUB parser restructuring
-```
-
-Those capabilities depend on this contract but remain separate implementation units.
+The original normalized-range increment did not itself define Paragraph/Sentence segmentation, TextUnit persistence, FTS, or EPUB structural policy. Those have evolved in separate implementation increments while preserving the identity/range rules above.

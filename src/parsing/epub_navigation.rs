@@ -174,8 +174,9 @@ pub(crate) fn parse_package_facts(package_xml: &XmlDocument<'_>) -> EpubPackageF
         .flat_map(|node| node.children())
         .filter(|node| node.is_element() && node.tag_name().name() == "itemref")
         .filter_map(|node| {
-            node.attribute("idref")
-                .map(|idref| SpineItem { idref: idref.to_string() })
+            node.attribute("idref").map(|idref| SpineItem {
+                idref: idref.to_string(),
+            })
         })
         .collect();
 
@@ -193,10 +194,7 @@ pub(crate) fn remember_fragment_index(
     media_type: &str,
     bytes: &[u8],
 ) {
-    cache.insert(
-        entry_path.to_string(),
-        fragment_index(media_type, bytes),
-    );
+    cache.insert(entry_path.to_string(), fragment_index(media_type, bytes));
 }
 
 pub(crate) fn build_navigation_map<R: Read + Seek>(
@@ -347,12 +345,17 @@ fn load_navigation_source<R: Read + Seek>(
     limits: &ArchiveLimits,
     total_read: &mut usize,
 ) -> Result<(String, String), LoadNavigationError> {
-    let source_path = resolve_archive_path(package_path, &item.href)
-        .map_err(|message| LoadNavigationError::Degraded(format!("invalid navigation resource path {:?}: {message}", item.href)))?;
-    let bytes = read_entry(archive, &source_path, limits, total_read).map_err(|error| match error {
-        ApplicationError::ResourceLimitExceeded(_) => LoadNavigationError::ResourceLimit(error),
-        other => LoadNavigationError::Degraded(other.to_string()),
+    let source_path = resolve_archive_path(package_path, &item.href).map_err(|message| {
+        LoadNavigationError::Degraded(format!(
+            "invalid navigation resource path {:?}: {message}",
+            item.href
+        ))
     })?;
+    let bytes =
+        read_entry(archive, &source_path, limits, total_read).map_err(|error| match error {
+            ApplicationError::ResourceLimitExceeded(_) => LoadNavigationError::ResourceLimit(error),
+            other => LoadNavigationError::Degraded(other.to_string()),
+        })?;
     let source = utf8_entry(bytes, &source_path)
         .map_err(|error| LoadNavigationError::Degraded(error.to_string()))?;
     Ok((source_path, source))
@@ -423,9 +426,9 @@ fn parse_epub_nav_list(ol: Node<'_, '_>) -> Vec<RawNavigationNode> {
     ol.children()
         .filter(|node| node.is_element() && node.tag_name().name() == "li")
         .map(|li| {
-            let target = li.children().find(|node| {
-                node.is_element() && matches!(node.tag_name().name(), "a" | "span")
-            });
+            let target = li
+                .children()
+                .find(|node| node.is_element() && matches!(node.tag_name().name(), "a" | "span"));
             let label = target.map(normalized_node_text).unwrap_or_default();
             let href = target
                 .filter(|node| node.tag_name().name() == "a")
@@ -579,7 +582,9 @@ fn resolve_target<R: Read + Seek>(
             entry_path: None,
             fragment: None,
             status: NavigationResolutionStatus::UnsupportedResource,
-            diagnostic: Some(format!("external navigation target {href:?} is outside the EPUB archive")),
+            diagnostic: Some(format!(
+                "external navigation target {href:?} is outside the EPUB archive"
+            )),
         });
     }
 
@@ -631,7 +636,9 @@ fn resolve_target<R: Read + Seek>(
             entry_path: Some(entry_path),
             fragment,
             status: NavigationResolutionStatus::MissingResource,
-            diagnostic: Some("navigation target manifest resource is absent from the archive".into()),
+            diagnostic: Some(
+                "navigation target manifest resource is absent from the archive".into(),
+            ),
         });
     }
     if !is_supported_content_media_type(&manifest_item.media_type) {
@@ -684,7 +691,9 @@ fn resolve_target<R: Read + Seek>(
             entry_path: Some(entry_path),
             fragment: Some(fragment.clone()),
             status: NavigationResolutionStatus::MissingFragment,
-            diagnostic: Some(format!("fragment {fragment:?} was not found in the target document")),
+            diagnostic: Some(format!(
+                "fragment {fragment:?} was not found in the target document"
+            )),
         }),
         Some(FragmentIndex::Malformed(message)) => Ok(TargetResolution {
             entry_path: Some(entry_path),
@@ -699,9 +708,14 @@ fn resolve_target<R: Read + Seek>(
 fn fragment_index(media_type: &str, bytes: &[u8]) -> FragmentIndex {
     let source = match std::str::from_utf8(bytes) {
         Ok(source) => source,
-        Err(error) => return FragmentIndex::Malformed(format!("target content is not UTF-8: {error}")),
+        Err(error) => {
+            return FragmentIndex::Malformed(format!("target content is not UTF-8: {error}"));
+        }
     };
-    if matches!(media_type, "application/xhtml+xml" | "application/xml" | "text/xml") {
+    if matches!(
+        media_type,
+        "application/xhtml+xml" | "application/xml" | "text/xml"
+    ) {
         return match XmlDocument::parse(source) {
             Ok(document) => FragmentIndex::Resolved(
                 document
@@ -715,14 +729,20 @@ fn fragment_index(media_type: &str, bytes: &[u8]) -> FragmentIndex {
                     })
                     .collect(),
             ),
-            Err(error) => FragmentIndex::Malformed(format!("target XHTML/XML is malformed: {error}")),
+            Err(error) => {
+                FragmentIndex::Malformed(format!("target XHTML/XML is malformed: {error}"))
+            }
         };
     }
     if media_type == "text/html" {
         let document = Html::parse_document(source);
         let selector = match Selector::parse("[id], a[name]") {
             Ok(selector) => selector,
-            Err(error) => return FragmentIndex::Malformed(format!("failed building HTML fragment selector: {error}")),
+            Err(error) => {
+                return FragmentIndex::Malformed(format!(
+                    "failed building HTML fragment selector: {error}"
+                ));
+            }
         };
         return FragmentIndex::Resolved(
             document
@@ -737,7 +757,9 @@ fn fragment_index(media_type: &str, bytes: &[u8]) -> FragmentIndex {
                 .collect(),
         );
     }
-    FragmentIndex::Malformed(format!("unsupported fragment-index media type {media_type:?}"))
+    FragmentIndex::Malformed(format!(
+        "unsupported fragment-index media type {media_type:?}"
+    ))
 }
 
 pub(crate) fn is_supported_content_media_type(media_type: &str) -> bool {
@@ -828,7 +850,8 @@ fn percent_decode(value: &str) -> Result<String, String> {
             index += 1;
         }
     }
-    String::from_utf8(decoded).map_err(|error| format!("percent-decoded value is not UTF-8: {error}"))
+    String::from_utf8(decoded)
+        .map_err(|error| format!("percent-decoded value is not UTF-8: {error}"))
 }
 
 const fn hex_value(value: u8) -> Option<u8> {
@@ -851,8 +874,7 @@ fn count_resolved_nodes(nodes: &[EpubNavigationNode]) -> usize {
     nodes
         .iter()
         .map(|node| {
-            usize::from(node.resolution_status.is_resolved())
-                + count_resolved_nodes(&node.children)
+            usize::from(node.resolution_status.is_resolved()) + count_resolved_nodes(&node.children)
         })
         .sum()
 }

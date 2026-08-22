@@ -71,7 +71,7 @@ impl Parser for HtmlParser {
             let section_id = SectionId("section://document".into());
             let (content, blocks) = if preamble.is_empty() {
                 (
-                    collapse_whitespace(&root.text().collect::<Vec<_>>().join(" ")),
+                    collapse_whitespace(&root.text().collect::<Vec<_>>().join("")),
                     Vec::new(),
                 )
             } else {
@@ -192,15 +192,15 @@ fn collect_content(
         let Some(kind) = normalized_block_kind(tag) else {
             continue;
         };
-        let text = if tag == "pre" {
-            element
+        let text = match tag {
+            "pre" => element
                 .text()
                 .collect::<Vec<_>>()
                 .join("")
                 .trim()
-                .to_string()
-        } else {
-            normalized_element_text(element)
+                .to_string(),
+            "table" => normalized_table_text(element)?,
+            _ => normalized_element_text(element),
         };
         if text.is_empty() {
             continue;
@@ -411,7 +411,21 @@ fn normalized_block_kind(tag: &str) -> Option<NormalizedBlockKind> {
 }
 
 fn normalized_element_text(element: ElementRef<'_>) -> String {
-    collapse_whitespace(&element.text().collect::<Vec<_>>().join(" "))
+    collapse_whitespace(&element.text().collect::<Vec<_>>().join(""))
+}
+
+fn normalized_table_text(element: ElementRef<'_>) -> Result<String, ApplicationError> {
+    let cells = selector("th, td")?;
+    let values = element
+        .select(&cells)
+        .map(normalized_element_text)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        Ok(normalized_element_text(element))
+    } else {
+        Ok(values.join(" "))
+    }
 }
 
 fn collapse_whitespace(value: &str) -> String {

@@ -95,7 +95,7 @@ Tests prove native-location-only block changes do not change hash v2, while bloc
 Current parser/cache policy：
 
 ```text
-normalization_version = reading-mcp-normalization/v5
+normalization_version = reading-mcp-normalization/v6
 ```
 
 Relevant history：
@@ -105,9 +105,10 @@ v2 = EPUB navigation-map parser facts
 v3 = navigation/spine reconciliation
 v4 = normalized-block-model/v1 + HTML inline normalization correction
 v5 = epub-structure-validator/v1 persisted report/coverage
+v6 = block-aware TextUnit v2 changes persisted EPUB validator TextUnit coverage
 ```
 
-The block-aware identity migration does not bump parser/cache normalization because it changes normalized addressing/TextUnit derived identity rather than parser-output policy.
+The block-aware identity migration initially appeared to affect only derived addressing. Implementation review established that the persisted EPUB validation report is also parser output and depends on current Paragraph/Sentence materialization. A v5 Parsed Cache hit would bypass parser/validator execution and could retain v1-era TextUnit coverage beside current v2 TextUnits. v6 prevents that stale mixed state.
 
 `normalization_version` scopes Parsed Cache policy; it is not a replacement for the actual normalized fingerprint.
 
@@ -124,7 +125,8 @@ final_source
 Consequences：
 
 - Raw Cache can survive parser-policy changes;
-- incompatible Parsed Cache entries become misses;
+- normalization-v5 Parsed Cache entries miss under v6;
+- current EPUB parser/validator output is regenerated under TextUnit v2 semantics;
 - DocumentRepository/TextUnit/Search derived-state responsibilities remain separate.
 
 ## 6. Normalized text range
@@ -214,7 +216,7 @@ Current response therefore advertises：
 
 ```text
 normalized-document-hash/v2
-reading-mcp-normalization/v5
+reading-mcp-normalization/v6
 section-content-unicode-scalar/v1
 ```
 
@@ -246,7 +248,7 @@ hash(document before save)
 hash(document restored from repository)
 ```
 
-The block map and EPUB validation report persist through Document metadata. The block-map identity projection is now part of hash v2; validator report/diagnostics remain excluded.
+The block map and EPUB validation report persist through Document metadata. The block-map identity projection is now part of hash v2; validator report/diagnostics remain excluded from the normalized hash even though their generation participates in parser/cache policy v6.
 
 Sentence facts remain deterministically rebuildable and do not require Sentence SQLite rows for correctness.
 
@@ -262,14 +264,14 @@ Tests cover：
 - block-map presence/kind sensitivity in hash v2;
 - native-location-only exclusion from hash v2;
 - hash rebuild after SQLite persistence;
-- Parsed Cache v4→v5 invalidation;
-- open-document schema advertises hash v2;
+- Parsed Cache v5→v6 invalidation;
+- open-document schema advertises hash v2 + normalization v6;
 - old v1 Paragraph locator stale rejection;
 - old v1 TextUnitCursor stale rejection;
 - normalized block exact slices/reopen persistence;
 - EPUB validator deterministic reopen behavior.
 
-CI #876 passed the implementation head before final docs-only synchronization：
+CI #898 passed after the v6 cache-policy correction：
 
 ```text
 Format  success
@@ -283,7 +285,7 @@ Test    success
 content_hash
 = raw source provenance
 
-reading-mcp-normalization/v5
+reading-mcp-normalization/v6
 = parser/cache policy
 
 normalized-document-hash/v2

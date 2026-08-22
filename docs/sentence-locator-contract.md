@@ -83,7 +83,9 @@ Recognized terminal punctuation includes:
 
 Terminal clusters and common closing punctuation are kept with the preceding Sentence.
 
-The ASCII-period policy is deliberately conservative. It avoids boundaries for strong technical/non-terminal patterns including:
+The ASCII punctuation policy is deliberately conservative. An ASCII `?` or `!` is accepted as a Sentence terminal only when its terminal/closer cluster is followed by whitespace or the end of the Paragraph. This prevents false splits in technical forms such as URL query strings and operators like `x!=0`.
+
+ASCII period handling adds further protection for strong technical/non-terminal patterns including:
 
 ```text
 3.14                 # decimal/version-like numeric punctuation
@@ -196,6 +198,8 @@ coarse_only_chars = paragraph_chars
 sentence_count  = 0
 ```
 
+Generated eligible ranges are required to remain inside the containing Paragraph; coverage calculation fails rather than silently hiding a range-accounting bug.
+
 This makes future source-preserving Sentence-first enumeration possible without pretending code/table content is a Sentence. The future enumeration layer can return the containing Paragraph as a coarse reading item.
 
 ## 8. Rebuildability
@@ -250,6 +254,7 @@ Tests cover:
 - deterministic document Sentence source order;
 - English and CJK terminal punctuation;
 - abbreviations, decimals, paths, file/member/API punctuation;
+- ASCII URL-query/operator `?` / `!` protection;
 - trailing unterminated prose fallback;
 - fenced and indented code as coarse-only Paragraphs;
 - Markdown table as a coarse-only Paragraph;

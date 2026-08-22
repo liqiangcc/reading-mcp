@@ -118,7 +118,10 @@ async fn title_only_hit_remains_section_level_and_never_fabricates_text_unit_ide
     let hit = searched.hits.first().expect("title hit");
 
     assert_eq!(hit.candidate_kind, SearchCandidateKind::Section);
-    assert_eq!(hit.text_locator.owner_section_id.0, "section://book/empty-target");
+    assert_eq!(
+        hit.text_locator.owner_section_id.0,
+        "section://book/empty-target"
+    );
     assert!(hit.text_locator.paragraph_index.is_none());
     assert!(hit.text_locator.sentence_index.is_none());
     assert!(hit.text_locator.normalized_range.is_none());

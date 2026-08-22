@@ -30,13 +30,11 @@ get_context
 read_document
 ```
 
-`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document/source/media type、raw/normalized identity、normalization diagnostics 与 section count；structure 返回 section tree；`get_text_units` 在单个 Section 内按 source order 枚举 Paragraph/Sentence reading items；search 返回 owning section + source/title/snippet/score/location；`get_context` 支持 legacy Section-neighbor 与 locator-driven tagged context；read 继续从 DocumentRepository 读取规范化正文。
-
-v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location` / precise TextLocator provenance。
+`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；`open_document` 返回 raw/normalized identity；structure 返回 Section tree；`get_text_units` 枚举 Paragraph/Sentence；`get_context` 支持 legacy Section-neighbor 与 locator-driven tagged context；`read_document` 同时支持 legacy Section-tree 与 exact TextLocator read。格式扩展不增加 PDF/EPUB/DOCX 专属 Tool。
 
 ## Normalized document identity and text coordinates
 
-`open_document` 以 additive 方式返回：
+`open_document` additive 返回：
 
 ```text
 content_hash
@@ -46,30 +44,9 @@ normalization_version             = reading-mcp-normalization/v1
 normalized_text_coordinate_space = section-content-unicode-scalar/v1
 ```
 
-其中：
+其中 raw `content_hash` 是 source-byte provenance，`normalized_document_hash` 是 addressing-relevant canonical Document/Section facts 的确定性指纹。
 
-```text
-content_hash
-= retrieved source bytes provenance
-
-normalized_document_hash
-= canonical addressing-relevant Document/Section fingerprint
-```
-
-`normalized-document-hash/v1` 按 persisted tree/source order 覆盖：
-
-```text
-Section id
-parent id
-Section title
-Section level
-exact Section.content
-child count/order
-```
-
-不覆盖 raw source、legacy `Location`、native provenance、MCP rendering 或 SearchIndex row。未来影响 Paragraph/Sentence segmentation 的 canonical persisted block/boundary facts 必须通过新 hash contract version 纳入。
-
-Normalized range 的唯一通用语义是：
+Normalized range 的统一语义：
 
 ```text
 owner    = exact persisted Section.content
@@ -78,7 +55,7 @@ interval = half-open [start, end)
 unit     = Unicode scalar / Rust char
 ```
 
-`Location.char_start/char_end` 保留 parser-defined legacy/source meaning，不被静默改写为 normalized range。
+Legacy `Location.char_start/char_end` 不被静默解释为 normalized range。
 
 Parsed Cache key 包含：
 
@@ -88,35 +65,24 @@ raw_sha256
 normalization_version
 ```
 
-因此 normalization policy 升级可以继续复用 Raw Cache，但不会错误复用旧 Parsed Document。
-
-完整契约见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
+完整定义见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
 
 ## Paragraph / Sentence TextUnit foundation
 
-当前 runtime 从 canonical `Section.content` 确定性派生 Paragraph，并可确定性 materialize Sentence：
-
 ```text
 text-segmentation/v1
-Paragraph ordinal = 1-based within owner Section
-Sentence ordinal  = 1-based within Paragraph
-range             = exact Section-relative Unicode-scalar [start, end)
+Section.content
+  → Paragraph exact ranges
+  → deterministic Sentence ranges/ownership
 ```
 
-Paragraph TextUnit 写入独立 derived `TextUnitIndex`：
+Paragraph TextUnit 进入独立 derived `TextUnitIndex`；Sentence locator/coverage 从 persisted canonical Document 确定性 materialize，不依赖 Sentence SQLite rows。SearchIndex/FTS 仍是另一职责。
 
-```text
-memory mode     → InMemoryTextUnitIndex
-persistent mode → SQLite text_units table (Paragraph v1)
-```
-
-Sentence locator/coverage 不依赖 Sentence SQLite rows；它从 canonical persisted Document + deterministic Paragraph/Sentence segmentation 重建。`TextUnitIndex` 与 `SearchIndex` 继续是两个职责，当前 FTS/search contract 不读取 precise Sentence locator stream。
-
-完整契约见 [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md) 和 [Sentence Locator and Coverage Contract](sentence-locator-contract.md)。
+完整定义见 [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md) 与 [Sentence Locator and Coverage Contract](sentence-locator-contract.md)。
 
 ## TextUnit enumeration
 
-`get_text_units` 当前支持：
+`get_text_units` 支持：
 
 ```text
 document_id
@@ -129,162 +95,137 @@ max_chars?
 cursor?
 ```
 
-默认 `requested_kind=sentence`、`direction=forward`、`coverage_policy=preserve_source`。
+`TextUnitCursor = text-unit-cursor/v1` 绑定 raw/normalized identity、Section、segmentation、kind、direction、coverage policy、next index 与 stream length。分页保证 source order、no-gap/no-overlap 和 actionable continuation。
 
-`preserve_source` 下，识别出的 code/table Paragraph 在 Sentence-first stream 中以 coarse Paragraph item 返回，不伪造 Sentence identity。`eligible_only` 只消费 eligible stream，按契约不宣称 all-source `section_complete`。
+`preserve_source` 遇到识别出的 code/table 时返回 coarse Paragraph item，不伪造 Sentence；`eligible_only` 不宣称 all-source completion。TextUnit 是 enumeration 原子项，不因 `max_chars` 被切开。
 
-TextUnitCursor：
+当前 v1 从 Section 边界开始；anchor-based `before/after(locator)` 仍是兼容后续扩展。
 
-```text
-text-unit-cursor/v1
-```
-
-绑定：
-
-```text
-document_id
-raw content_hash
-normalized_document_hash
-section_id
-text-segmentation/v1
-requested_kind
-direction
-coverage_policy
-next item index
-total declared items
-```
-
-分页使用 `stream.start_index/end_index/total_items` 证明相邻页边界；每个 response 内即使 backward traversal 也保持 source order。任何 incomplete response 都返回 `next_cursor`；terminal response `complete=true` 且 `next_cursor=null`。
-
-单个 TextUnit 不会为了满足 `max_chars` 被切开；若单个 item 已超过预算则返回资源限制错误。
-
-当前 v1 从 Section 边界开始，anchor-based `before/after(locator)` 起点仍是兼容后续扩展。
-
-完整契约见 [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)。
+完整定义见 [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)。
 
 ## Locator-driven context
 
-`get_context` 不增加新的 Tool name，而是在保持 legacy wire call 的同时增加 tagged relation。
+`get_context` 保留：
+
+```text
+legacy: document_id + section_id + before/after + max_chars?
+       → neighbor(unit=section)
+```
+
+并 additive 支持：
+
+```text
+document_id + (section_id | target_locator)
+relation:
+  neighbor { unit: section | paragraph | sentence, before, after }
+  | container { kind: paragraph | section }
+  | structural { kind: owner_section | ancestors | siblings | children }
+```
+
+TextLocator 校验 document/raw/normalized identity、owner、Paragraph/Sentence ordinal、`text-segmentation/v1` 和 exact range；失败使用 `INVALID_LOCATOR / STALE_LOCATOR`，不做 fuzzy rebasing。
+
+Sentence neighbor 与 `get_text_units(... preserve_source)` 保持同一 source-order/coarse non-prose 语义。Locator-driven structured正文只出现在 `items[]`，不重复到顶层 legacy `content`。
+
+完整定义见 [Context Granularity Contract](context-granularity-contract.md)。
+
+## Exact TextLocator read
+
+`read_document` 现在有两条明确路径。
 
 Legacy：
 
 ```text
 document_id
 section_id
-before / after
 max_chars?
-```
-
-等价于：
-
-```text
-neighbor(unit=section)
-```
-
-Structured：
-
-```text
-document_id
-section_id? | target_locator?
-relation:
-  neighbor { unit: section | paragraph | sentence, before, after }
-  | container { kind: paragraph | section }
-  | structural { kind: owner_section | ancestors | siblings | children }
-max_chars?
-```
-
-TextLocator validation覆盖：
-
-```text
-document_id
-raw content_hash
-normalized_document_hash
-owner Section
-Paragraph/Sentence ordinal shape
-text-segmentation/v1
-exact normalized range
-```
-
-稳定错误：
-
-```text
-INVALID_LOCATOR
-STALE_LOCATOR
-```
-
-不做 fuzzy rebasing。
-
-Sentence neighbor context 与 `get_text_units(requested_kind=sentence, preserve_source)` 使用同一 source-order/coarse non-prose 语义。Paragraph/Sentence context item 是原子项；超过预算时显式失败，不截断 locator-bearing TextUnit。
-
-为避免同一正文在一次响应中重复占用 token，locator-driven Paragraph/Sentence/structural context 的 canonical payload 位于 `items[]`，顶层 legacy `content` 为空；legacy Section-neighbor 与 Section-container 继续保留历史 content projection。
-
-完整契约见 [Context Granularity Contract](context-granularity-contract.md)。
-
-## Section read continuation
-
-`read_document` 保留现有请求：
-
-```text
-document_id
-section_id
-max_chars?
-```
-
-并以 additive 方式支持：
-
-```text
 cursor?
+
+→ SectionTreeReadStream/v1
+→ section-tree-markdown/v1
+→ selected Section + descendants
 ```
 
-首次读取从 Section subtree 的确定性逻辑流开始：
+Precise：
+
+```text
+document_id
+target_locator
+max_chars?
+cursor?
+
+→ exact_target
+→ exact-normalized-source/v1
+```
+
+`section_id` 和 `target_locator` 互斥。
+
+Exact target 支持：
+
+```text
+Section        → only exact Section.content
+Paragraph      → exact Paragraph range
+Sentence       → exact Sentence range
+CharacterRange → exact Section-relative normalized range
+```
+
+Exact response 区分：
+
+```text
+resolved_target_locator
+= logical target
+
+returned_locator
+= exact CharacterRange represented by this response segment
+```
+
+每个 exact segment 必须满足：
+
+```text
+content == owner_section.normalized_text_slice(returned_locator.normalized_range)
+```
+
+Exact stream：
+
+```text
+read_mode         = exact_target
+rendering_version = exact-normalized-source/v1
+coordinate_space  = exact-target-unicode-scalar/v1
+```
+
+`stream.start_char/end_char` 只表示 target-local continuation progress，不是 canonical source range。
+
+Oversized target 使用 `read-cursor/v2` continuation。Exact cursor 在既有 raw/normalized identity、Section、mode/rendering version、next stream position 之外绑定 target kind、ordinal/range/segmentation facts。Legacy Section-tree v2 cursor 不携带这些 exact fields，因此保持旧序列化语义。
+
+Legacy Section-tree response 的 rendered subtree 不能 truthful 映射成一个 contiguous source range，所以：
+
+```text
+returned_locator = null
+```
+
+完整定义见 [Precise Read Locator Contract](precise-read-locator-contract.md)。
+
+## Section-tree read continuation
+
+Legacy Section read 继续使用：
 
 ```text
 SectionTreeReadStream/v1
-rendering_version = section-tree-markdown/v1
-coordinate_space  = section-tree-rendered-unicode-scalar/v1
+read-cursor/v2
+section-tree-rendered-unicode-scalar/v1
 ```
 
-当响应预算不足时，返回：
-
-```text
-truncated = true
-complete = false
-next_cursor
-stream.coordinate_space
-stream.start_char
-stream.end_char
-stream.total_chars
-```
-
-继续调用时仍传入同一个 `document_id`、`section_id`，并附带 `next_cursor`。服务端验证 cursor 绑定：
-
-```text
-document_id
-raw content_hash
-normalized_document_hash
-root section_id
-read_mode = section_tree
-rendering_version
-next stream character position
-cursor schema version = read-cursor/v2
-```
-
-`read-cursor/v2` 表示 Cursor 已绑定正式 `normalized-document-hash/v1` 语义。此前 provisional fingerprint 产生的 `read-cursor/v1` 会被明确识别为 stale，不能继续或自动重定位。
-
-`stream.start_char/end_char` 是 Unicode scalar 计数的 rendered stream coordinates，仅用于 continuation 验证；它不是 canonical source locator、normalized range 或 citation。Cursor 遇到 document/normalized facts、target、mode 或 rendering version 不匹配时 fail closed，不做 fuzzy rebasing。
-
-重复 continuation 必须满足：
+Repeated continuation 必须满足：
 
 ```text
 segment[n].end_char == segment[n+1].start_char
-all segments concatenated == complete SectionTreeReadStream/v1
+concatenated segments == complete declared stream
 no gap
 no overlap
 terminal complete = true
 terminal next_cursor = null
 ```
 
-首次 `max_chars=0` 保留旧行为，返回空 incomplete segment 和 position 0 cursor；cursor continuation 的 `max_chars=0` 被拒绝，避免产生无法前进的 continuation stream。
+首次 `max_chars=0` 保留旧行为；continuation `max_chars=0` 被拒绝以避免零进度。
 
 ## 当前默认 Runtime
 
@@ -306,9 +247,6 @@ ParserRouter::release
 ├── DOCX
 └── OpenAPI/Swagger JSON/YAML
 
-BudgetedParser
-CachingParser
-
 Default persistent state
 ├── File Raw Cache
 ├── File Parsed Cache
@@ -317,45 +255,33 @@ Default persistent state
 └── SQLite FTS5 SearchIndex
 ```
 
-Sentence enumeration/context uses deterministic materialization from the persisted canonical Document；当前没有 Sentence persistence schema。
-
-设置 `READING_MCP_STATE_DIR=memory` 可使用纯内存运行时。完整配置见 `runtime-configuration.md`。
-
-## 本地文件安全
-
-本地文件默认关闭；只有 `READING_MCP_LOCAL_ROOTS` 显式配置的 canonical root 可读。请求路径同样 canonicalize 后必须位于授权 root 内，并受最大文件字节预算限制。
+Sentence enumeration/context/read facts remain deterministically rebuildable from canonical Document; there is no Sentence persistence correctness dependency.
 
 ## 真实 stdio 验收
 
-测试不是直接调用 UseCase，而是启动 `reading-mcp` 子进程，经 stdio 完成 MCP initialize、tools/list 和完整阅读流程。
+测试启动真正的 `reading-mcp` 子进程，经 stdio 完成 MCP initialize、tools/list 和调用链。
 
-测试覆盖：
+覆盖：
 
 - 7 Tool discovery/调用；
-- structured DTO；
-- raw/normalized source identity 与 location traceability；
-- Text/Markdown/HTML/PDF acceptance matrix；
-- 持久化 state 重启后继续使用旧 document_id；
-- normalized hash 从 persisted canonical Document 确定性重建；
-- Section-relative Unicode-scalar normalized range validator；
-- normalization-version-scoped Parsed Cache；
-- Paragraph TextUnit exact-slice / source-order / deterministic rebuild；
-- Sentence deterministic locator/coverage；
-- `get_text_units` 真实 stdio Sentence enumeration + actionable TextUnitCursor；
-- TextUnit forward/backward no-gap/no-overlap pagination；
-- source-preserving non-prose coarse item 与 eligible-only completion 语义；
-- `get_text_units → TextLocator → get_context` 真实 stdio handoff；
-- Sentence/Paragraph neighbor、Paragraph container 与 structural relation；
-- locator stale/malformed fail-closed；
-- Sentence context 与 source-preserving enumeration 顺序/coarse 语义一致；
-- precise context 不切分 TextUnit；
-- legacy Section-neighbor get_context 继续有效；
-- SQLite DocumentRepository 重启后 TextUnitCursor 继续使用，无 Sentence persistence 依赖；
-- SQLite Paragraph TextUnitIndex persistence/replacement；
-- SectionTreeReadStream continuation 的 actionable cursor；
-- 多段拼接无 gap/overlap，并精确等于一次完整读取；
-- cursor 对 raw/normalized document identity、target 和 stream contract 的 fail-closed 验证；
-- 旧 `read-cursor/v1` 对新正式身份契约显式 stale；
+- raw/normalized source identity；
+- normalized range / TextUnit exact-slice；
+- Paragraph/Sentence deterministic rebuild；
+- `get_text_units` forward/backward continuation；
+- source-preserving non-prose 与 eligible-only completion；
+- persisted repository restart 后 TextUnitCursor 继续；
+- `get_text_units → TextLocator → get_context` handoff；
+- tagged neighbor/container/structural context；
+- locator malformed/stale fail-closed；
+- context 与 enumeration Sentence/coarse 语义 parity；
+- `get_text_units → TextLocator → read_document` exact handoff；
+- exact Section/Paragraph/Sentence/CharacterRange read；
+- exact-target multi-page no-gap/no-overlap reconstruction；
+- every `returned_locator` exact slice equals response content；
+- exact cursor cannot change target；
+- read/context overlapping locator stale semantics parity；
+- legacy Section-tree read/context compatibility；
+- old read-cursor/v1 stale behavior；
 - stderr telemetry 不污染 stdout MCP transport。
 
 ## 架构约束
@@ -365,20 +291,13 @@ mcp → application → domain
 retrieval/security/parsing/infrastructure → application/domain ports
 ```
 
-禁止：
+禁止 parser/retriever/index 直接依赖 MCP DTO，也禁止将 cursor offset 当成 source identity。
 
-```text
-domain/application → rmcp
-parser → MCP
-retriever → MCP
-search index → MCP DTO
-```
-
-`tests/architecture_boundaries.rs` 把关键依赖方向固化为自动化测试。
+当前 read/context 各自仍有重叠的 Locator resolution 实现；跨 consumer parity test 锁定行为。在下一步 SearchHit 成为第三个 Locator consumer 前，先抽取共享 resolver。
 
 ## 当前支持的远程访问
 
-除 stdio 外，`reading-mcp-http` 提供带 Bearer Token 的 Streamable HTTP 单机入口，默认监听 `127.0.0.1:8787/mcp`，可通过 Cloudflare Tunnel、Tailscale Funnel 等 HTTPS 隧道供远程 MCP Client 使用。公网多租户、OAuth 和稳定生产网关仍不在 v0.1 范围内。
+除 stdio 外，`reading-mcp-http` 提供带 Bearer Token 的 Streamable HTTP 单机入口，默认 loopback。远程访问通过受信任 tunnel/reverse proxy；公网多租户/OAuth 不在 v0.1 范围内。
 
 ## v0.1 明确非目标
 

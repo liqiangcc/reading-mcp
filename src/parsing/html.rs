@@ -192,6 +192,9 @@ fn collect_content(
         let Some(kind) = normalized_block_kind(tag) else {
             continue;
         };
+        if has_native_body_block_ancestor(element) {
+            continue;
+        }
         let text = match tag {
             "pre" => element
                 .text()
@@ -221,6 +224,15 @@ fn collect_content(
     }
 
     Ok((events, preamble))
+}
+
+fn has_native_body_block_ancestor(element: ElementRef<'_>) -> bool {
+    let element_id = element.id();
+    element
+        .ancestors()
+        .filter(|node| node.id() != element_id)
+        .filter_map(ElementRef::wrap)
+        .any(|ancestor| normalized_block_kind(ancestor.value().name()).is_some())
 }
 
 fn build_html_sections(

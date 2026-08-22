@@ -19,8 +19,7 @@ async fn stdio_context_consumes_text_locator_with_tagged_relations() {
     .await
     .expect("fixture");
 
-    let local_roots =
-        std::env::join_paths([directory.path()]).expect("local root should be valid");
+    let local_roots = std::env::join_paths([directory.path()]).expect("local root should be valid");
     let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)

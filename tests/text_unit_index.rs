@@ -2,9 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use reading_mcp::application::ports::{
-    DocumentRepository, RetrievalOptions, TextUnitIndex,
-};
+use reading_mcp::application::ports::{DocumentRepository, RetrievalOptions, TextUnitIndex};
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
     TEXT_SEGMENTATION_VERSION, TextUnitKind,
@@ -54,7 +52,10 @@ fn paragraph_text_units_are_exact_section_relative_unicode_scalar_slices() {
     assert_eq!(coverage.paragraph_chars, 10);
     assert_eq!(coverage.separator_chars, 3);
     assert_eq!(coverage.paragraph_count, 2);
-    assert_eq!(coverage.owner_chars, coverage.paragraph_chars + coverage.separator_chars);
+    assert_eq!(
+        coverage.owner_chars,
+        coverage.paragraph_chars + coverage.separator_chars
+    );
 }
 
 #[test]
@@ -150,7 +151,14 @@ fn source_order_is_depth_first_section_order_then_paragraph_order() {
     assert_eq!(
         set.units
             .iter()
-            .map(|unit| (unit.source_order, unit.owner_section_id.0.as_str(), unit.paragraph_index, unit.text.as_str()))
+            .map(|unit| {
+                (
+                    unit.source_order,
+                    unit.owner_section_id.0.as_str(),
+                    unit.paragraph_index,
+                    unit.text.as_str(),
+                )
+            })
             .collect::<Vec<_>>(),
         vec![
             (0, "section://root", 1, "R1"),

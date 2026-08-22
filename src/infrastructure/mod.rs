@@ -23,5 +23,7 @@ pub use observability::{
     ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
     ObservedSearchIndex,
 };
+#[doc(hidden)]
+pub use sqlite::SqliteSearchIndex as LegacySqliteSearchIndex;
 pub use sqlite::{SqliteDocumentRepository, SqliteTextUnitIndex};
 pub use sqlite_search_index::SqliteSearchIndex;

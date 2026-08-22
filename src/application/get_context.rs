@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::reading_support::{
     content_response_limit, flatten_sections, render_section_shallow, truncate_chars,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, ParagraphContentClass, Section, SectionId,
-    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION,
-    TextLocator, TextUnit,
+    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TextLocator, TextUnit,
 };
 
 const MAX_CONTEXT_WINDOW: usize = 20;
@@ -234,130 +234,24 @@ fn resolve_target(
                 kind: ContextItemKind::Section,
             })
         }
-        ContextTarget::Locator(locator) => validate_locator(document, locator),
-    }
-}
-
-fn validate_locator(
-    document: &Document,
-    locator: TextLocator,
-) -> Result<ResolvedTarget, ApplicationError> {
-    if locator.document_id != document.id {
-        return Err(ApplicationError::InvalidLocator(format!(
-            "locator document {} does not match requested document {}",
-            locator.document_id.0, document.id.0
-        )));
-    }
-    if locator.content_hash != document.content_hash {
-        return Err(ApplicationError::StaleLocator(format!(
-            "raw content hash changed from {} to {}",
-            locator.content_hash.0, document.content_hash.0
-        )));
-    }
-
-    let normalized_hash = document.normalized_document_hash();
-    if locator.normalized_document_hash != normalized_hash {
-        return Err(ApplicationError::StaleLocator(format!(
-            "normalized document hash changed from {} to {}",
-            locator.normalized_document_hash.0, normalized_hash.0
-        )));
-    }
-
-    let section = document
-        .find_section(&locator.owner_section_id)
-        .ok_or_else(|| {
-            ApplicationError::InvalidLocator(format!(
-                "locator owner section {} does not exist",
-                locator.owner_section_id.0
-            ))
-        })?;
-
-    match (
-        locator.paragraph_index,
-        locator.sentence_index,
-        locator.normalized_range,
-        locator.segmentation_version.as_deref(),
-    ) {
-        (None, None, None, None) => Ok(ResolvedTarget {
-            locator: TextLocator::for_section(document, section),
-            kind: ContextItemKind::Section,
-        }),
-        (Some(paragraph_index), None, Some(range), Some(segmentation_version)) => {
-            validate_segmentation_version(segmentation_version)?;
-            if paragraph_index == 0 {
-                return Err(ApplicationError::InvalidLocator(
-                    "paragraph_index must be 1-based".into(),
-                ));
-            }
-            let paragraph = document
-                .paragraph_text_units()
-                .units
-                .into_iter()
-                .find(|unit| {
-                    unit.owner_section_id == locator.owner_section_id
-                        && unit.paragraph_index == paragraph_index
-                })
-                .ok_or_else(|| {
-                    ApplicationError::StaleLocator(format!(
-                        "paragraph {paragraph_index} no longer exists in section {}",
-                        locator.owner_section_id.0
-                    ))
-                })?;
-            if paragraph.normalized_range != range {
-                return Err(ApplicationError::StaleLocator(format!(
-                    "paragraph {paragraph_index} normalized range changed"
-                )));
-            }
+        ContextTarget::Locator(locator) => {
+            let resolved = resolve_text_locator(document, &locator)?;
+            let kind = match resolved.kind {
+                ResolvedLocatorKind::Section => ContextItemKind::Section,
+                ResolvedLocatorKind::Paragraph => ContextItemKind::Paragraph,
+                ResolvedLocatorKind::Sentence => ContextItemKind::Sentence,
+                ResolvedLocatorKind::CharacterRange => {
+                    return Err(ApplicationError::InvalidRequest(
+                        "get_context does not accept CharacterRange locator anchors".into(),
+                    ));
+                }
+            };
             Ok(ResolvedTarget {
-                locator: TextLocator::for_paragraph(document, section, &paragraph),
-                kind: ContextItemKind::Paragraph,
+                locator: resolved.locator,
+                kind,
             })
         }
-        (Some(paragraph_index), Some(sentence_index), Some(range), Some(segmentation_version)) => {
-            validate_segmentation_version(segmentation_version)?;
-            if paragraph_index == 0 || sentence_index == 0 {
-                return Err(ApplicationError::InvalidLocator(
-                    "paragraph_index and sentence_index must be 1-based".into(),
-                ));
-            }
-            let sentence = document
-                .sentence_text_units()
-                .units
-                .into_iter()
-                .find(|unit| {
-                    unit.owner_section_id == locator.owner_section_id
-                        && unit.paragraph_index == paragraph_index
-                        && unit.sentence_index == sentence_index
-                })
-                .ok_or_else(|| {
-                    ApplicationError::StaleLocator(format!(
-                        "sentence {paragraph_index}.{sentence_index} no longer exists in section {}",
-                        locator.owner_section_id.0
-                    ))
-                })?;
-            if sentence.normalized_range != range {
-                return Err(ApplicationError::StaleLocator(format!(
-                    "sentence {paragraph_index}.{sentence_index} normalized range changed"
-                )));
-            }
-            Ok(ResolvedTarget {
-                locator: TextLocator::for_sentence(document, section, &sentence),
-                kind: ContextItemKind::Sentence,
-            })
-        }
-        _ => Err(ApplicationError::InvalidLocator(
-            "locator Paragraph/Sentence/range/segmentation fields form an invalid shape".into(),
-        )),
     }
-}
-
-fn validate_segmentation_version(version: &str) -> Result<(), ApplicationError> {
-    if version != TEXT_SEGMENTATION_VERSION {
-        return Err(ApplicationError::StaleLocator(format!(
-            "locator segmentation version {version} is incompatible with {TEXT_SEGMENTATION_VERSION}"
-        )));
-    }
-    Ok(())
 }
 
 fn validate_window(before: usize, after: usize) -> Result<(), ApplicationError> {

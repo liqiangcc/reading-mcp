@@ -15,6 +15,7 @@ pub const NORMALIZED_BLOCK_COUNT_METADATA_KEY: &str = "normalized_blocks";
 #[serde(rename_all = "snake_case")]
 pub enum NormalizedBlockKind {
     Paragraph,
+    #[serde(rename = "blockquote")]
     BlockQuote,
     ListItem,
     Preformatted,

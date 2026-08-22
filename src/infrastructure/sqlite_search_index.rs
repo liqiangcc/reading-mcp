@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::application::ports::{
-    ApplicationError, LEXICAL_TOKENIZER_VERSION, SearchHit, SearchHitKind, SearchIndex,
+    ApplicationError, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit, SearchHit, SearchHitKind,
+    SearchIndex,
 };
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash,
@@ -148,6 +149,27 @@ impl SearchIndex for SqliteSearchIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>, ApplicationError> {
+        Ok(self
+            .search_lexical(document_id, query, limit)
+            .await?
+            .into_iter()
+            .map(|hit| SearchHit {
+                section_id: hit.section_id,
+                title: hit.title,
+                source: hit.source,
+                snippet: hit.snippet,
+                score: hit.score,
+                location: hit.location,
+            })
+            .collect())
+    }
+
+    async fn search_lexical(
+        &self,
+        document_id: &DocumentId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
         if query.trim().is_empty() {
             return Err(ApplicationError::InvalidRequest(
                 "search query must not be empty".into(),
@@ -229,7 +251,7 @@ impl SearchIndex for SqliteSearchIndex {
                     "persisted tokenizer version {tokenizer_version} does not match {LEXICAL_TOKENIZER_VERSION}"
                 )));
             }
-            hits.push(SearchHit {
+            hits.push(LexicalSearchHit {
                 section_id: SectionId(section_id),
                 title,
                 source: DocumentSource(source),

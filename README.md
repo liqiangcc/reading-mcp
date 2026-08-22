@@ -6,17 +6,18 @@ Reading MCP 让 MCP Client / Agent 能够**精确地与用户阅读同一份文�
 
 它只提供可靠的文档上下文，不在内核中实现 AI 总结、问答、教学、笔记或通用 RAG。
 
-## v0.1.0 候选能力
+## v0.1.0 当前能力
 
 统一 MCP Tools：
 
 ```text
+list_documents
 open_document
 get_document_structure
+get_text_units
 search_document
 get_context
 read_document
-list_documents
 ```
 
 独立格式 Parser：
@@ -82,13 +83,26 @@ get_context
 read_document
 ```
 
-搜索单元可以是较小段落，但读取单元保持逻辑章节：
+需要逐句阅读时，在 `open_document` 后先读取 `reading_profile/v1`，再用
+`get_document_structure`（`StructureCursor`）枚举 Section，用
+`get_text_units(requested_kind=sentence, coverage_policy=preserve_source)` 按
+`TextLocator` 和 `TextUnitCursor` 逐项推进。`body-order/v1` 是整本/多 Section
+组合的 canonical body 顺序；结构 preorder 不被当作 EPUB 正文阅读顺序。
+
+`list_documents` 使用 `discovery-cursor/v1` continuation。所有 cursor 都只表示
+各自 bounded stream 的进度，不是 citation，也不会 fuzzy rebase；raw 或 normalized
+identity 变化会明确返回 stale。
+
+搜索单元可以是较小段落或精确 Sentence，但读取单元保持 canonical source identity：
 
 ```text
 Search Unit ≠ Read Unit
 Index ≠ Document
 Search ≠ Read
 ```
+
+`search_document` 的 `SearchHit.text_locator` 可以直接交给 `read_document`、
+`get_context` 或 anchored `get_text_units`，禁止复制 snippet 后重新搜索。
 
 ## 安全默认
 

@@ -66,7 +66,12 @@ Paragraph TextUnit + Paragraph TextUnitIndex        ✓
 Sentence locator + non-prose coverage               ✓
 TextLocator enumeration output                      ✓
 get_text_units + TextUnitCursor                     ✓
-TextLocator input to context/search/read             later
+TextLocator input to context/search/read             ✓
+
+StructureCursor / DiscoveryCursor / body-order/v1    ✓
+whole-document multi-Section composition             ✓
+TextLocator restart/resume from persistent state     ✓
+Streamable HTTP full reading lifecycle               ✓
 ```
 
 ### 基础设施

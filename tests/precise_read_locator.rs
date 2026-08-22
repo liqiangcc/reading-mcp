@@ -111,13 +111,10 @@ async fn exact_section_locator_reads_only_section_content_not_child_subtree() {
 #[tokio::test]
 async fn oversized_exact_target_continues_without_gap_or_overlap_and_returns_source_ranges() {
     let mut document = document_fixture();
-    document.root_sections[0].content = format!(
-        "{}",
-        (0..30)
-            .map(|index| format!("Sentence {index} keeps exact read continuation deterministic."))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    document.root_sections[0].content = (0..30)
+        .map(|index| format!("Sentence {index} keeps exact read continuation deterministic."))
+        .collect::<Vec<_>>()
+        .join(" ");
     let repository = Arc::new(InMemoryDocumentRepository::default());
     repository.save(document.clone()).await.expect("save");
     let use_case = ReadDocumentUseCase::new(repository);

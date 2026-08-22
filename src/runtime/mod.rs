@@ -130,10 +130,7 @@ pub fn build_server(
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
     let get_structure = Arc::new(GetDocumentStructureUseCase::new(repository.clone()));
     let get_text_units = Arc::new(GetTextUnitsUseCase::new(repository.clone()));
-    let search_document = Arc::new(SearchDocumentUseCase::new(
-        search_index,
-        repository.clone(),
-    ));
+    let search_document = Arc::new(SearchDocumentUseCase::new(search_index, repository.clone()));
     let read_document = Arc::new(ReadDocumentUseCase::new(repository.clone()));
     let get_context = Arc::new(GetContextUseCase::new(repository));
 

@@ -139,10 +139,10 @@ mod tests {
         );
         document.metadata.insert(
             "epub_structure_map".into(),
-            r#"{"schema_version":"epub-structure-reconciliation/v1","sections":[{"section_id":"section://parent","source_order":1},{"section_id":"section://parent/child","source_order":0}]}"#.into(),
+            r#"{"schema_version":"epub-structure-reconciliation/v1","sections":[{"section_id":"section://parent","source_order":1},{"section_id":"section://child","source_order":0}]}"#.into(),
         );
         let order = section_body_order(&document).expect("EPUB body order should be available");
-        assert_eq!(order[&SectionId("section://parent/child".into())], 0);
+        assert_eq!(order[&SectionId("section://child".into())], 0);
         assert_eq!(order[&SectionId("section://parent".into())], 1);
     }
 

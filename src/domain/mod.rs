@@ -8,7 +8,8 @@ pub use normalized_text::{
     NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
 };
 pub use text_unit::{
-    ParagraphSectionCoverage, ParagraphTextUnitSet, TEXT_SEGMENTATION_VERSION,
+    ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet, SentenceEligibility,
+    SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
     TEXT_UNIT_ID_VERSION, TextUnit, TextUnitId, TextUnitKind,
 };
 

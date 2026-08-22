@@ -175,9 +175,11 @@ outer selected block
 
 For example, a `<blockquote>` containing `<p>` elements is represented as one `blockquote` block rather than a BlockQuote plus duplicated Paragraph rows containing the same source text.
 
-The accepted segmentation-v2 migration respects this evidence boundary: one persisted BlockQuote becomes one Paragraph-level reading unit and may have Sentence children, but v2 does not invent nested Paragraphs that block-model/v1 did not persist.
+A current regression fixture proves the consequence: a BlockQuote containing two nested `<p>` elements is persisted as one BlockQuote range, and the normalized body can be `Quoted text.Second paragraph.` without a reliable inner Paragraph separator. The suppressed child boundaries are therefore not recoverable canonical facts.
 
-A future nested block-tree contract would require explicit parent/child identity and overlap semantics; it is not inferred in v1.
+The accepted segmentation-v2 migration respects this evidence boundary conservatively: a persisted BlockQuote or ListItem becomes one **typed coarse Paragraph-level unit with no Sentence children** under block-model/v1. It does not invent nested Paragraph/Sentence identity from transient DOM knowledge or punctuation guesses.
+
+A future nested/leaf block-tree contract would require explicit parent/child identity and overlap semantics; only that stronger persisted evidence can justify a later finer-grained identity migration.
 
 ## 8. Source order vs structural hierarchy
 
@@ -288,12 +290,14 @@ ADR 0005 now defines the explicit follow-up identity migration. It advances both
 The next implementation consumes block-model/v1 as follows:
 
 ```text
-paragraph    → one sentence-eligible Paragraph
-blockquote   → one sentence-eligible Paragraph
-list_item    → one sentence-eligible Paragraph
-preformatted → one coarse Paragraph, no Sentence children
-table        → one coarse Paragraph, no Sentence children
+paragraph    → one exact sentence-eligible Paragraph
+blockquote   → one typed coarse Paragraph-level unit, no Sentence children
+list_item    → one typed coarse Paragraph-level unit, no Sentence children
+preformatted → one coarse Paragraph-level unit, no Sentence children
+table        → one coarse Paragraph-level unit, no Sentence children
 ```
+
+BlockQuote/ListItem are coarse because flat maximal projection may hide mixed or multiple nested leaf blocks. This is evidence degradation, not a semantic claim that quote/list content is inherently non-prose.
 
 For uncovered Section ranges:
 
@@ -304,7 +308,9 @@ non-whitespace  → deterministic v1-style fallback scoped to the gap
 
 Native evidence outranks text heuristics. Existing fenced/indented-code and Markdown-table heuristics remain only for fallback/no-block regions.
 
-Paragraph ordinals are assigned by exact Section source position after native and fallback candidates are merged. `block_index` remains a native-block ordinal and is not reused as `paragraph_index`.
+Paragraph-level ordinals are assigned by exact Section source position after native and fallback candidates are merged. `block_index` remains a native-block ordinal and is not reused as `paragraph_index`.
+
+Coarse BlockQuote/ListItem/Preformatted/Table units remain Paragraph-addressable/searchable but do not emit Sentence identity under block-model/v1.
 
 ## 14. Accepted normalized identity projection
 
@@ -334,6 +340,7 @@ Existing block-model tests cover:
 - semantic table cell separation;
 - headingless multi-block source order;
 - nested block de-duplication;
+- the concrete nested BlockQuote fixture where two child `<p>` elements collapse into one persisted outer range;
 - validator rejection of bad source order and overlap;
 - SQLite DocumentRepository close/reopen persistence;
 - EPUB Section-ID/native-location remapping after structure reconciliation;
@@ -341,7 +348,7 @@ Existing block-model tests cover:
 
 The subsequent EPUB validator additionally proves that the persisted block map can participate in deterministic coverage/revalidation after repository reopen without reparsing source.
 
-The v2 implementation must add migration evidence for native/fallback Paragraph projection, coarse pre/table Sentence behavior, hash-v2 block sensitivity, old locator/cursor staleness, lexical-index/v3 rebuild, and restart determinism.
+The v2 implementation must add migration evidence for exact native Paragraphs, coarse BlockQuote/ListItem/Preformatted/Table Sentence behavior, nested-fixture no-fabrication, native/fallback gap projection, hash-v2 block sensitivity, old locator/cursor staleness, lexical-index/v3 rebuild, and restart determinism.
 
 ## 16. Explicit non-goals
 
@@ -352,7 +359,7 @@ block-aware Paragraph segmentation
 block-aware Sentence eligibility/segmentation
 text-segmentation/v2
 normalized-document-hash/v2
-nested block-tree identity
+nested/leaf block-tree identity
 block-aware SearchIndex ranking
 SVG/fixed-layout precise blocks
 new MCP Tools
@@ -376,7 +383,7 @@ Implementation order is:
 
 ```text
 normalized-document-hash/v2
-→ text-segmentation/v2 native/fallback Paragraph projection
+→ text-segmentation/v2 native/fallback Paragraph-level projection
 → Sentence eligibility/coverage
 → locator/cursor stale gates
 → derived TextUnit replacement

@@ -230,6 +230,8 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::TextUnitIndexFailed(_) => "text_unit_index_failed",
         ApplicationError::DocumentNotFound => "document_not_found",
         ApplicationError::SectionNotFound => "section_not_found",
+        ApplicationError::InvalidLocator(_) => "invalid_locator",
+        ApplicationError::StaleLocator(_) => "stale_locator",
         ApplicationError::InvalidCursor(_) => "invalid_cursor",
         ApplicationError::StaleCursor(_) => "stale_cursor",
         ApplicationError::CursorTargetMismatch(_) => "cursor_target_mismatch",

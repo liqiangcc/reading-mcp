@@ -65,6 +65,10 @@ pub enum ApplicationError {
     DocumentNotFound,
     #[error("section not found")]
     SectionNotFound,
+    #[error("invalid source locator: {0}")]
+    InvalidLocator(String),
+    #[error("stale source locator: {0}")]
+    StaleLocator(String),
     #[error("invalid read cursor: {0}")]
     InvalidCursor(String),
     #[error("stale read cursor: {0}")]

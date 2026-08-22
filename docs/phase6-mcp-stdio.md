@@ -30,7 +30,7 @@ get_context
 read_document
 ```
 
-`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document/source/media type、raw/normalized identity、normalization diagnostics 与 section count；structure 返回 section tree；`get_text_units` 在单个 Section 内按 source order 枚举 Paragraph/Sentence reading items；search 返回 owning section + source/title/snippet/score/location；context/read 继续从 DocumentRepository 读取规范化正文。
+`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document/source/media type、raw/normalized identity、normalization diagnostics 与 section count；structure 返回 section tree；`get_text_units` 在单个 Section 内按 source order 枚举 Paragraph/Sentence reading items；search 返回 owning section + source/title/snippet/score/location；`get_context` 支持 legacy Section-neighbor 与 locator-driven tagged context；read 继续从 DocumentRepository 读取规范化正文。
 
 v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location` / precise TextLocator provenance。
 
@@ -158,9 +158,67 @@ total declared items
 
 单个 TextUnit 不会为了满足 `max_chars` 被切开；若单个 item 已超过预算则返回资源限制错误。
 
-当前 v1 从 Section 边界开始，anchor-based `before/after(locator)` 起点留给后续 locator/context handoff。
+当前 v1 从 Section 边界开始，anchor-based `before/after(locator)` 起点仍是兼容后续扩展。
 
 完整契约见 [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)。
+
+## Locator-driven context
+
+`get_context` 不增加新的 Tool name，而是在保持 legacy wire call 的同时增加 tagged relation。
+
+Legacy：
+
+```text
+document_id
+section_id
+before / after
+max_chars?
+```
+
+等价于：
+
+```text
+neighbor(unit=section)
+```
+
+Structured：
+
+```text
+document_id
+section_id? | target_locator?
+relation:
+  neighbor { unit: section | paragraph | sentence, before, after }
+  | container { kind: paragraph | section }
+  | structural { kind: owner_section | ancestors | siblings | children }
+max_chars?
+```
+
+TextLocator validation覆盖：
+
+```text
+document_id
+raw content_hash
+normalized_document_hash
+owner Section
+Paragraph/Sentence ordinal shape
+text-segmentation/v1
+exact normalized range
+```
+
+稳定错误：
+
+```text
+INVALID_LOCATOR
+STALE_LOCATOR
+```
+
+不做 fuzzy rebasing。
+
+Sentence neighbor context 与 `get_text_units(requested_kind=sentence, preserve_source)` 使用同一 source-order/coarse non-prose 语义。Paragraph/Sentence context item 是原子项；超过预算时显式失败，不截断 locator-bearing TextUnit。
+
+为避免同一正文在一次响应中重复占用 token，locator-driven Paragraph/Sentence/structural context 的 canonical payload 位于 `items[]`，顶层 legacy `content` 为空；legacy Section-neighbor 与 Section-container 继续保留历史 content projection。
+
+完整契约见 [Context Granularity Contract](context-granularity-contract.md)。
 
 ## Section read continuation
 
@@ -259,7 +317,7 @@ Default persistent state
 └── SQLite FTS5 SearchIndex
 ```
 
-Sentence enumeration uses deterministic materialization from the persisted canonical Document; there is no Sentence persistence schema in this increment.
+Sentence enumeration/context uses deterministic materialization from the persisted canonical Document；当前没有 Sentence persistence schema。
 
 设置 `READING_MCP_STATE_DIR=memory` 可使用纯内存运行时。完整配置见 `runtime-configuration.md`。
 
@@ -286,6 +344,12 @@ Sentence enumeration uses deterministic materialization from the persisted canon
 - `get_text_units` 真实 stdio Sentence enumeration + actionable TextUnitCursor；
 - TextUnit forward/backward no-gap/no-overlap pagination；
 - source-preserving non-prose coarse item 与 eligible-only completion 语义；
+- `get_text_units → TextLocator → get_context` 真实 stdio handoff；
+- Sentence/Paragraph neighbor、Paragraph container 与 structural relation；
+- locator stale/malformed fail-closed；
+- Sentence context 与 source-preserving enumeration 顺序/coarse 语义一致；
+- precise context 不切分 TextUnit；
+- legacy Section-neighbor get_context 继续有效；
 - SQLite DocumentRepository 重启后 TextUnitCursor 继续使用，无 Sentence persistence 依赖；
 - SQLite Paragraph TextUnitIndex persistence/replacement；
 - SectionTreeReadStream continuation 的 actionable cursor；

@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::application::ports::{ApplicationError, DocumentRepository, SearchIndex};
+use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
+use crate::application::ports::{
+    ApplicationError, DocumentRepository, SearchHitKind, SearchIndex,
+};
 use crate::domain::{DocumentId, DocumentSource, Location, SectionId, TextLocator};
 
 const MAX_SEARCH_LIMIT: usize = 50;
@@ -34,6 +37,7 @@ pub struct LocatedSearchHit {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchDocumentResult {
     pub document_id: DocumentId,
+    pub tokenizer_version: String,
     pub hits: Vec<LocatedSearchHit>,
 }
 
@@ -69,6 +73,7 @@ impl SearchDocumentUseCase {
             )));
         }
 
+        let expected_tokenizer_version = self.search_index.tokenizer_version();
         let index_hits = self
             .search_index
             .search(&command.document_id, query, command.limit)
@@ -87,18 +92,26 @@ impl SearchDocumentUseCase {
                     hit.source.0, document.source.0
                 )));
             }
-            let section = document.find_section(&hit.section_id).ok_or_else(|| {
+            if hit.tokenizer_version != expected_tokenizer_version {
+                return Err(ApplicationError::IndexFailed(format!(
+                    "search hit tokenizer version {} does not match runtime {}",
+                    hit.tokenizer_version, expected_tokenizer_version
+                )));
+            }
+
+            let resolved = resolve_text_locator(&document, &hit.text_locator).map_err(|error| {
                 ApplicationError::IndexFailed(format!(
-                    "search hit references missing canonical section {}",
-                    hit.section_id.0
+                    "search hit carries an invalid canonical locator: {error}"
                 ))
             })?;
+            if hit.section_id != resolved.locator.owner_section_id {
+                return Err(ApplicationError::IndexFailed(format!(
+                    "search hit section {} does not match locator owner {}",
+                    hit.section_id.0, resolved.locator.owner_section_id.0
+                )));
+            }
 
-            // Current InMemory/SQLite SearchIndex rows are paragraph-like retrieval
-            // units, but their splitting/location facts are not the canonical
-            // Paragraph TextUnit contract. The strongest truthful handoff today is
-            // therefore the owning Section locator. Paragraph/Sentence precision is
-            // reserved for the later lexical TextUnit index migration.
+            let candidate_kind = candidate_kind(hit.candidate_kind, resolved.kind)?;
             hits.push(LocatedSearchHit {
                 section_id: hit.section_id,
                 title: hit.title,
@@ -106,14 +119,35 @@ impl SearchDocumentUseCase {
                 snippet: hit.snippet,
                 score: hit.score,
                 location: hit.location,
-                candidate_kind: SearchCandidateKind::Section,
-                text_locator: TextLocator::for_section(&document, section),
+                candidate_kind,
+                text_locator: resolved.locator,
             });
         }
 
         Ok(SearchDocumentResult {
             document_id: command.document_id,
+            tokenizer_version: expected_tokenizer_version.into(),
             hits,
         })
+    }
+}
+
+fn candidate_kind(
+    indexed: SearchHitKind,
+    resolved: ResolvedLocatorKind,
+) -> Result<SearchCandidateKind, ApplicationError> {
+    match (indexed, resolved) {
+        (SearchHitKind::Section, ResolvedLocatorKind::Section) => Ok(SearchCandidateKind::Section),
+        (SearchHitKind::Paragraph, ResolvedLocatorKind::Paragraph) => {
+            Ok(SearchCandidateKind::Paragraph)
+        }
+        (SearchHitKind::Sentence, ResolvedLocatorKind::Sentence) => {
+            Ok(SearchCandidateKind::Sentence)
+        }
+        (indexed, resolved) => Err(ApplicationError::IndexFailed(format!(
+            "search candidate kind {} does not match resolved locator kind {}",
+            indexed.as_str(),
+            resolved.as_str()
+        ))),
     }
 }

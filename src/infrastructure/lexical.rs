@@ -64,15 +64,13 @@ fn collect_section_candidates(
         .iter()
         .filter(|unit| unit.owner_section_id == section.id)
     {
-        let mut location = section.location.clone();
-        location.paragraph = u32::try_from(paragraph.paragraph_index).ok();
         push_candidate(
             document,
             section,
             SearchHitKind::Paragraph,
             paragraph.text.clone(),
             paragraph.text.clone(),
-            location,
+            text_unit_location(section, paragraph.paragraph_index, None),
             TextLocator::for_paragraph(document, section, paragraph),
             output,
             source_order,
@@ -83,15 +81,17 @@ fn collect_section_candidates(
         .iter()
         .filter(|unit| unit.owner_section_id == section.id)
     {
-        let mut location = section.location.clone();
-        location.paragraph = u32::try_from(sentence.paragraph_index).ok();
         push_candidate(
             document,
             section,
             SearchHitKind::Sentence,
             sentence.text.clone(),
             sentence.text.clone(),
-            location,
+            text_unit_location(
+                section,
+                sentence.paragraph_index,
+                Some(sentence.sentence_index),
+            ),
             TextLocator::for_sentence(document, section, sentence),
             output,
             source_order,
@@ -101,6 +101,26 @@ fn collect_section_candidates(
     for child in &section.children {
         collect_section_candidates(document, child, paragraphs, sentences, output, source_order);
     }
+}
+
+fn text_unit_location(
+    section: &Section,
+    paragraph_index: usize,
+    sentence_index: Option<usize>,
+) -> Location {
+    let mut location = section.location.clone();
+    location.paragraph = u32::try_from(paragraph_index).ok();
+    let suffix = match sentence_index {
+        Some(sentence_index) => {
+            format!("search-unit:{paragraph_index}#sentence:{sentence_index}")
+        }
+        None => format!("search-unit:{paragraph_index}"),
+    };
+    location.native_location = Some(match &section.location.native_location {
+        Some(native) => format!("{native}#{suffix}"),
+        None => suffix,
+    });
+    location
 }
 
 #[allow(clippy::too_many_arguments)]

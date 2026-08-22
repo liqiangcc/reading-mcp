@@ -71,16 +71,26 @@ impl SearchDocumentUseCase {
             )));
         }
 
-        let expected_tokenizer_version = self.search_index.tokenizer_version();
-        let index_hits = self
-            .search_index
-            .search_lexical(&command.document_id, query, command.limit)
-            .await?;
         let document = self
             .repository
             .get(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
+        let expected_tokenizer_version = self.search_index.tokenizer_version();
+        let index_hits = match self
+            .search_index
+            .search_lexical(&command.document_id, query, command.limit)
+            .await
+        {
+            Ok(hits) => hits,
+            Err(ApplicationError::DocumentNotFound) => {
+                self.search_index.index(&document).await?;
+                self.search_index
+                    .search_lexical(&command.document_id, query, command.limit)
+                    .await?
+            }
+            Err(error) => return Err(error),
+        };
 
         let mut hits = Vec::with_capacity(index_hits.len());
         for hit in index_hits {

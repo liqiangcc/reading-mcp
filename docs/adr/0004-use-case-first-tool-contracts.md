@@ -4,13 +4,15 @@
 - Date: 2026-08-21
 - Reviewed branch: `design/tool-contract-use-cases`
 - Reviewed against main: `e55fc203aa4c6e184b71125a2022140c31a4b762`
+- Implementation status: the accepted seventh Tool `get_text_units` is now implemented by `feat/text-unit-enumeration-contract`; runtime surface is seven Tools.
 - Related design: `docs/tool-contract-use-case-design.md`
+- Related implementation contract: `docs/text-unit-enumeration-contract.md`
 - Related identity architecture: `docs/adr/0002-text-index-locator-identity.md`
 - Related reliability architecture: `docs/adr/0003-epub-first-structure-reliability.md`
 
 ## Context
 
-Reading MCP must support AI Agents that complete reading goals, not merely clients that successfully invoke Tools. The current runtime exposes six Tools:
+At design-review time, Reading MCP exposed six Tools:
 
 ```text
 list_documents
@@ -21,14 +23,14 @@ get_context
 read_document
 ```
 
-Those Tools support the existing coarse workflow, but source-first review of the implementation and tests found contract gaps:
+Those Tools supported the existing coarse workflow, but source-first review of implementation/tests found contract gaps:
 
-1. a truncated Section read has no actionable continuation;
-2. a bounded structure response has no expansion continuation;
-3. SearchHit can identify an owning Section but cannot hand an exact Paragraph/Sentence locator directly to read/context;
-4. context only means neighboring Sections;
-5. no current contract can discover the first Paragraph/Sentence, enumerate subsequent TextUnits in source order, or prove that a Section-level TextUnit stream is complete;
-6. open/structure responses do not expose the capability, reliability, provenance, and coverage facts needed to qualify precise-reading claims;
+1. a truncated Section read had no actionable continuation;
+2. a bounded structure response had no expansion continuation;
+3. SearchHit could identify an owning Section but not hand an exact Paragraph/Sentence locator directly to read/context;
+4. context only meant neighboring Sections;
+5. no contract could discover the first Paragraph/Sentence, enumerate subsequent TextUnits in source order, or prove that a Section-level TextUnit stream was complete;
+6. open/structure responses did not expose all capability, reliability, provenance, and coverage facts needed to qualify precise-reading claims;
 7. old documentation still contained five-Tool assumptions after `list_documents` was implemented.
 
 The design review started from Actor goals and detailed use cases, derived independent capabilities, modeled their state machines, and only then evaluated Tool candidates. It compared three alternatives for ordered Paragraph/Sentence enumeration:
@@ -53,22 +55,23 @@ A Tool or contract mode is accepted only when an Actor goal and use case establi
 
 “Keep the Tool count small” and “adding a Tool is convenient” are both insufficient reasons.
 
-### 2. Current runtime fact is six Tools
+### 2. Six-Tool reviewed baseline; seven-Tool implemented runtime
 
-The reviewed runtime exposes six Tools. Existing valid calls and response fields remain supported.
+The reviewed baseline exposed six Tools. Existing valid calls and response fields remain supported.
 
-Documentation must distinguish:
+ADR 0004 accepted exactly one additional independent responsibility. After the underlying normalized identity, Paragraph/Sentence and cursor invariants were implemented, that decision was realized.
+
+Current runtime fact:
 
 ```text
-current implemented surface = six Tools
-accepted future surface      = seven Tools
+implemented surface = seven Tools
 ```
 
-The seventh Tool must not be advertised as implemented until its supporting capabilities and invariants exist.
+The migration was additive: the six previous Tool calls remain valid and the seventh Tool is now advertised only because its supporting capability and invariants exist.
 
-### 3. Add one generic ordered TextUnit enumeration responsibility
+### 3. One generic ordered TextUnit enumeration responsibility
 
-The accepted future surface adds:
+The accepted and now implemented Tool is:
 
 ```text
 get_text_units
@@ -81,13 +84,14 @@ Its responsibility is:
 Use-case evidence includes:
 
 - list Paragraphs in a Section;
-- previous/next Paragraph;
 - find the first Sentence in a Section;
 - advance Sentence by Sentence in source order;
-- previous/next Sentence;
-- continue until Section completion;
+- backward traversal;
+- continue until declared stream completion;
 - account for code/table/non-prose without fake Sentence identity;
 - verify no gap/overlap under response budgets.
+
+The initial runtime starts at a Section boundary and continues by TextUnitCursor. Anchor-based `before/after(locator)` starts remain a compatible future extension after locator-input/context handoff is implemented.
 
 No separate `get_sentences`, `get_paragraphs`, or format-specific Tool is accepted.
 
@@ -104,7 +108,7 @@ TextUnitCursor = progress through one ordered enumeration stream
 
 and create a parameter cross-product across target, read mode, granularity, anchor, direction, pagination, rendering, and non-prose policy.
 
-### 5. Future recommended Tool surface
+### 5. Current Tool surface
 
 ```text
 list_documents
@@ -127,7 +131,7 @@ Responsibilities remain:
 
 ### 6. Context has three explicit semantic variants
 
-The following are independent capabilities:
+The following remain independent capabilities:
 
 ```text
 neighbor context
@@ -137,7 +141,7 @@ structural context
 
 They may share `get_context`, but only through an explicit tagged relation contract. A bag of interacting optional parameters that changes meaning implicitly is rejected.
 
-Legacy `section_id + before + after` maps only to Section-neighbor context.
+Legacy `section_id + before + after` maps only to Section-neighbor context. Paragraph/Sentence context is still a later increment.
 
 ### 7. SearchHit must carry direct source handoff
 
@@ -155,7 +159,7 @@ The accepted interaction is:
 search → SearchHit.text_locator → read/context
 ```
 
-Copying a snippet and searching again is not a conforming precise-reading workflow.
+Copying a snippet and searching again is not a conforming precise-reading workflow. This search handoff is still a later increment; enumeration now provides the canonical TextLocator output foundation.
 
 ### 8. Locator and cursor identities remain separate
 
@@ -169,6 +173,8 @@ Cursor      = opaque progress through one versioned stream
 Fine-grained identity remains bound to the normalized document and segmentation policy. Raw `content_hash` remains source provenance and is not silently redefined.
 
 A stream cursor is never a citation and never becomes a normalized source range.
+
+Current TextUnitCursor binds raw/normalized document identity, target Section, segmentation version, requested kind, direction, coverage policy, next index, stream length and cursor schema.
 
 ### 9. Stale state fails closed
 
@@ -184,36 +190,40 @@ Forbidden:
 - rebase a cursor onto a new stream;
 - use snippet text as identity.
 
-Index rebuild alone does not invalidate a SearchHit locator when canonical normalized/segmentation identity is unchanged.
+Index rebuild alone does not invalidate source identity when canonical normalized/segmentation identity is unchanged.
 
 ### 10. Non-prose remains readable without fabricated Sentences
 
 A Sentence-first request may encounter code, tables, formulas, or other non-prose.
 
-Under source-preserving enumeration, the response may emit an explicitly coarser exact reading item with:
+Under `preserve_source`, `get_text_units` emits an explicitly coarser exact Paragraph reading item for recognized code/table content with:
 
 ```text
 requested kind
-actual/effective kind
+effective kind
 content class
 locator/range
 degradation reason
 ```
 
-It must not create fake Sentence ordinals. Coverage reports distinguish:
+It does not create fake Sentence ordinals.
 
-- eligible prose represented by Sentences;
+`eligible_only` is deliberately a narrower stream and must not claim all-source completion, even if a particular Section happens to contain only currently eligible prose.
+
+Coverage distinguishes:
+
+- eligible content represented by Sentences;
 - coarser non-prose items;
 - intentionally skipped regions;
 - unsupported gaps.
 
-Sentence coverage and all-content coverage must not share a misleading denominator.
+Sentence coverage and all-content coverage do not share a misleading denominator.
 
 ### 11. Reliability and coverage are returned at decision points
 
 No dedicated reliability/inspection Tool is accepted in this ADR.
 
-Capability, provenance, degradation, and coverage information belongs additively in the workflows where the Agent must choose what to do:
+Capability, provenance, degradation, and coverage information belongs additively in workflows where the Agent must choose what to do:
 
 ```text
 open_document
@@ -226,15 +236,16 @@ A dedicated inspection Tool requires a later independent use-case decision.
 
 ### 12. Contract evolution is additive first
 
-Current valid calls remain valid:
+Current valid calls include the six legacy Tools plus `get_text_units`:
 
 ```text
 list_documents(path?, recursive, max_results)
 open_document(source, auth_profile?, force_refresh)
 get_document_structure(document_id, max_depth?)
+get_text_units(document_id, section_id, requested_kind, direction, coverage_policy, max_items, max_chars?, cursor?)
 search_document(document_id, query, limit)
 get_context(document_id, section_id, before, after, max_chars?)
-read_document(document_id, section_id, max_chars?)
+read_document(document_id, section_id, max_chars?, cursor?)
 ```
 
 Rules:
@@ -245,39 +256,53 @@ Rules:
 4. legacy Section context retains current neighbor semantics;
 5. precise locator/cursor/capability fields are additive initially;
 6. persisted migrations are explicit and tested;
-7. the new Tool is introduced only after the underlying domain/application capability exists.
+7. TextUnit enumeration remains independent of read/context/search state machines.
 
-## Tool Contract Direction
-
-The accepted logical direction is:
+## Tool Contract Status
 
 ### `list_documents`
 
-Add completion/continuation metadata for bounded discovery.
+Current discovery semantics are implemented. Explicit bounded discovery cursor/completion remains future.
 
 ### `open_document`
 
-Add normalized-document identity, open/version outcome, capability grading, reliability, and coverage summary while preserving raw `content_hash` semantics.
+Raw/normalized identity and normalization diagnostics are implemented. Richer open outcome/capability grading remains future.
 
 ### `get_document_structure`
 
-Add actionable subtree/pagination semantics, child completeness, source order, provenance, and structural coverage. It continues to exclude Paragraph/Sentence enumeration.
+Structural Section hierarchy is implemented and continues to exclude Paragraph/Sentence enumeration. Actionable subtree pagination remains future.
 
 ### `get_text_units`
 
-Add a generic Section-scoped ordered enumeration contract for Paragraph/Sentence requests, exact text and per-item locator, anchor/direction, `TextUnitCursor`, completion, non-prose degradation, and coverage.
+Implemented v1:
+
+```text
+Section-boundary start
+paragraph | sentence
+forward | backward
+preserve_source | eligible_only
+max_items / max_chars
+TextLocator output
+TextUnitCursor continuation
+complete / section_complete
+coverage
+```
+
+Every response page is source ordered. TextUnit is atomic under response budgeting. Sentence persistence is not a correctness dependency; stream materialization is deterministic from canonical Document + segmentation version.
+
+Future compatible extension: anchor-based `before/after(locator)` starts.
 
 ### `search_document`
 
-Add `auto | section | paragraph | sentence` granularity and locator-bearing candidate kinds. Search remains bounded retrieval, not body reading.
+Current Section handoff remains. Future: `auto | section | paragraph | sentence` granularity and locator-bearing candidate kinds.
 
 ### `get_context`
 
-Add tagged `neighbor | container | structural` relations and structured locator-bearing items; preserve the legacy concatenated Section-neighbor response.
+Current Section-neighbor contract remains. Future: tagged `neighbor | container | structural` relations with locator-bearing items.
 
 ### `read_document`
 
-Add tagged source targets and `ReadCursor`, exact-target mode, completion metadata, and strict cursor validation. Rendered Section-tree stream positions remain distinct from canonical normalized ranges.
+SectionTreeReadStream + ReadCursor continuation is implemented. Future: tagged exact TextLocator targets. Rendered stream positions remain distinct from canonical normalized ranges.
 
 ## Relationship to Earlier ADRs
 
@@ -287,7 +312,7 @@ ADR 0002 remains accepted and normative for:
 - canonical Document/Section versus derived TextUnit/Search state;
 - normalized-document identity;
 - exact normalized ranges;
-- TextLocator versus ReadCursor;
+- TextLocator versus cursors;
 - search candidate kinds;
 - tokenizer/segmentation separation;
 - backward-compatible precise contract evolution.
@@ -303,99 +328,76 @@ ADR 0003 remains accepted and normative for:
 
 This ADR supersedes only earlier statements that:
 
-- described the current primary surface as five Tools; or
+- described the primary surface as five Tools; or
 - left the need for a generic `get_text_units` Tool undecided.
 
-It does not supersede locator, persistence, segmentation, retrieval, or EPUB reliability decisions.
+The implementation-status notes in this ADR supersede its own historical “future seven Tool” wording; the design rationale remains unchanged.
 
-## Implementation Order
-
-This design ADR does not authorize implementation on the design branch. After merge, use short-lived branches and preserve separation from the existing `feat/read-continuation` branch.
-
-Recommended dependency order:
+## Implementation Order / Status
 
 ```text
-P0 read continuation
-   - deterministic SectionTreeReadStream
-   - actionable ReadCursor
-   - strict version/mode binding
-
-P0 normalized source identity/range
-   - normalized_document_hash
-   - exact Section-relative normalized ranges
-
-P1 canonical/rebuildable Paragraph TextUnits
-   - segmentation policy/version
-   - locator/range validation
-
-P1 deterministic Sentence TextUnits
-   - prose eligibility
-   - non-prose classification/coverage
-
-P1 get_text_units contract + application capability
-   - ordered enumeration
-   - TextUnitCursor
-   - completion/gap/overlap tests
-
-P1 precise read/context/search locator handoff
-   - exact locator reads
-   - tagged context relations
-   - locator-bearing search candidates
-
-P1 EPUB reliability/coverage increments
-   - navigation/spine reconciliation
-   - canonical block provenance
-   - validator evidence
+P0 read continuation                                  ✓
+P0 normalized source identity/range                  ✓
+P1 canonical/rebuildable Paragraph TextUnits         ✓
+P1 deterministic Sentence locator/coverage           ✓
+P1 get_text_units + TextUnitCursor enumeration       ✓
+P1 precise read/context/search locator handoff       next
+P1 EPUB reliability/coverage increments              later
 ```
 
-Implementation branches may refine order where dependencies prove different, but must not collapse locator/cursor identity or pull Sentence/TextUnit work into the read-continuation branch.
+Short-lived implementation branches must continue to preserve locator/cursor identity and avoid collapsing independent state machines.
 
 ## Acceptance Invariants
 
-A future implementation conforms only if:
+A conforming runtime now requires:
 
 1. use-case success is defined at reading-task level, not Tool-call level;
-2. current six valid Tool calls remain valid;
-3. `get_text_units` is the only accepted new Tool in this decision;
-4. structure does not expand into a Sentence-sized TOC;
-5. read does not become an implicit TextUnit enumerator;
-6. every truncated/partial stream has actionable continuation or explicit unsupported state;
-7. repeated Section/TextUnit continuation is gap-free and overlap-free;
-8. every TextUnit is an exact normalized source slice;
-9. SearchHit flows directly into read/context through a locator;
-10. neighbor/container/structural context semantics are explicit;
-11. TextLocator and every cursor type remain non-interchangeable;
-12. stale locator/cursor identity fails closed;
-13. non-prose remains readable without fake Sentences;
+2. the six pre-existing Tool calls remain valid and `get_text_units` is the only new Tool admitted by this decision;
+3. structure does not expand into a Sentence-sized TOC;
+4. read does not become an implicit TextUnit enumerator;
+5. every incomplete read/TextUnit stream has actionable continuation or explicit unsupported state;
+6. repeated Section/TextUnit continuation is gap-free and overlap-free when returned cursors are used as-is;
+7. every TextUnit is an exact normalized source slice;
+8. SearchHit will flow directly into read/context through a locator when that later handoff increment lands;
+9. neighbor/container/structural context semantics remain explicit;
+10. TextLocator and every cursor type remain non-interchangeable;
+11. stale cursor/locator identity fails closed;
+12. non-prose remains readable without fake Sentences under source-preserving enumeration;
+13. `eligible_only` never claims all-source completion;
 14. reliability/degradation/coverage is visible and reproducible;
 15. Document/Section remain source truth and indexes remain rebuildable derived state;
-16. no Rust runtime, parser, FTS, or storage implementation is implied by this design commit.
+16. Sentence persistence is never required to reconstruct canonical content or identity.
 
 ## Consequences
 
 Positive:
 
-- an Agent can eventually perform complete Sentence-first reading with explicit end-of-Section state;
+- an Agent can perform complete Section-scoped Sentence-first reading with explicit end-of-stream state;
 - Paragraph/Sentence traversal has one generic, source-ordered contract;
-- read, enumeration, search, and context each retain a clear responsibility;
-- source handoff no longer depends on copied snippets;
-- stale state and non-prose behavior become testable rather than implicit;
-- the surface grows only where multiple real use cases require it.
+- read, enumeration, search, and context retain clear responsibilities;
+- non-prose degradation and completion claims are explicit;
+- TextUnitCursor can continue from persisted canonical Document without a Sentence source store;
+- the surface grew only where multiple real use cases required it.
 
 Costs:
 
-- the future surface contains seven rather than six Tools;
-- a new TextUnit enumeration state machine and cursor type must be maintained;
-- capability/reliability/coverage metadata becomes part of contract design;
-- additive migration requires old and new request/response forms to coexist for a period;
+- the runtime surface now contains seven rather than six Tools;
+- a TextUnit enumeration state machine and cursor type must be maintained;
+- capability/reliability/coverage metadata is part of contract design;
+- locator-input read/context/search handoff is still a separate migration step;
 - end-to-end acceptance must validate task completion and coverage, not only schema success.
 
 ## Review Outcome
 
-Accepted after an independent review corrected three initial design risks:
+The design was accepted after review corrected three initial risks:
 
 1. a pure Sentence stream would have hidden non-prose;
 2. overloading `read_document` would have conflated read and enumeration cursors;
 3. a generic context parameter bag would have hidden neighbor/container/structural semantics.
 
-The resulting decision is consistent with ADR 0002 and ADR 0003 and is sufficiently stable to guide later implementation planning.
+Implementation review later added two important constraints:
+
+1. `eligible_only` never claims all-source completion;
+2. Sentence persistence is unnecessary for correctness because cursor continuation is version-bound and deterministically rebuildable from canonical persisted Document state.
+
+The resulting decision remains consistent with ADR 0002 and ADR 0003.

@@ -1,16 +1,18 @@
 # Sentence Locator and Coverage Contract
 
-> Status: Implemented P1 locator foundation
+> Status: Implemented P1 locator foundation; consumed by implemented `get_text_units`
 >
 > Branch: `feat/sentence-locator`
 >
-> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/paragraph-text-unit-index.md`, `docs/tool-contract-use-case-design.md`
+> Follow-up implementation: `feat/text-unit-enumeration-contract`
+>
+> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/paragraph-text-unit-index.md`, `docs/text-unit-enumeration-contract.md`, `docs/tool-contract-use-case-design.md`
 
 ## 1. Goal
 
-This increment establishes deterministic Sentence identity and Paragraph ownership before any MCP Sentence enumeration Tool is exposed.
+This increment established deterministic Sentence identity and Paragraph ownership before MCP Sentence enumeration was exposed. The subsequent enumeration increment now consumes this foundation through `get_text_units` without changing its identity rules.
 
-The dependency chain is:
+The implemented dependency chain is:
 
 ```text
 persisted canonical Document / Section.content
@@ -23,7 +25,9 @@ deterministic Sentence segmentation
         ↓
 SentenceTextUnit + exact NormalizedTextRange
         ↓
-future get_text_units / context / search handoff
+get_text_units + TextUnitCursor
+        ↓
+future context / search / precise-read locator input
 ```
 
 `Document / Section` remain source truth. Paragraph and Sentence units remain rebuildable derived state.
@@ -109,7 +113,7 @@ If eligible prose has no recognized terminal punctuation, the remaining non-whit
 
 ## 5. Exact range semantics
 
-Sentence ranges use the already-implemented canonical coordinate space:
+Sentence ranges use the canonical coordinate space:
 
 ```text
 section-content-unicode-scalar/v1
@@ -159,7 +163,7 @@ code_block       → coarse_paragraph_only
 table            → coarse_paragraph_only
 ```
 
-Code/table Paragraphs therefore receive zero fabricated Sentence children.
+Code/table Paragraphs receive zero fabricated Sentence children.
 
 ## 7. Coverage semantics
 
@@ -192,15 +196,17 @@ coarse_only_chars = 0
 For recognized non-prose Paragraphs:
 
 ```text
-sentence_chars  = 0
-separator_chars = 0
+sentence_chars    = 0
+separator_chars   = 0
 coarse_only_chars = paragraph_chars
-sentence_count  = 0
+sentence_count    = 0
 ```
 
 Generated eligible ranges are required to remain inside the containing Paragraph; coverage calculation fails rather than silently hiding a range-accounting bug.
 
-This makes future source-preserving Sentence-first enumeration possible without pretending code/table content is a Sentence. The future enumeration layer can return the containing Paragraph as a coarse reading item.
+The implemented `get_text_units(requested_kind=sentence, coverage_policy=preserve_source)` uses this data to return recognized code/table Paragraphs as explicit coarse Paragraph reading items. It never fabricates Sentence identity.
+
+`eligible_only` may omit coarse regions, but the enumeration contract therefore never claims all-source `source_complete/section_complete` under that policy.
 
 ## 8. Rebuildability
 
@@ -212,42 +218,61 @@ sentence_text_units(document)
 sentence_text_units(repository_round_trip(document))
 ```
 
-Changing normalized text/structure changes `normalized_document_hash` and therefore Sentence identity. A stale locator must fail closed in later wire contracts; this increment does not implement fuzzy rebasing.
+Changing normalized text/structure changes `normalized_document_hash` and therefore Sentence identity. TextUnitCursor binds this normalized identity and fails closed after changes; no fuzzy rebasing is performed.
 
 ## 9. Persistence boundary
 
-This increment intentionally does **not** migrate the existing Paragraph TextUnitIndex schema.
-
-Current persisted index remains:
+The existing persisted index remains:
 
 ```text
 TextUnitIndex v1 = Paragraph units
 ```
 
-Sentence locator state is rebuilt from canonical Document + deterministic Paragraph units. This matches the implementation-order requirement for `feat/sentence-locator`: prove deterministic Sentence identity and coverage before deciding the pagination/enumeration storage contract.
+The enumeration implementation deliberately chose **not** to add Sentence SQLite rows. Sentence locator state and the declared Sentence stream are rebuilt from canonical Document + deterministic Paragraph/Sentence segmentation.
 
-The next `get_text_units` increment must decide, from its pagination and lookup use cases, whether Sentence rows need persistence or can be deterministically materialized through a dedicated enumeration index. It must not silently insert Sentence rows into the current Paragraph-only schema, whose uniqueness contract has no Sentence ordinal.
+This is now backed by continuation evidence:
+
+```text
+open/save canonical Document
+→ get_text_units page 1
+→ persist/reopen SqliteDocumentRepository
+→ continue with TextUnitCursor
+→ same deterministic remaining Sentence stream
+```
+
+Therefore Sentence persistence is currently:
+
+```text
+optional future performance optimization
+≠ correctness dependency
+≠ source truth
+```
+
+A future persistence migration requires measured performance evidence and must remain fully rebuildable.
 
 ## 10. MCP surface
 
-No MCP Tool or request/response contract is added in this increment.
-
-Current runtime remains six Tools:
+The subsequent enumeration increment added the seventh Tool:
 
 ```text
 list_documents
 open_document
 get_document_structure
+get_text_units
 search_document
 get_context
 read_document
 ```
 
-`get_text_units` remains accepted design, not implemented runtime functionality.
+`get_text_units` emits Paragraph/Sentence TextLocator output, supports forward/backward source-order pagination and TextUnitCursor continuation, and carries non-prose/coverage semantics.
+
+Current v1 begins at a Section boundary. Anchor-based `before/after(locator)` start and TextLocator input to read/context/search are later extensions.
+
+See [TextUnit Enumeration Contract](text-unit-enumeration-contract.md).
 
 ## 11. Acceptance evidence
 
-Tests cover:
+Sentence foundation tests cover:
 
 - exact Sentence range/text equality;
 - Paragraph ownership and 1-based Sentence ordinals;
@@ -264,7 +289,15 @@ Tests cover:
 - normalized text changes invalidating Sentence IDs;
 - canonical Document SQLite round-trip rebuild equality.
 
-The repository release gate remains:
+Enumeration follow-up tests additionally cover:
+
+- source-preserving coarse non-prose output;
+- eligible-only no all-source completion claim;
+- forward/backward no-gap/no-overlap pagination;
+- TextUnitCursor stale/mismatch behavior;
+- continuation after persisted Document repository reopen without Sentence rows.
+
+Release gate remains:
 
 ```text
 cargo fmt --all -- --check
@@ -272,20 +305,18 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-## 12. Explicit non-goals
+## 12. Current non-goals / next dependency
 
-This increment does not implement:
+Still not implemented:
 
 ```text
-get_text_units
-TextUnitCursor
 Sentence persistence migration
-TextLocator MCP wire DTOs
-Sentence read mode
+anchor-based TextUnit before/after start
+TextLocator input to read_document
 Paragraph/Sentence context
 SearchHit → Sentence TextLocator
 Paragraph/Sentence FTS
 EPUB parser/block-type restructuring
 ```
 
-The next dependency step is `feat/text-unit-enumeration-contract`.
+The next dependency step is `feat/context-granularity`, followed by search locator handoff. Sentence persistence remains conditional on performance evidence.

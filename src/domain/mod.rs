@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 
 mod normalized_text;
+mod text_locator;
 mod text_unit;
 
 pub use normalized_text::{
     NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE,
     NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
 };
+pub use text_locator::TextLocator;
 pub use text_unit::{
     ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet, SentenceEligibility,
     SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,

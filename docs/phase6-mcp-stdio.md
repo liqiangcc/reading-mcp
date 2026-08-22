@@ -18,20 +18,21 @@ Domain + Ports + Adapters
 
 `rmcp` 只进入 MCP adapter/binary。
 
-## 6 个 Tool
+## 7 个 Tool
 
 ```text
 list_documents
 open_document
 get_document_structure
+get_text_units
 search_document
 get_context
 read_document
 ```
 
-`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document/source/media type、raw/normalized identity、normalization diagnostics 与 section count；structure 返回 section tree；search 返回 owning section + source/title/snippet/score/location；context/read 从 DocumentRepository 读取规范化正文。
+`list_documents` 只枚举 `READING_MCP_LOCAL_ROOTS` 授权目录中的可读文档，不打开文档；支持递归扫描和结果数量上限。`open_document` 返回 document/source/media type、raw/normalized identity、normalization diagnostics 与 section count；structure 返回 section tree；`get_text_units` 在单个 Section 内按 source order 枚举 Paragraph/Sentence reading items；search 返回 owning section + source/title/snippet/score/location；context/read 继续从 DocumentRepository 读取规范化正文。
 
-v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location`。
+v0.1 不增加 PDF/EPUB/DOCX 专属 Tool，格式位置统一放在 `Location` / precise TextLocator provenance。
 
 ## Normalized document identity and text coordinates
 
@@ -79,7 +80,7 @@ unit     = Unicode scalar / Rust char
 
 `Location.char_start/char_end` 保留 parser-defined legacy/source meaning，不被静默改写为 normalized range。
 
-Parsed Cache key 现在包含：
+Parsed Cache key 包含：
 
 ```text
 final_source
@@ -91,27 +92,75 @@ normalization_version
 
 完整契约见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
 
-## Paragraph TextUnit derived index
+## Paragraph / Sentence TextUnit foundation
 
-当前 runtime 已在 `open_document` 后从 persisted-compatible `Section.content` 确定性派生 Paragraph TextUnit：
+当前 runtime 从 canonical `Section.content` 确定性派生 Paragraph，并可确定性 materialize Sentence：
 
 ```text
 text-segmentation/v1
 Paragraph ordinal = 1-based within owner Section
+Sentence ordinal  = 1-based within Paragraph
 range             = exact Section-relative Unicode-scalar [start, end)
-source_order      = root/child source order + Paragraph order
 ```
 
-这些 TextUnit 写入独立的 derived `TextUnitIndex`：
+Paragraph TextUnit 写入独立 derived `TextUnitIndex`：
 
 ```text
 memory mode     → InMemoryTextUnitIndex
-persistent mode → SQLite text_units table
+persistent mode → SQLite text_units table (Paragraph v1)
 ```
 
-`TextUnitIndex` 与 `SearchIndex` 是两个职责。当前 FTS/search contract 不读取 TextUnitIndex，MCP Tool 数量仍然是 6。Sentence TextUnit、TextUnitCursor 与 `get_text_units` 尚未实现。
+Sentence locator/coverage 不依赖 Sentence SQLite rows；它从 canonical persisted Document + deterministic Paragraph/Sentence segmentation 重建。`TextUnitIndex` 与 `SearchIndex` 继续是两个职责，当前 FTS/search contract 不读取 precise Sentence locator stream。
 
-完整契约见 [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md)。
+完整契约见 [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md) 和 [Sentence Locator and Coverage Contract](sentence-locator-contract.md)。
+
+## TextUnit enumeration
+
+`get_text_units` 当前支持：
+
+```text
+document_id
+section_id
+requested_kind = paragraph | sentence
+direction      = forward | backward
+coverage_policy= preserve_source | eligible_only
+max_items
+max_chars?
+cursor?
+```
+
+默认 `requested_kind=sentence`、`direction=forward`、`coverage_policy=preserve_source`。
+
+`preserve_source` 下，识别出的 code/table Paragraph 在 Sentence-first stream 中以 coarse Paragraph item 返回，不伪造 Sentence identity。`eligible_only` 只消费 eligible stream，按契约不宣称 all-source `section_complete`。
+
+TextUnitCursor：
+
+```text
+text-unit-cursor/v1
+```
+
+绑定：
+
+```text
+document_id
+raw content_hash
+normalized_document_hash
+section_id
+text-segmentation/v1
+requested_kind
+direction
+coverage_policy
+next item index
+total declared items
+```
+
+分页使用 `stream.start_index/end_index/total_items` 证明相邻页边界；每个 response 内即使 backward traversal 也保持 source order。任何 incomplete response 都返回 `next_cursor`；terminal response `complete=true` 且 `next_cursor=null`。
+
+单个 TextUnit 不会为了满足 `max_chars` 被切开；若单个 item 已超过预算则返回资源限制错误。
+
+当前 v1 从 Section 边界开始，anchor-based `before/after(locator)` 起点留给后续 locator/context handoff。
+
+完整契约见 [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)。
 
 ## Section read continuation
 
@@ -210,6 +259,8 @@ Default persistent state
 └── SQLite FTS5 SearchIndex
 ```
 
+Sentence enumeration uses deterministic materialization from the persisted canonical Document; there is no Sentence persistence schema in this increment.
+
 设置 `READING_MCP_STATE_DIR=memory` 可使用纯内存运行时。完整配置见 `runtime-configuration.md`。
 
 ## 本地文件安全
@@ -222,7 +273,7 @@ Default persistent state
 
 测试覆盖：
 
-- 6 Tool discovery/调用；
+- 7 Tool discovery/调用；
 - structured DTO；
 - raw/normalized source identity 与 location traceability；
 - Text/Markdown/HTML/PDF acceptance matrix；
@@ -231,10 +282,15 @@ Default persistent state
 - Section-relative Unicode-scalar normalized range validator；
 - normalization-version-scoped Parsed Cache；
 - Paragraph TextUnit exact-slice / source-order / deterministic rebuild；
-- SQLite TextUnitIndex persistence/replacement；
+- Sentence deterministic locator/coverage；
+- `get_text_units` 真实 stdio Sentence enumeration + actionable TextUnitCursor；
+- TextUnit forward/backward no-gap/no-overlap pagination；
+- source-preserving non-prose coarse item 与 eligible-only completion 语义；
+- SQLite DocumentRepository 重启后 TextUnitCursor 继续使用，无 Sentence persistence 依赖；
+- SQLite Paragraph TextUnitIndex persistence/replacement；
 - SectionTreeReadStream continuation 的 actionable cursor；
 - 多段拼接无 gap/overlap，并精确等于一次完整读取；
-- cursor 对 raw/normalized document identity、target 和 rendering contract 的 fail-closed 验证；
+- cursor 对 raw/normalized document identity、target 和 stream contract 的 fail-closed 验证；
 - 旧 `read-cursor/v1` 对新正式身份契约显式 stale；
 - stderr telemetry 不污染 stdout MCP transport。
 

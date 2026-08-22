@@ -668,7 +668,8 @@ fn sentence_context_stream(
 
         if coverage.eligibility == SentenceEligibility::CoarseParagraphOnly {
             let mut item = paragraph_context_item(document, section, paragraph, coverage);
-            item.degradation = Some(coarse_sentence_context_degradation(coverage.content_class).into());
+            item.degradation =
+                Some(coarse_sentence_context_degradation(coverage.content_class).into());
             result.push(item);
             continue;
         }

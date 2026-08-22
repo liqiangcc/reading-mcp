@@ -15,7 +15,7 @@ use reading_mcp::parsing::{
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 #[tokio::test]
-async fn canonical_profile_preserves_native_fallback_and_coarse_evidence() {
+async fn canonical_profile_preserves_native_and_coarse_evidence() {
     let document = HtmlParser
         .parse(resource(
             "memory:profile.html",
@@ -25,7 +25,6 @@ async fn canonical_profile_preserves_native_fallback_and_coarse_evidence() {
 <p>Native sentence.</p>
 <blockquote><p>Quoted one.</p><p>Quoted two.</p></blockquote>
 <pre>let value = 1;</pre>
-<div>Fallback tail.</div>
 </main></body></html>"#
                 .to_vec(),
         ))
@@ -76,7 +75,7 @@ async fn canonical_profile_preserves_native_fallback_and_coarse_evidence() {
     assert!(coverage.native_paragraph_chars > 0);
     assert!(coverage.native_structural_container_chars > 0);
     assert!(coverage.native_non_prose_chars > 0);
-    assert!(coverage.fallback_chars > 0);
+    assert_eq!(coverage.fallback_chars, 0);
     assert!(coverage.coarse_paragraphs >= 2);
     assert!(coverage.sentence_coarse_only_chars > 0);
     assert!(

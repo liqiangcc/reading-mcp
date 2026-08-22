@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::application::get_context::GetContextUseCase;
 use crate::application::get_document_structure::GetDocumentStructureUseCase;
+use crate::application::get_text_units::GetTextUnitsUseCase;
 use crate::application::list_documents::ListDocumentsUseCase;
 use crate::application::open_document::OpenDocumentUseCase;
 use crate::application::ports::{
@@ -128,6 +129,7 @@ pub fn build_server(
     ));
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
     let get_structure = Arc::new(GetDocumentStructureUseCase::new(repository.clone()));
+    let get_text_units = Arc::new(GetTextUnitsUseCase::new(repository.clone()));
     let search_document = Arc::new(SearchDocumentUseCase::new(search_index));
     let read_document = Arc::new(ReadDocumentUseCase::new(repository.clone()));
     let get_context = Arc::new(GetContextUseCase::new(repository));
@@ -136,6 +138,7 @@ pub fn build_server(
         open_document,
         list_documents,
         get_structure,
+        get_text_units,
         search_document,
         read_document,
         get_context,

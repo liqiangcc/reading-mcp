@@ -5,8 +5,8 @@ use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
 use reading_mcp::mcp::contracts::{
-    GetContextResponse, GetDocumentStructureResponse, ListDocumentsResponse, OpenDocumentResponse,
-    ReadDocumentResponse, SearchDocumentResponse,
+    GetContextResponse, GetDocumentStructureResponse, GetTextUnitsResponse, ListDocumentsResponse,
+    OpenDocumentResponse, ReadDocumentResponse, SearchDocumentResponse,
 };
 
 #[tokio::test]
@@ -61,6 +61,7 @@ Processes own resources and execution state.
         vec![
             "get_context",
             "get_document_structure",
+            "get_text_units",
             "list_documents",
             "open_document",
             "read_document",
@@ -130,11 +131,67 @@ Processes own resources and execution state.
         Some("section://operating-systems")
     );
 
-    let structure_document_id = structure.document_id.clone();
+    let text_units = client
+        .call_tool(
+            CallToolRequestParams::new("get_text_units").with_arguments(arguments(json!({
+                "document_id": structure.document_id,
+                "section_id": "section://operating-systems/virtual-memory",
+                "requested_kind": "sentence",
+                "coverage_policy": "preserve_source",
+                "max_items": 1,
+                "max_chars": 4000
+            }))),
+        )
+        .await
+        .expect("get_text_units MCP call should succeed")
+        .into_typed::<GetTextUnitsResponse>()
+        .expect("get_text_units should return typed structured content");
+    assert_eq!(text_units.items.len(), 1);
+    assert_eq!(
+        text_units.items[0].text,
+        "Address spaces give each process an isolated view of memory."
+    );
+    assert_eq!(text_units.items[0].locator.paragraph_index, Some(1));
+    assert_eq!(text_units.items[0].locator.sentence_index, Some(1));
+    assert_eq!(text_units.stream.start_index, 0);
+    assert_eq!(text_units.stream.end_index, 1);
+    assert_eq!(text_units.stream.total_items, 2);
+    assert!(!text_units.complete);
+    let text_unit_cursor = text_units
+        .next_cursor
+        .clone()
+        .expect("first sentence page should be resumable");
+
+    let continued_units = client
+        .call_tool(
+            CallToolRequestParams::new("get_text_units").with_arguments(arguments(json!({
+                "document_id": opened.document_id,
+                "section_id": "section://operating-systems/virtual-memory",
+                "requested_kind": "sentence",
+                "coverage_policy": "preserve_source",
+                "max_items": 1,
+                "max_chars": 4000,
+                "cursor": text_unit_cursor
+            }))),
+        )
+        .await
+        .expect("get_text_units continuation should succeed")
+        .into_typed::<GetTextUnitsResponse>()
+        .expect("continued get_text_units should return typed structured content");
+    assert_eq!(continued_units.items.len(), 1);
+    assert_eq!(
+        continued_units.items[0].text,
+        "Page replacement algorithms decide which resident page should be evicted."
+    );
+    assert_eq!(text_units.stream.end_index, continued_units.stream.start_index);
+    assert!(continued_units.complete);
+    assert!(continued_units.section_complete);
+    assert!(continued_units.next_cursor.is_none());
+
     let searched = client
         .call_tool(
             CallToolRequestParams::new("search_document").with_arguments(arguments(json!({
-                "document_id": structure_document_id,
+                "document_id": continued_units.document_id,
                 "query": "replacement algorithms",
                 "limit": 10
             }))),

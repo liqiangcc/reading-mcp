@@ -80,6 +80,135 @@ pub struct SectionNode {
     pub children: Vec<SectionNode>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextUnitKindDto {
+    Paragraph,
+    #[default]
+    Sentence,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextUnitDirectionDto {
+    #[default]
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextUnitCoveragePolicyDto {
+    #[default]
+    PreserveSource,
+    EligibleOnly,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextUnitContentClassDto {
+    Unknown,
+    NonProse,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct GetTextUnitsRequest {
+    pub document_id: String,
+    pub section_id: String,
+    #[serde(default)]
+    pub requested_kind: TextUnitKindDto,
+    #[serde(default)]
+    pub direction: TextUnitDirectionDto,
+    #[serde(default)]
+    pub coverage_policy: TextUnitCoveragePolicyDto,
+    #[serde(default = "default_text_unit_max_items")]
+    pub max_items: usize,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+fn default_text_unit_max_items() -> usize {
+    32
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct GetTextUnitsResponse {
+    pub document_id: String,
+    pub target_section_locator: TextLocatorDto,
+    pub requested_kind: TextUnitKindDto,
+    pub direction: TextUnitDirectionDto,
+    pub coverage_policy: TextUnitCoveragePolicyDto,
+    pub items: Vec<TextUnitItemDto>,
+    pub complete: bool,
+    pub section_complete: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    pub coverage: TextUnitCoverageDto,
+    pub stream: TextUnitStreamSegmentDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TextUnitItemDto {
+    pub text: String,
+    pub locator: TextLocatorDto,
+    pub effective_kind: TextUnitKindDto,
+    pub content_class: TextUnitContentClassDto,
+    pub content_class_detail: String,
+    #[serde(default)]
+    pub degradation: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TextUnitCoverageDto {
+    pub owner_chars: usize,
+    pub section_separator_chars: usize,
+    pub sentence_separator_chars: usize,
+    pub paragraph_count: usize,
+    pub sentence_eligible_paragraphs: usize,
+    pub non_prose_paragraphs: usize,
+    pub represented_paragraphs: usize,
+    pub represented_sentences: usize,
+    pub coarse_non_prose_items: usize,
+    pub intentionally_skipped: usize,
+    pub unsupported_gaps: usize,
+    pub source_complete: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TextUnitStreamSegmentDto {
+    pub direction: TextUnitDirectionDto,
+    pub start_index: usize,
+    pub end_index: usize,
+    pub total_items: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TextLocatorDto {
+    pub document_id: String,
+    pub content_hash: String,
+    pub normalized_document_hash: String,
+    pub owner_section_id: String,
+    pub section_path: Vec<String>,
+    #[serde(default)]
+    pub paragraph_index: Option<usize>,
+    #[serde(default)]
+    pub sentence_index: Option<usize>,
+    #[serde(default)]
+    pub normalized_range: Option<NormalizedRangeDto>,
+    #[serde(default)]
+    pub segmentation_version: Option<String>,
+    #[serde(default)]
+    pub native_location: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct NormalizedRangeDto {
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SearchDocumentRequest {
     pub document_id: String,

@@ -240,7 +240,10 @@ pub struct SearchHitDto {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadDocumentRequest {
     pub document_id: String,
-    pub section_id: String,
+    #[serde(default)]
+    pub section_id: Option<String>,
+    #[serde(default)]
+    pub target_locator: Option<TextLocatorDto>,
     #[serde(default)]
     pub max_chars: Option<usize>,
     #[serde(default)]
@@ -259,6 +262,9 @@ pub struct ReadDocumentResponse {
     #[serde(default)]
     pub next_cursor: Option<String>,
     pub stream: ReadStreamSegmentDto,
+    pub resolved_target_locator: TextLocatorDto,
+    #[serde(default)]
+    pub returned_locator: Option<TextLocatorDto>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

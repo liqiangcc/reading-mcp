@@ -4,7 +4,9 @@
 >
 > Branch: `feat/context-granularity`
 >
-> Related: `docs/tool-contract-use-case-design.md`, `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/text-unit-enumeration-contract.md`
+> Follow-up consumer: `feat/precise-read-locator`
+>
+> Related: `docs/tool-contract-use-case-design.md`, `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/text-unit-enumeration-contract.md`, `docs/precise-read-locator-contract.md`
 
 ## 1. Goal
 
@@ -87,7 +89,7 @@ text-segmentation/v1
 exact Section-relative normalized range
 ```
 
-Valid shapes are:
+Valid context anchor shapes are:
 
 ```text
 Section:
@@ -115,6 +117,8 @@ STALE_LOCATOR
 ```
 
 No title search, snippet comparison, nearest-text match, ordinal rebasing or fuzzy relocation is allowed.
+
+The later precise-read increment now consumes the same Section/Paragraph/Sentence locator identities and also accepts CharacterRange. Cross-consumer regression tests require read and context to agree on valid/stale overlapping locator kinds. Before a third consumer such as SearchHit locator resolution is added, the duplicated validation logic should be consolidated into one shared resolver so identity rules cannot drift.
 
 ## 4. Neighbor semantics
 
@@ -253,19 +257,29 @@ A requested precise context window that exceeds the effective text budget also f
 
 Context itself has no continuation cursor in this increment; it is a bounded expansion around an already-known anchor, not an ordered complete-reading stream.
 
-## 9. Relationship to TextUnit enumeration
+## 9. Relationship to TextUnit enumeration and exact read
 
 ```text
 get_text_units
 = discover/enumerate reading items
 
 get_context
-= expand around one already-known locator
+= bounded expansion around one already-known locator
+
+read_document(target_locator)
+= canonical exact source read of one already-known locator
 ```
 
 `TextUnitCursor` is not accepted by `get_context`, and context does not redefine enumeration progress.
 
 Sentence neighbor source order/coarse semantics are regression-tested against `get_text_units(... preserve_source)` so these two capabilities cannot silently drift into different definitions of the same Sentence-first reading stream.
+
+The exact-read follow-up means one TextLocator can now flow directly to both consumers:
+
+```text
+TextLocator ─┬→ get_context
+             └→ read_document
+```
 
 ## 10. MCP surface
 
@@ -298,7 +312,8 @@ Tests cover:
 - malformed locator shape produces `INVALID_LOCATOR`;
 - precise TextUnit context is atomic under `max_chars`;
 - legacy Section-neighbor semantics remain valid;
-- real stdio `get_text_units → TextLocator → get_context` handoff.
+- real stdio `get_text_units → TextLocator → get_context` handoff;
+- cross-consumer parity with exact read for overlapping Sentence locator identity/stale rules.
 
 Repository release gate remains:
 
@@ -308,12 +323,17 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-## 12. Explicit non-goals / next dependency
+## 12. Current non-goals / next dependency
 
-Not implemented here:
+Now implemented by the precise-read follow-up:
 
 ```text
-TextLocator input to read_document
+TextLocator → exact read_document
+```
+
+Still not implemented:
+
+```text
 SearchHit → TextLocator
 Paragraph/Sentence FTS
 anchor-based get_text_units before/after(locator) start
@@ -321,4 +341,4 @@ Sentence SQLite persistence
 EPUB parser/navigation restructuring
 ```
 
-The next dependency should be `feat/precise-read-locator`: make `read_document` consume the same canonical TextLocator in an exact-target mode. After both read and context consume locators, `feat/search-locator` can hand a SearchHit directly into either operation without an asymmetric precise-reading path.
+The next dependency is `feat/search-locator`. Before SearchHit becomes a third locator consumer, first consolidate locator resolution into a shared application/domain resolver, then hand SearchHit's strongest truthful TextLocator directly into the already-implemented read/context consumers.

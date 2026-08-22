@@ -22,7 +22,7 @@
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
 - [ADR 0003：EPUB-First Structure Reliability](adr/0003-epub-first-structure-reliability.md)：EPUB 结构优先级、provenance、degradation、validator 和 coverage 的稳定决策。
 - [ADR 0004：Use-Case-First MCP Tool Contracts](adr/0004-use-case-first-tool-contracts.md)：从 6 Tool 推导出的第 7 个独立职责 `get_text_units`，以及 read/enumeration/context/search 的责任边界。
-- [ADR 0005：Block-Aware TextUnit Identity Migration](adr/0005-block-aware-text-unit-identity.md)：已实现 block-aware segmentation/hash identity、旧 locator/cursor fail-closed 与 lexical-index/v3 rebuild 决策。
+- [ADR 0005：Block-Aware TextUnit Identity Migration](adr/0005-block-aware-text-unit-identity.md)：已实现 block-aware segmentation/hash identity、旧 locator/cursor fail-closed、Parsed Cache v6 与 lexical-index/v3 rebuild 决策。
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
 - [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、当前 7 个 Tool 和 stdio 子进程端到端测试。
@@ -155,8 +155,9 @@ epub-structure-validator/v1
 → persisted-fact validation / coverage evidence
 → 不成为 source identity
 
-reading-mcp-normalization/v5
+reading-mcp-normalization/v6
 → Parsed Document policy/cache invalidation
+→ v5 cache 不可复用，因为 EPUB validator 的 persisted TextUnit coverage 已切换到 segmentation v2
 
 lexical-search-index/v3
 → precise lexical derived-state schema/version

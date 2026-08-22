@@ -85,9 +85,8 @@ fn technical_periods_do_not_create_false_sentence_boundaries() {
 
 #[test]
 fn ascii_question_and_exclamation_require_a_clear_sentence_boundary() {
-    let document = document_with_content(
-        "Use https://example.test?q=1 and compare x!=0. Continue? Done!",
-    );
+    let document =
+        document_with_content("Use https://example.test?q=1 and compare x!=0. Continue? Done!");
     let set = document.sentence_text_units();
 
     assert_eq!(
@@ -101,6 +100,15 @@ fn ascii_question_and_exclamation_require_a_clear_sentence_boundary() {
             "Done!",
         ]
     );
+}
+
+#[test]
+fn unterminated_tail_is_preserved_as_one_sentence() {
+    let document = document_with_content("No terminal punctuation here");
+    let set = document.sentence_text_units();
+
+    assert_eq!(set.units.len(), 1);
+    assert_eq!(set.units[0].text, "No terminal punctuation here");
 }
 
 #[test]

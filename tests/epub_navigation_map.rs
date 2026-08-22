@@ -13,11 +13,41 @@ async fn epub3_nav_map_preserves_hierarchy_resolution_and_provenance_without_rew
         .await
         .expect("EPUB 3 nav fixture should parse");
 
-    assert_eq!(document.metadata.get("epub_package_version").map(String::as_str), Some("3.0"));
-    assert_eq!(document.metadata.get("epub_navigation_provenance").map(String::as_str), Some("epub_nav"));
-    assert_eq!(document.metadata.get("epub_navigation_source_path").map(String::as_str), Some("OPS/nav/toc.xhtml"));
-    assert_eq!(document.metadata.get("epub_navigation_nodes").map(String::as_str), Some("3"));
-    assert_eq!(document.metadata.get("epub_navigation_resolved_nodes").map(String::as_str), Some("2"));
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_package_version")
+            .map(String::as_str),
+        Some("3.0")
+    );
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_provenance")
+            .map(String::as_str),
+        Some("epub_nav")
+    );
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_source_path")
+            .map(String::as_str),
+        Some("OPS/nav/toc.xhtml")
+    );
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_nodes")
+            .map(String::as_str),
+        Some("3")
+    );
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_resolved_nodes")
+            .map(String::as_str),
+        Some("2")
+    );
 
     let map = navigation_map(&document);
     assert_eq!(map["schema_version"], "epub-navigation-map/v1");
@@ -30,7 +60,9 @@ async fn epub3_nav_map_preserves_hierarchy_resolution_and_provenance_without_rew
     assert_eq!(nodes[0]["resolved_entry_path"], "OPS/text/ch1.xhtml");
     assert_eq!(nodes[0]["fragment"], "intro");
     assert_eq!(nodes[0]["resolution_status"], "resolved_fragment");
-    let children = nodes[0]["children"].as_array().expect("child navigation nodes");
+    let children = nodes[0]["children"]
+        .as_array()
+        .expect("child navigation nodes");
     assert_eq!(children.len(), 1);
     assert_eq!(children[0]["label"], "Publisher Detail");
     assert_eq!(children[0]["depth"], 2);
@@ -41,8 +73,18 @@ async fn epub3_nav_map_preserves_hierarchy_resolution_and_provenance_without_rew
 
     // Navigation is mapped in this increment but does not yet rewrite the heading-derived
     // canonical Section hierarchy; reconciliation is a separate follow-up.
-    assert!(document.root_sections.iter().any(|section| section.title == "Visible Intro"));
-    assert!(!document.root_sections.iter().any(|section| section.title == "Publisher Intro"));
+    assert!(
+        document
+            .root_sections
+            .iter()
+            .any(|section| section.title == "Visible Intro")
+    );
+    assert!(
+        !document
+            .root_sections
+            .iter()
+            .any(|section| section.title == "Publisher Intro")
+    );
 }
 
 #[tokio::test]
@@ -52,15 +94,31 @@ async fn malformed_epub3_nav_degrades_to_legacy_ncx_with_explicit_provenance() {
         .await
         .expect("malformed EPUB 3 nav should degrade to NCX");
 
-    assert_eq!(document.metadata.get("epub_package_version").map(String::as_str), Some("3.0"));
-    assert_eq!(document.metadata.get("epub_navigation_provenance").map(String::as_str), Some("epub_ncx"));
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_package_version")
+            .map(String::as_str),
+        Some("3.0")
+    );
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_provenance")
+            .map(String::as_str),
+        Some("epub_ncx")
+    );
     let map = navigation_map(&document);
     assert_eq!(map["provenance"], "epub_ncx");
     assert_eq!(map["source_manifest_id"], "ncx");
     assert_eq!(map["nodes"][0]["label"], "Legacy Chapter");
     assert_eq!(map["nodes"][0]["resolution_status"], "resolved_fragment");
     let diagnostics = map["diagnostics"].as_array().expect("diagnostics");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic["code"] == "malformed_epub_nav"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "malformed_epub_nav")
+    );
 }
 
 #[tokio::test]
@@ -79,7 +137,13 @@ async fn navigation_resolution_exposes_invalid_missing_and_unsupported_targets()
         statuses,
         vec!["invalid_path", "missing_resource", "unsupported_resource"]
     );
-    assert_eq!(document.metadata.get("epub_navigation_resolved_nodes").map(String::as_str), Some("0"));
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_resolved_nodes")
+            .map(String::as_str),
+        Some("0")
+    );
 }
 
 #[tokio::test]
@@ -88,15 +152,34 @@ async fn epub_without_nav_or_ncx_remains_readable_and_records_navigation_degrada
         .parse(resource(build_no_navigation_fixture()))
         .await
         .expect("heading/spine fallback EPUB should remain readable");
-    assert_eq!(document.metadata.get("epub_navigation_provenance").map(String::as_str), Some("none"));
-    assert_eq!(document.metadata.get("epub_navigation_nodes").map(String::as_str), Some("0"));
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_provenance")
+            .map(String::as_str),
+        Some("none")
+    );
+    assert_eq!(
+        document
+            .metadata
+            .get("epub_navigation_nodes")
+            .map(String::as_str),
+        Some("0")
+    );
     let map = navigation_map(&document);
-    assert!(map["diagnostics"]
-        .as_array()
-        .expect("diagnostics")
-        .iter()
-        .any(|diagnostic| diagnostic["code"] == "navigation_unavailable"));
-    assert!(document.root_sections.iter().any(|section| section.title == "Fallback Heading"));
+    assert!(
+        map["diagnostics"]
+            .as_array()
+            .expect("diagnostics")
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "navigation_unavailable")
+    );
+    assert!(
+        document
+            .root_sections
+            .iter()
+            .any(|section| section.title == "Fallback Heading")
+    );
 }
 
 fn navigation_map(document: &reading_mcp::domain::Document) -> Value {
@@ -222,7 +305,10 @@ fn build_resolution_diagnostics_fixture() -> Vec<u8> {
             "OPS/chapter.xhtml",
             r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Readable</h1><p>Body.</p></body></html>"#,
         ),
-        ("OPS/figure.svg", r#"<svg xmlns="http://www.w3.org/2000/svg"><g id="shape"/></svg>"#),
+        (
+            "OPS/figure.svg",
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g id="shape"/></svg>"#,
+        ),
     ])
 }
 

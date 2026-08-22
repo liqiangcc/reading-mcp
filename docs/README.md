@@ -7,14 +7,15 @@
 - [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)：已实现的 normalized-document hash、normalization version、Section-relative Unicode-scalar range、坐标空间隔离和 Parsed Cache 版本约束。
 - [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md)：已实现的 Paragraph v1 确定性分段、stable TextUnit identity、source order、coverage 与 SQLite/InMemory derived TextUnitIndex。
 - [Sentence Locator and Coverage Contract](sentence-locator-contract.md)：已实现的 deterministic Sentence locator foundation、Paragraph ownership、technical-punctuation protection 与 non-prose coarse coverage。
+- [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)：已实现的 `get_text_units`、TextLocator、TextUnitCursor、Paragraph/Sentence source-order pagination 与 coverage/completion 语义。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与最终 Tool Contract；包含逐句枚举、SearchHit handoff、stale、non-prose 和 reliability/coverage。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
 - [ADR 0003：EPUB-First Structure Reliability](adr/0003-epub-first-structure-reliability.md)：EPUB 结构优先级、provenance、degradation、validator 和 coverage 的稳定决策。
-- [ADR 0004：Use-Case-First MCP Tool Contracts](adr/0004-use-case-first-tool-contracts.md)：当前 6 Tool 与未来 7 Tool 的边界、`get_text_units` 决策及 additive contract evolution。
+- [ADR 0004：Use-Case-First MCP Tool Contracts](adr/0004-use-case-first-tool-contracts.md)：从 6 Tool 推导出的第 7 个独立职责 `get_text_units`；该 accepted design 现已进入 runtime。
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
-- [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、当前 6 个 Tool 和 stdio 子进程端到端测试。
+- [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、当前 7 个 Tool 和 stdio 子进程端到端测试。
 - [MVP Hardening Review](mvp-review.md)：发布前架构、安全、契约和真实使用 Review。
 - [Runtime Configuration](runtime-configuration.md)：持久化状态、资源预算、HTTP、auth profile、telemetry 和错误语义配置。
 - [Release Hardening Plan](release-hardening-plan.md)：v0.1.0 前的 hardening 完成矩阵、扩展格式和 Release Gate。
@@ -39,6 +40,8 @@ normalized-text-range-contract.md
 paragraph-text-unit-index.md
       ↓
 sentence-locator-contract.md
+      ↓
+text-unit-enumeration-contract.md
       ↓
 epub-structure-reliability-design.md
       ↓
@@ -85,21 +88,27 @@ Reading MCP = 文档上下文基础设施
 list_documents
 open_document
 get_document_structure
+get_text_units
 search_document
 get_context
 read_document
 ```
 
-当前底层 precise-reading foundation 已实现：
+当前 precise-reading foundation 已实现：
 
 ```text
 normalized_document_hash / normalized range
 ReadCursor continuation
 Paragraph TextUnit + Paragraph TextUnitIndex
 Sentence locator + Paragraph ownership + non-prose coverage
+TextLocator output
+TextUnitCursor + source-order pagination
+get_text_units Paragraph/Sentence enumeration
 ```
 
-Sentence persistence、TextUnitCursor 与 `get_text_units` 尚未实现。Use-Case-First 设计接受的未来 surface 在这些依赖满足后增加一个通用 `get_text_units`；当前文档必须继续区分“已实现 6 Tool”和“已接受但尚未实现的未来第 7 Tool”。
+Sentence persistence 仍未实现，也不是当前正确性的依赖：`get_text_units` 从 canonical persisted Document 确定性 materialize Paragraph/Sentence stream，TextUnitCursor 绑定 normalized identity 与 segmentation version。后续只有在实际性能证据需要时才增加 Sentence derived persistence。
+
+当前 `get_text_units` v1 从 Section 边界起读，支持 forward/backward 与 cursor continuation；anchor-based `before/after(locator)` 起点、TextLocator 输入到 read/context/search handoff 仍属于后续独立增量。
 
 格式能力分为两类：
 

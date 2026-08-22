@@ -209,7 +209,13 @@ impl SearchIndex for ObservedSearchIndex {
     ) -> Result<Vec<SearchHit>, ApplicationError> {
         let started = Instant::now();
         let result = self.inner.search(document_id, query, limit).await;
-        emit_search_event(started, query, limit, result.as_ref().map(Vec::len).unwrap_or_default(), result.is_ok());
+        emit_search_event(
+            started,
+            query,
+            limit,
+            result.as_ref().map(Vec::len).unwrap_or_default(),
+            result.is_ok(),
+        );
         result
     }
 
@@ -221,7 +227,13 @@ impl SearchIndex for ObservedSearchIndex {
     ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
         let started = Instant::now();
         let result = self.inner.search_lexical(document_id, query, limit).await;
-        emit_search_event(started, query, limit, result.as_ref().map(Vec::len).unwrap_or_default(), result.is_ok());
+        emit_search_event(
+            started,
+            query,
+            limit,
+            result.as_ref().map(Vec::len).unwrap_or_default(),
+            result.is_ok(),
+        );
         result
     }
 }

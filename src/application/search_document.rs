@@ -76,7 +76,7 @@ impl SearchDocumentUseCase {
         let expected_tokenizer_version = self.search_index.tokenizer_version();
         let index_hits = self
             .search_index
-            .search(&command.document_id, query, command.limit)
+            .search_lexical(&command.document_id, query, command.limit)
             .await?;
         let document = self
             .repository

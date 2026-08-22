@@ -1,7 +1,5 @@
 use crate::application::ports::ApplicationError;
-use crate::domain::{
-    Document, NormalizedTextRange, TEXT_SEGMENTATION_VERSION, TextLocator,
-};
+use crate::domain::{Document, NormalizedTextRange, TEXT_SEGMENTATION_VERSION, TextLocator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResolvedLocatorKind {

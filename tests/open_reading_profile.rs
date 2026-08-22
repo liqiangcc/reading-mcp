@@ -1,8 +1,6 @@
 use std::io::{Cursor, Write};
 
-use reading_mcp::application::ports::{
-    DocumentReliabilityInspector, Parser, RetrievedResource,
-};
+use reading_mcp::application::ports::{DocumentReliabilityInspector, Parser, RetrievedResource};
 use reading_mcp::application::reading_profile::{
     READING_PROFILE_SCHEMA_VERSION, ReadingCapabilityAvailability, ReliabilityIntegrity,
     ReliabilitySummary, build_reading_profile,
@@ -52,7 +50,10 @@ async fn canonical_profile_preserves_native_and_coarse_evidence() {
         ReadingCapabilityAvailability::Available
     );
     assert_eq!(
-        profile.capabilities.paragraph_enumeration.segmentation_version,
+        profile
+            .capabilities
+            .paragraph_enumeration
+            .segmentation_version,
         TEXT_SEGMENTATION_VERSION
     );
     assert!(profile.capabilities.lexical_search.precise_candidates);
@@ -175,7 +176,10 @@ async fn degraded_epub_keeps_canonical_readability_and_exposes_source_gap() {
         "navigation_missing_fragment_document_fallback",
     ] {
         assert!(
-            evidence.degradation_codes.iter().any(|actual| actual == code),
+            evidence
+                .degradation_codes
+                .iter()
+                .any(|actual| actual == code),
             "expected degradation code {code:?}"
         );
     }
@@ -191,12 +195,18 @@ async fn missing_required_epub_reliability_evidence_fails_closed() {
         ))
         .await
         .expect("clean EPUB should parse before tampering");
-    document.metadata.remove(EPUB_VALIDATION_REPORT_METADATA_KEY);
+    document
+        .metadata
+        .remove(EPUB_VALIDATION_REPORT_METADATA_KEY);
 
     let error = PersistedDocumentReliabilityInspector
         .inspect(&document)
         .expect_err("required EPUB reliability evidence must not become not_applicable");
-    assert!(error.to_string().contains("missing required reliability evidence"));
+    assert!(
+        error
+            .to_string()
+            .contains("missing required reliability evidence")
+    );
 }
 
 fn resource(source: &str, media_type: &str, bytes: Vec<u8>) -> RetrievedResource {

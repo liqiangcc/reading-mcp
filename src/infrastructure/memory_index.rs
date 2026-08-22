@@ -18,6 +18,10 @@ pub struct InMemorySearchIndex {
 
 #[async_trait]
 impl SearchIndex for InMemorySearchIndex {
+    fn supports_precise_lexical_candidates(&self) -> bool {
+        true
+    }
+
     fn tokenizer_version(&self) -> &'static str {
         LEXICAL_TOKENIZER_VERSION
     }

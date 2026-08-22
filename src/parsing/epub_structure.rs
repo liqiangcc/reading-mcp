@@ -149,13 +149,9 @@ pub(crate) fn reconcile_epub_structure(
 ) -> EpubStructureResult {
     let mut flat_sections = Vec::new();
     let mut source_order = 0usize;
-    for parsed in parsed_spine {
-        flatten_sections(
-            parsed.sections,
-            &parsed,
-            &mut source_order,
-            &mut flat_sections,
-        );
+    for mut parsed in parsed_spine {
+        let sections = std::mem::take(&mut parsed.sections);
+        flatten_sections(sections, &parsed, &mut source_order, &mut flat_sections);
     }
 
     let mut diagnostics = Vec::new();

@@ -83,7 +83,10 @@ async fn sentence_neighbor_and_container_are_locator_driven() {
 
     assert_eq!(container.items.len(), 1);
     assert_eq!(container.items[0].role, ContextItemRole::Container);
-    assert_eq!(container.items[0].effective_kind, ContextItemKind::Paragraph);
+    assert_eq!(
+        container.items[0].effective_kind,
+        ContextItemKind::Paragraph
+    );
     assert_eq!(
         container.items[0].content.as_deref(),
         Some("First sentence. Second sentence.")
@@ -374,8 +377,7 @@ fn document_fixture() -> Document {
                     parent_id: Some(SectionId("section://root".into())),
                     title: "Topic A".into(),
                     level: 2,
-                    content: "First sentence. Second sentence.\n\nThird paragraph sentence."
-                        .into(),
+                    content: "First sentence. Second sentence.\n\nThird paragraph sentence.".into(),
                     location: Location {
                         section_path: vec!["Root".into(), "Topic A".into()],
                         ..Location::default()

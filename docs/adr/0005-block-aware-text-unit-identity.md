@@ -5,7 +5,7 @@
 - Design branch: `design/block-aware-text-unit-identity`
 - Implementation branch: `feat/block-aware-text-unit-identity`
 - Design reviewed against main: `1c95e430819f5e6ae422f3276cbf64ec28b18787`
-- Implementation status: complete; gated by CI #876 (Format / Clippy / Test successful before documentation-only synchronization)
+- Implementation status: complete; final gate includes cache-policy correction to `reading-mcp-normalization/v6`
 - Related: ADR 0002, ADR 0003, ADR 0004, `docs/block-aware-text-unit-identity-migration.md`, `docs/normalized-block-model-contract.md`, `docs/epub-structure-validator-contract.md`
 
 ## Context
@@ -21,6 +21,8 @@ normalized-document-hash/v1
 That identity could not begin consuming native block kind/range/order without an explicit migration: otherwise the same apparent identity could rebuild a different Paragraph/Sentence stream.
 
 Independent source-first review also exposed an evidence limit in `normalized-block-model/v1`: it is a flat maximal non-overlapping projection. A blockquote containing multiple nested `<p>` elements may persist as one BlockQuote range, and normalized text can lose the inner Paragraph separator. Therefore the implementation preserves such regions coarsely rather than fabricating nested precision.
+
+A later implementation review found one additional cache boundary that the original design underestimated: `epub-structure-validator/v1` is persisted inside parser output and its TextUnit coverage is computed from the current Paragraph/Sentence materialization. Advancing segmentation to v2 therefore changes persisted parser output for EPUB even when ZIP/DOM parsing itself is unchanged. Parsed Cache entries produced under normalization v5 must not survive this migration.
 
 ## Decision and implemented behavior
 
@@ -152,13 +154,30 @@ Opening SQLite state with v2 lexical metadata invalidates the old derived rows. 
 
 Invalid persisted block evidence causes lexical rebuild to fail closed rather than panic or silently create fallback locators.
 
-### 8. Parser/cache normalization remains v5
+### 8. Parser/cache normalization advances to v6
+
+Final runtime policy:
 
 ```text
 reading-mcp-normalization/v5
+→ reading-mcp-normalization/v6
 ```
 
-This migration changes normalized address/TextUnit derived identity, not canonical parser-output policy. A blockless persisted Document therefore remains readable through deterministic fallback without forced source re-fetch/reparse.
+The original design expected v5 to remain valid because the native block parser output itself did not change. Implementation review showed that boundary was too narrow.
+
+`CachingParser` keys Parsed Cache entries by:
+
+```text
+final_source
++ raw_sha256
++ normalization_version
+```
+
+and returns a cache hit without reparsing or revalidating the EPUB structure report. Meanwhile `epub-structure-validator/v1` persists Paragraph/Sentence coverage and degradations inside `Document.metadata`. `text-segmentation/v2` changes those persisted facts. Reusing a v5 cached EPUB could therefore expose a v1-era validator report beside current v2 TextUnits.
+
+Normalization v6 makes all v5 Parsed Cache entries miss and forces current parser/validator output to be regenerated. Raw Resource Cache remains reusable; this is a parsed-output invalidation, not an unnecessary source refetch requirement.
+
+A regression test explicitly proves a v5 Parsed Cache key is a miss under current v6 policy.
 
 ### 9. MCP Tool surface remains seven
 
@@ -206,19 +225,18 @@ The implementation gate proves:
 11. v1 Paragraph locators fail `STALE_LOCATOR`;
 12. v1 TextUnit cursors fail `STALE_CURSOR`;
 13. lexical v2 state is invalidated and rebuilt as v3 while tokenizer stays v1;
-14. restart/reopen and existing EPUB validator tests remain green;
-15. existing read/context/search direct handoff remains green;
-16. runtime Tool count remains seven.
+14. normalization v5 Parsed Cache entries miss under v6 so persisted EPUB validator evidence cannot remain on v1 TextUnit semantics;
+15. restart/reopen and existing EPUB validator tests remain green;
+16. existing read/context/search direct handoff remains green;
+17. runtime Tool count remains seven.
 
-CI #876 passed:
+CI #898 passed the implementation and v6 cache-policy correction:
 
 ```text
 Format  success
 Clippy  success
 Test    success
 ```
-
-before the final documentation-only synchronization commits.
 
 ## Consequences
 
@@ -230,11 +248,13 @@ Positive:
 - block-map changes cannot silently reuse old normalized identity;
 - locator/cursor migration is explicitly fail-closed;
 - lexical derived state stays coherent with current TextUnit identity;
+- stale v5 parsed EPUB reports cannot survive the segmentation-v2 migration;
 - blockless formats retain deterministic behavior.
 
 Costs:
 
 - normalized document identity changed globally;
+- parser/cache normalization advances to v6 and old parsed documents are regenerated;
 - old normalized-hash-bound locator/cursor state becomes stale;
 - quote/list Sentence precision remains deferred until nested/leaf block evidence exists;
 - TextUnit materialization must account for native ranges plus uncovered gaps;
@@ -253,4 +273,4 @@ Costs:
 
 ## Review outcome
 
-Implemented as accepted after the source-first correction. Reading MCP now claims only the precision persisted by `normalized-block-model/v1`: native Paragraph is sentence-eligible; flat BlockQuote/ListItem and Preformatted/Table regions remain coarse; uncovered content uses deterministic fallback; all identity-bearing block facts participate in normalized hash v2; old precise state fails stale; lexical state rebuilds under v3; and no new Tool was introduced.
+Implemented as accepted after two source-first corrections. Reading MCP now claims only the precision persisted by `normalized-block-model/v1`: native Paragraph is sentence-eligible; flat BlockQuote/ListItem and Preformatted/Table regions remain coarse; uncovered content uses deterministic fallback; all identity-bearing block facts participate in normalized hash v2; old precise state fails stale; lexical state rebuilds under v3; Parsed Cache advances to normalization v6 because persisted EPUB validator output depends on current TextUnit coverage; and no new Tool was introduced.

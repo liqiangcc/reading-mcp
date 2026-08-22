@@ -2,7 +2,7 @@
 
 ## 目标
 
-Reading MCP 是面向 AI/MCP Client 的统一文档阅读上下文基础设施。它负责获取、解析、结构化、定位、搜索、有序 TextUnit 枚举、按章节读取、上下文展开、缓存与持久化；总结、问答、推理、教学、笔记和通用 RAG 继续由上层 AI 完成。
+Reading MCP 是面向 AI/MCP Client 的统一文档阅读上下文基础设施。它负责获取、解析、结构化、定位、搜索、有序 TextUnit 枚举、精确读取、上下文展开、缓存与持久化；总结、问答、推理、教学、笔记和通用 RAG 继续由上层 AI 完成。
 
 当前核心流程：
 
@@ -14,7 +14,7 @@ list_documents（可选，仅用于授权本地目录发现）
 → get_context / read_document
 ```
 
-Tool 成功不等于阅读任务成功。长 Section 的完整读取或 TextUnit 枚举必须能够在响应预算下继续，直到声明的目标流明确完成，并验证无 gap / overlap。精确阅读契约的目标与演进见 [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)。
+Tool 成功不等于阅读任务成功。长 Section、exact source target 或 TextUnit 枚举必须能够在响应预算下继续，直到声明的目标流明确完成，并验证无 gap / overlap。精确阅读契约的目标与演进见 [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)。
 
 ## 来源
 
@@ -83,6 +83,31 @@ structural(owner_section | ancestors | siblings | children)
 
 Paragraph/Sentence context 必须通过 canonical `TextLocator` ownership/range 解析，不得通过标题或 snippet 二次搜索。Legacy Section-neighbor 语义保持兼容。
 
+`read_document` 也有两条明确 path：
+
+```text
+legacy:
+  document_id + section_id + max_chars? + cursor?
+  → SectionTreeReadStream/v1
+  → selected Section + descendants rendered as the historical stream
+
+precise:
+  document_id + target_locator + max_chars? + cursor?
+  → exact_target
+  → exact canonical source target
+```
+
+Precise read 当前接受：
+
+```text
+Section locator        → exact Section.content only
+Paragraph locator      → exact Paragraph normalized slice
+Sentence locator       → exact Sentence normalized slice
+CharacterRange locator → exact owner-Section normalized range
+```
+
+`section_id` 与 `target_locator` 互斥。Exact target 超出单次 response budget 时必须通过 version-bound ReadCursor 继续，而不是 silently truncate 或要求重新读取整个 Section。
+
 ## 文档模型、TextUnit 与搜索
 
 所有格式统一为 `Document / Section / Location`；精确阅读在 canonical Section 上确定性派生 Paragraph/Sentence TextUnit。
@@ -95,9 +120,9 @@ Search Unit         ≠ Read Unit
 StructuralNode      ≠ TextUnit
 ```
 
-Sentence locator/enumeration/context 当前无需 Sentence SQLite row：同一个 persisted canonical Document + `text-segmentation/v1` 必须确定性重建相同 Sentence facts。Sentence persistence 只有在性能证据需要时才能作为 derived optimization 引入。
+Sentence locator/enumeration/context/read 当前无需 Sentence SQLite row：同一个 persisted canonical Document + `text-segmentation/v1` 必须确定性重建相同 Sentence facts。Sentence persistence 只有在性能证据需要时才能作为 derived optimization 引入。
 
-搜索结果当前必须映射回 owning Section，并返回 source/title/snippet/score/location。未来精确搜索结果还必须返回可直接交给 read/context 的 version-bound `TextLocator`，不能要求 Agent 复制 snippet 再搜索一次。
+搜索结果当前必须映射回 owning Section，并返回 source/title/snippet/score/location。下一精确搜索增量必须返回可直接交给已实现 read/context consumers 的 version-bound `TextLocator`，不能要求 Agent 复制 snippet 再搜索一次。
 
 ## 可追溯性
 
@@ -127,7 +152,23 @@ space    = section-content-unicode-scalar/v1
 
 `Location.char_start/char_end` 继续保持 parser-defined legacy/source semantics。它们不是 normalized range。正式定义见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
 
-`get_text_units` 当前返回 canonical `TextLocator`；`get_context` 已能消费 Section/Paragraph/Sentence locator，并验证 document/raw/normalized identity、owner、ordinal、segmentation version 与 exact range。
+`get_text_units` 返回 canonical `TextLocator`；`get_context` 与 exact `read_document` 已能消费 locator，并验证 document/raw/normalized identity、owner、ordinal、segmentation version 与 exact range。
+
+Precise `read_document` 响应必须区分：
+
+```text
+resolved_target_locator
+= logical source target being read
+
+returned_locator
+= exact CharacterRange represented by this response segment
+```
+
+Legacy Section-tree response 无法由一个 contiguous source range 描述，因此 `returned_locator=null`；exact-target 每个 segment 必须有 truthful returned source range，并满足：
+
+```text
+content == owner_section.normalized_text_slice(returned_locator.normalized_range)
+```
 
 Locator failure 必须明确区分：
 
@@ -139,6 +180,14 @@ STALE_LOCATOR
 不得 fuzzy rebase 到“最相似”的 Paragraph/Sentence。
 
 `TextLocator` 是 canonical source address；`ReadCursor`、`TextUnitCursor` 等 cursor 只是特定 versioned stream 的进度，不能作为引用位置。
+
+Exact-target stream position 也是 target-local progress：
+
+```text
+exact-target-unicode-scalar/v1
+```
+
+它不是 `section-content-unicode-scalar/v1` source range；source range 只能通过 `returned_locator` 表达。
 
 ## TextUnit completion / coverage
 
@@ -180,9 +229,9 @@ Sentence `neighbor` context 使用与 `get_text_units(... preserve_source)` 相�
 - Parser timeout；
 - Normalized Document 字符数、section 数和树深度限制。
 
-所有 bounded response 必须明确 complete/truncated 状态；只要目标尚未完成，就必须提供可操作 continuation 或明确 unsupported/degradation，不能只返回不可继续的 `truncated=true`。
+所有 bounded response 必须明确 complete/truncated 状态；只要声明的 read/enumeration stream 尚未完成，就必须提供可操作 continuation 或明确 unsupported/degradation，不能只返回不可继续的 `truncated=true`。
 
-TextUnit 单元在 enumeration 和 precise context 中都是原子项；不得为了 `max_chars` 截断 Sentence/Paragraph 后继续沿用原 locator 身份。单个精确 item 或 requested precise window 超出预算时必须显式返回资源限制。
+TextUnit 单元在 enumeration 和 precise context 中都是原子项；不得为了 `max_chars` 截断 Sentence/Paragraph 后继续沿用原 locator identity。Precise read 是 canonical source read，因此允许对 oversized target 分段，但每段必须有新的 exact `returned_locator`，且 next ReadCursor 只表示 stream progress。
 
 Structured Paragraph/Sentence/structural context 的 canonical payload 位于 `items[]`，顶层 legacy `content` 不重复同一正文；legacy Section-neighbor 与 Section-container 保留其历史 content projection。
 
@@ -235,6 +284,6 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-测试范围包括架构边界、真实 stdio MCP E2E、TextUnit forward/backward continuation gap/overlap、non-prose/eligible-only coverage、TextLocator-driven context、locator stale/malformed fail-closed、cursor stale/mismatch、持久化重启、HTTP 条件重验证、auth redirect isolation、资源预算、SQLite FTS、Text/Markdown/HTML/PDF acceptance，以及 EPUB/DOCX/OpenAPI 解析。
+测试范围包括架构边界、真实 stdio MCP E2E、TextUnit forward/backward continuation gap/overlap、non-prose/eligible-only coverage、TextLocator-driven context、TextLocator-driven exact read、exact-read continuation/source-range mapping、locator stale/malformed fail-closed、cursor stale/mismatch、持久化重启、HTTP 条件重验证、auth redirect isolation、资源预算、SQLite FTS、Text/Markdown/HTML/PDF acceptance，以及 EPUB/DOCX/OpenAPI 解析。
 
-后续精确阅读增量还必须增加：TextLocator→exact read、SearchHit→TextLocator、stale exact-read locator、EPUB provenance/degradation/coverage 和旧客户端兼容性测试。
+后续精确阅读增量还必须增加：SearchHit→TextLocator direct handoff、Paragraph/Sentence lexical candidate coverage、EPUB provenance/degradation/coverage 和旧客户端兼容性测试。

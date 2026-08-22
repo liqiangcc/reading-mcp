@@ -6,11 +6,11 @@
 - Reviewed against main: `97490792ed1207ff27ed795fbc5f42138dc80784`
 - Related design: `docs/epub-structure-reliability-design.md`
 - Related locator architecture: `docs/adr/0002-text-index-locator-identity.md`
-- Implementation status: `feat/epub-navigation-map` and `feat/epub-structure-reconciliation` are implemented; persisted normalized XHTML block facts are the next EPUB increment. Paragraph/Sentence TextUnit foundations are already implemented independently.
+- Implementation status: `feat/epub-navigation-map`, `feat/epub-structure-reconciliation`, and `feat/normalized-block-model` are implemented. The next EPUB reliability increment is the structure/range/coverage validator. Paragraph/Sentence TextUnit foundations remain independently versioned.
 
 ## Context
 
-Precise Paragraph/Sentence addressing is useful only when the structural parse above it is trustworthy. EPUB parsing now separates package/manifest, spine source order, publisher navigation, and canonical Section reconciliation instead of treating XHTML headings alone as the final book hierarchy.
+Precise Paragraph/Sentence addressing is useful only when the structural parse above it is trustworthy. EPUB parsing now separates package/manifest, spine source order, publisher navigation, canonical Section reconciliation, and persisted native body-block facts instead of treating XHTML headings alone as the final book hierarchy.
 
 The EPUB reliability design was reviewed against the current parser and the W3C EPUB 3.3 Recommendation. The review identified the following required boundaries:
 
@@ -159,7 +159,7 @@ unlinked
 
 A missing fragment may degrade to a document-level target if the containing resource is still trustworthy, and the loss of precision remains visible.
 
-A fragment that exists in the DOM but is not an existing canonical Section boundary does not fabricate a Section; XHTML heading fallback remains until normalized block boundaries are persisted reproducibly.
+A fragment that exists in the DOM but is not an existing canonical Section boundary does not fabricate a Section. The persisted normalized block model now preserves supported body-block boundaries for later validation and future explicitly versioned identity migration, but reconciliation still does not silently promote arbitrary block fragments into Sections.
 
 ### 10. EPUB precise-reading support is capability-graded
 
@@ -179,22 +179,23 @@ Until specialized handling exists:
 
 ### 11. Native block structure precedes sentence segmentation
 
-Within supported XHTML content, meaningful block structure must be preserved before Paragraph/Sentence segmentation.
+Within supported XHTML content, meaningful block structure is preserved before Paragraph/Sentence segmentation.
 
-Block kinds such as:
+The implemented `normalized-block-model/v1` persists these body-block kinds as exact Section-relative ranges:
 
 ```text
-p
-blockquote
-li
-pre
-table
-heading
+p           → paragraph
+blockquote  → blockquote
+li          → list_item
+pre         → preformatted
+table       → table
 ```
 
-must not all be flattened into indistinguishable prose before native block evidence is allowed to influence precise TextUnits.
+Heading evidence remains canonical `Section.title/id/parent/level/location` rather than a fake body block because heading label text is not part of current `Section.content`.
 
-Per ADR 0002, parser-native block boundaries may affect persistent TextUnit identity only if addressing-relevant boundary metadata is materialized into persisted canonical normalized state. This remains the next implementation increment.
+Block ranges are generated while rendering the same normalized text that becomes `Section.content`; they are not recovered later by text search. The current flat model uses a maximal non-overlapping body-block projection so nested selected blocks do not duplicate source text.
+
+Per ADR 0002, persisted native block facts may affect future persistent TextUnit identity only through an explicit identity migration. Current `text-segmentation/v1` and `normalized-document-hash/v1` do not silently reinterpret existing Paragraph/Sentence locators from the new block map.
 
 ### 12. Paragraph and Sentence remain derived TextUnits
 
@@ -202,11 +203,12 @@ EPUB-first reliability does not change the source-truth model:
 
 ```text
 Section.content                 = canonical normalized text
-Paragraph/Sentence TextUnits    = persisted but rebuildable derived state
+NormalizedBlockMap             = persisted canonical normalization evidence
+Paragraph/Sentence TextUnits    = persisted/rebuildable derived state
 FTS/BM25                        = rebuildable retrieval state
 ```
 
-Canonical Section/Chapter text must not depend on reassembling Sentence rows.
+Canonical Section/Chapter text must not depend on reassembling Sentence rows. Current Paragraph/Sentence segmentation remains `text-segmentation/v1`; block-aware segmentation is a separate future migration, not part of the block-persistence increment.
 
 ### 13. Provenance is preferred over subjective confidence
 
@@ -219,9 +221,10 @@ epub_nav
 epub_ncx
 xhtml_heading
 spine_item
+xhtml_native_block
 ```
 
-The reconciliation map retains original heading title/level separately from final canonical title/level/parent so the structural decision remains auditable.
+The reconciliation map retains original heading title/level separately from final canonical title/level/parent so the structural decision remains auditable. Normalized blocks retain native anchor/location when available.
 
 ### 14. Degradation must be visible
 
@@ -251,11 +254,12 @@ Precise-reading readiness requires deterministic validation of:
 - structural/source order;
 - claimed native target resolution;
 - provenance correctness;
+- normalized block owner/index/source-order/range invariants;
 - normalized range bounds;
 - `TextUnit.text == exact slice of Section.content`;
 - Paragraph/Sentence ownership and source order.
 
-Validators report violations; they do not silently repair canonical content. The full EPUB validator remains a later dedicated increment rather than being hidden inside reconciliation.
+`Document::validate_normalized_block_map()` already validates the block-local invariants without repairing source state. The full EPUB validator remains the next dedicated increment and will compose package/navigation/reconciliation/block/TextUnit evidence rather than hiding validation inside parsing.
 
 ### 16. Coverage is evidence
 
@@ -295,8 +299,13 @@ P1 feat/epub-structure-reconciliation          ✓
    - linear/non-linear semantics
    - persisted epub-structure-reconciliation/v1 facts
 
-P1 feat/normalized-block-model                 next
-   - persisted addressing-relevant XHTML block boundaries/kinds
+P1 feat/normalized-block-model                 ✓
+   - persisted normalized-block-model/v1 body-block kinds/ranges
+   - exact Section.content slice ownership
+   - HTML/EPUB native location provenance
+   - nested non-overlap projection
+   - SQLite DocumentRepository reopen evidence
+   - no silent TextUnit identity migration
 
 P1 feat/text-unit-index                        ✓
    - deterministic Paragraph units from persisted canonical state
@@ -304,12 +313,21 @@ P1 feat/text-unit-index                        ✓
 P1 feat/sentence-locator                       ✓
    - deterministic Sentence segmentation
 
-P1 feat/epub-structure-validator               later
-   - structural/range validators
+P1 feat/epub-structure-validator               next
+   - package/navigation/reconciliation/block structural validators
+   - range/provenance/TextUnit invariants
    - coverage diagnostics
 ```
 
-`feat/epub-navigation-map` advanced Parsed Cache policy to `reading-mcp-normalization/v2`. Reconciliation can change canonical Section title/parent/path/hierarchy, so this increment advances it again to `reading-mcp-normalization/v3`. `normalized-document-hash/v1` remains the hash contract: its existing Section inputs naturally change when reconciliation changes canonical structure, making old fine-grained locator/cursor identity stale without redefining the algorithm.
+Parsed Cache policy advanced in evidence-gated parser increments:
+
+```text
+v2 → navigation-map parser output
+v3 → canonical structure reconciliation
+v4 → persisted normalized block output / HTML text normalization correction
+```
+
+`normalized-document-hash/v1` remains the current hash contract. Reconciliation changes its existing Section inputs naturally; block metadata alone does not alter the current hash because `text-segmentation/v1` does not consume block identity yet. A future block-aware segmentation migration must explicitly version its identity inputs rather than silently changing existing locators.
 
 SVG/fixed-layout precise-reading support is a separate capability increment unless pre-research proves it can share the XHTML reliability model without weakening invariants.
 
@@ -324,35 +342,42 @@ An implementation conforms only if all are true:
 5. `linear=no` content is not silently lost;
 6. unsupported SVG/fixed-layout/foreign content is visible in coverage;
 7. reflowable XHTML precision is not falsely generalized to all EPUB content;
-8. native block boundaries are not used for persistent locators unless persisted as canonical addressing-relevant state;
-9. Paragraph/Sentence TextUnits rebuild deterministically;
+8. native body-block facts are persisted as exact canonical Section-relative ranges before any future identity contract depends on them;
+9. current Paragraph/Sentence TextUnits rebuild deterministically under their existing version;
 10. every precise TextUnit is an exact canonical normalized slice;
 11. non-prose blocks are not force-split to inflate sentence coverage;
 12. parser degradation is observable and reproducible;
 13. validator/coverage evidence exists before claiming precise-reading reliability;
 14. navigation can change canonical hierarchy only at proven Section boundaries;
 15. navigation order cannot reorder canonical sibling/root source order against the spine;
-16. reconciliation does not duplicate canonical Section text for TOC aliases/wrappers.
+16. reconciliation does not duplicate canonical Section text for TOC aliases/wrappers;
+17. normalized block ranges are exact owner slices and do not overlap/reorder within an owner;
+18. nested native block selection does not duplicate the same source text;
+19. block source order remains parser/spine source order and is not conflated with reconciled Section-tree traversal;
+20. block persistence alone does not silently mutate `text-segmentation/v1` / existing locator identity.
 
 ## Consequences
 
 Positive:
 
-- publisher-provided EPUB hierarchy now contributes directly to canonical Sections when targets are provable;
+- publisher-provided EPUB hierarchy contributes directly to canonical Sections when targets are provable;
 - source ordering remains auditable and independent from publisher TOC ordering;
-- precise Sentence locators inherit a stronger structural foundation;
+- native XHTML body-block evidence now survives parser and repository recreation;
+- exact block ranges can be validated without reconstructing offsets from snippets;
+- precise Sentence locators inherit a stronger structural foundation without an implicit identity migration;
 - malformed EPUBs can remain readable without creating false precision;
 - EPUB2 compatibility, CJK prose, auxiliary content, and unsupported media can be tested explicitly;
 - PDF can later adopt the same provenance/coverage model while acknowledging its greater inference burden.
 
 Costs:
 
-- EPUB parsing is more than a thin wrapper around `HtmlParser`;
+- EPUB/HTML parsing is more than a thin text flattener;
 - canonical structural facts can change across normalization versions and therefore intentionally stale prior locators;
-- normalized block metadata still needs a future domain/storage extension;
+- the v1 block projection is flat; nested block-tree identity is intentionally deferred;
+- current Paragraph/Sentence segmentation does not yet exploit persisted block evidence;
 - validator and complete coverage remain dedicated follow-up work;
 - precise-reading claims remain capability-specific rather than a single boolean.
 
 ## Review outcome
 
-Accepted. Navigation mapping and canonical reconciliation are now implemented as separate stages: the navigation plane is preserved as provenance, while reconciliation applies publisher labels/hierarchy only at proven Section boundaries and keeps spine/source ordering authoritative. The next evidence-gated step is persisted normalized block structure, followed later by the EPUB validator/full coverage increment.
+Accepted. Navigation mapping, canonical reconciliation, and normalized body-block persistence are implemented as separate evidence-gated stages. Publisher hierarchy only changes proven Section boundaries; spine/source ordering remains authoritative; native blocks are persisted as exact ranges without silently redefining current TextUnit identity. The next step is the EPUB structure/range/provenance/coverage validator, followed by any separately versioned block-aware TextUnit identity migration only when validator evidence supports it.

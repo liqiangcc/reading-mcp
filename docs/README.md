@@ -6,6 +6,7 @@
 - [Text Index & Source Locator Architecture](text-index-and-locator-design.md)：精确阅读的五级寻址、TextUnit/Locator、字符坐标、切分版本与 continuation 契约。
 - [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)：已实现的 normalized-document hash、normalization version、Section-relative Unicode-scalar range、坐标空间隔离和 Parsed Cache 版本约束。
 - [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md)：已实现的 Paragraph v1 确定性分段、stable TextUnit identity、source order、coverage 与 SQLite/InMemory derived TextUnitIndex。
+- [Sentence Locator and Coverage Contract](sentence-locator-contract.md)：已实现的 deterministic Sentence locator foundation、Paragraph ownership、technical-punctuation protection 与 non-prose coarse coverage。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与最终 Tool Contract；包含逐句枚举、SearchHit handoff、stale、non-prose 和 reliability/coverage。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
@@ -36,6 +37,8 @@ adr/0002-text-index-locator-identity.md
 normalized-text-range-contract.md
       ↓
 paragraph-text-unit-index.md
+      ↓
+sentence-locator-contract.md
       ↓
 epub-structure-reliability-design.md
       ↓
@@ -92,10 +95,11 @@ read_document
 ```text
 normalized_document_hash / normalized range
 ReadCursor continuation
-Paragraph TextUnit + TextUnitIndex
+Paragraph TextUnit + Paragraph TextUnitIndex
+Sentence locator + Paragraph ownership + non-prose coverage
 ```
 
-Sentence TextUnit、TextUnitCursor 与 `get_text_units` 尚未实现。Use-Case-First 设计接受的未来 surface 在这些依赖满足后增加一个通用 `get_text_units`；当前文档必须继续区分“已实现 6 Tool”和“已接受但尚未实现的未来第 7 Tool”。
+Sentence persistence、TextUnitCursor 与 `get_text_units` 尚未实现。Use-Case-First 设计接受的未来 surface 在这些依赖满足后增加一个通用 `get_text_units`；当前文档必须继续区分“已实现 6 Tool”和“已接受但尚未实现的未来第 7 Tool”。
 
 格式能力分为两类：
 

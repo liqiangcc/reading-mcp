@@ -80,10 +80,16 @@ async fn legacy_search_adapter_keeps_section_level_handoff_without_precise_port(
         .await
         .expect("legacy adapter should keep working");
 
-    assert_eq!(result.tokenizer_version, "legacy-search-tokenizer/unversioned");
+    assert_eq!(
+        result.tokenizer_version,
+        "legacy-search-tokenizer/unversioned"
+    );
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].candidate_kind, SearchCandidateKind::Section);
-    assert_eq!(result.hits[0].text_locator.owner_section_id.0, "section://topic");
+    assert_eq!(
+        result.hits[0].text_locator.owner_section_id.0,
+        "section://topic"
+    );
     assert!(result.hits[0].text_locator.normalized_range.is_none());
     assert_eq!(
         result.hits[0].location.native_location.as_deref(),

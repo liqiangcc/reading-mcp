@@ -26,6 +26,16 @@ pub struct RetrievedResource {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchHit {
+    pub section_id: SectionId,
+    pub title: String,
+    pub source: DocumentSource,
+    pub snippet: String,
+    pub score: f32,
+    pub location: Location,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SearchHitKind {
     Section,
@@ -44,7 +54,7 @@ impl SearchHitKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SearchHit {
+pub struct LexicalSearchHit {
     pub section_id: SectionId,
     pub title: String,
     pub source: DocumentSource,
@@ -178,4 +188,15 @@ pub trait SearchIndex: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>, ApplicationError>;
+
+    async fn search_lexical(
+        &self,
+        _document_id: &DocumentId,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        Err(ApplicationError::IndexFailed(
+            "search adapter does not implement canonical lexical candidates".into(),
+        ))
+    }
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::body_order::{BODY_ORDER_VERSION, section_body_order};
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::structure_cursor::{
     STRUCTURE_TRAVERSAL_VERSION, StructureCursorClaims, decode_structure_cursor,
@@ -27,6 +28,7 @@ pub struct SectionOutline {
     pub title: String,
     pub level: u8,
     pub location: Location,
+    pub body_order: usize,
     pub children_complete: bool,
     pub children: Vec<SectionOutline>,
 }
@@ -34,6 +36,7 @@ pub struct SectionOutline {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructureStreamSegment {
     pub traversal_version: String,
+    pub body_order_version: String,
     pub root_section_id: Option<SectionId>,
     pub max_depth: Option<u8>,
     pub start_index: usize,
@@ -96,6 +99,7 @@ impl GetDocumentStructureUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let normalized_hash = document.normalized_document_hash();
+        let body_order = section_body_order(&document)?;
 
         if let Some(claims) = &cursor_claims {
             if claims.content_hash != document.content_hash.0 {
@@ -117,6 +121,7 @@ impl GetDocumentStructureUseCase {
             scope.root_section_id.as_ref(),
             scope.effective_max_depth,
             cursor_claims.is_some(),
+            &body_order,
         )?;
         let total_nodes = entries.len();
 
@@ -163,6 +168,7 @@ impl GetDocumentStructureUseCase {
             next_cursor,
             stream: StructureStreamSegment {
                 traversal_version: STRUCTURE_TRAVERSAL_VERSION.into(),
+                body_order_version: BODY_ORDER_VERSION.into(),
                 root_section_id: scope.root_section_id,
                 max_depth: scope.effective_max_depth,
                 start_index,
@@ -244,6 +250,7 @@ struct FlatStructureEntry {
     title: String,
     level: u8,
     location: Location,
+    body_order: usize,
     in_scope_child_ids: Vec<SectionId>,
 }
 
@@ -252,6 +259,7 @@ fn flatten_requested_scope(
     root_section_id: Option<&SectionId>,
     max_depth: Option<u8>,
     from_cursor: bool,
+    body_order: &std::collections::HashMap<SectionId, usize>,
 ) -> Result<Vec<FlatStructureEntry>, ApplicationError> {
     let mut output = Vec::new();
     match root_section_id {
@@ -266,11 +274,11 @@ fn flatten_requested_scope(
                     ApplicationError::SectionNotFound
                 }
             })?;
-            flatten_section(root, 1, max_depth, &mut output);
+            flatten_section(root, 1, max_depth, &mut output, body_order);
         }
         None => {
             for section in &document.root_sections {
-                flatten_section(section, 1, max_depth, &mut output);
+                flatten_section(section, 1, max_depth, &mut output, body_order);
             }
         }
     }
@@ -282,6 +290,7 @@ fn flatten_section(
     depth: u8,
     max_depth: Option<u8>,
     output: &mut Vec<FlatStructureEntry>,
+    body_order: &std::collections::HashMap<SectionId, usize>,
 ) {
     let include_children = max_depth.is_none_or(|limit| depth < limit);
     output.push(FlatStructureEntry {
@@ -290,6 +299,9 @@ fn flatten_section(
         title: section.title.clone(),
         level: section.level,
         location: section.location.clone(),
+        body_order: *body_order
+            .get(&section.id)
+            .expect("validated body order must contain every canonical Section"),
         in_scope_child_ids: if include_children {
             section
                 .children
@@ -303,7 +315,13 @@ fn flatten_section(
 
     if include_children {
         for child in &section.children {
-            flatten_section(child, depth.saturating_add(1), max_depth, output);
+            flatten_section(
+                child,
+                depth.saturating_add(1),
+                max_depth,
+                output,
+                body_order,
+            );
         }
     }
 }
@@ -352,6 +370,7 @@ fn build_page_outline(
         title: entry.title.clone(),
         level: entry.level,
         location: entry.location.clone(),
+        body_order: entry.body_order,
         children_complete: entry
             .in_scope_child_ids
             .iter()

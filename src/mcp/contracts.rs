@@ -213,6 +213,7 @@ pub struct GetDocumentStructureResponse {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct StructureStreamSegmentDto {
     pub traversal_version: String,
+    pub body_order_version: String,
     #[serde(default)]
     pub root_section_id: Option<String>,
     #[serde(default)]
@@ -230,6 +231,7 @@ pub struct SectionNode {
     pub title: String,
     pub level: u8,
     pub location: LocationDto,
+    pub body_order: usize,
     pub children_complete: bool,
     pub children: Vec<SectionNode>,
 }

@@ -20,15 +20,11 @@ impl From<ReadingProfile> for ReadingProfileDto {
             schema_version: profile.schema_version,
             capabilities: ReadingCapabilitiesDto {
                 structural_navigation: StructureCapabilityDto {
-                    availability: availability_dto(
-                        capabilities.structural_navigation.availability,
-                    ),
+                    availability: availability_dto(capabilities.structural_navigation.availability),
                     section_count: capabilities.structural_navigation.section_count,
                 },
                 paragraph_enumeration: SegmentedReadingCapabilityDto {
-                    availability: availability_dto(
-                        capabilities.paragraph_enumeration.availability,
-                    ),
+                    availability: availability_dto(capabilities.paragraph_enumeration.availability),
                     segmentation_version: capabilities.paragraph_enumeration.segmentation_version,
                 },
                 sentence_first_enumeration: SentenceFirstCapabilityDto {

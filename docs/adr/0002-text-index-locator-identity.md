@@ -6,7 +6,7 @@
 - Reviewed against main: `e4ec0ee5a39f6c549afcf17b68d6dfa7ebfe6198`
 - Related design: `docs/text-index-and-locator-design.md`
 - Amended by: `docs/adr/0004-use-case-first-tool-contracts.md` (Tool-count and ordered TextUnit-enumeration decisions only)
-- Implementation status: normalized identity/range, Paragraph TextUnits, Sentence locator/coverage, `get_text_units` + `TextUnitCursor`, locator-driven context, and exact TextLocator read are implemented; SearchHit locator handoff remains future.
+- Implementation status: normalized identity/range, Paragraph TextUnits, Sentence locator/coverage, `get_text_units` + `TextUnitCursor`, locator-driven context, exact TextLocator read, shared locator resolution, and SearchHit → Section TextLocator handoff are implemented; Paragraph/Sentence lexical candidate precision remains future.
 
 ## Context
 
@@ -80,7 +80,7 @@ Raw `content_hash` remains available in locators/results as source provenance.
 
 ### 4. Unified TextLocator
 
-Precise enumeration/read/context share one canonical locator model:
+Enumeration, read, context, and search handoff share one canonical locator model:
 
 ```text
 TextLocator
@@ -98,7 +98,14 @@ TextLocator
 
 Paragraph and Sentence ordinals are human-facing 1-based values.
 
-Current `get_text_units` emits Section/Paragraph/Sentence locators. `get_context` consumes Section/Paragraph/Sentence anchors. Exact `read_document` consumes Section/Paragraph/Sentence plus CharacterRange locators. SearchHit still uses the legacy owning-Section/Location handoff and is the next locator migration.
+Current behavior:
+
+- `get_text_units` emits Section/Paragraph/Sentence locators;
+- `get_context` consumes Section/Paragraph/Sentence anchors;
+- exact `read_document` consumes Section/Paragraph/Sentence plus CharacterRange;
+- current `search_document` emits the strongest truthful locator supported by the existing SearchIndex: the canonical owning Section locator.
+
+Search result enrichment does **not** interpret the current paragraph-like FTS/search-unit split as canonical Paragraph identity. Existing search rows do not carry the canonical normalized range + segmentation facts required to prove Paragraph/Sentence identity.
 
 CharacterRange is represented by a locator with `normalized_range` but no Paragraph/Sentence ordinal or segmentation version. It remains version-bound through document/raw/normalized identity and owner Section.
 
@@ -114,7 +121,7 @@ It is:
 
 Paragraph, Sentence, and CharacterRange do not switch to parent-local coordinate systems. Segmentation tracks exact slices of persisted `Section.content`; it does not trim/rewrite text and then claim reconstructed offsets as canonical ranges.
 
-Existing `Location.char_start` / `char_end` keep parser-defined legacy meaning. Parser-native offsets, normalized ranges, and rendered-response offsets remain distinct coordinate spaces.
+Existing `Location.char_start` / `char_end` keep parser-defined legacy meaning. Parser-native offsets, normalized ranges, search-unit locations, and rendered-response offsets remain distinct coordinate spaces.
 
 Exact read adds another explicitly stream-local coordinate system:
 
@@ -124,7 +131,32 @@ exact-target-unicode-scalar/v1
 
 Those positions are relative to the selected exact target and are continuation progress only. They are not source ranges. Exact read reports source coverage through a separate `returned_locator` CharacterRange.
 
-### 6. Cursor state is not a TextLocator
+### 6. Locator resolution is shared; capability acceptance remains explicit
+
+All locator-consuming application use cases must share one identity/stale resolver for:
+
+```text
+document_id
+content_hash
+normalized_document_hash
+owner Section
+locator shape
+Paragraph/Sentence ordinal
+segmentation version
+normalized range equality
+```
+
+The shared resolver returns a validated locator kind. Individual capabilities then decide which valid kinds they support.
+
+For example:
+
+- exact read supports CharacterRange;
+- current context does not support CharacterRange as an anchor and returns an explicit request-level error;
+- a valid CharacterRange must not be mislabeled `INVALID_LOCATOR` merely because one consumer does not implement that relation.
+
+No consumer may implement a private fuzzy/stale-repair rule.
+
+### 7. Cursor state is not a TextLocator
 
 Continuation is progress state, not source identity.
 
@@ -134,24 +166,7 @@ ReadCursor     = opaque progress through one versioned read stream
 TextUnitCursor = opaque progress through one versioned enumeration stream
 ```
 
-Legacy Section read continuation uses:
-
-```text
-SectionTreeReadStream/v1
-```
-
-A Section-tree `ReadCursor` binds at least:
-
-- `document_id`;
-- raw `content_hash`;
-- `normalized_document_hash`;
-- root `section_id`;
-- `read_mode = section_tree`;
-- `rendering_version = section-tree-markdown/v1`;
-- next rendered-stream position;
-- cursor schema version.
-
-Rendered Section-tree offsets are never canonical source ranges/citations, and a legacy recursive response has `returned_locator=null` because it may contain multiple source regions and inserted heading rendering.
+Legacy Section read continuation uses `SectionTreeReadStream/v1`. A Section-tree `ReadCursor` binds document/raw/normalized identity, root Section, read mode/rendering version, next stream position, and cursor schema.
 
 Exact TextLocator reads use:
 
@@ -160,7 +175,7 @@ read_mode         = exact_target
 rendering_version = exact-normalized-source/v1
 ```
 
-They retain `read-cursor/v2` and add mode-specific optional bindings for target kind, Paragraph/Sentence ordinal, exact target range and segmentation version. Legacy Section-tree v2 cursors omit those fields and preserve their previous serialized claim shape. Exact cursors cannot resume a different target or mode.
+They retain `read-cursor/v2` and add optional exact-target bindings. Legacy Section-tree v2 cursors omit those fields and preserve their previous serialized claim/checksum shape. Exact cursors cannot resume another target or read mode.
 
 Every exact response segment carries a source `returned_locator` satisfying:
 
@@ -168,51 +183,41 @@ Every exact response segment carries a source `returned_locator` satisfying:
 content == owner_section.normalized_text_slice(returned_locator.normalized_range)
 ```
 
-Implemented TextUnit enumeration uses:
+Implemented TextUnit enumeration uses `text-unit-cursor/v1` and binds raw/normalized identity, owner Section, segmentation, kind, direction, coverage policy, next index, stream length, and cursor schema.
 
-```text
-text-unit-cursor/v1
-```
+Every incomplete declared read/enumeration stream exposes actionable continuation. Repeated continuation consumes the declared stream without gaps/overlap when the returned cursor is used as-is.
 
-and binds:
+### 8. Search preserves structural title candidates and truthful precision
 
-- document raw/normalized identity;
-- owner Section target;
-- `text-segmentation/v1`;
-- requested TextUnit kind;
-- direction;
-- coverage policy;
-- next enumeration index;
-- total declared items;
-- cursor schema version.
-
-Current TextUnit v1 starts at a Section boundary and continues by cursor. Anchor policy is not yet part of the runtime request; future `before/after(locator)` start must extend cursor scope explicitly.
-
-Every incomplete declared read/enumeration stream exposes actionable continuation. Repeated continuation consumes the declared stream without gaps/overlap when the returned cursor is used as-is. A cursor fails when required identity or stream contract no longer matches.
-
-### 7. Search preserves structural title candidates
-
-Lexical retrieval design supports three candidate kinds:
+The accepted lexical candidate surface is:
 
 ```text
 section | paragraph | sentence
 ```
 
-- Section candidates preserve current title search, including empty-body Sections.
-- Sentence candidates improve precise terminology/evidence localization.
-- Paragraph candidates preserve local explanatory context/recall.
+A title-only hit resolves to a Section-level locator. It must not be represented by inventing Paragraph/Sentence identity.
 
-A title-only hit resolves to a Section-level locator. It must not be represented by inventing fake Paragraph/Sentence identity.
-
-Client-facing granularity may evolve additively as:
+Current SearchIndex implementations use Section-associated paragraph-like retrieval units for ranking/snippets. Their split/location facts are **not** the canonical Paragraph TextUnit contract. Therefore current `search_document` returns:
 
 ```text
-auto | section | paragraph | sentence
+candidate_kind = section
+text_locator   = canonical owning Section locator
 ```
 
-Existing FTS/BM25-first behavior remains baseline until measured evidence justifies a change. The next precise SearchHit increment must carry a locator directly into the already-implemented read/context consumers; snippet text is preview, never identity.
+while retaining the old snippet/score/legacy Location preview fields.
 
-### 8. Tokenization belongs only to the retrieval layer
+The direct workflow is now implemented:
+
+```text
+SearchHit.text_locator ─┬→ read_document
+                        └→ get_context
+```
+
+Snippet text is preview, never identity. SearchDocumentUseCase constructs the locator from canonical `DocumentRepository` facts after ranking; if the index refers to a missing Section or inconsistent source, it fails instead of fabricating a handoff.
+
+Paragraph/Sentence candidate kinds remain future until the lexical index stores/proves canonical TextUnit identity.
+
+### 9. Tokenization belongs only to the retrieval layer
 
 Sentence is a reading/evidence unit. Token is a retrieval implementation detail.
 
@@ -228,25 +233,20 @@ tokenizer_version
 
 Changing tokenizer configuration rebuilds lexical indexes but must not renumber Paragraph/Sentence TextUnits. A relational token table is not required by default.
 
-### 9. Backward compatibility and Tool-surface amendment
+### 10. Backward compatibility and Tool-surface amendment
 
 Precise evolution remains additive:
 
 - the six pre-existing MCP Tools remain valid;
 - legacy Section-based `read_document` and `get_context` requests continue to work;
-- current `content_hash` semantics remain unchanged;
+- current `search_document(document_id, query, limit)` request remains valid;
+- old SearchHit fields remain present; `candidate_kind + text_locator` are additive;
+- `content_hash` semantics remain unchanged;
 - existing `Location` fields are not silently reinterpreted;
 - new locator/cursor fields are additive;
 - persisted migrations are explicit/tested.
 
-ADR 0004 accepted one generic `get_text_units` Tool because Paragraph/Sentence ordered enumeration is an independent, use-case-proven responsibility. That Tool is now implemented.
-
-Current distinction:
-
-```text
-pre-enumeration compatible surface = six Tools
-current implemented surface        = seven Tools including get_text_units
-```
+ADR 0004 accepted one generic `get_text_units` Tool. Current implemented surface remains seven Tools.
 
 No `get_sentences`, `get_paragraphs`, or format-specific TextUnit Tool is authorized.
 
@@ -254,50 +254,24 @@ No `get_sentences`, `get_paragraphs`, or format-specific TextUnit Tool is author
 
 ```text
 P0 feat/read-continuation                         ✓
-   - SectionTreeReadStream/v1
-   - actionable ReadCursor
-   - raw + normalized document binding
-
 P0 feat/normalized-text-range                    ✓
-   - Section-relative normalized range
-   - deterministic normalized_document_hash
-   - normalization-version diagnostics
-
 P1 feat/text-unit-index                          ✓
-   - deterministic Paragraph TextUnits
-   - persisted/rebuildable Paragraph TextUnitIndex
-
 P1 feat/sentence-locator                         ✓
-   - deterministic Sentence segmentation
-   - non-prose eligibility/coverage
-
 P1 feat/text-unit-enumeration-contract           ✓
-   - generic get_text_units
-   - source-order pagination
-   - TextLocator output
-   - TextUnitCursor + complete/no-gap/no-overlap
-   - preserve_source / eligible_only semantics
-
 P1 feat/context-granularity                      ✓
-   - tagged Paragraph/Sentence neighbor/container/structural context
-   - TextLocator input/validation
-
 P1 feat/precise-read-locator                     ✓
-   - exact Section/Paragraph/Sentence/CharacterRange read
-   - exact-target ReadCursor continuation
-   - resolved target versus returned source locator
+P1 feat/search-locator                           ✓
+   - shared TextLocator resolver
+   - SearchHit candidate_kind + TextLocator
+   - current strongest truthful precision = Section
+   - direct search → read/context handoff
 
-P1 feat/search-locator                           next
-   - first consolidate shared locator resolution before a third consumer
-   - search hits resolve directly to strongest truthful TextLocator
-
-P1 feat/lexical-text-unit-index                  later
+P1 feat/lexical-text-unit-index                  next
    - preserve Section-title candidates
-   - Paragraph + Sentence FTS/BM25
+   - canonical Paragraph + Sentence candidates
    - independently versioned CJK-capable tokenizer policy
+   - index migration/rebuild semantics
 ```
-
-Read continuation remains isolated from TextUnit enumeration state. Locator consumers must share the same identity/stale rules; until shared resolution is extracted, cross-consumer parity tests guard the overlapping read/context semantics.
 
 ## Acceptance invariants
 
@@ -311,29 +285,33 @@ An implementation conforms only if all of these hold:
 6. ReadCursor/TextUnitCursor progress is never exposed as source identity/citation location.
 7. Every incomplete declared stream has deterministic, gap-free, overlap-free continuation or explicit unsupported state.
 8. Exact-read `returned_locator` source ranges reproduce response content exactly and concatenate without gap/overlap across continuation.
-9. Search hits must eventually flow into read/context without re-searching quoted text.
-10. Existing Section-title retrieval is preserved without fabricated Paragraph identity.
-11. Tokenizer changes cannot change TextUnit identity.
-12. CJK/mixed technical text does not depend on whitespace-only tokenization.
-13. Word/Token never becomes a stable source locator level.
-14. Existing six-Tool clients remain valid while current runtime exposes seven Tools.
-15. Given a Section, `get_text_units` returns first/next Paragraph/Sentence-first items and explicit terminal completion.
-16. Code/table/non-prose remains readable or explicitly accounted for without fabricated Sentence identity.
-17. `eligible_only` never claims all-source completion.
-18. Stale locator/cursor identity fails closed and is never fuzzily remapped.
-19. `get_document_structure` never becomes a Paragraph/Sentence tree.
-20. `read_document` never hides TextUnit enumeration behind an ambiguous granularity parameter.
-21. Legacy `section_id` read remains Section-tree mode while a Section `target_locator` reads only that Section's canonical `Section.content`.
-22. Sentence persistence is optional derived optimization, not a source/cursor correctness dependency.
+9. Search hits flow into read/context without re-searching quoted text.
+10. Current search retrieval rows never receive fabricated Paragraph/Sentence identity.
+11. Existing Section-title retrieval is preserved without fabricated Paragraph identity.
+12. Tokenizer changes cannot change TextUnit identity.
+13. CJK/mixed technical text does not depend on whitespace-only tokenization.
+14. Word/Token never becomes a stable source locator level.
+15. Existing six-Tool clients remain valid while current runtime exposes seven Tools.
+16. Given a Section, `get_text_units` returns first/next Paragraph/Sentence-first items and explicit terminal completion.
+17. Code/table/non-prose remains readable or explicitly accounted for without fabricated Sentence identity.
+18. `eligible_only` never claims all-source completion.
+19. Stale locator/cursor identity fails closed and is never fuzzily remapped.
+20. `get_document_structure` never becomes a Paragraph/Sentence tree.
+21. `read_document` never hides TextUnit enumeration behind an ambiguous granularity parameter.
+22. Legacy `section_id` read remains Section-tree mode while a Section `target_locator` reads only that Section's canonical `Section.content`.
+23. Sentence persistence is optional derived optimization, not a source/cursor correctness dependency.
+24. Read/context share the same locator identity resolver; capability-specific unsupported kinds are not misclassified as malformed locators.
+25. SearchIndex row IDs/snippets/legacy search-unit offsets never become canonical source identity.
 
 ## Consequences
 
 Positive:
 
-- precise Sentence-first enumeration, exact read, context recovery and evidence location share one locator model;
+- enumeration, exact read, context, and search handoff share one locator identity model;
+- SearchHit can hand evidence candidates directly into canonical consumers without snippet copying;
 - reindexing/search-engine changes cannot silently redefine source identity;
+- current search precision is truthful even though retrieval rows are smaller than Sections;
 - parser upgrades that alter normalized text are detected even when raw source bytes are unchanged;
-- legacy recursive Section reads retain continuation without contaminating canonical source ranges;
 - exact-target continuation can page a large source target while reporting truthful source coverage per segment;
 - CJK lexical improvements remain isolated from source identity;
 - deterministic reconstruction avoids premature Sentence storage coupling.
@@ -342,14 +320,12 @@ Costs:
 
 - normalized-document fingerprinting is a required primitive;
 - cursor/rendering/segmentation/tokenizer versions require explicit maintenance;
-- exact read adds a second explicit ReadCursor mode and source-range reporting contract;
-- current read/context locator resolution overlaps and must be consolidated before a third consumer is added;
-- future schema migrations must preserve legacy `Location` semantics;
-- Paragraph persistence and runtime Sentence materialization add derived-state/rebuild work;
-- the runtime surface has seven Tools and distinct read/enumeration/context state semantics.
+- SearchDocumentUseCase now needs canonical DocumentRepository facts in addition to SearchIndex ranking;
+- Paragraph/Sentence search precision requires a separate lexical TextUnit index migration rather than reusing legacy search-unit boundaries;
+- future schema migrations must preserve legacy `Location` semantics.
 
 ## Review outcome
 
 Accepted. ADR 0004 amends only Tool-surface/deferment decisions. Locator identity, normalized ranges, source/index separation, tokenizer separation, stale fail-closed behavior, and cursor/source separation remain normative.
 
-Subsequent implementation evidence confirmed the core identity decisions and added operational clarifications: `eligible_only` cannot claim all-source completion; Sentence persistence is unnecessary for restart-safe TextUnit continuation; precise context and precise read can consume the same canonical locator; and exact read must distinguish stream-local progress from the exact source range returned in each response.
+Subsequent implementation evidence confirmed that a direct search handoff does not require pretending the existing FTS row is a canonical Paragraph. The safe bridge is ranking in derived SearchIndex, then canonical Section locator enrichment from DocumentRepository; finer candidate identity remains evidence-gated.

@@ -4,7 +4,9 @@
 >
 > Branch: `feat/precise-read-locator`
 >
-> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/text-unit-enumeration-contract.md`, `docs/context-granularity-contract.md`
+> Follow-up: `feat/search-locator` now hands SearchHit Section locators directly into this consumer.
+>
+> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/text-unit-enumeration-contract.md`, `docs/context-granularity-contract.md`, `docs/search-locator-contract.md`
 
 ## 1. Goal
 
@@ -18,7 +20,7 @@ TextLocator
 read_document(target_locator=...)
 ```
 
-`read_document` now has two deliberately distinct read modes:
+`read_document` has two deliberately distinct read modes:
 
 ```text
 legacy section_id
@@ -71,9 +73,7 @@ normalized_range     = null
 segmentation_version = null
 ```
 
-Exact Section read means **only the canonical `Section.content` of that Section**.
-
-It does not recursively render descendants. This is intentionally different from the legacy `section_id` read.
+Exact Section read means only the canonical `Section.content` of that Section. It does not recursively render descendants.
 
 ### CharacterRange locator
 
@@ -112,7 +112,9 @@ Any mixed or incomplete shape fails as `INVALID_LOCATOR`.
 
 ## 4. Identity validation
 
-Every exact read validates:
+Exact read now delegates locator identity/stale validation to the shared application-level TextLocator resolver also used by structured context.
+
+It validates:
 
 ```text
 document_id
@@ -133,6 +135,8 @@ Rules:
 - no snippet matching;
 - no nearest ordinal/range rebasing.
 
+The shared resolver determines whether a locator is valid; exact read then applies its own capability policy. Exact read accepts Section, CharacterRange, Paragraph, and Sentence.
+
 ## 5. Exact read stream
 
 The exact target has an independently versioned logical stream:
@@ -145,9 +149,7 @@ coordinate_space  = exact-target-unicode-scalar/v1
 
 The logical stream is the target's canonical normalized text with no Markdown heading rendering or descendant insertion.
 
-`stream.start_char/end_char` are zero-based Unicode-scalar positions **relative to that exact target stream**. They are continuation progress, not a source locator.
-
-The distinction remains normative:
+`stream.start_char/end_char` are zero-based Unicode-scalar positions relative to that exact target stream. They are continuation progress, not a source locator.
 
 ```text
 TextLocator            = canonical source identity
@@ -158,19 +160,15 @@ stream.start/end_char  = stream-local progress coordinates
 
 ## 6. `resolved_target_locator` and `returned_locator`
 
-Every read response now carries:
+Every read response carries `resolved_target_locator`.
 
-```text
-resolved_target_locator
-```
-
-For legacy Section-tree mode it is the resolved Section locator. Because rendered Section-tree output cannot be represented as one contiguous canonical source range, legacy responses use:
+For legacy Section-tree mode it is the resolved Section locator. Because rendered Section-tree output cannot be represented as one contiguous canonical source range:
 
 ```text
 returned_locator = null
 ```
 
-For `exact_target`, every response segment carries:
+For `exact_target`, every segment carries:
 
 ```text
 returned_locator = CharacterRange TextLocator
@@ -188,7 +186,7 @@ If an exact target is returned over multiple pages, adjacent source ranges are g
 
 ## 7. Exact-target continuation
 
-Oversized exact targets are not rejected merely because one MCP response budget is smaller than the target. They use actionable `ReadCursor` continuation.
+Oversized exact targets use actionable `ReadCursor` continuation.
 
 Current cursor schema remains:
 
@@ -196,9 +194,7 @@ Current cursor schema remains:
 read-cursor/v2
 ```
 
-For legacy Section-tree cursors, the previous v2 serialized claims remain unchanged.
-
-Exact-target cursors add optional mode-specific bindings:
+Legacy Section-tree v2 serialized claims remain compatible. Exact-target cursors add optional mode-specific bindings:
 
 ```text
 target_kind
@@ -209,20 +205,9 @@ target_range_end?
 target_segmentation_version?
 ```
 
-along with the existing bindings:
+along with document/raw/normalized identity, owner/root Section, read mode, rendering version, next stream position, and cursor schema.
 
-```text
-document_id
-raw content_hash
-normalized_document_hash
-owner/root Section
-read_mode
-rendering_version
-next stream character position
-cursor schema version
-```
-
-A legacy Section-tree cursor cannot be used for exact read and an exact cursor cannot be used for Section-tree read. An exact cursor cannot be resumed with another locator.
+A legacy Section-tree cursor cannot be used for exact read; an exact cursor cannot be used for Section-tree read or another exact locator.
 
 ## 8. Response-budget invariants
 
@@ -249,24 +234,19 @@ complete  = true
 next_cursor = null
 ```
 
-As with legacy continuation, a continuation call with `max_chars=0` is rejected because it cannot advance the stream. Initial zero-budget behavior remains compatible and may return an actionable position-zero cursor for a non-empty target.
+A continuation call with `max_chars=0` is rejected because it cannot advance the stream. Initial zero-budget behavior remains compatible and may return an actionable position-zero cursor for a non-empty target.
 
 ## 9. Acceptance evidence
 
-Tests cover:
+Tests cover exact Sentence/Paragraph/CharacterRange/Section reads, truthful returned source ranges, multi-page no-gap/no-overlap reconstruction, exact cursor target/mode binding, stale/malformed locator failure, real stdio `get_text_units → TextLocator → read_document`, and legacy Section-tree compatibility.
 
-- exact Sentence read;
-- exact Paragraph read;
-- Unicode CharacterRange read;
-- exact Section locator reads only its own `Section.content`;
-- returned source locator slices exactly equal response content;
-- multi-page exact target reconstruction with no gap/overlap;
-- exact cursor target binding;
-- stale normalized-document locator failure;
-- malformed/out-of-bounds locator failure;
-- real stdio `get_text_units → TextLocator → read_document` handoff;
-- real exact-target ReadCursor continuation;
-- legacy Section-tree stdio read compatibility.
+The later search-locator increment additionally proves:
+
+```text
+search_document → SearchHit.text_locator → read_document(target_locator)
+```
+
+using the current truthful Section-level SearchHit locator.
 
 Release gate remains:
 
@@ -276,23 +256,18 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-## 10. Explicit non-goals / next dependency
+## 10. Current non-goals / next dependency
 
-This increment does not implement:
+SearchHit → TextLocator handoff is now implemented. Current SearchIndex can only prove owning Section identity, so SearchHit currently produces a Section locator.
+
+Still deferred:
 
 ```text
-SearchHit → precise TextLocator
-Paragraph/Sentence FTS
+canonical Paragraph/Sentence lexical candidates
+independently versioned CJK/mixed technical tokenizer policy
 anchor-based get_text_units before/after(locator)
 Sentence SQLite persistence
 EPUB parser/navigation restructuring
 ```
 
-With both direct consumers now available:
-
-```text
-TextLocator → read_document
-TextLocator → get_context
-```
-
-the next dependency step is `feat/search-locator`: make SearchHit carry the strongest truthful version-bound TextLocator and hand it directly to both consumers without snippet re-search.
+The next search-precision dependency is `feat/lexical-text-unit-index`: only after the lexical index stores/proves canonical Paragraph/Sentence identity may SearchHit emit those finer candidate kinds.

@@ -40,7 +40,7 @@ async fn search_units_are_smaller_than_logical_read_sections() {
         .await
         .expect("markdown should open and index");
 
-    let searched = SearchDocumentUseCase::new(index)
+    let searched = SearchDocumentUseCase::new(index, repository.clone())
         .execute(SearchDocumentCommand {
             document_id: opened.document_id.clone(),
             query: "replacement algorithms".into(),

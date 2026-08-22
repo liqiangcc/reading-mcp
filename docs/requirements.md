@@ -83,7 +83,7 @@ structural(owner_section | ancestors | siblings | children)
 
 Paragraph/Sentence context 必须通过 canonical `TextLocator` ownership/range 解析，不得通过标题或 snippet 二次搜索。Legacy Section-neighbor 语义保持兼容。
 
-`read_document` 也有两条明确 path：
+`read_document` 有两条明确 path：
 
 ```text
 legacy:
@@ -108,6 +108,41 @@ CharacterRange locator → exact owner-Section normalized range
 
 `section_id` 与 `target_locator` 互斥。Exact target 超出单次 response budget 时必须通过 version-bound ReadCursor 继续，而不是 silently truncate 或要求重新读取整个 Section。
 
+`search_document` 保留原请求：
+
+```text
+document_id
+query
+limit
+```
+
+SearchHit 保留原有：
+
+```text
+section_id
+title
+source
+snippet
+score
+location
+```
+
+并 additive 返回：
+
+```text
+candidate_kind: section | paragraph | sentence
+text_locator: TextLocator
+```
+
+当前 InMemory/SQLite SearchIndex 使用 paragraph-like retrieval rows，但这些 row 的切分/legacy Location 不等价于 canonical Paragraph TextUnit，且没有 normalized range + segmentation identity。因此当前实现只能诚实返回：
+
+```text
+candidate_kind = section
+text_locator   = canonical owning Section locator
+```
+
+`paragraph` / `sentence` candidate kind 只有在后续 lexical TextUnit index 能证明 canonical Paragraph/Sentence identity 后才允许实际产生。Snippet/legacy search-unit Location 继续是 preview/provenance，不能被静默升级为 source identity。
+
 ## 文档模型、TextUnit 与搜索
 
 所有格式统一为 `Document / Section / Location`；精确阅读在 canonical Section 上确定性派生 Paragraph/Sentence TextUnit。
@@ -122,7 +157,7 @@ StructuralNode      ≠ TextUnit
 
 Sentence locator/enumeration/context/read 当前无需 Sentence SQLite row：同一个 persisted canonical Document + `text-segmentation/v1` 必须确定性重建相同 Sentence facts。Sentence persistence 只有在性能证据需要时才能作为 derived optimization 引入。
 
-搜索结果当前必须映射回 owning Section，并返回 source/title/snippet/score/location。下一精确搜索增量必须返回可直接交给已实现 read/context consumers 的 version-bound `TextLocator`，不能要求 Agent 复制 snippet 再搜索一次。
+搜索的职责仍是回答“哪里可能相关”，不是把 SearchIndex row 变成 canonical source truth。`SearchDocumentUseCase` 在 ranking 后回到 `DocumentRepository` 校验 source/owning Section，并构造当前 strongest truthful Section TextLocator。若 index 引用不存在的 canonical Section 或 source 不一致，必须显式失败，而不是伪造 locator。
 
 ## 可追溯性
 
@@ -152,7 +187,9 @@ space    = section-content-unicode-scalar/v1
 
 `Location.char_start/char_end` 继续保持 parser-defined legacy/source semantics。它们不是 normalized range。正式定义见 [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)。
 
-`get_text_units` 返回 canonical `TextLocator`；`get_context` 与 exact `read_document` 已能消费 locator，并验证 document/raw/normalized identity、owner、ordinal、segmentation version 与 exact range。
+`get_text_units` 产生 canonical `TextLocator`；`get_context` 与 exact `read_document` 消费 locator；`search_document` 当前也直接返回 canonical Section locator。read/context 共用一个 application-level resolver 统一 document/raw/normalized identity、owner、Paragraph/Sentence/range/segmentation stale/invalid 规则。
+
+Consumer 仍决定有效 locator shape 是否适合该能力。例如 CharacterRange 是合法 exact-read target，但当前 `get_context` 不接受 CharacterRange anchor；这应返回 unsupported request semantics，而不是把一个合法 locator 说成 malformed。
 
 Precise `read_document` 响应必须区分：
 
@@ -253,6 +290,8 @@ Parsed Cache 必须按 `final_source + raw hash + normalization_version` 隔离�
 
 默认状态目录为 `~/.reading-mcp`，使用持久化 Raw/Parsed Cache、SQLite DocumentRepository、SQLite Paragraph TextUnitIndex 和 SQLite FTS5 SearchIndex。设置 `READING_MCP_STATE_DIR=memory` 可切换纯内存模式。
 
+当前 search-locator handoff 不修改 SearchIndex schema；canonical locator 由 SearchDocumentUseCase 从 DocumentRepository enrich。Paragraph/Sentence FTS 是独立的后续迁移。
+
 ## auth_profile
 
 模型只传 profile 名，不传 Secret。部署侧通过环境变量提供 Bearer Token 与 host allowlist；每次 redirect 都重新执行 profile→host 校验，认证 Raw Cache 按 profile 隔离。
@@ -284,6 +323,6 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-测试范围包括架构边界、真实 stdio MCP E2E、TextUnit forward/backward continuation gap/overlap、non-prose/eligible-only coverage、TextLocator-driven context、TextLocator-driven exact read、exact-read continuation/source-range mapping、locator stale/malformed fail-closed、cursor stale/mismatch、持久化重启、HTTP 条件重验证、auth redirect isolation、资源预算、SQLite FTS、Text/Markdown/HTML/PDF acceptance，以及 EPUB/DOCX/OpenAPI 解析。
+测试范围包括架构边界、真实 stdio MCP E2E、TextUnit forward/backward continuation gap/overlap、non-prose/eligible-only coverage、TextLocator-driven context、TextLocator-driven exact read、SearchHit→Section TextLocator direct handoff、exact-read continuation/source-range mapping、locator stale/malformed fail-closed、cursor stale/mismatch、持久化重启、HTTP 条件重验证、auth redirect isolation、资源预算、SQLite FTS、Text/Markdown/HTML/PDF acceptance，以及 EPUB/DOCX/OpenAPI 解析。
 
-后续精确阅读增量还必须增加：SearchHit→TextLocator direct handoff、Paragraph/Sentence lexical candidate coverage、EPUB provenance/degradation/coverage 和旧客户端兼容性测试。
+后续精确搜索增量还必须增加：canonical Paragraph/Sentence lexical candidates、independently-versioned CJK/mixed technical tokenizer policy、SearchIndex schema/migration evidence，以及 EPUB provenance/degradation/coverage。

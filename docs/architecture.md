@@ -26,7 +26,7 @@ Tool Contract 的设计顺序必须遵守：
 Actor Goal → Use Case → Capability / State Machine → Tool
 ```
 
-详细决策见 [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)、[ADR 0004](adr/0004-use-case-first-tool-contracts.md) 与 [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)。
+详细决策见 [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)、[ADR 0004](adr/0004-use-case-first-tool-contracts.md)、[TextUnit Enumeration Contract](text-unit-enumeration-contract.md)、[Precise Read Locator Contract](precise-read-locator-contract.md) 与 [Search Locator Handoff Contract](search-locator-contract.md)。
 
 ---
 
@@ -62,7 +62,7 @@ retrieval/security/parsing/infrastructure
       application/domain ports
 ```
 
-Document/Section 是 canonical normalized facts；Paragraph/Sentence TextUnit 与 SearchIndex 是可重建派生状态。
+`Document / Section` 是 canonical normalized facts；Paragraph/Sentence TextUnit 与 SearchIndex 是可重建派生状态。
 
 ---
 
@@ -89,7 +89,7 @@ Document/Section 是 canonical normalized facts；Paragraph/Sentence TextUnit �
 
 ### 3.2 Application Use Cases
 
-系统用例编排层。当前 runtime 已实现：
+当前 runtime 已实现：
 
 ```text
 ListDocumentsUseCase
@@ -113,14 +113,24 @@ get_context
 read_document
 ```
 
-`OrderedTextUnitEnumeration` 已独立映射为 `get_text_units`；没有把 Paragraph/Sentence 枚举塞进 `read_document` 或 `get_context`。
-
-仍待实现的独立能力包括：
+已经实现的 precise handoff：
 
 ```text
-Precise locator input / handoff
-Paragraph/Sentence Neighbor / Container / Structural context
-SearchHit precise locator handoff
+get_text_units ─→ TextLocator ─┬→ read_document
+                               └→ get_context
+
+search_document → SearchHit.text_locator ─┬→ read_document
+                                         └→ get_context
+```
+
+`OrderedTextUnitEnumeration` 独立映射为 `get_text_units`；没有把 Paragraph/Sentence 枚举塞进 `read_document` 或 `get_context`。
+
+当前仍待独立演进的能力主要包括：
+
+```text
+canonical Paragraph/Sentence lexical candidates
+independently-versioned CJK/mixed technical tokenizer
+anchor-based get_text_units before/after(locator)
 Reliability / Coverage richer inspection
 ```
 
@@ -213,7 +223,7 @@ DocumentRepository
 └── Document / Section / addressing-relevant persisted facts
 ```
 
-它是读取事实来源。Search snippet、FTS row、rendered MCP response、Paragraph/Sentence rows都不能替代 canonical Document。
+它是读取与定位事实来源。Search snippet、FTS row、rendered MCP response、Paragraph/Sentence rows都不能替代 canonical Document。
 
 ### 3.8 TextUnit、Locator 与 Enumeration
 
@@ -250,7 +260,7 @@ Paragraph TextUnit
   → per-Paragraph Sentence/coarse coverage
 ```
 
-当前 `get_text_units` 直接消费 canonical Document 的 deterministic Paragraph/Sentence materialization，并输出：
+`get_text_units` 直接消费 canonical Document 的 deterministic Paragraph/Sentence materialization，并输出：
 
 ```text
 TextLocator
@@ -260,29 +270,86 @@ coverage
 stream indices
 ```
 
-`TextUnitIndex` 已有独立 application port，以及 InMemory / SQLite adapter，但持久化 schema 仍是 Paragraph-only。Sentence persistence 不是枚举正确性依赖；SQLite DocumentRepository reopen 后 TextUnitCursor 可以重建并继续相同 Sentence stream。
+`TextUnitIndex` 有独立 application port 与 InMemory / SQLite adapter，但持久化 schema 当前仍是 Paragraph-only。Sentence persistence 不是枚举、read、context 的正确性依赖；SQLite DocumentRepository reopen 后仍可重建相同 Sentence stream。
 
-TextUnit identity 依赖 addressing-relevant normalized identity 与 segmentation version，而不能依赖 SearchIndex row ID。
+TextUnit identity 依赖 addressing-relevant normalized identity 与 segmentation version，不能依赖 SearchIndex row ID。
 
-### 3.9 Search Index
+### 3.9 Shared TextLocator Resolver
 
-搜索是 derived retrieval state：
+Exact read 与 structured context 共用一个 application-level locator resolver：
 
 ```text
-Section title candidates
-future Paragraph candidates
-future Sentence candidates
-        ↓
-SearchHit + future direct TextLocator handoff
+TextLocator
+   ↓
+resolve_text_locator(Document, locator)
+   ↓
+validated Section | CharacterRange | Paragraph | Sentence
 ```
 
-当前实现仍以 owning Section + legacy Location handoff；后续 `feat/search-locator` 才把 version-bound `TextLocator` 直接交给 read/context。
+统一负责：
 
-当前 FTS `SearchIndex` 尚未改用 Paragraph TextUnitIndex 或 Sentence locator；职责和迁移节奏保持独立。
+```text
+document_id
+raw content_hash
+normalized_document_hash
+owner Section
+locator shape
+Paragraph/Sentence ordinal
+segmentation version
+normalized range equality
+INVALID_LOCATOR / STALE_LOCATOR
+```
+
+Resolver 只判断 canonical identity。Capability 再决定是否接受某种合法 locator：
+
+- exact read 接受 Section / CharacterRange / Paragraph / Sentence；
+- current context 接受 Section / Paragraph / Sentence；
+- CharacterRange 对 context 是 unsupported relation semantics，不是 malformed locator。
+
+禁止每个 consumer 私有实现不同的 fuzzy/stale-repair 规则。
+
+### 3.10 Search Index
+
+SearchIndex 是 derived retrieval state，而不是 source identity：
+
+```text
+current Section title candidates
+current paragraph-like retrieval rows
+future canonical Paragraph candidates
+future canonical Sentence candidates
+        ↓
+rank / snippet
+```
+
+当前 InMemory/SQLite SearchIndex 的 paragraph-like row 使用历史 retrieval split / legacy `Location`，没有 canonical `normalized_range + segmentation_version`，因此不能被解释成 Paragraph TextUnit。
+
+当前 SearchDocumentUseCase 使用两阶段 handoff：
+
+```text
+SearchIndex.search(...)
+      ↓
+ranked bounded hits
+      ↓
+DocumentRepository.get(document_id)
+      ↓
+validate source + owning Section
+      ↓
+SearchHit {
+  legacy preview fields,
+  candidate_kind = section,
+  text_locator = canonical Section TextLocator
+}
+```
+
+所以当前 SearchHit 已能直接交给 read/context，但 precision 诚实停留在 Section。
+
+Paragraph/Sentence candidate kind 属于后续 `feat/lexical-text-unit-index`，必须由 canonical TextUnit facts 和 tokenizer/index versioning 支撑。
+
+当前 search-locator 增量不修改 InMemory/SQLite SearchIndex implementation/schema。
 
 Search answers “where?”，不承担 unbounded canonical body read。
 
-### 3.10 Cache / Persistent State
+### 3.11 Cache / Persistent State
 
 逻辑职责保持独立：
 
@@ -294,7 +361,7 @@ TextUnitIndex        # Paragraph persisted
 SearchIndex
 ```
 
-Sentence enumeration currently materializes from canonical Document and does not add a Sentence store.
+Sentence 当前从 canonical Document materialize，不增加第二个 source store。
 
 实现可共享一个物理 SQLite 文件，但 ports/事实语义不能合并。
 
@@ -375,7 +442,7 @@ Sentence 不是 child Section；canonical Section 也不能通过拼接 TextUnit
 
 ### 4.4 Location 与 TextLocator
 
-当前 legacy `Location`：
+Legacy `Location`：
 
 ```text
 Location
@@ -389,7 +456,7 @@ Location
 └── native_location
 ```
 
-当前 `get_text_units` 已输出统一精确地址：
+Canonical `TextLocator`：
 
 ```text
 TextLocator
@@ -404,17 +471,24 @@ TextLocator
 └── native_location / provenance?
 ```
 
-三个坐标空间必须分离：
+当前 locator flow：
 
 ```text
-parser/native source coordinates
-normalized owner Section.content coordinates
-rendered MCP response/read-stream coordinates
+get_text_units                 → Section/Paragraph/Sentence locator
+search_document                → current Section locator
+read_document(target_locator)  ← Section/Paragraph/Sentence/CharacterRange
+get_context(target_locator)    ← Section/Paragraph/Sentence
 ```
 
-只有 normalized owner coordinates 能作为通用精确 source range。
+三个主要坐标空间必须分离：
 
-当前 Locator 是 enumeration 输出；read/context/search 的 Locator 输入/直接 handoff 仍属后续增量。
+```text
+parser/native/search-unit source coordinates
+normalized owner Section.content coordinates
+rendered/read-stream progress coordinates
+```
+
+只有 normalized owner coordinates 能作为通用精确 source range。Legacy `Location` 或 search-unit marker 不因 SearchHit 增加 TextLocator 而改变语义。
 
 ### 4.5 Cursor
 
@@ -438,9 +512,9 @@ StructureCursor
 SearchCursor
 ```
 
-Cursor 彼此不可交换，也不能用于引用。rendered read-stream offset 或 TextUnit stream index 不能转成 source locator。
+Cursor 彼此不可交换，也不能用于引用。rendered/exact-target read-stream offset 或 TextUnit stream index 不能转成 source locator。
 
-`TextUnitCursor` 当前绑定 raw/normalized identity、target Section、segmentation version、requested kind、direction、coverage policy、next index 与 total items。
+`TextUnitCursor` 绑定 raw/normalized identity、target Section、segmentation version、requested kind、direction、coverage policy、next index 与 total items。
 
 ---
 
@@ -475,7 +549,7 @@ document/version identity
 + segmentation version
 ```
 
-Paragraph TextUnitId、Sentence TextUnitId 和 enumeration TextLocator 均按上述原则确定性生成。
+Paragraph TextUnitId、Sentence TextUnitId 和 precise TextLocator 按上述原则确定性生成。
 
 禁止旧 locator fuzzy-map 到新文档中“最相似”的句子。
 
@@ -490,16 +564,23 @@ Search Unit    ≠ Read stream
 Index          ≠ Document
 ```
 
-结构优先保留 source/native hierarchy；Paragraph/Sentence 在 canonical persisted state 上确定性派生；SearchIndex 后续引用 locator；canonical read 最终回到 source facts。
+结构优先保留 source/native hierarchy；Paragraph/Sentence 在 canonical persisted state 上确定性派生；SearchIndex 负责 retrieval ranking；SearchDocumentUseCase 回到 canonical Document 构造当前 truthful locator；canonical read 最终回到 source facts。
 
-当前职责明确分离：
+当前职责：
 
 ```text
 read_document
-  = read already-known Section target / continue one read stream
+  = legacy Section-tree stream
+  | exact already-known TextLocator target
 
 get_text_units
-  = discover/enumerate ordered Paragraph/Sentence-first reading items inside one Section
+  = discover/enumerate ordered Paragraph/Sentence-first items
+
+search_document
+  = bounded lexical candidates + truthful locator handoff
+
+get_context
+  = bounded neighbor/container/structural expansion around known anchor
 ```
 
 `get_text_units` 不递归吸收 child Sections；结构顺序由 `get_document_structure` 和 Agent workflow 控制。
@@ -530,32 +611,33 @@ get_text_units
   → TextLocator + TextUnitCursor + coverage
 
 search_document
-  → LexicalSearch
-  → SearchIndex
+  → LexicalSearch + LocatorHandoff
+  → SearchIndex ranking
+  → DocumentRepository canonical Section enrichment
+  → candidate_kind=section + TextLocator
 
 read_document
-  → PreciseRead (current target: Section subtree)
-  → DocumentRepository + ReadCursor
+  → PreciseRead
+  → legacy SectionTreeReadStream | exact TextLocator target
+  → DocumentRepository + shared locator resolver + ReadCursor
 
 get_context
-  → NeighborContext (current: Section level)
-  → DocumentRepository
+  → NeighborContext | ContainerContext | StructuralContext
+  → DocumentRepository + shared locator resolver
 ```
 
 ### Accepted future evolution
 
 ```text
 get_text_units
-  → future anchor-based before/after(locator) start
-
-read_document
-  → TextLocator exact target input
-
-get_context
-  → tagged Neighbor | Container | Structural context with TextLocator anchor
+  → anchor-based before/after(locator) start
 
 search_document
-  → Section/Paragraph/Sentence candidate + direct TextLocator handoff
+  → canonical Paragraph/Sentence candidates
+  → independently-versioned tokenizer/index policy
+
+open/structure/enumeration
+  → richer reliability / coverage inspection
 ```
 
 Reliability/Coverage、StableCitation、FreshnessValidation 和 NativeTraceability 是跨结果契约，不自动产生额外 Tool。
@@ -596,10 +678,10 @@ Sentence locator/enumeration 不增加第二个 source store。需要时从 cano
 
 ## 9. Complete Reading State Machines
 
-### Section read stream
+### Section-tree / exact read stream
 
 ```text
-read target
+known read target
   ↓
 response budget reached?
  ├─ no  → complete
@@ -608,9 +690,13 @@ response budget reached?
           continue until complete
 ```
 
+Legacy Section-tree stream positions是 rendered coordinates；exact-target positions 是 target-local progress。两者都不是 citation/source locator。
+
+Exact response 用 `returned_locator` 单独声明本页真实 source CharacterRange。
+
 `truncated=true` 没有 continuation 不构成完整阅读语义。
 
-### TextUnit stream（implemented）
+### TextUnit stream
 
 ```text
 select Section
@@ -636,7 +722,7 @@ TextUnit 本身是 enumeration 原子项；`max_chars` 不允许把一个 Senten
 
 ## 10. Context Semantics
 
-必须明确区分：
+明确区分：
 
 ```text
 neighbor context    # same-level before/after
@@ -644,35 +730,45 @@ container context   # Sentence→Paragraph, TextUnit→Section
 structural context  # owner/ancestors/siblings/children
 ```
 
-可以共用 `get_context`，但请求必须是 tagged relation。不能通过一个模糊 `mode/unit/before/after` 参数袋隐式改变语义。
+共用 `get_context`，但请求是 tagged relation。不能通过模糊参数袋隐式改变语义。
 
-当前 legacy Section `before/after` 只映射到 `neighbor(unit=section)`。TextLocator anchor 已有输出基础，但 context 输入尚未迁移。
+当前 legacy Section `before/after` 只映射到 `neighbor(unit=section)`；structured path 已接受 Section/Paragraph/Sentence TextLocator。
+
+Identity 先由 shared resolver 验证，再由 relation/capability 验证 anchor kind。
 
 ---
 
 ## 11. Search Handoff
 
-当前 coarse handoff：
+当前已实现：
 
 ```text
-SearchHit → owning Section → read/context
-```
-
-未来 precise handoff：
-
-```text
-SearchHit(candidate_kind + TextLocator)
-             ├→ read_document
-             └→ get_context
+SearchIndex ranked hit
+        ↓
+SearchDocumentUseCase
+        ↓
+canonical DocumentRepository validation/enrichment
+        ↓
+SearchHit {
+  legacy snippet/score/location,
+  candidate_kind = section,
+  text_locator = owning Section locator
+}
+        ├→ read_document(target_locator)
+        └→ get_context(target_locator, relation)
 ```
 
 禁止：
 
 ```text
 SearchHit.snippet → copy → search again
+legacy search-unit Location → pretend canonical Paragraph range
+index row ID → source identity
 ```
 
 Title-only Section hit 必须保留，不能伪造 Paragraph/Sentence 来统一 schema。
+
+未来 lexical TextUnit index 可以把 candidate kind 升级为 Paragraph/Sentence，但前提是索引保存或可验证 canonical TextUnit locator facts。
 
 ---
 
@@ -717,7 +813,7 @@ paragraph_chars / sentence_chars / separator_chars / coarse_only_chars
 sentence_count
 ```
 
-`get_text_units` 在此基础上返回 Section enumeration coverage：
+`get_text_units` 返回 Section enumeration coverage：
 
 ```text
 owner_chars
@@ -784,12 +880,20 @@ BrowserRetriever
 
 ## 15. 错误模型
 
-当前稳定类别包括 source/retrieval/parse/repository/index/text-unit-index/document/section/invalid-request/cursor 等。
-
-后续 precise locator-input contracts 还需要稳定逻辑错误类别：
+稳定 locator/cursor 类别包括：
 
 ```text
+INVALID_LOCATOR
 STALE_LOCATOR
+INVALID_CURSOR
+STALE_CURSOR
+CURSOR_TARGET_MISMATCH
+CURSOR_ENCODING_FAILED
+```
+
+仍需按后续 capability 增量完善的逻辑类别包括：
+
+```text
 UNSUPPORTED_CAPABILITY
 INVALID_NORMALIZED_RANGE
 STRUCTURE_INVARIANT_FAILED
@@ -797,18 +901,10 @@ TEXT_UNIT_INVARIANT_FAILED
 COVERAGE_INCOMPLETE
 ```
 
-当前 ReadCursor/TextUnitCursor 已使用：
-
-```text
-INVALID_CURSOR
-STALE_CURSOR
-CURSOR_TARGET_MISMATCH
-CURSOR_ENCODING_FAILED
-```
-
 规则：
 
 - locator/cursor identity mismatch fail closed；
+- unsupported locator kind for one capability 不等于 malformed locator；
 - re-open/re-parse 是显式 workflow；
 - fallback 只在 lower precision 可被真实证明时允许；
 - MCP Adapter 返回稳定 `code + retryable`，但不泄露正文/Secret。
@@ -830,6 +926,7 @@ src/
 │   ├── search_document
 │   ├── get_context
 │   ├── read_document
+│   ├── locator_resolution
 │   ├── read_cursor
 │   └── text_unit_cursor
 ├── domain/
@@ -858,7 +955,8 @@ Parsing ≠ indexing
 Indexing ≠ reading
 Reading ≠ reasoning
 StructuralNode ≠ TextUnit
-Search unit ≠ canonical read target
+Search unit ≠ canonical TextUnit
+Search candidate ≠ SearchIndex row identity
 TextLocator ≠ Cursor
 ReadCursor ≠ TextUnitCursor
 Neighbor context ≠ Container context ≠ Structural context
@@ -867,4 +965,4 @@ Security policy ≠ HTTP implementation
 Fallback ≠ native precision
 ```
 
-只要这些边界保持稳定，后续增加 Parser、Retriever、TextUnit/FTS 或 precise-reading capability 都不需要破坏核心架构。
+只要这些边界保持稳定，后续增加 Parser、Retriever、canonical Paragraph/Sentence lexical index 或 precise-reading capability 都不需要破坏核心架构。

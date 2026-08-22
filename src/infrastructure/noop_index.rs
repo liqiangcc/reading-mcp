@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::application::ports::{ApplicationError, SearchHit, SearchIndex};
+use crate::application::ports::{ApplicationError, LexicalSearchHit, SearchHit, SearchIndex};
 use crate::domain::{Document, DocumentId};
 
 #[derive(Default)]
@@ -18,6 +18,15 @@ impl SearchIndex for NoopSearchIndex {
         _query: &str,
         _limit: usize,
     ) -> Result<Vec<SearchHit>, ApplicationError> {
+        Ok(vec![])
+    }
+
+    async fn search_lexical(
+        &self,
+        _document_id: &DocumentId,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
         Ok(vec![])
     }
 }

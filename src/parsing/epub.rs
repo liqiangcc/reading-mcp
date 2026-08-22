@@ -167,7 +167,6 @@ impl Parser for EpubParser {
                 .collect::<Vec<_>>();
             parsed_spine_documents.push(ParsedSpineDocument {
                 spine_index: ordinal,
-                idref: spine_item.idref.clone(),
                 linear,
                 entry_path: entry_path.clone(),
                 sections,

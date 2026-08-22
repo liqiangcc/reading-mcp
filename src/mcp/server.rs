@@ -573,7 +573,7 @@ fn coverage_policy(value: TextUnitCoveragePolicyDto) -> TextUnitCoveragePolicy {
 fn coverage_policy_dto(value: TextUnitCoveragePolicy) -> TextUnitCoveragePolicyDto {
     match value {
         TextUnitCoveragePolicy::PreserveSource => TextUnitCoveragePolicyDto::PreserveSource,
-        TextUnitCoveragePolicyDto::EligibleOnly => TextUnitCoveragePolicy::EligibleOnly,
+        TextUnitCoveragePolicy::EligibleOnly => TextUnitCoveragePolicyDto::EligibleOnly,
     }
 }
 

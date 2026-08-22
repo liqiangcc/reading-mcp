@@ -2,6 +2,7 @@ mod archive;
 mod common;
 mod docx;
 mod epub;
+mod epub_navigation;
 mod html;
 mod limited_pdf;
 mod markdown;

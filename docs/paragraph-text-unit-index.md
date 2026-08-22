@@ -127,7 +127,9 @@ owner_chars = paragraph_chars + separator_chars
 
 Whitespace separators are intentionally not fabricated as Paragraph TextUnits. They are known structural separators, not unsupported gaps.
 
-Non-prose eligibility/classification is deliberately deferred to `feat/sentence-locator`, matching ADR 0002. This increment does not call code/table content a Sentence, does not invent format-specific TextUnit kinds, and does not claim Sentence coverage.
+The subsequent `feat/sentence-locator` increment now implements deterministic Sentence identity plus conservative persisted-text classification for obvious fenced/indented code and Markdown tables. Those non-prose Paragraphs remain Paragraph-addressable and are reported as coarse-only rather than receiving fabricated Sentence children. See [Sentence Locator and Coverage Contract](sentence-locator-contract.md).
+
+The persisted Paragraph TextUnitIndex itself remains Paragraph-only; Sentence persistence and pagination are intentionally left to the enumeration contract.
 
 ## 6. TextUnitIndex boundary
 
@@ -217,12 +219,14 @@ It validates:
 ```text
 every unit belongs to the requested document_id
 source_order is contiguous and matches input order
+paragraph ordinal is non-zero
 persisted numeric fields are representable
 persisted normalized ranges are ordered
+persisted range length equals exact Unicode-scalar text length
 persisted kind is supported
 ```
 
-Reopening the SQLite adapter must reproduce the same ordered TextUnit values.
+Reopening the SQLite adapter must reproduce the same ordered Paragraph TextUnit values.
 
 ## 10. Acceptance evidence
 
@@ -241,7 +245,8 @@ Tests cover:
 - deterministic cross-Section source order;
 - rebuild equality after canonical Document SQLite round-trip;
 - InMemory/OpenDocument integration;
-- SQLite TextUnitIndex persistence and replacement.
+- SQLite TextUnitIndex persistence and replacement;
+- rejection of malformed derived Paragraph rows.
 
 The normal repository release gate remains:
 
@@ -251,14 +256,12 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-## 11. Non-goals
+## 11. Current boundary and next step
 
-This increment does not implement:
+Paragraph indexing is complete for this foundation. Sentence locator identity and non-prose coverage are now implemented separately, but the following remain intentionally unimplemented:
 
 ```text
-Sentence TextUnits
-Sentence segmentation
-non-prose Sentence eligibility/coverage
+Sentence persistence migration
 TextLocator wire DTOs
 get_text_units
 TextUnitCursor
@@ -268,4 +271,4 @@ Paragraph/Sentence FTS
 EPUB structure/parser changes
 ```
 
-The next dependency step is `feat/sentence-locator`.
+The next dependency step is `feat/text-unit-enumeration-contract`.

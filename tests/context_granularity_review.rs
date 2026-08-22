@@ -62,7 +62,10 @@ async fn sentence_context_matches_preserve_source_enumeration_order_and_coarse_s
     assert_eq!(context.items.len(), enumeration.items.len());
     for (context_item, enumeration_item) in context.items.iter().zip(&enumeration.items) {
         assert_eq!(context_item.locator, enumeration_item.locator);
-        assert_eq!(context_item.content.as_deref(), Some(enumeration_item.text.as_str()));
+        assert_eq!(
+            context_item.content.as_deref(),
+            Some(enumeration_item.text.as_str())
+        );
     }
     assert_eq!(context.items[0].effective_kind, ContextItemKind::Paragraph);
     assert!(context.items[0].degradation.is_some());

@@ -95,14 +95,13 @@ impl Parser for EpubParser {
             if !is_supported_content_media_type(&manifest_item.media_type) {
                 continue;
             }
-            let entry_path = resolve_archive_path(&package_path, &manifest_item.href).map_err(
-                |message| {
+            let entry_path =
+                resolve_archive_path(&package_path, &manifest_item.href).map_err(|message| {
                     ApplicationError::ParseFailed(format!(
                         "EPUB manifest path {:?} is invalid: {message}",
                         manifest_item.href
                     ))
-                },
-            )?;
+                })?;
             let xhtml = read_entry(&mut archive, &entry_path, &self.limits, &mut total_read)?;
             remember_fragment_index(
                 &mut fragment_cache,

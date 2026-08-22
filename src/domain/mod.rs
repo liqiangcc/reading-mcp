@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 
 mod normalized_text;
+mod text_unit;
 
 pub use normalized_text::{
     NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE,
     NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
+};
+pub use text_unit::{
+    TEXT_SEGMENTATION_VERSION, TEXT_UNIT_ID_VERSION, ParagraphSectionCoverage, ParagraphTextUnitSet,
+    TextUnit, TextUnitId, TextUnitKind,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

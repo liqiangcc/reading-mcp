@@ -340,7 +340,8 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         ApplicationError::CursorEncodingFailed(_)
         | ApplicationError::RepositoryFailed(_)
         | ApplicationError::CacheFailed(_)
-        | ApplicationError::IndexFailed(_) => ErrorData::internal_error(message, data),
+        | ApplicationError::IndexFailed(_)
+        | ApplicationError::TextUnitIndexFailed(_) => ErrorData::internal_error(message, data),
     }
 }
 
@@ -361,6 +362,7 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::RepositoryFailed(_) => ("REPOSITORY_FAILED", true),
         ApplicationError::CacheFailed(_) => ("CACHE_FAILED", true),
         ApplicationError::IndexFailed(_) => ("INDEX_FAILED", true),
+        ApplicationError::TextUnitIndexFailed(_) => ("TEXT_UNIT_INDEX_FAILED", true),
     }
 }
 
@@ -390,6 +392,10 @@ mod tests {
         assert_eq!(
             error_descriptor(&ApplicationError::CursorTargetMismatch("wrong".into())),
             ("CURSOR_TARGET_MISMATCH", false)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::TextUnitIndexFailed("sqlite".into())),
+            ("TEXT_UNIT_INDEX_FAILED", true)
         );
     }
 }

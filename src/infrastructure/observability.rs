@@ -227,6 +227,7 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::RepositoryFailed(_) => "repository_failed",
         ApplicationError::CacheFailed(_) => "cache_failed",
         ApplicationError::IndexFailed(_) => "index_failed",
+        ApplicationError::TextUnitIndexFailed(_) => "text_unit_index_failed",
         ApplicationError::DocumentNotFound => "document_not_found",
         ApplicationError::SectionNotFound => "section_not_found",
         ApplicationError::InvalidCursor(_) => "invalid_cursor",

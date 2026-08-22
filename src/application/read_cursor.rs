@@ -237,6 +237,19 @@ mod tests {
     }
 
     #[test]
+    fn pre_exact_v2_section_cursor_fixture_remains_valid() {
+        // Captured from the pre-exact-target v2 claim shape. Optional exact-target
+        // fields must deserialize as None and, because they are omitted during
+        // serialization, must not invalidate the historical checksum.
+        const PRE_EXACT_V2_CURSOR: &str = "rc1.7b22636c61696d73223a7b22736368656d615f76657273696f6e223a22726561642d637572736f722f7632222c22646f63756d656e745f6964223a22646f633a31222c22636f6e74656e745f68617368223a227368613235363a726177222c226e6f726d616c697a65645f646f63756d656e745f68617368223a227368613235363a6e6f726d616c697a6564222c2273656374696f6e5f6964223a2273656374696f6e3a2f2f726f6f74222c22726561645f6d6f6465223a2273656374696f6e5f74726565222c2272656e646572696e675f76657273696f6e223a2273656374696f6e2d747265652d6d61726b646f776e2f7631222c226e6578745f63686172223a34327d2c22636865636b73756d223a227368613235363a33643266633263646235313961356665376633323038663739353131363432633033333533633635306338353736333736353131393439343264303734353466227d";
+
+        assert_eq!(
+            decode_read_cursor(PRE_EXACT_V2_CURSOR).expect("pre-exact v2 cursor should decode"),
+            claims()
+        );
+    }
+
+    #[test]
     fn exact_cursor_round_trip_preserves_target_bindings() {
         let expected = ReadCursorClaims::new_exact(
             "doc:1".into(),

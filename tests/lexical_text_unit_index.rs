@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use reading_mcp::application::ports::{
-    DocumentRepository, LEXICAL_TOKENIZER_VERSION, SearchIndex,
-};
+use reading_mcp::application::ports::{DocumentRepository, LEXICAL_TOKENIZER_VERSION, SearchIndex};
 use reading_mcp::application::search_document::{
     SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
 };
@@ -64,20 +62,25 @@ async fn in_memory_search_emits_truthful_section_paragraph_and_sentence_candidat
         })
         .await
         .expect("technical identifier search");
-    assert!(technical
-        .hits
-        .iter()
-        .any(|hit| hit.candidate_kind == SearchCandidateKind::Paragraph));
-    assert!(technical
-        .hits
-        .iter()
-        .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence));
+    assert!(
+        technical
+            .hits
+            .iter()
+            .any(|hit| hit.candidate_kind == SearchCandidateKind::Paragraph)
+    );
+    assert!(
+        technical
+            .hits
+            .iter()
+            .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence)
+    );
 }
 
 #[tokio::test]
 async fn non_prose_is_searchable_as_paragraph_without_fake_sentence_candidate() {
     let mut document = fixture();
-    document.root_sections[0].content = "```rust\nlet unsafe_marker = read_cursor_v2();\n```".into();
+    document.root_sections[0].content =
+        "```rust\nlet unsafe_marker = read_cursor_v2();\n```".into();
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let index = Arc::new(InMemorySearchIndex::default());
     repository.save(document.clone()).await.expect("save");
@@ -92,14 +95,18 @@ async fn non_prose_is_searchable_as_paragraph_without_fake_sentence_candidate() 
         .await
         .expect("search code paragraph");
 
-    assert!(result
-        .hits
-        .iter()
-        .any(|hit| hit.candidate_kind == SearchCandidateKind::Paragraph));
-    assert!(!result
-        .hits
-        .iter()
-        .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence));
+    assert!(
+        result
+            .hits
+            .iter()
+            .any(|hit| hit.candidate_kind == SearchCandidateKind::Paragraph)
+    );
+    assert!(
+        !result
+            .hits
+            .iter()
+            .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence)
+    );
 }
 
 #[tokio::test]
@@ -121,13 +128,16 @@ async fn sqlite_lexical_candidates_and_tokenizer_version_survive_reopen() {
             })
             .await
             .expect("initial search");
-        assert!(result
-            .hits
-            .iter()
-            .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence));
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence)
+        );
     }
 
-    let repository = Arc::new(SqliteDocumentRepository::open(&database).expect("reopen repository"));
+    let repository =
+        Arc::new(SqliteDocumentRepository::open(&database).expect("reopen repository"));
     let index = Arc::new(SqliteSearchIndex::open(&database).expect("reopen index"));
     assert_eq!(index.tokenizer_version(), LEXICAL_TOKENIZER_VERSION);
     let result = SearchDocumentUseCase::new(index, repository)
@@ -139,10 +149,12 @@ async fn sqlite_lexical_candidates_and_tokenizer_version_survive_reopen() {
         .await
         .expect("persistent CJK search");
     assert_eq!(result.tokenizer_version, LEXICAL_TOKENIZER_VERSION);
-    assert!(result
-        .hits
-        .iter()
-        .any(|hit| hit.candidate_kind == SearchCandidateKind::Section));
+    assert!(
+        result
+            .hits
+            .iter()
+            .any(|hit| hit.candidate_kind == SearchCandidateKind::Section)
+    );
 }
 
 fn fixture() -> Document {

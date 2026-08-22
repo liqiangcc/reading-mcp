@@ -214,7 +214,7 @@ DocumentRepository
 
 它是读取事实来源。Search snippet、FTS row、rendered MCP response、Sentence rows都不能替代 canonical Document。
 
-### 3.8 TextUnit Index（Paragraph implemented; Sentence future）
+### 3.8 TextUnit Index 与 Sentence Locator
 
 Paragraph/Sentence 是 deterministic、versioned、rebuildable TextUnits：
 
@@ -226,18 +226,30 @@ TextUnit segmentation policy
 Paragraph / Sentence TextUnits
 ```
 
-当前已实现 Paragraph v1：
+当前已实现 Paragraph v1 持久化派生索引：
 
 ```text
 text-segmentation/v1
 Section.content
   → exact Paragraph NormalizedTextRange
-  → deterministic TextUnitId
-  → source_order
+  → deterministic Paragraph TextUnitId
+  → Paragraph source_order
   → TextUnitIndex
 ```
 
-`TextUnitIndex` 已有独立 application port，以及 InMemory / SQLite adapter。它是 derived state；`DocumentRepository` 仍是 source truth。Sentence TextUnit、TextUnitCursor 与 MCP enumeration 仍属于后续增量。
+当前也已实现 Sentence locator foundation：
+
+```text
+Paragraph TextUnit
+  → conservative persisted-text eligibility/classification
+  → deterministic English/CJK Sentence segmentation
+  → exact Section-relative Sentence NormalizedTextRange
+  → paragraph_index + sentence_index + parent_paragraph_id
+  → deterministic Sentence TextUnitId/source_order
+  → per-Paragraph Sentence/coarse coverage
+```
+
+`TextUnitIndex` 已有独立 application port，以及 InMemory / SQLite adapter，但当前持久化 schema 仍是 Paragraph-only。Sentence locator state 由 canonical Document + Paragraph TextUnit 确定性重建；Sentence persistence、TextUnitCursor 与 MCP enumeration 仍属于后续增量。
 
 TextUnit identity 必须依赖 addressing-relevant normalized identity 与 segmentation version，而不能依赖易失 SearchIndex row ID。
 
@@ -255,7 +267,7 @@ SearchHit + TextLocator
 
 当前实现以 owning Section + legacy Location handoff；未来必须返回 version-bound `TextLocator`，直接进入 read/context。
 
-当前 FTS `SearchIndex` 尚未改用 Paragraph TextUnitIndex；两者职责和迁移节奏保持独立。
+当前 FTS `SearchIndex` 尚未改用 Paragraph TextUnitIndex 或 Sentence locator；职责和迁移节奏保持独立。
 
 Search answers “where?”，不承担 unbounded canonical body read。
 
@@ -267,7 +279,7 @@ Search answers “where?”，不承担 unbounded canonical body read。
 RawResourceCache
 ParsedDocumentCache
 DocumentRepository
-TextUnitIndex        # Paragraph implemented; Sentence future
+TextUnitIndex        # Paragraph persisted; Sentence locator rebuildable
 SearchIndex
 ```
 
@@ -307,7 +319,7 @@ Section
 
 Chapter/Section/Subsection 是递归 StructuralNode，不是多个不同技术索引层。
 
-### 4.3 TextUnit（Paragraph implemented; Sentence future）
+### 4.3 TextUnit（Paragraph persisted; Sentence locator implemented）
 
 当前 Paragraph TextUnit：
 
@@ -326,9 +338,27 @@ TextUnit
 └── segmentation_version
 ```
 
-未来 Sentence 会复用相同 normalized identity/range 基础，并增加 Paragraph ownership / sentence ordinal 与 non-prose eligibility 语义。TextLocator wire contract 仍未实现。
+当前 Sentence locator：
 
-Sentence 不是 child Section；canonical Section 也不能通过拼接 TextUnit rows 重建。
+```text
+SentenceTextUnit
+├── id: TextUnitId
+├── document_id
+├── content_hash                  # raw provenance
+├── normalized_document_hash
+├── owner_section_id
+├── paragraph_index               # 1-based container
+├── sentence_index                # 1-based within Paragraph
+├── parent_paragraph_id
+├── source_order                  # deterministic Sentence stream order
+├── normalized_range              # exact Section.content slice
+├── text                          # exact slice
+└── segmentation_version
+```
+
+明显 fenced/indented code 与 Markdown table 以 coarse Paragraph coverage 表示，不伪造 Sentence。当前分类来自 persisted-text strong signals，不冒充 parser-native block provenance。
+
+Sentence 不是 child Section；canonical Section 也不能通过拼接 TextUnit rows 重建。TextLocator wire contract 仍未实现。
 
 ### 4.4 Location 与 TextLocator
 
@@ -423,7 +453,7 @@ document/version identity
 + segmentation version
 ```
 
-当前 Paragraph TextUnitId 已按上述原则确定性生成；未来 TextLocator 继续复用该身份基础。
+当前 Paragraph TextUnitId 与 Sentence TextUnitId 均按上述原则确定性生成；未来 TextLocator 继续复用该身份基础。
 
 禁止旧 locator fuzzy-map 到新文档中“最相似”的句子。
 
@@ -450,7 +480,7 @@ get_text_units
   = discover/enumerate ordered child reading items
 ```
 
-当前 Paragraph TextUnitIndex 只是底层派生索引，不等于 `get_text_units` 已可用。
+当前已经具备 Paragraph TextUnitIndex 与 Sentence locator/coverage 底层基础，但不等于 `get_text_units` 已可用。
 
 ---
 
@@ -485,12 +515,14 @@ get_context
   → DocumentRepository
 ```
 
+Sentence locator is currently a deterministic domain capability, not a seventh runtime Tool.
+
 ### Accepted future evolution
 
 ```text
 get_text_units
   → OrderedTextUnitEnumeration
-  → TextUnitIndex + Locator validation
+  → Paragraph TextUnitIndex + Sentence locator/materialization + Locator validation
 
 read_document
   → Section/TextLocator read + ReadCursor continuation
@@ -532,6 +564,8 @@ build/rebuild SearchIndex
 return version + capability/reliability/coverage summary
 ```
 
+Sentence locator state does not add a second source store and is currently materialized deterministically from canonical Document + Paragraph units when needed by domain/tests. The future enumeration contract will decide its pagination/storage boundary.
+
 重复打开相同 normalized version 应保持身份稳定；source 或 canonical normalized facts 变化必须可观察。可读但 precise capability 降级时，open 成功并显式报告，不得伪造完整 native structure。
 
 ---
@@ -568,7 +602,7 @@ section_complete
 
 在 source-preserving policy 下，每个 source region 必须被 reading item 表示或被 coverage 显式说明。code/table 不得为了 coverage 被伪造为 Sentence。
 
-上述 TextUnit stream 是已接受的未来 Tool workflow；当前只实现了 Paragraph TextUnit 底层派生索引。
+上述 TextUnit stream 是已接受的未来 Tool workflow；当前已实现 Paragraph 派生索引和 Sentence locator/non-prose coverage，但尚未实现 TextUnitCursor、分页或 `get_text_units` Tool。
 
 ---
 
@@ -641,7 +675,27 @@ Coverage 需要定义清楚 denominator：
 - non-prose coarse/skipped counts；
 - unsupported gaps。
 
-当前 Paragraph v1 额外维护每个 Section 的 `owner_chars / paragraph_chars / separator_chars / paragraph_count`，只说明 Paragraph 与分隔符的确定性覆盖；它不提前宣称 Sentence/non-prose eligibility coverage。
+当前 Paragraph v1 维护每个 Section 的：
+
+```text
+owner_chars / paragraph_chars / separator_chars / paragraph_count
+```
+
+当前 Sentence locator foundation 维护每个 Paragraph 的：
+
+```text
+content_class / eligibility
+paragraph_chars / sentence_chars / separator_chars / coarse_only_chars
+sentence_count
+```
+
+并保证：
+
+```text
+paragraph_chars = sentence_chars + separator_chars + coarse_only_chars
+```
+
+明显 code/table 内容使用 coarse-only coverage，不伪造 Sentence；`prose_or_unknown` 只表示没有 strong non-prose signal，不声称 native prose provenance。
 
 Reliability/Coverage 信息应在 open/structure/TextUnit enumeration 等决策点返回。没有独立 Use Case 前不增加 inspection Tool。
 

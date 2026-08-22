@@ -3,7 +3,7 @@ use std::io::{Cursor, Write};
 use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievedResource};
 use reading_mcp::domain::{
     DocumentSource, MediaType, NORMALIZED_BLOCK_MODEL_VERSION, NormalizedBlockKind,
-    NormalizedBlockMap, NormalizedTextRange,
+    NormalizedTextRange,
 };
 use reading_mcp::infrastructure::SqliteDocumentRepository;
 use reading_mcp::parsing::{ArchiveLimits, EpubParser, HtmlParser};

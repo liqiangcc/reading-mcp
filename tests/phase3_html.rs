@@ -80,7 +80,7 @@ async fn html_reuses_open_structure_search_and_read_without_special_use_cases() 
         "section://operating-systems/virtual-memory/page-tables"
     );
 
-    let searched = SearchDocumentUseCase::new(index)
+    let searched = SearchDocumentUseCase::new(index, repository.clone())
         .execute(SearchDocumentCommand {
             document_id: opened.document_id.clone(),
             query: "replacement algorithms".into(),

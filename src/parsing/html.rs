@@ -355,7 +355,7 @@ fn render_blocks(
         normalized_blocks.push(NormalizedBlock {
             owner_section_id: owner_section_id.clone(),
             block_index: offset + 1,
-            source_order: 0,
+            source_order: offset,
             kind: block.kind,
             normalized_range,
             native_anchor: block.anchor.clone(),

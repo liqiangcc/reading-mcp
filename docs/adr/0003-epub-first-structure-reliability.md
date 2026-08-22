@@ -6,11 +6,11 @@
 - Reviewed against main: `97490792ed1207ff27ed795fbc5f42138dc80784`
 - Related design: `docs/epub-structure-reliability-design.md`
 - Related locator architecture: `docs/adr/0002-text-index-locator-identity.md`
-- Implementation status: `feat/epub-navigation-map` is implemented; nav/spine/heading structural reconciliation is the next EPUB increment. Paragraph/Sentence TextUnit foundations are already implemented independently.
+- Implementation status: `feat/epub-navigation-map` and `feat/epub-structure-reconciliation` are implemented; persisted normalized XHTML block facts are the next EPUB increment. Paragraph/Sentence TextUnit foundations are already implemented independently.
 
 ## Context
 
-Precise Paragraph/Sentence addressing is useful only when the structural parse above it is trustworthy. The existing EPUB implementation already reads `container.xml`, the package document, manifest, and spine, then delegates readable XHTML spine items to the generic HTML parser. This preserves default item order and some native entry/anchor information, but the resulting Section hierarchy currently comes from XHTML `h1`–`h6` reconstruction rather than the publisher's EPUB navigation hierarchy.
+Precise Paragraph/Sentence addressing is useful only when the structural parse above it is trustworthy. EPUB parsing now separates package/manifest, spine source order, publisher navigation, and canonical Section reconciliation instead of treating XHTML headings alone as the final book hierarchy.
 
 The EPUB reliability design was reviewed against the current parser and the W3C EPUB 3.3 Recommendation. The review identified the following required boundaries:
 
@@ -70,9 +70,11 @@ spine-item fallback node
 
 A weaker source may supplement missing detail but cannot overwrite provenance and pretend to be a stronger source.
 
+The implemented reconciliation applies this precedence only when stronger navigation evidence maps to a real canonical Section boundary. It never creates fake Sections merely to mirror a TOC node.
+
 ### 5. EPUB 3 navigation is first-class input
 
-The parser must discover the EPUB navigation document through package/manifest metadata, including the `nav` resource property, rather than by filename convention.
+The parser discovers the EPUB navigation document through package/manifest metadata, including the `nav` resource property, rather than by filename convention.
 
 The `toc nav` hierarchy is the primary publisher navigation hierarchy. Each navigation node preserves at least:
 
@@ -87,23 +89,23 @@ provenance = epub_nav
 resolution status
 ```
 
-The navigation document must be parsed for structure before any generic HTML normalization removes `nav` elements.
+The navigation document is parsed for structure before generic HTML normalization removes `nav` elements.
 
 ### 6. Legacy NCX is compatibility provenance
 
-When a legacy NCX is used, its nodes may populate the same logical navigation contract but retain:
+When a legacy NCX is used, its nodes populate the same logical navigation contract but retain:
 
 ```text
 provenance = epub_ncx
 ```
 
-NCX must never be labeled as EPUB 3 navigation structure.
+NCX is never labeled as EPUB 3 navigation structure.
 
 ### 7. Spine order remains authoritative for source order
 
 The spine determines deterministic top-level content ordering.
 
-For each spine reference, persist/derive enough facts to audit order and support coverage:
+For each spine reference, reconciliation records:
 
 ```text
 spine_index
@@ -115,7 +117,7 @@ media type
 parse status
 ```
 
-Malformed navigation must not be allowed to reorder source content contrary to resolved spine/document order.
+Malformed or differently ordered navigation cannot reorder canonical sibling/root source content contrary to resolved spine/document order. Such conflicts are diagnostic facts.
 
 ### 8. `linear=no` is auxiliary, not nonexistent
 
@@ -128,7 +130,7 @@ linear=yes/omitted → primary reading sequence
 linear=no          → auxiliary spine content
 ```
 
-Search/read coverage may include both, while clients can later choose primary-only traversal when the contract supports it.
+Supported `linear=no` XHTML/XML is currently parsed into the canonical Document and tagged as auxiliary in `epub-structure-reconciliation/v1`. A future traversal contract may allow primary-only navigation without deleting the source.
 
 ### 9. Navigation targets must be resolved, not merely parsed
 
@@ -142,7 +144,7 @@ href
  → document/DOM position
 ```
 
-Resolution state is explicit. At minimum distinguish:
+Resolution state distinguishes:
 
 ```text
 resolved_document
@@ -151,9 +153,13 @@ missing_fragment
 missing_resource
 unsupported_resource
 invalid_path
+malformed_resource
+unlinked
 ```
 
-A missing fragment may degrade to a document-level target if the containing resource is still trustworthy, but the loss of precision must be visible.
+A missing fragment may degrade to a document-level target if the containing resource is still trustworthy, and the loss of precision remains visible.
+
+A fragment that exists in the DOM but is not an existing canonical Section boundary does not fabricate a Section; XHTML heading fallback remains until normalized block boundaries are persisted reproducibly.
 
 ### 10. EPUB precise-reading support is capability-graded
 
@@ -173,7 +179,7 @@ Until specialized handling exists:
 
 ### 11. Native block structure precedes sentence segmentation
 
-Within supported XHTML content, meaningful block structure is preserved before Paragraph/Sentence segmentation.
+Within supported XHTML content, meaningful block structure must be preserved before Paragraph/Sentence segmentation.
 
 Block kinds such as:
 
@@ -186,9 +192,9 @@ table
 heading
 ```
 
-must not all be flattened into indistinguishable prose before future precise TextUnits are derived.
+must not all be flattened into indistinguishable prose before native block evidence is allowed to influence precise TextUnits.
 
-Per ADR 0002, parser-native block boundaries may affect persistent TextUnit identity only if addressing-relevant boundary metadata is materialized into persisted canonical normalized state.
+Per ADR 0002, parser-native block boundaries may affect persistent TextUnit identity only if addressing-relevant boundary metadata is materialized into persisted canonical normalized state. This remains the next implementation increment.
 
 ### 12. Paragraph and Sentence remain derived TextUnits
 
@@ -206,18 +212,16 @@ Canonical Section/Chapter text must not depend on reassembling Sentence rows.
 
 Structural/boundary records use factual provenance and status rather than ungrounded numeric confidence scores.
 
-Examples:
+Implemented structural provenance includes:
 
 ```text
-source = epub_nav
-status = resolved
-
-source = xhtml_heading
-status = fallback
-
-source = normalized_block
-status = inferred
+epub_nav
+epub_ncx
+xhtml_heading
+spine_item
 ```
+
+The reconciliation map retains original heading title/level separately from final canonical title/level/parent so the structural decision remains auditable.
 
 ### 14. Degradation must be visible
 
@@ -229,7 +233,9 @@ Recoverable structural failures preserve readable content but emit diagnostics/c
 missing/malformed nav
 missing/malformed NCX
 unresolved TOC fragment
-malformed heading hierarchy
+navigation target not at a Section boundary
+navigation order conflicting with spine order
+unmapped navigation parent
 unsupported auxiliary resource
 intentional sentence-split skip for non-prose
 ```
@@ -249,7 +255,7 @@ Precise-reading readiness requires deterministic validation of:
 - `TextUnit.text == exact slice of Section.content`;
 - Paragraph/Sentence ownership and source order.
 
-Validators report violations; they do not silently repair canonical content.
+Validators report violations; they do not silently repair canonical content. The full EPUB validator remains a later dedicated increment rather than being hidden inside reconciliation.
 
 ### 16. Coverage is evidence
 
@@ -257,7 +263,7 @@ EPUB parsing must be able to report structural/textual coverage dimensions such 
 
 ```text
 spine items total / parsed
-navigation nodes total / resolved
+navigation nodes total / resolved / applied
 fragment targets total / resolved
 content documents total / parsed
 normalized blocks represented
@@ -280,15 +286,16 @@ P1 feat/epub-navigation-map                    ✓
    - archive-safe target/fragment resolution diagnostics
    - legacy NCX fallback provenance
    - persisted epub-navigation-map/v1 parser fact
-   - no canonical Section rewrite yet
 
-P1 feat/epub-structure-reconciliation          next
-   - reconcile nav hierarchy with spine/document order
+P1 feat/epub-structure-reconciliation          ✓
+   - nav/NCX → proven Section boundary mapping
+   - spine-authoritative canonical source order
    - XHTML heading/spine fallback
    - structural provenance
    - linear/non-linear semantics
+   - persisted epub-structure-reconciliation/v1 facts
 
-P1 feat/normalized-block-model                 later
+P1 feat/normalized-block-model                 next
    - persisted addressing-relevant XHTML block boundaries/kinds
 
 P1 feat/text-unit-index                        ✓
@@ -302,7 +309,7 @@ P1 feat/epub-structure-validator               later
    - coverage diagnostics
 ```
 
-`feat/epub-navigation-map` persists navigation in `Document.metadata` only. Because this changes parser output but not current Section addressing facts, Parsed Cache version advances to `reading-mcp-normalization/v2` while `normalized-document-hash/v1` remains unchanged. The next reconciliation increment may change canonical Section facts and therefore normalized hash values naturally.
+`feat/epub-navigation-map` advanced Parsed Cache policy to `reading-mcp-normalization/v2`. Reconciliation can change canonical Section title/parent/path/hierarchy, so this increment advances it again to `reading-mcp-normalization/v3`. `normalized-document-hash/v1` remains the hash contract: its existing Section inputs naturally change when reconciliation changes canonical structure, making old fine-grained locator/cursor identity stale without redefining the algorithm.
 
 SVG/fixed-layout precise-reading support is a separate capability increment unless pre-research proves it can share the XHTML reliability model without weakening invariants.
 
@@ -322,13 +329,17 @@ An implementation conforms only if all are true:
 10. every precise TextUnit is an exact canonical normalized slice;
 11. non-prose blocks are not force-split to inflate sentence coverage;
 12. parser degradation is observable and reproducible;
-13. validator/coverage evidence exists before claiming precise-reading reliability.
+13. validator/coverage evidence exists before claiming precise-reading reliability;
+14. navigation can change canonical hierarchy only at proven Section boundaries;
+15. navigation order cannot reorder canonical sibling/root source order against the spine;
+16. reconciliation does not duplicate canonical Section text for TOC aliases/wrappers.
 
 ## Consequences
 
 Positive:
 
-- publisher-provided EPUB structure is preserved instead of needlessly re-inferred;
+- publisher-provided EPUB hierarchy now contributes directly to canonical Sections when targets are provable;
+- source ordering remains auditable and independent from publisher TOC ordering;
 - precise Sentence locators inherit a stronger structural foundation;
 - malformed EPUBs can remain readable without creating false precision;
 - EPUB2 compatibility, CJK prose, auxiliary content, and unsupported media can be tested explicitly;
@@ -336,11 +347,12 @@ Positive:
 
 Costs:
 
-- EPUB parsing becomes more than a thin wrapper around `HtmlParser`;
-- canonical block metadata likely needs a future domain/storage extension;
-- navigation/spine reconciliation and coverage introduce additional state and fixtures;
-- precise-reading claims become capability-specific rather than a single boolean.
+- EPUB parsing is more than a thin wrapper around `HtmlParser`;
+- canonical structural facts can change across normalization versions and therefore intentionally stale prior locators;
+- normalized block metadata still needs a future domain/storage extension;
+- validator and complete coverage remain dedicated follow-up work;
+- precise-reading claims remain capability-specific rather than a single boolean.
 
 ## Review outcome
 
-Accepted. The architecture is sufficiently constrained to continue detailed pre-research later. The first implementation increment now realizes the navigation-map plane without collapsing it into spine order or canonical Section hierarchy; reconciliation, block persistence, validator and full coverage remain separate evidence-gated steps.
+Accepted. Navigation mapping and canonical reconciliation are now implemented as separate stages: the navigation plane is preserved as provenance, while reconciliation applies publisher labels/hierarchy only at proven Section boundaries and keeps spine/source ordering authoritative. The next evidence-gated step is persisted normalized block structure, followed later by the EPUB validator/full coverage increment.

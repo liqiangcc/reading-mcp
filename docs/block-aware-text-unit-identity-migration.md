@@ -47,6 +47,8 @@ Paragraph v1 split only by blank lines and used text heuristics for obvious code
 
 The migration therefore advances both normalized identity and segmentation policy explicitly.
 
+Implementation review also found that `epub-structure-validator/v1` persists TextUnit coverage inside parser output. Because that coverage changes under segmentation v2, Parsed Cache policy must advance too; otherwise an old normalization-v5 EPUB Document could retain a v1-era validation report beside current v2 TextUnits.
+
 ## 3. Source-of-truth boundary
 
 ```text
@@ -307,13 +309,18 @@ Coarse BlockQuote/ListItem/Preformatted/Table regions remain Paragraph lexical c
 
 ## 12. Parser/cache boundary
 
-Parser/cache normalization remains:
+Parsed Document policy advances:
 
 ```text
 reading-mcp-normalization/v5
+→ reading-mcp-normalization/v6
 ```
 
-The migration changes normalized address/TextUnit identity rather than parser-output policy. Blockless persisted Documents continue through deterministic fallback and are not forcibly re-fetched/reparsed merely to obtain native blocks.
+`CachingParser` uses normalization version as part of the Parsed Cache key and returns a cache hit without re-running the parser or EPUB validator.
+
+Although native block parser output itself is unchanged, `epub-structure-validator/v1` is part of persisted parser output and records current Paragraph/Sentence coverage. Segmentation v2 changes those persisted facts, so normalization v5 is not a safe cache identity for the new runtime.
+
+A v5 Parsed Cache entry therefore misses under v6 and the parser/validator regenerates current output. Raw Resource Cache can still be reused, so this does not imply an unnecessary network/source refetch.
 
 ## 13. MCP Tool impact
 
@@ -356,9 +363,10 @@ New migration tests prove:
 12. old v1 TextUnit cursors fail `STALE_CURSOR`;
 13. lexical v2 derived state is invalidated and rebuilt under v3;
 14. `lexical-tokenizer/v1` remains unchanged;
-15. existing EPUB navigation/reconciliation/validator, precise read, context, search and stdio suites remain green.
+15. normalization-v5 Parsed Cache lookup misses under current v6 policy;
+16. existing EPUB navigation/reconciliation/validator, precise read, context, search and stdio suites remain green.
 
-CI #876 passed before final docs-only synchronization:
+CI #898 passed after the v6 cache-policy correction:
 
 ```text
 Format  success

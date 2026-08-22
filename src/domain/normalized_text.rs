@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Document, Section};
 
-pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v1";
+pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v2";
 pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v1";
 pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scalar/v1";
 
@@ -92,10 +92,9 @@ pub enum NormalizedTextRangeError {
 impl fmt::Display for NormalizedTextRangeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::StartAfterEnd { start, end } => write!(
-                formatter,
-                "normalized range start {start} exceeds end {end}"
-            ),
+            Self::StartAfterEnd { start, end } => {
+                write!(formatter, "normalized range start {start} is after end {end}")
+            }
             Self::OutOfBounds {
                 start,
                 end,
@@ -110,13 +109,18 @@ impl fmt::Display for NormalizedTextRangeError {
 
 impl Error for NormalizedTextRangeError {}
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NormalizedDocumentHashVersion(pub String);
+
 impl Document {
     pub fn normalized_document_hash(&self) -> NormalizedDocumentHash {
         let mut hasher = Sha256::new();
         hasher.update(NORMALIZED_DOCUMENT_HASH_DOMAIN);
-        hash_usize(&mut hasher, self.root_sections.len());
+        update_string(&mut hasher, &self.title);
+        update_string(&mut hasher, &self.media_type.0);
+        update_usize(&mut hasher, self.root_sections.len());
         for section in &self.root_sections {
-            hash_section(&mut hasher, section);
+            update_section(&mut hasher, section);
         }
         NormalizedDocumentHash(format!("sha256:{:x}", hasher.finalize()))
     }
@@ -142,45 +146,43 @@ impl Section {
     }
 }
 
-fn hash_section(hasher: &mut Sha256, section: &Section) {
-    hasher.update(b"section\0");
-    hash_text(hasher, &section.id.0);
-    hash_optional_text(
-        hasher,
-        section.parent_id.as_ref().map(|value| value.0.as_str()),
-    );
-    hash_text(hasher, &section.title);
+fn update_section(hasher: &mut Sha256, section: &Section) {
+    update_string(hasher, &section.id.0);
+    update_optional_string(hasher, section.parent_id.as_ref().map(|value| value.0.as_str()));
+    update_string(hasher, &section.title);
     hasher.update([section.level]);
-    hash_text(hasher, &section.content);
-    hash_usize(hasher, section.children.len());
+    update_string(hasher, &section.content);
+    update_usize(hasher, section.children.len());
     for child in &section.children {
-        hash_section(hasher, child);
+        update_section(hasher, child);
     }
 }
 
-fn hash_text(hasher: &mut Sha256, value: &str) {
-    hash_usize(hasher, value.len());
+fn update_string(hasher: &mut Sha256, value: &str) {
+    update_usize(hasher, value.len());
     hasher.update(value.as_bytes());
 }
 
-fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {
+fn update_optional_string(hasher: &mut Sha256, value: Option<&str>) {
     match value {
         Some(value) => {
             hasher.update([1]);
-            hash_text(hasher, value);
+            update_string(hasher, value);
         }
         None => hasher.update([0]),
     }
 }
 
-fn hash_usize(hasher: &mut Sha256, value: usize) {
-    let value = u64::try_from(value).expect("normalized document size must fit in u64");
-    hasher.update(value.to_be_bytes());
+fn update_usize(hasher: &mut Sha256, value: usize) {
+    hasher.update((value as u64).to_le_bytes());
 }
 
-fn byte_offset_for_scalar(text: &str, scalar_index: usize) -> usize {
-    match text.char_indices().nth(scalar_index) {
-        Some((byte_index, _)) => byte_index,
-        None => text.len(),
+fn byte_offset_for_scalar(text: &str, scalar_offset: usize) -> usize {
+    if scalar_offset == text.chars().count() {
+        return text.len();
     }
+    text.char_indices()
+        .nth(scalar_offset)
+        .map(|(offset, _)| offset)
+        .unwrap_or(text.len())
 }

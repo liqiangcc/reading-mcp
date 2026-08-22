@@ -93,13 +93,16 @@ pub(crate) fn decode_text_unit_cursor(
             "text-unit cursor exceeds the maximum encoded size".into(),
         ));
     }
-    let encoded = cursor.strip_prefix(TEXT_UNIT_CURSOR_PREFIX).ok_or_else(|| {
-        ApplicationError::InvalidCursor("text-unit cursor prefix is invalid".into())
-    })?;
+    let encoded = cursor
+        .strip_prefix(TEXT_UNIT_CURSOR_PREFIX)
+        .ok_or_else(|| {
+            ApplicationError::InvalidCursor("text-unit cursor prefix is invalid".into())
+        })?;
     let envelope_bytes = decode_hex(encoded)?;
-    let envelope: TextUnitCursorEnvelope = serde_json::from_slice(&envelope_bytes).map_err(|error| {
-        ApplicationError::InvalidCursor(format!("text-unit cursor payload is invalid: {error}"))
-    })?;
+    let envelope: TextUnitCursorEnvelope =
+        serde_json::from_slice(&envelope_bytes).map_err(|error| {
+            ApplicationError::InvalidCursor(format!("text-unit cursor payload is invalid: {error}"))
+        })?;
     let claims_bytes = serde_json::to_vec(&envelope.claims).map_err(|error| {
         ApplicationError::InvalidCursor(format!(
             "text-unit cursor claims cannot be validated: {error}"
@@ -190,7 +193,10 @@ mod tests {
     fn cursor_round_trip_preserves_stream_bindings() {
         let expected = claims();
         let encoded = encode_text_unit_cursor(expected.clone()).expect("cursor should encode");
-        assert_eq!(decode_text_unit_cursor(&encoded).expect("cursor should decode"), expected);
+        assert_eq!(
+            decode_text_unit_cursor(&encoded).expect("cursor should decode"),
+            expected
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 - [Normalized Document Identity and Text Range Contract](normalized-text-range-contract.md)：已实现的 normalized-document hash、normalization version、Section-relative Unicode-scalar range、坐标空间隔离和 Parsed Cache 版本约束。
 - [Paragraph TextUnit Index Contract](paragraph-text-unit-index.md)：已实现的 block-aware Paragraph 确定性分段、stable TextUnit identity、source order、coverage 与 SQLite/InMemory derived TextUnitIndex。
 - [Sentence Locator and Coverage Contract](sentence-locator-contract.md)：已实现的 deterministic Sentence locator、Paragraph ownership、technical-punctuation protection 与 native/coarse coverage。
-- [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)：已实现的 `get_text_units`、TextLocator、TextUnitCursor、Paragraph/Sentence source-order pagination 与 coverage/completion 语义。
+- [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)：已实现的 `get_text_units`、TextLocator anchor、TextUnitCursor、Paragraph/Sentence source-order pagination 与 coverage/completion 语义。
 - [Context Granularity Contract](context-granularity-contract.md)：已实现的 TextLocator-driven `neighbor / container / structural` context、stale validation、coarse source-preserving context 与 legacy Section compatibility。
 - [Precise Read Locator Contract](precise-read-locator-contract.md)：已实现的 TextLocator → exact `read_document`、CharacterRange、exact-target ReadCursor continuation 与 returned source locator。
 - [Search Locator Handoff Contract](search-locator-contract.md)：已实现的 SearchHit → TextLocator direct handoff 与 shared locator resolver。
@@ -121,10 +121,11 @@ ReadCursor continuation
 block-aware Paragraph TextUnit + Paragraph TextUnitIndex
 Sentence locator + Paragraph ownership + native/coarse coverage
 TextLocator + shared resolver
-TextUnitCursor + source-order pagination
-get_text_units Paragraph/Sentence enumeration
+TextUnitCursor + source-order pagination + anchor origin binding
+get_text_units Section-boundary / exclusive TextLocator-anchor enumeration
 TextLocator → get_context
 TextLocator → exact read_document
+TextLocator → get_text_units(anchor_locator)
 SearchHit → candidate_kind + TextLocator
 canonical Section title lexical candidates
 canonical Paragraph lexical candidates
@@ -132,7 +133,7 @@ canonical eligible Sentence lexical candidates
 lexical-tokenizer/v1
 CJK + mixed technical lexical projection
 lexical-search-index/v3 SQLite rebuildable state
-search → precise TextLocator → read/context direct handoff
+search → precise TextLocator → read/context/enumeration direct handoff
 EPUB navigation-map/v1 parser facts
 EPUB structure-reconciliation/v1 canonical hierarchy
 normalized-block-model/v1 persisted exact body-block ranges
@@ -223,11 +224,15 @@ Validator 不重新打开 ZIP/DOM，只消费持久化事实。内部一致性�
 
 ```text
 get_text_units ─→ TextLocator ─┬→ read_document
-                               └→ get_context
+                               ├→ get_context
+                               └→ get_text_units(anchor_locator)
 
 search_document → SearchHit.text_locator ─┬→ read_document
-                                         └→ get_context
+                                         ├→ get_context
+                                         └→ get_text_units(anchor_locator)
 ```
+
+`get_text_units(anchor_locator)` 是 Section-scoped、排他的精确续读：`forward` 从 anchor 之后开始，`backward` 从 anchor 之前开始；anchor 必须是 requested kind / coverage policy 声明流中的真实 item。续页只携带 cursor，cursor 会保留 origin anchor 证据。到达某一方向边界只表示该 traversal `complete`，不会把中间起点误报为整个 Section `section_complete`。
 
 SearchHit 可以真实返回：
 
@@ -238,8 +243,6 @@ candidate_kind = section | paragraph | sentence
 Section title candidates 始终保留；coarse structural/non-prose region 可以是 Paragraph candidate，但不会伪造 Sentence candidate。Legacy `location/search-unit` 只作为 preview/provenance，canonical identity 始终来自 `text_locator`。
 
 Sentence persistence 仍不是正确性依赖：Sentence enumeration/context/read/search facts 都可以从 canonical persisted Document + deterministic segmentation 重建。只有真实性能证据出现时才增加 Sentence derived persistence。
-
-当前 `get_text_units` 仍从 Section 边界起读；anchor-based `before/after(locator)` 是独立后续扩展。
 
 格式能力分为两类：
 

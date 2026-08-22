@@ -1,11 +1,12 @@
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{Document, Section};
 
-pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v3";
+pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v4";
 pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v1";
 pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scalar/v1";
 
@@ -26,7 +27,7 @@ impl AsRef<str> for NormalizedDocumentHash {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct NormalizedTextRange {
     start: usize,
     end: usize,

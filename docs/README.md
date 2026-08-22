@@ -16,11 +16,13 @@
 - [EPUB Structure Reconciliation Contract](epub-structure-reconciliation-contract.md)：已实现的 nav/NCX/heading/spine precedence、spine-authoritative source order、`linear=no` 与 structural provenance。
 - [Normalized Block Model Contract](normalized-block-model-contract.md)：已实现的 HTML/XHTML native body-block kinds、exact Section-relative ranges、EPUB remap、持久化/重启验证与 identity migration 边界。
 - [EPUB Structure Validator Contract](epub-structure-validator-contract.md)：已实现的 persisted-fact integrity validation、error/degradation taxonomy、spine/navigation/structure/block/TextUnit coverage 与 SQLite reopen revalidation。
+- [Block-Aware TextUnit Identity Migration](block-aware-text-unit-identity-migration.md)：已接受、待实现的 native-block-aware Paragraph/Sentence、`text-segmentation/v2`、`normalized-document-hash/v2`、stale 与 lexical v3 migration 设计。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与 Tool Contract。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
 - [ADR 0003：EPUB-First Structure Reliability](adr/0003-epub-first-structure-reliability.md)：EPUB 结构优先级、provenance、degradation、validator 和 coverage 的稳定决策。
 - [ADR 0004：Use-Case-First MCP Tool Contracts](adr/0004-use-case-first-tool-contracts.md)：从 6 Tool 推导出的第 7 个独立职责 `get_text_units`，以及 read/enumeration/context/search 的责任边界。
+- [ADR 0005：Block-Aware TextUnit Identity Migration](adr/0005-block-aware-text-unit-identity.md)：接受 block-aware segmentation/hash identity、旧 locator/cursor fail-closed 与 lexical-index/v3 rebuild 决策。
 - [MVP 实施计划](mvp.md)：从工程骨架到 Markdown/Text、搜索、HTML、PDF、安全缓存和真实 Agent 验证的阶段计划。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
 - [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、当前 7 个 Tool 和 stdio 子进程端到端测试。
@@ -67,11 +69,15 @@ normalized-block-model-contract.md
       ↓
 epub-structure-validator-contract.md
       ↓
+block-aware-text-unit-identity-migration.md
+      ↓
 epub-structure-reliability-design.md
       ↓
 adr/0003-epub-first-structure-reliability.md
       ↓
 adr/0004-use-case-first-tool-contracts.md
+      ↓
+adr/0005-block-aware-text-unit-identity.md
       ↓
 mvp.md
       ↓
@@ -134,7 +140,7 @@ epub-structure-validator/v1 integrity + factual coverage evidence
 INVALID_LOCATOR / STALE_LOCATOR fail-closed validation
 ```
 
-身份、解析策略与检索版本继续分离：
+当前运行时身份、解析策略与检索版本继续分离：
 
 ```text
 normalized-document-hash/v1 + text-segmentation/v1
@@ -154,6 +160,23 @@ reading-mcp-normalization/v5
 lexical-tokenizer/v1
 → search projection / rebuild only
 ```
+
+ADR 0005 已接受下一次显式 identity migration，但尚未进入 runtime：
+
+```text
+normalized-document-hash/v2
++ text-segmentation/v2
++ normalized-block-model/v1 identity projection
+→ block-aware Paragraph/Sentence/TextLocator identity
+
+lexical-search-index/v2
+→ lexical-search-index/v3 rebuild
+
+lexical-tokenizer/v1
+→ 保持不变
+```
+
+迁移后旧 v1 Paragraph/Sentence locator 必须 `STALE_LOCATOR`，旧 TextUnitCursor 必须 `STALE_CURSOR`；不会因为文本仍匹配就静默重解释。因为 normalized-document identity 本身升级，旧 Section/CharacterRange locator 与 ReadCursor 也通过旧 normalized hash fail closed。
 
 Tokenizer 变化不得重编号 TextUnit 或改变 TextLocator。SQLite lexical index version/tokenizer version 不匹配时，仅丢弃并重建 derived lexical state，不触碰 canonical Document/TextUnit facts；若 persisted Document 存在但 lexical rows 缺失，搜索可直接从 canonical repository 重建，不重新下载/解析来源。
 
@@ -188,7 +211,7 @@ NormalizedBlock v1 不复制正文：每个 block 都是 owner Section 的 exact
 
 Validator 不重新打开 ZIP/DOM，只消费持久化事实。内部一致性冲突是 `error` 并使 EPUB parser fail closed；missing fragment、unsupported media、fallback、native block 与当前 v1 TextUnit 的差异属于 `degradation`，保留 readable Document 与明确 coverage。报告可随 Document 持久化并在 SQLite reopen 后得到相同 revalidation 结果。
 
-当前 `text-segmentation/v1` 仍未消费 block map。下一独立工作不是静默改现有 locator，而是基于 validator coverage 单独设计/实施 block-aware TextUnit identity migration，显式决定 segmentation/hash version。
+当前 `text-segmentation/v1` 仍未消费 block map。block-aware identity 设计已经完成，下一独立实现分支是 `feat/block-aware-text-unit-identity`：先实现 hash/segmentation v2，再迁移 locator/cursor/derived lexical state，不从 MCP Tool 或 ranking 层倒推实现。
 
 当前 direct handoff：
 

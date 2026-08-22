@@ -4,11 +4,11 @@
 >
 > Branch: `feat/normalized-text-range`
 >
-> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/normalized-block-model-contract.md`, `docs/tool-contract-use-case-design.md`
+> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/normalized-block-model-contract.md`, `docs/epub-structure-validator-contract.md`, `docs/tool-contract-use-case-design.md`
 
 ## 1. Goal
 
-This contract establishes the identity/range foundation required by precise Paragraph/Sentence locators and later canonical block facts.
+This contract establishes the identity/range foundation required by precise Paragraph/Sentence locators and canonical block facts.
 
 It answers four separate questions:
 
@@ -69,14 +69,14 @@ MCP rendering and response offsets
 search/index rows
 ```
 
-`normalized-block-model/v1` is currently persisted in reserved Document metadata but is **not yet an input to `normalized-document-hash/v1`**, because current `text-segmentation/v1` Paragraph/Sentence identity does not consume the block map. A future block-aware segmentation migration must explicitly version its identity inputs rather than silently redefining existing locators.
+`normalized-block-model/v1` and `epub-structure-validator/v1` are persisted in reserved Document metadata but are **not inputs to `normalized-document-hash/v1`**, because current `text-segmentation/v1` Paragraph/Sentence identity does not consume them. A future block-aware segmentation migration must explicitly version its identity inputs rather than silently redefining existing locators.
 
 ### 2.3 Normalization policy version
 
 Current diagnostic/cache version:
 
 ```text
-normalization_version = reading-mcp-normalization/v4
+normalization_version = reading-mcp-normalization/v5
 ```
 
 Relevant EPUB/HTML parser-policy history:
@@ -85,6 +85,7 @@ Relevant EPUB/HTML parser-policy history:
 v2 = EPUB navigation-map parser facts added
 v3 = navigation/spine reconciliation may change canonical Section structure
 v4 = normalized-block-model/v1 persisted + HTML inline text normalization correction
+v5 = epub-structure-validator/v1 persisted report + factual coverage evidence
 ```
 
 `normalization_version` scopes Parsed Cache policy. It is not a substitute for the actual normalized fingerprint.
@@ -108,7 +109,7 @@ Consequences:
 - old parsed cache files become harmless misses;
 - DocumentRepository and SearchIndex responsibilities remain unchanged.
 
-Current tests explicitly prove v3 Parsed Cache keys miss under v4.
+Current tests explicitly prove v4 Parsed Cache keys miss under v5.
 
 ## 4. Normalized text range
 
@@ -159,6 +160,8 @@ Construction rejects `start > end`; owner validation rejects `end > owner length
 
 `NormalizedBlockMap` reuses this coordinate contract and additionally checks owner existence, non-empty ranges, per-owner order/non-overlap, block ordinals and global block source order.
 
+`epub-structure-validator/v1` composes these persisted range facts with canonical Section and current deterministic TextUnit evidence. It does not introduce another coordinate space.
+
 ## 6. Coordinate spaces remain separate
 
 ### Parser/native/legacy coordinates
@@ -195,13 +198,13 @@ normalization_version
 normalized_text_coordinate_space
 ```
 
-The runtime Tool count does not change when normalization policy advances.
+The runtime Tool count does not change when normalization policy or internal persisted evidence advances.
 
 ## 8. Cursor/locator integration
 
 ReadCursor/TextLocator bind the normalized-document hash for stale detection. No cursor or locator is rebased by text similarity.
 
-EPUB reconciliation can change canonical Section title/parent/order/level and therefore naturally changes hash-v1 values. The normalized block increment does not silently stale locators solely because the block metadata map was added; current segmentation/locator identity remains v1 until a separately reviewed migration.
+EPUB reconciliation can change canonical Section title/parent/order/level and therefore naturally changes hash-v1 values. Block/validation metadata does not silently stale locators solely because evidence/report fields were added; current segmentation/locator identity remains v1 until a separately reviewed migration.
 
 ## 9. Persistence and rebuildability
 
@@ -215,7 +218,9 @@ hash(document before repository save)
 hash(document restored from repository)
 ```
 
-The normalized block map is also persisted/revalidated through the existing DocumentRepository metadata serialization, without a new SQLite schema. This persistence alone does not make it a hash-v1 identity input.
+The normalized block map and EPUB validation report are also persisted through existing DocumentRepository metadata serialization, without new SQLite schemas. Persistence of these derived/canonical-evidence records does not itself make them hash-v1 identity inputs.
+
+The EPUB validation report can be deterministically recomputed from the restored underlying facts without source reparse.
 
 ## 10. Acceptance evidence
 
@@ -227,11 +232,12 @@ Tests cover:
 - hash changes for Section id, parentage, title, level, content, and order;
 - hash stability across raw source/provenance and legacy Location changes;
 - hash rebuild after SQLite persistence;
-- Parsed Cache misses across normalization versions, now including v3 → v4;
+- Parsed Cache misses across normalization versions, now including v4 → v5;
 - additive MCP schema fields;
 - rendered read-stream/source-coordinate separation;
 - NormalizedBlock exact-slice and SQLite reopen persistence;
-- current Paragraph TextUnit IDs unchanged when only block metadata is removed.
+- current Paragraph TextUnit IDs unchanged when only block metadata is removed;
+- EPUB validator report/revalidation surviving SQLite reopen without source reparse.
 
 ## 11. Migration rule
 
@@ -240,9 +246,10 @@ Persisting new evidence and using it as identity are deliberately separate chang
 Current state:
 
 ```text
-normalized-block-model/v1 = persisted canonical normalization evidence
-text-segmentation/v1      = current Paragraph/Sentence identity policy
-normalized-hash/v1        = current source-address fingerprint
+normalized-block-model/v1      = persisted canonical normalization evidence
+epub-structure-validator/v1    = persisted/rebuildable validation evidence
+text-segmentation/v1           = current Paragraph/Sentence identity policy
+normalized-document-hash/v1    = current source-address fingerprint
 ```
 
 Before native blocks affect Paragraph/Sentence identity, the new increment must explicitly version segmentation and any required normalized-hash inputs, add stale/migration tests, and must not reinterpret existing locators under the old version names.

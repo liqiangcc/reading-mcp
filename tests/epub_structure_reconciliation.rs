@@ -30,11 +30,18 @@ async fn publisher_navigation_hierarchy_overrides_heading_parentage_without_copy
     );
 
     let structure = structure_map(&document);
-    assert_eq!(structure["schema_version"], "epub-structure-reconciliation/v1");
+    assert_eq!(
+        structure["schema_version"],
+        "epub-structure-reconciliation/v1"
+    );
     assert_eq!(structure["applied_navigation_nodes"], 2);
     let sections = structure["sections"].as_array().expect("section facts");
     assert_eq!(sections.len(), 2);
-    assert!(sections.iter().all(|section| section["provenance"] == "epub_nav"));
+    assert!(
+        sections
+            .iter()
+            .all(|section| section["provenance"] == "epub_nav")
+    );
 }
 
 #[tokio::test]
@@ -47,9 +54,11 @@ async fn canonical_order_remains_spine_order_even_when_navigation_order_conflict
 
     let structure = structure_map(&document);
     let diagnostics = structure["diagnostics"].as_array().expect("diagnostics");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic["code"] == "navigation_order_conflicts_spine_order"
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "navigation_order_conflicts_spine_order")
+    );
 
     let spine = structure["spine"].as_array().expect("spine facts");
     assert_eq!(spine.len(), 2);
@@ -137,9 +146,9 @@ fn structure_map(document: &reading_mcp::domain::Document) -> Value {
 }
 
 fn build_hierarchical_nav_fixture() -> Vec<u8> {
-    build_zip(&[
-        ("mimetype", "application/epub+zip"),
-        ("META-INF/container.xml", container_xml()),
+    build_zip(vec![
+        ("mimetype", "application/epub+zip".into()),
+        ("META-INF/container.xml", container_xml().into()),
         (
             "OPS/package.opf",
             package(
@@ -155,23 +164,26 @@ fn build_hierarchical_nav_fixture() -> Vec<u8> {
             r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
 <nav epub:type="toc"><ol><li><a href="chapter.xhtml#chapter">Publisher Chapter</a><ol>
 <li><a href="appendix.xhtml#appendix">Publisher Appendix</a></li>
-</ol></li></ol></nav></body></html>"#,
+</ol></li></ol></nav></body></html>"#
+                .into(),
         ),
         (
             "OPS/chapter.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="chapter">Visible Chapter</h1><p>Chapter body.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="chapter">Visible Chapter</h1><p>Chapter body.</p></body></html>"#
+                .into(),
         ),
         (
             "OPS/appendix.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="appendix">Visible Appendix</h1><p>Appendix body.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="appendix">Visible Appendix</h1><p>Appendix body.</p></body></html>"#
+                .into(),
         ),
     ])
 }
 
 fn build_reversed_nav_fixture() -> Vec<u8> {
-    build_zip(&[
-        ("mimetype", "application/epub+zip"),
-        ("META-INF/container.xml", container_xml()),
+    build_zip(vec![
+        ("mimetype", "application/epub+zip".into()),
+        ("META-INF/container.xml", container_xml().into()),
         (
             "OPS/package.opf",
             package(
@@ -188,23 +200,26 @@ fn build_reversed_nav_fixture() -> Vec<u8> {
 <nav epub:type="toc"><ol>
 <li><a href="second.xhtml#second">Publisher Second</a></li>
 <li><a href="first.xhtml#first">Publisher First</a></li>
-</ol></nav></body></html>"#,
+</ol></nav></body></html>"#
+                .into(),
         ),
         (
             "OPS/first.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="first">Visible First</h1><p>First.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="first">Visible First</h1><p>First.</p></body></html>"#
+                .into(),
         ),
         (
             "OPS/second.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="second">Visible Second</h1><p>Second.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="second">Visible Second</h1><p>Second.</p></body></html>"#
+                .into(),
         ),
     ])
 }
 
 fn build_non_heading_fragment_fixture() -> Vec<u8> {
-    build_zip(&[
-        ("mimetype", "application/epub+zip"),
-        ("META-INF/container.xml", container_xml()),
+    build_zip(vec![
+        ("mimetype", "application/epub+zip".into()),
+        ("META-INF/container.xml", container_xml().into()),
         (
             "OPS/package.opf",
             package(
@@ -218,19 +233,21 @@ fn build_non_heading_fragment_fixture() -> Vec<u8> {
             "OPS/nav.xhtml",
             r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol>
 <li><a href="chapter.xhtml#paragraph-target">Publisher Paragraph Target</a></li>
-</ol></nav></body></html>"#,
+</ol></nav></body></html>"#
+                .into(),
         ),
         (
             "OPS/chapter.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="heading">Visible Heading</h1><p id="paragraph-target">Body.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="heading">Visible Heading</h1><p id="paragraph-target">Body.</p></body></html>"#
+                .into(),
         ),
     ])
 }
 
 fn build_headingless_fixture() -> Vec<u8> {
-    build_zip(&[
-        ("mimetype", "application/epub+zip"),
-        ("META-INF/container.xml", container_xml()),
+    build_zip(vec![
+        ("mimetype", "application/epub+zip".into()),
+        ("META-INF/container.xml", container_xml().into()),
         (
             "OPS/package.opf",
             package(
@@ -241,15 +258,16 @@ fn build_headingless_fixture() -> Vec<u8> {
         ),
         (
             "OPS/chapter.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Headingless</title></head><body><p>Headingless body.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Headingless</title></head><body><p>Headingless body.</p></body></html>"#
+                .into(),
         ),
     ])
 }
 
 fn build_ncx_fixture() -> Vec<u8> {
-    build_zip(&[
-        ("mimetype", "application/epub+zip"),
-        ("META-INF/container.xml", container_xml()),
+    build_zip(vec![
+        ("mimetype", "application/epub+zip".into()),
+        ("META-INF/container.xml", container_xml().into()),
         (
             "OPS/package.opf",
             package(
@@ -263,17 +281,21 @@ fn build_ncx_fixture() -> Vec<u8> {
             "OPS/toc.ncx",
             r#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>
 <navPoint id="n1"><navLabel><text>NCX Chapter</text></navLabel><content src="chapter.xhtml#chapter"/></navPoint>
-</navMap></ncx>"#,
+</navMap></ncx>"#
+                .into(),
         ),
         (
             "OPS/chapter.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="chapter">Visible Chapter</h1><p>Body.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="chapter">Visible Chapter</h1><p>Body.</p></body></html>"#
+                .into(),
         ),
     ])
 }
 
 fn package(manifest: &str, spine_items: &str, toc: Option<&str>) -> String {
-    let toc = toc.map(|value| format!(" toc=\"{value}\"")).unwrap_or_default();
+    let toc = toc
+        .map(|value| format!(" toc=\"{value}\""))
+        .unwrap_or_default();
     format!(
         r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
@@ -289,14 +311,14 @@ fn container_xml() -> &'static str {
 </rootfiles></container>"#
 }
 
-fn build_zip(entries: &[(&str, impl AsRef<str>)]) -> Vec<u8> {
+fn build_zip(entries: Vec<(&str, String)>) -> Vec<u8> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(cursor);
     let options = SimpleFileOptions::default();
     for (name, content) in entries {
-        writer.start_file(*name, options).expect("ZIP entry");
+        writer.start_file(name, options).expect("ZIP entry");
         writer
-            .write_all(content.as_ref().as_bytes())
+            .write_all(content.as_bytes())
             .expect("ZIP content");
     }
     writer.finish().expect("ZIP finish").into_inner()

@@ -32,7 +32,6 @@ pub(crate) struct EpubSpineRecord {
 #[derive(Clone, Debug)]
 pub(crate) struct ParsedSpineDocument {
     pub(crate) spine_index: usize,
-    pub(crate) idref: String,
     pub(crate) linear: bool,
     pub(crate) entry_path: String,
     pub(crate) sections: Vec<Section>,
@@ -114,7 +113,6 @@ pub(crate) struct EpubStructureResult {
 #[derive(Clone, Debug)]
 struct AppliedNavigation {
     source_order: usize,
-    label: String,
     provenance: EpubNavigationProvenance,
     resolution_status: NavigationResolutionStatus,
 }
@@ -152,7 +150,12 @@ pub(crate) fn reconcile_epub_structure(
     let mut flat_sections = Vec::new();
     let mut source_order = 0usize;
     for parsed in parsed_spine {
-        flatten_sections(parsed.sections, &parsed, &mut source_order, &mut flat_sections);
+        flatten_sections(
+            parsed.sections,
+            &parsed,
+            &mut source_order,
+            &mut flat_sections,
+        );
     }
 
     let mut diagnostics = Vec::new();
@@ -167,7 +170,8 @@ pub(crate) fn reconcile_epub_structure(
     let mut primary_for_section = HashMap::<usize, usize>::new();
 
     for node in &navigation_nodes {
-        let Some(section_index) = resolve_navigation_section(node, &flat_sections, &mut diagnostics)
+        let Some(section_index) =
+            resolve_navigation_section(node, &flat_sections, &mut diagnostics)
         else {
             continue;
         };
@@ -205,13 +209,17 @@ pub(crate) fn reconcile_epub_structure(
         }
         flat_sections[section_index].applied_navigation = Some(AppliedNavigation {
             source_order: node.source_order,
-            label: node.label.clone(),
             provenance: node.provenance,
             resolution_status: node.resolution_status,
         });
     }
 
-    diagnose_navigation_source_order(&navigation_nodes, &navigation_targets, &flat_sections, &mut diagnostics);
+    diagnose_navigation_source_order(
+        &navigation_nodes,
+        &navigation_targets,
+        &flat_sections,
+        &mut diagnostics,
+    );
 
     for (&section_index, &navigation_source_order) in &primary_for_section {
         let Some(node) = navigation_by_order.get(&navigation_source_order).copied() else {
@@ -327,13 +335,12 @@ fn flatten_sections(
 ) {
     for mut section in sections {
         let children = std::mem::take(&mut section.children);
-        let fallback_provenance = if section.id.0.ends_with("/document")
-            || section.id.0.ends_with("/preamble")
-        {
-            EpubStructureProvenance::SpineItem
-        } else {
-            EpubStructureProvenance::XhtmlHeading
-        };
+        let fallback_provenance =
+            if section.id.0.ends_with("/document") || section.id.0.ends_with("/preamble") {
+                EpubStructureProvenance::SpineItem
+            } else {
+                EpubStructureProvenance::XhtmlHeading
+            };
         let source_title = section.title.clone();
         let source_level = section.level;
         output.push(FlatSection {
@@ -396,7 +403,9 @@ fn resolve_navigation_section(
             }
             matched
         }
-        NavigationResolutionStatus::ResolvedDocument => first_section_in_entry(entry_path, sections),
+        NavigationResolutionStatus::ResolvedDocument => {
+            first_section_in_entry(entry_path, sections)
+        }
         NavigationResolutionStatus::MissingFragment => {
             let result = first_section_in_entry(entry_path, sections);
             if result.is_some() {
@@ -489,7 +498,12 @@ fn build_forest(
     let mut roots = Vec::new();
 
     for (index, flat) in sections.iter().enumerate() {
-        match flat.section.parent_id.as_ref().and_then(|id| by_id.get(id).copied()) {
+        match flat
+            .section
+            .parent_id
+            .as_ref()
+            .and_then(|id| by_id.get(id).copied())
+        {
             Some(parent_index) if parent_index != index => children[parent_index].push(index),
             Some(_) => {
                 diagnostics.push(EpubStructureDiagnostic {

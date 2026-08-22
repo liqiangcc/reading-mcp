@@ -7,7 +7,7 @@ use serde_json::Value;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 #[tokio::test]
-async fn epub3_nav_map_preserves_hierarchy_resolution_and_provenance_without_rewriting_sections() {
+async fn epub3_nav_map_preserves_hierarchy_resolution_and_feeds_canonical_reconciliation() {
     let document = EpubParser::new(ArchiveLimits::default())
         .parse(resource(build_epub3_nav_fixture()))
         .await
@@ -71,19 +71,19 @@ async fn epub3_nav_map_preserves_hierarchy_resolution_and_provenance_without_rew
     assert_eq!(nodes[1]["source_order"], 2);
     assert_eq!(nodes[1]["resolution_status"], "missing_fragment");
 
-    // Navigation is mapped in this increment but does not yet rewrite the heading-derived
-    // canonical Section hierarchy; reconciliation is a separate follow-up.
+    // The navigation map remains a separate provenance plane, but this follow-up stage now
+    // reconciles proven heading targets into the canonical Section hierarchy.
     assert!(
         document
             .root_sections
             .iter()
-            .any(|section| section.title == "Visible Intro")
+            .any(|section| section.title == "Publisher Intro")
     );
     assert!(
         !document
             .root_sections
             .iter()
-            .any(|section| section.title == "Publisher Intro")
+            .any(|section| section.title == "Visible Intro")
     );
 }
 

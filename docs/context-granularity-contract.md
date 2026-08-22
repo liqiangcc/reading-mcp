@@ -4,9 +4,9 @@
 >
 > Branch: `feat/context-granularity`
 >
-> Follow-up consumer: `feat/precise-read-locator`
+> Follow-ups: `feat/precise-read-locator` and `feat/search-locator`
 >
-> Related: `docs/tool-contract-use-case-design.md`, `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/text-unit-enumeration-contract.md`, `docs/precise-read-locator-contract.md`
+> Related: `docs/tool-contract-use-case-design.md`, `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0004-use-case-first-tool-contracts.md`, `docs/text-unit-enumeration-contract.md`, `docs/precise-read-locator-contract.md`, `docs/search-locator-contract.md`
 
 ## 1. Goal
 
@@ -26,8 +26,6 @@ The current seven-Tool surface remains unchanged.
 
 ### Legacy Section-neighbor request
 
-The existing wire request remains valid:
-
 ```text
 document_id
 section_id
@@ -36,13 +34,7 @@ after
 max_chars?
 ```
 
-When `relation` is absent, this means exactly:
-
-```text
-neighbor(unit=section)
-```
-
-It keeps the historical shallow Section rendering and legacy `content / location / owner_section_id / truncated` behavior.
+When `relation` is absent, this means exactly `neighbor(unit=section)` and keeps historical shallow Section rendering plus legacy response fields.
 
 ### Structured request
 
@@ -68,48 +60,36 @@ relation:
 max_chars?
 ```
 
-With an explicit relation, `section_id` and `target_locator` are mutually exclusive.
-
-A locator cannot be supplied without an explicit relation because that would make context semantics implicit again.
+With an explicit relation, `section_id` and `target_locator` are mutually exclusive. A locator cannot be supplied without an explicit relation because that would make context semantics implicit again.
 
 ## 3. Locator validation
 
-A locator-consuming context request fails closed before expanding context.
+Context now delegates canonical identity/stale validation to the shared application-level TextLocator resolver also used by exact read.
 
-Validation covers:
+The shared resolver covers:
 
 ```text
 document_id
-raw content_hash provenance
+raw content_hash
 normalized_document_hash
 owner_section_id
-Paragraph/Sentence shape
-1-based paragraph_index / sentence_index
+Section / CharacterRange / Paragraph / Sentence shape
+Paragraph/Sentence ordinal
 text-segmentation/v1
 exact Section-relative normalized range
 ```
 
-Valid context anchor shapes are:
+Current valid **context anchor** shapes remain:
 
 ```text
-Section:
-  no paragraph/sentence/range/segmentation fields
-
-Paragraph:
-  paragraph_index
-  normalized_range
-  segmentation_version
-
-Sentence:
-  paragraph_index
-  sentence_index
-  normalized_range
-  segmentation_version
+Section
+Paragraph
+Sentence
 ```
 
-The implementation deterministically rebuilds the referenced Paragraph/Sentence from canonical persisted `Document / Section.content` and verifies that the current exact range matches the locator.
+CharacterRange is a valid canonical TextLocator kind in the shared resolver and exact read, but current context relations do not accept it. Context therefore returns a request-level unsupported semantic error for CharacterRange rather than misclassifying it as malformed identity.
 
-Failure taxonomy:
+Failure taxonomy for actual identity problems:
 
 ```text
 INVALID_LOCATOR
@@ -118,43 +98,29 @@ STALE_LOCATOR
 
 No title search, snippet comparison, nearest-text match, ordinal rebasing or fuzzy relocation is allowed.
 
-The later precise-read increment now consumes the same Section/Paragraph/Sentence locator identities and also accepts CharacterRange. Cross-consumer regression tests require read and context to agree on valid/stale overlapping locator kinds. Before a third consumer such as SearchHit locator resolution is added, the duplicated validation logic should be consolidated into one shared resolver so identity rules cannot drift.
-
 ## 4. Neighbor semantics
 
 ### Section neighbor
 
-```text
-neighbor(unit=section)
-```
-
-Uses the existing flattened structural source order and remains compatible with the legacy call.
+`neighbor(unit=section)` uses existing flattened structural source order and remains compatible with the legacy call.
 
 ### Paragraph neighbor
 
-```text
-neighbor(unit=paragraph)
-```
-
 Requirements:
 
-- anchor must be a Paragraph locator;
-- before/after items are deterministic Paragraph TextUnits;
+- anchor is a Paragraph locator;
+- before/after are deterministic Paragraph TextUnits;
 - traversal stays inside the same owner Section;
 - child Sections are not crossed implicitly;
 - every returned Paragraph has its exact TextLocator.
 
 ### Sentence neighbor
 
-```text
-neighbor(unit=sentence)
-```
-
 Requirements:
 
-- anchor must be a Sentence locator;
-- response order is canonical source order;
-- the stream follows the same source-preserving semantics as `get_text_units(requested_kind=sentence, coverage_policy=preserve_source)`;
+- anchor is a Sentence locator;
+- response is canonical source order;
+- semantics match `get_text_units(requested_kind=sentence, coverage_policy=preserve_source)`;
 - recognized non-prose code/table regions may appear as an explicitly coarser Paragraph item;
 - no fake Sentence identity is generated.
 
@@ -171,21 +137,11 @@ The context window is bounded to 20 items on either side.
 
 ### Sentence / Paragraph → containing Paragraph
 
-```text
-container(kind=paragraph)
-```
-
-A Sentence resolves through its deterministic Paragraph ownership. A Paragraph resolves to itself as the textual container.
-
-The result is exactly one Paragraph item with an exact locator. A Section anchor cannot be reinterpreted as a Paragraph container.
+`container(kind=paragraph)` resolves a Sentence through deterministic Paragraph ownership. A Paragraph resolves to itself. A Section anchor cannot be reinterpreted as a Paragraph container.
 
 ### TextUnit / Section → owner Section
 
-```text
-container(kind=section)
-```
-
-Returns the exact owner Section selected through locator ownership. The legacy Section content projection may be bounded/truncated, while the structured item carries Section identity.
+`container(kind=section)` returns the exact owner Section selected through locator ownership. Legacy Section content projection may be bounded/truncated while the structured item carries Section identity.
 
 ## 6. Structural semantics
 
@@ -196,20 +152,18 @@ structural(siblings)
 structural(children)
 ```
 
-These relations use Section identity/parentage, never title search.
-
-Semantics:
+These use Section identity/parentage, never title search.
 
 - `owner_section`: exactly the locator's owner Section;
 - `ancestors`: root to immediate parent;
 - `siblings`: same parent, excluding owner;
 - `children`: direct children only.
 
-Structural items are metadata-oriented (`title + TextLocator`) and do not become an implicit body-read stream. The response is bounded to 100 structural items.
+Structural items are metadata-oriented (`title + TextLocator`) and do not become an implicit body-read stream. Response is bounded to 100 structural items.
 
 ## 7. Response shape and token policy
 
-The legacy response fields remain:
+Legacy fields remain:
 
 ```text
 document_id
@@ -236,13 +190,11 @@ items[]:
   degradation?
 ```
 
-For locator-driven Paragraph/Sentence/structural context, canonical content lives in `items[]`; the top-level legacy `content` projection is intentionally empty so the same body is not duplicated in one MCP response.
-
-Legacy Section-neighbor requests and Section-container responses keep their legacy `content` projection because old clients depend on it.
+For locator-driven Paragraph/Sentence/structural context, canonical content lives in `items[]`; top-level legacy `content` stays empty to avoid duplicate body tokens. Legacy Section-neighbor and Section-container preserve their old projection.
 
 ## 8. Response budgets
 
-Section legacy projections preserve the existing bounded/truncating semantics.
+Section legacy projections preserve existing bounded/truncating semantics.
 
 Precise Paragraph/Sentence items are atomic:
 
@@ -251,71 +203,63 @@ exact TextUnit > max_chars
 → RESOURCE_LIMIT_EXCEEDED
 ```
 
-A precise item is never split and then returned under the original TextLocator.
+A precise item is never split and returned under its original TextLocator. A context window exceeding the budget fails explicitly because context has no traversal cursor; it is a bounded expansion around a known anchor.
 
-A requested precise context window that exceeds the effective text budget also fails explicitly rather than returning a partial context window without a context cursor.
-
-Context itself has no continuation cursor in this increment; it is a bounded expansion around an already-known anchor, not an ordered complete-reading stream.
-
-## 9. Relationship to TextUnit enumeration and exact read
+## 9. Relationship to enumeration, exact read, and search
 
 ```text
 get_text_units
 = discover/enumerate reading items
 
 get_context
-= bounded expansion around one already-known locator
+= bounded expansion around one known locator
 
 read_document(target_locator)
-= canonical exact source read of one already-known locator
+= canonical exact source read
+
+search_document
+= bounded retrieval candidate + direct locator handoff
 ```
 
-`TextUnitCursor` is not accepted by `get_context`, and context does not redefine enumeration progress.
+`TextUnitCursor` is not accepted by context, and context does not redefine enumeration progress.
 
-Sentence neighbor source order/coarse semantics are regression-tested against `get_text_units(... preserve_source)` so these two capabilities cannot silently drift into different definitions of the same Sentence-first reading stream.
+Sentence neighbor source order/coarse semantics are regression-tested against `get_text_units(... preserve_source)`.
 
-The exact-read follow-up means one TextLocator can now flow directly to both consumers:
+A single locator can now flow from either enumeration or search into context/read:
 
 ```text
-TextLocator ─┬→ get_context
-             └→ read_document
+get_text_units ─→ TextLocator ─┬→ get_context
+                               └→ read_document
+
+search_document → SearchHit.text_locator ─┬→ get_context
+                                         └→ read_document
 ```
+
+Current SearchHit locator is Section-level because the existing SearchIndex cannot yet prove canonical Paragraph/Sentence identity.
 
 ## 10. MCP surface
 
-No new Tool is added.
-
-Current runtime remains:
-
-```text
-list_documents
-open_document
-get_document_structure
-get_text_units
-search_document
-get_context
-read_document
-```
+No new Tool is added. Runtime remains seven Tools.
 
 ## 11. Acceptance evidence
 
 Tests cover:
 
-- Sentence ±N from an exact TextLocator;
-- Paragraph ±N stays inside one owner Section;
+- Sentence ±N from exact TextLocator;
+- Paragraph ±N inside one owner Section;
 - Sentence → containing Paragraph;
-- owner Section / ancestors / siblings / direct children;
-- deterministic source order and role marking;
-- recognized non-prose coarse items in Sentence context;
+- owner Section / ancestors / siblings / children;
+- deterministic order/roles;
+- non-prose coarse Sentence context;
 - parity with `get_text_units(preserve_source)`;
-- normalized document changes produce `STALE_LOCATOR`;
-- malformed locator shape produces `INVALID_LOCATOR`;
-- precise TextUnit context is atomic under `max_chars`;
-- legacy Section-neighbor semantics remain valid;
-- real stdio `get_text_units → TextLocator → get_context` handoff;
-- cross-consumer parity with exact read for overlapping Sentence locator identity/stale rules.
+- stale/malformed locator failures;
+- precise TextUnit budget atomicity;
+- legacy Section-neighbor compatibility;
+- real stdio `get_text_units → TextLocator → get_context`;
+- exact-read/context parity through the shared resolver;
+- real stdio `search_document → Section TextLocator → get_context`.
 
-Repository release gate remains:
+Release gate remains:
 
 ```text
 cargo fmt --all -- --check
@@ -325,20 +269,22 @@ cargo test --locked --all-features
 
 ## 12. Current non-goals / next dependency
 
-Now implemented by the precise-read follow-up:
+Now implemented by follow-ups:
 
 ```text
 TextLocator → exact read_document
+SearchHit → truthful Section TextLocator → context/read
+shared locator identity resolver
 ```
 
-Still not implemented:
+Still deferred:
 
 ```text
-SearchHit → TextLocator
-Paragraph/Sentence FTS
-anchor-based get_text_units before/after(locator) start
+canonical Paragraph/Sentence search candidates
+CJK/mixed technical tokenizer versioning
+anchor-based get_text_units before/after(locator)
 Sentence SQLite persistence
 EPUB parser/navigation restructuring
 ```
 
-The next dependency is `feat/search-locator`. Before SearchHit becomes a third locator consumer, first consolidate locator resolution into a shared application/domain resolver, then hand SearchHit's strongest truthful TextLocator directly into the already-implemented read/context consumers.
+The next search-precision dependency is `feat/lexical-text-unit-index`. It must preserve title-only Section candidates while adding canonical Paragraph/Sentence candidates whose locator identity is actually stored/provable.

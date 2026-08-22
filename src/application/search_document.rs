@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository, SearchIndex};
-use crate::domain::{
-    DocumentId, DocumentSource, Location, SectionId, TextLocator,
-};
+use crate::domain::{DocumentId, DocumentSource, Location, SectionId, TextLocator};
 
 const MAX_SEARCH_LIMIT: usize = 50;
 

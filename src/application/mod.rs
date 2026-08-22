@@ -10,4 +10,5 @@ pub mod read_document;
 pub mod reading_profile;
 mod reading_support;
 pub mod search_document;
+mod structure_cursor;
 mod text_unit_cursor;

@@ -5,7 +5,8 @@ use crate::application::ports::ApplicationError;
 
 pub(crate) const READ_CURSOR_SCHEMA_VERSION: &str = "read-cursor/v2";
 // The prefix versions the envelope encoding. The v2 schema keeps the same
-// envelope representation but changes the normalized-document hash contract.
+// envelope representation and remains backward-compatible for SectionTree
+// cursors. Exact-target cursors add mode-specific optional bindings.
 const READ_CURSOR_PREFIX: &str = "rc1.";
 const READ_CURSOR_CHECKSUM_DOMAIN: &[u8] = b"reading-mcp/read-cursor-checksum/v1\0";
 const MAX_READ_CURSOR_CHARS: usize = 16 * 1024;
@@ -20,6 +21,18 @@ pub(crate) struct ReadCursorClaims {
     pub read_mode: String,
     pub rendering_version: String,
     pub next_char: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_paragraph_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_sentence_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_range_start: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_range_end: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_segmentation_version: Option<String>,
 }
 
 impl ReadCursorClaims {
@@ -41,6 +54,46 @@ impl ReadCursorClaims {
             read_mode: read_mode.into(),
             rendering_version: rendering_version.into(),
             next_char,
+            target_kind: None,
+            target_paragraph_index: None,
+            target_sentence_index: None,
+            target_range_start: None,
+            target_range_end: None,
+            target_segmentation_version: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_exact(
+        document_id: String,
+        content_hash: String,
+        normalized_document_hash: String,
+        section_id: String,
+        read_mode: &str,
+        rendering_version: &str,
+        next_char: usize,
+        target_kind: &str,
+        target_paragraph_index: Option<usize>,
+        target_sentence_index: Option<usize>,
+        target_range_start: Option<usize>,
+        target_range_end: Option<usize>,
+        target_segmentation_version: Option<String>,
+    ) -> Self {
+        Self {
+            schema_version: READ_CURSOR_SCHEMA_VERSION.into(),
+            document_id,
+            content_hash,
+            normalized_document_hash,
+            section_id,
+            read_mode: read_mode.into(),
+            rendering_version: rendering_version.into(),
+            next_char,
+            target_kind: Some(target_kind.into()),
+            target_paragraph_index,
+            target_sentence_index,
+            target_range_start,
+            target_range_end,
+            target_segmentation_version,
         }
     }
 }
@@ -184,6 +237,30 @@ mod tests {
     }
 
     #[test]
+    fn exact_cursor_round_trip_preserves_target_bindings() {
+        let expected = ReadCursorClaims::new_exact(
+            "doc:1".into(),
+            "sha256:raw".into(),
+            "sha256:normalized".into(),
+            "section://root".into(),
+            "exact_target",
+            "exact-normalized-source/v1",
+            8,
+            "sentence",
+            Some(2),
+            Some(1),
+            Some(10),
+            Some(30),
+            Some("text-segmentation/v1".into()),
+        );
+        let encoded = encode_read_cursor(expected.clone()).expect("cursor should encode");
+        assert_eq!(
+            decode_read_cursor(&encoded).expect("cursor should decode"),
+            expected
+        );
+    }
+
+    #[test]
     fn previous_normalized_hash_cursor_schema_is_explicitly_stale() {
         let mut legacy = claims();
         legacy.schema_version = "read-cursor/v1".into();
@@ -194,9 +271,9 @@ mod tests {
     }
 
     #[test]
-    fn cursor_tampering_is_rejected() {
+    fn tampered_cursor_is_rejected() {
         let mut encoded = encode_read_cursor(claims()).expect("cursor should encode");
-        let last = encoded.pop().expect("cursor should not be empty");
+        let last = encoded.pop().expect("cursor should be non-empty");
         encoded.push(if last == '0' { '1' } else { '0' });
 
         let error = decode_read_cursor(&encoded).expect_err("tampering must fail");

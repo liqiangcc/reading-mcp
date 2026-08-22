@@ -139,13 +139,7 @@ fn collect_section_paragraphs(
     }
 
     for child in &section.children {
-        collect_section_paragraphs(
-            document,
-            normalized_document_hash,
-            child,
-            units,
-            coverage,
-        );
+        collect_section_paragraphs(document, normalized_document_hash, child, units, coverage);
     }
 }
 

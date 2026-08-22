@@ -102,13 +102,19 @@ impl fmt::Display for NormalizedBlockMapError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedVersion(version) => {
-                write!(formatter, "unsupported normalized block map version {version:?}")
+                write!(
+                    formatter,
+                    "unsupported normalized block map version {version:?}"
+                )
             }
             Self::InvalidJson(message) => {
                 write!(formatter, "invalid normalized block map JSON: {message}")
             }
             Self::UnknownOwner(owner) => {
-                write!(formatter, "normalized block owner Section {owner:?} does not exist")
+                write!(
+                    formatter,
+                    "normalized block owner Section {owner:?} does not exist"
+                )
             }
             Self::InvalidBlockIndex {
                 owner_section_id,

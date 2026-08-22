@@ -84,6 +84,26 @@ fn technical_periods_do_not_create_false_sentence_boundaries() {
 }
 
 #[test]
+fn ascii_question_and_exclamation_require_a_clear_sentence_boundary() {
+    let document = document_with_content(
+        "Use https://example.test?q=1 and compare x!=0. Continue? Done!",
+    );
+    let set = document.sentence_text_units();
+
+    assert_eq!(
+        set.units
+            .iter()
+            .map(|unit| unit.text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Use https://example.test?q=1 and compare x!=0.",
+            "Continue?",
+            "Done!",
+        ]
+    );
+}
+
+#[test]
 fn cjk_terminal_punctuation_does_not_require_ascii_whitespace() {
     let document = document_with_content("第一句。第二句？第三句！Final sentence.");
     let set = document.sentence_text_units();

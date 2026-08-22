@@ -233,6 +233,9 @@ impl Document {
             }
 
             let paragraph_chars = paragraph.normalized_range.len();
+            let separator_chars = paragraph_chars
+                .checked_sub(sentence_chars)
+                .expect("generated sentence ranges must remain inside the containing Paragraph");
             coverage.push(SentenceParagraphCoverage {
                 owner_section_id: paragraph.owner_section_id.clone(),
                 paragraph_id: paragraph.id.clone(),
@@ -241,7 +244,7 @@ impl Document {
                 eligibility,
                 paragraph_chars,
                 sentence_chars,
-                separator_chars: paragraph_chars.saturating_sub(sentence_chars),
+                separator_chars,
                 coarse_only_chars: 0,
                 sentence_count: ranges.len(),
             });
@@ -385,12 +388,20 @@ fn sentence_ranges(paragraph: &TextUnit) -> Vec<NormalizedTextRange> {
 
 fn sentence_boundary_end(chars: &[char], index: usize) -> Option<usize> {
     match chars[index] {
-        '。' | '！' | '？' | '!' | '?' => Some(extend_terminal_cluster(chars, index)),
+        '。' | '！' | '？' => Some(extend_terminal_cluster(chars, index)),
+        '!' | '?' if ascii_terminal_is_terminal(chars, index) => {
+            Some(extend_terminal_cluster(chars, index))
+        }
         '.' if ascii_period_is_terminal(chars, index) => {
             Some(extend_terminal_cluster(chars, index))
         }
         _ => None,
     }
+}
+
+fn ascii_terminal_is_terminal(chars: &[char], index: usize) -> bool {
+    let boundary_end = extend_terminal_cluster(chars, index);
+    boundary_end == chars.len() || chars[boundary_end].is_whitespace()
 }
 
 fn ascii_period_is_terminal(chars: &[char], index: usize) -> bool {
@@ -430,8 +441,7 @@ fn ascii_period_is_terminal(chars: &[char], index: usize) -> bool {
         return false;
     }
 
-    let boundary_end = extend_terminal_cluster(chars, index);
-    boundary_end == chars.len() || chars[boundary_end].is_whitespace()
+    ascii_terminal_is_terminal(chars, index)
 }
 
 fn extend_terminal_cluster(chars: &[char], index: usize) -> usize {

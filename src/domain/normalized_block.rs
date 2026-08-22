@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Document, NormalizedTextRange, Section, SectionId};
+use super::{Document, NormalizedTextRange, SectionId};
 
 pub const NORMALIZED_BLOCK_MODEL_VERSION: &str = "normalized-block-model/v1";
 pub const NORMALIZED_BLOCK_MAP_METADATA_KEY: &str = "normalized_block_map";
@@ -44,7 +44,8 @@ pub struct NormalizedBlock {
     pub owner_section_id: SectionId,
     /// Human-facing, 1-based block ordinal within the owner Section.
     pub block_index: usize,
-    /// Deterministic global order within the canonical Document traversal.
+    /// Deterministic global source order emitted by the parser. This is independent from
+    /// reconciled Section-tree traversal order.
     pub source_order: usize,
     pub kind: NormalizedBlockKind,
     pub normalized_range: NormalizedTextRange,
@@ -95,10 +96,6 @@ pub enum NormalizedBlockMapError {
         previous_end: usize,
         next_start: usize,
     },
-    OwnerOrderRegression {
-        previous_owner_order: usize,
-        next_owner_order: usize,
-    },
 }
 
 impl fmt::Display for NormalizedBlockMapError {
@@ -107,7 +104,9 @@ impl fmt::Display for NormalizedBlockMapError {
             Self::UnsupportedVersion(version) => {
                 write!(formatter, "unsupported normalized block map version {version:?}")
             }
-            Self::InvalidJson(message) => write!(formatter, "invalid normalized block map JSON: {message}"),
+            Self::InvalidJson(message) => {
+                write!(formatter, "invalid normalized block map JSON: {message}")
+            }
             Self::UnknownOwner(owner) => {
                 write!(formatter, "normalized block owner Section {owner:?} does not exist")
             }
@@ -144,13 +143,6 @@ impl fmt::Display for NormalizedBlockMapError {
             } => write!(
                 formatter,
                 "normalized blocks in Section {owner_section_id:?} overlap or reorder: previous end {previous_end}, next start {next_start}"
-            ),
-            Self::OwnerOrderRegression {
-                previous_owner_order,
-                next_owner_order,
-            } => write!(
-                formatter,
-                "normalized block owner traversal order regresses from {previous_owner_order} to {next_owner_order}"
             ),
         }
     }
@@ -201,15 +193,8 @@ impl Document {
             ));
         }
 
-        let mut section_order = HashMap::new();
-        let mut next_section_order = 0usize;
-        for section in &self.root_sections {
-            collect_section_order(section, &mut next_section_order, &mut section_order);
-        }
-
         let mut expected_block_index = HashMap::<SectionId, usize>::new();
         let mut last_range_end = HashMap::<SectionId, usize>::new();
-        let mut previous_owner_order = None;
 
         for (expected_source_order, block) in map.blocks.iter().enumerate() {
             if block.source_order != expected_source_order {
@@ -222,18 +207,6 @@ impl Document {
             let owner = self.find_section(&block.owner_section_id).ok_or_else(|| {
                 NormalizedBlockMapError::UnknownOwner(block.owner_section_id.0.clone())
             })?;
-            let owner_order = *section_order
-                .get(&block.owner_section_id)
-                .expect("existing Section must have traversal order");
-            if let Some(previous) = previous_owner_order
-                && owner_order < previous
-            {
-                return Err(NormalizedBlockMapError::OwnerOrderRegression {
-                    previous_owner_order: previous,
-                    next_owner_order: owner_order,
-                });
-            }
-            previous_owner_order = Some(owner_order);
 
             let expected = expected_block_index
                 .entry(block.owner_section_id.clone())
@@ -273,17 +246,5 @@ impl Document {
         }
 
         Ok(())
-    }
-}
-
-fn collect_section_order(
-    section: &Section,
-    next_order: &mut usize,
-    output: &mut HashMap<SectionId, usize>,
-) {
-    output.insert(section.id.clone(), *next_order);
-    *next_order += 1;
-    for child in &section.children {
-        collect_section_order(child, next_order, output);
     }
 }

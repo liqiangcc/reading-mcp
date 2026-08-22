@@ -23,6 +23,7 @@ use super::epub_structure::{
     EPUB_STRUCTURE_MAP_VERSION, EpubSpineParseStatus, EpubSpineRecord, ParsedSpineDocument,
     reconcile_epub_structure,
 };
+use super::epub_validator::attach_epub_validation_report;
 
 pub struct EpubParser {
     limits: ArchiveLimits,
@@ -302,6 +303,14 @@ impl Parser for EpubParser {
         document
             .set_normalized_block_map(NormalizedBlockMap::new(normalized_blocks))
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+        let report = attach_epub_validation_report(&mut document)
+            .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+        if report.has_errors() {
+            return Err(ApplicationError::ParseFailed(format!(
+                "EPUB structural validation failed: {}",
+                report.error_codes().join(", ")
+            )));
+        }
         Ok(document)
     }
 }

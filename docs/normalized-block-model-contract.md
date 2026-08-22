@@ -4,7 +4,7 @@
 >
 > Branch: `feat/normalized-block-model`
 >
-> Related: `docs/adr/0003-epub-first-structure-reliability.md`, `docs/epub-structure-reconciliation-contract.md`, `docs/normalized-text-range-contract.md`
+> Related: `docs/adr/0003-epub-first-structure-reliability.md`, `docs/epub-structure-reconciliation-contract.md`, `docs/normalized-text-range-contract.md`, `docs/epub-structure-validator-contract.md`
 
 ## 1. Goal
 
@@ -33,10 +33,16 @@ Current block schema:
 normalized-block-model/v1
 ```
 
-Current parser/cache policy:
+The block model was introduced under parser/cache policy:
 
 ```text
 reading-mcp-normalization/v4
+```
+
+Current parser/cache policy after the subsequent EPUB validator increment is:
+
+```text
+reading-mcp-normalization/v5
 ```
 
 Current source-address identity remains:
@@ -46,7 +52,7 @@ normalized-document-hash/v1
 text-segmentation/v1
 ```
 
-The v4 normalization bump invalidates Parsed Cache entries created before persisted block facts existed. The normalized hash contract is intentionally unchanged in this increment because current Paragraph/Sentence identity still uses `text-segmentation/v1` and does not consume block rows.
+The v4 normalization bump invalidated Parsed Cache entries created before persisted block facts existed. The subsequent v5 bump adds persisted validator/coverage output without changing the block schema or current TextUnit identity.
 
 ## 3. Persisted shape
 
@@ -220,7 +226,7 @@ No SQLite schema migration is required because DocumentRepository already persis
 
 ## 11. Validation
 
-`Document::validate_normalized_block_map()` checks:
+`Document::validate_normalized_block_map()` checks block-local shape:
 
 - schema version;
 - contiguous global source order;
@@ -230,11 +236,23 @@ No SQLite schema migration is required because DocumentRepository already persis
 - non-empty block ranges;
 - no overlap or reorder among blocks sharing one owner Section.
 
-The validator reports violations; it does not clamp, rebase or search for replacement text.
+`epub-structure-validator/v1` now consumes the persisted block map together with EPUB navigation/reconciliation and current TextUnit facts. It additionally records:
+
+```text
+blocks by kind
+Sections with / without native blocks
+Section content chars
+block chars
+separator-or-unmodeled chars
+native block ↔ current Paragraph exact matches
+native pre/table overlap with current Sentence units
+```
+
+Integrity violations are errors; source/model coverage gaps are degradations. Neither validator clamps, rebases or searches for replacement text.
 
 ## 12. Identity boundary in v1
 
-The block map is now persisted canonical normalization evidence, but existing precise TextUnit identity deliberately remains unchanged:
+The block map is persisted canonical normalization evidence, but existing precise TextUnit identity deliberately remains unchanged:
 
 ```text
 normalized-document-hash/v1
@@ -244,7 +262,7 @@ normalized-document-hash/v1
 
 Consequently:
 
-- adding/removing only the block metadata map does not alter the current normalized hash;
+- adding/removing only block/validation metadata does not alter the current normalized hash;
 - current Paragraph TextUnit IDs do not change solely because block rows are present;
 - current search/read/context/enumeration behavior is unchanged.
 
@@ -254,7 +272,7 @@ Before a future block-aware Paragraph/Sentence policy can become identity-bearin
 
 ## 13. Acceptance evidence
 
-Tests cover:
+Block-model tests cover:
 
 - Paragraph / BlockQuote / ListItem / Preformatted / Table kinds;
 - exact Unicode-scalar Section-relative slices;
@@ -265,13 +283,13 @@ Tests cover:
 - validator rejection of bad source order and overlap;
 - SQLite DocumentRepository close/reopen persistence;
 - EPUB Section-ID/native-location remapping after structure reconciliation;
-- unchanged current normalized hash and Paragraph TextUnit IDs when only block metadata is removed;
-- Parsed Cache v3 entries missing under normalization v4;
-- existing precise-reading/search/EPUB regression suites.
+- unchanged current normalized hash and Paragraph TextUnit IDs when only block metadata is removed.
+
+The subsequent EPUB validator additionally proves that the persisted block map can participate in deterministic coverage/revalidation after repository reopen without reparsing source.
 
 ## 14. Explicit non-goals
 
-This increment does not implement:
+The block-model increment does not itself implement:
 
 ```text
 block-aware Paragraph segmentation
@@ -280,17 +298,25 @@ text-segmentation/v2
 normalized-document-hash/v2
 nested block-tree identity
 block-aware SearchIndex ranking
-EPUB structure validator/full coverage report
 SVG/fixed-layout precise blocks
 new MCP Tools
 ```
 
-## 15. Next dependency
+The EPUB validator is now implemented separately rather than hidden inside the block model.
 
-The next EPUB reliability increment is:
+## 15. Next decision
+
+With persisted block facts and validator coverage now available, the next independent unit is an explicit block-aware TextUnit identity migration decision.
+
+Before implementation it must answer:
 
 ```text
-feat/epub-structure-validator
+Which block kinds become Paragraph candidates?
+How do blockquote/list_item preserve source semantics?
+How do pre/table become coarse non-prose?
+Does segmentation advance to text-segmentation/v2?
+Does normalized-document-hash require v2 block inputs?
+How do existing v1 locators/cursors fail stale instead of being silently reinterpreted?
 ```
 
-It can now validate stable package/navigation/reconciliation/block facts rather than transient parser observations. Only after validator and coverage evidence should a separate identity migration make Paragraph/Sentence semantics depend on the persisted block model.
+No current v1 identity changes until those decisions are versioned and tested.

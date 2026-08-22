@@ -11,11 +11,14 @@ HTTP            = HTTPS only
 Local file      = disabled
 State           = ~/.reading-mcp
 Repository      = SQLite
+Paragraph index = SQLite derived TextUnitIndex
 Search          = SQLite FTS5
 Raw cache       = persistent file cache
 Parsed cache    = persistent file cache
 Telemetry       = stderr JSON enabled
 ```
+
+Sentence enumeration 不需要 Sentence SQLite rows；它从 persisted canonical Document 确定性 materialize。
 
 Windows 上默认 state root 使用 `%USERPROFILE%\.reading-mcp`。
 
@@ -59,10 +62,11 @@ SQLite 中：
 
 ```text
 documents    = DocumentRepository
+text_units   = Paragraph TextUnitIndex (derived)
 search_units = FTS5 SearchIndex
 ```
 
-两者可以共享数据库文件，但仍通过两个独立 Port 使用。
+三者可以共享数据库文件，但仍通过独立职责/Port 使用。Sentence stream 不是新的 source store；当前没有 Sentence persistence table。
 
 ## HTTP
 
@@ -107,33 +111,57 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 
 资源预算限制“输入和规范化文档能有多大”；Response Budget 独立限制“一次 MCP Tool 调用最多返回多少”。这两个边界不能互相替代。
 
-正文类 Tool 使用固定的服务端安全上限：
+### `read_document` / `get_context`
+
+正文类 legacy Tool：
 
 ```text
-read_document / get_context
 默认 max_chars = 32000
 服务端硬上限   = 64000
 ```
 
-如果客户端省略 `max_chars`，服务端使用 32,000 字符默认值；如果客户端请求超过 64,000，服务端会自动封顶到 64,000。只要正文被截断，响应中的：
+`read_document` 的 SectionTreeReadStream 若超出页预算，会返回 `ReadCursor` continuation；`get_context` 当前仍是 legacy bounded Section-neighbor response。
 
-```json
-{
-  "truncated": true
-}
+### `get_text_units`
+
+TextUnit enumeration 有独立双预算：
+
+```text
+max_items default = 32
+max_items max     = 256
+
+max_chars default = 32768
+max_chars max     = 65536
 ```
 
-会明确告诉调用方需要继续缩小范围或读取更具体的 Section。客户端不能通过传入超大 `max_chars` 绕过服务端硬上限。
+`max_chars` 只预算 item 的 canonical text。TextUnit 是 enumeration 原子项：
 
-`get_document_structure` 不返回正文，但结构本身也可能非常大，因此单次响应最多返回 1,000 个 `SectionNode`。`max_depth` 仍用于主动缩小结构深度；若服务端节点预算导致树被截断，响应同样返回：
-
-```json
-{
-  "truncated": true
-}
+```text
+单个 Paragraph/Sentence > max_chars
+→ RESOURCE_LIMIT_EXCEEDED
 ```
 
-这里的 `truncated` 只表示服务端 Response Budget 截断，不表示调用方主动设置 `max_depth` 后省略了更深层节点。
+不会为了满足 response budget 截断一个 TextUnit 然后继续沿用同一个 TextLocator。
+
+页尚未结束时返回：
+
+```text
+complete = false
+next_cursor = text-unit-cursor/v1
+```
+
+terminal page：
+
+```text
+complete = true
+next_cursor = null
+```
+
+`preserve_source` 可在 terminal page 宣称 `section_complete=true`，前提是 all-source coverage 完整；`eligible_only` 按契约不会宣称 all-source completion。
+
+### `get_document_structure`
+
+结构 Tool 不返回正文，但结构本身也可能很大，因此单次响应最多返回 1,000 个 `SectionNode`。`max_depth` 仍用于主动缩小结构深度；若服务端节点预算导致树被截断，响应返回 `truncated=true`。
 
 这些限制属于 Application/MCP 输出边界，而不是 Parser、Repository 或 Domain 职责。目标是确保：
 
@@ -141,6 +169,7 @@ read_document / get_context
 按需读取 > 整篇注入
 客户端请求大小 < 服务端安全上限
 Normalized Document 大小 != 单次 MCP Response 大小
+TextUnit budget != source/document resource budget
 ```
 
 ## HTTP Cache Revalidation
@@ -262,7 +291,7 @@ Authorization: Bearer <READING_MCP_HTTP_TOKEN>
 
 HTTP 服务拒绝 `0.0.0.0`、LAN 地址和其他非 loopback bind。远程访问必须通过受信任的 MCP Tunnel 或 reverse proxy；这使“网络暴露”与 Reading MCP 进程本身保持职责分离。
 
-RMCP 默认 Host 防护保持开启，不再为了动态 tunnel 域名全局关闭。若 tunnel/reverse proxy 会把公共 Host 转发到 Reading MCP，必须显式配置该 Host：
+RMCP 默认 Host 防护保持开启。若 tunnel/reverse proxy 会把公共 Host 转发到 Reading MCP，必须显式配置该 Host：
 
 ```bash
 READING_MCP_HTTP_ALLOWED_HOSTS=mcp.example.com
@@ -282,7 +311,7 @@ http://[::1]:8787
 READING_MCP_HTTP_ALLOWED_ORIGINS=https://trusted-client.example.com
 ```
 
-不要通过设置空 allowlist 来关闭 Host/Origin 防护。临时随机域名 tunnel 应在 tunnel 建立后把实际 Host/Origin 明确加入 allowlist，或优先使用 Secure MCP Tunnel 的 stdio 路径。
+不要通过设置空 allowlist 来关闭 Host/Origin 防护。
 
 ## Telemetry
 
@@ -330,10 +359,14 @@ MCP error `data` 提供：
 }
 ```
 
-稳定 code：
+稳定 code 包括：
 
 ```text
 INVALID_REQUEST
+INVALID_CURSOR
+STALE_CURSOR
+CURSOR_TARGET_MISMATCH
+CURSOR_ENCODING_FAILED
 BLOCKED_SOURCE
 AUTHENTICATION_FAILED
 RESOURCE_LIMIT_EXCEEDED
@@ -344,6 +377,7 @@ SECTION_NOT_FOUND
 REPOSITORY_FAILED
 CACHE_FAILED
 INDEX_FAILED
+TEXT_UNIT_INDEX_FAILED
 ```
 
-`retryable=true` 目前用于来源/存储/缓存/索引等可能的暂态失败；策略拒绝、解析失败和资源超限默认不可盲目重试。
+`retryable=true` 用于来源/存储/缓存/索引等可能的暂态失败；策略拒绝、cursor identity mismatch、解析失败和资源超限默认不可盲目重试。

@@ -135,8 +135,9 @@ fn document() -> Document {
             parent_id: None,
             title: "Root".into(),
             level: 1,
-            content: "A deliberately long exact target verifies that cursor modes cannot be confused."
-                .into(),
+            content:
+                "A deliberately long exact target verifies that cursor modes cannot be confused."
+                    .into(),
             location: Location {
                 section_path: vec!["Root".into()],
                 ..Location::default()

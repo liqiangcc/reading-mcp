@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -12,6 +12,11 @@ use crate::domain::{Document, DocumentSource, MediaType, Section, SectionId};
 use super::HtmlParser;
 use super::archive::{ArchiveLimits, read_entry, utf8_entry, validate_archive_entries};
 use super::common::{content_hash, document_id, title_from_metadata};
+use super::epub_navigation::{
+    EPUB_NAVIGATION_MAP_VERSION, FragmentCache, build_navigation_map,
+    is_supported_content_media_type, parse_package_facts, remember_fragment_index,
+    resolve_archive_path,
+};
 
 pub struct EpubParser {
     limits: ArchiveLimits,
@@ -73,26 +78,8 @@ impl Parser for EpubParser {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-
-        let manifest = package_xml
-            .descendants()
-            .filter(|node| node.is_element() && node.tag_name().name() == "item")
-            .filter_map(|node| {
-                Some((
-                    node.attribute("id")?.to_string(),
-                    (
-                        node.attribute("href")?.to_string(),
-                        node.attribute("media-type").unwrap_or_default().to_string(),
-                    ),
-                ))
-            })
-            .collect::<HashMap<_, _>>();
-        let spine = package_xml
-            .descendants()
-            .filter(|node| node.is_element() && node.tag_name().name() == "itemref")
-            .filter_map(|node| node.attribute("idref").map(str::to_string))
-            .collect::<Vec<_>>();
-        if spine.is_empty() {
+        let package_facts = parse_package_facts(&package_xml);
+        if package_facts.spine.is_empty() {
             return Err(ApplicationError::ParseFailed(
                 "EPUB package has an empty spine".into(),
             ));
@@ -100,18 +87,29 @@ impl Parser for EpubParser {
 
         let mut root_sections = Vec::new();
         let mut parsed_spine = 0usize;
-        for (spine_index, idref) in spine.iter().enumerate() {
-            let Some((href, media_type)) = manifest.get(idref) else {
+        let mut fragment_cache = FragmentCache::new();
+        for (spine_index, spine_item) in package_facts.spine.iter().enumerate() {
+            let Some(manifest_item) = package_facts.manifest_item(&spine_item.idref) else {
                 continue;
             };
-            if !matches!(
-                media_type.as_str(),
-                "application/xhtml+xml" | "text/html" | "application/xml" | "text/xml"
-            ) {
+            if !is_supported_content_media_type(&manifest_item.media_type) {
                 continue;
             }
-            let entry_path = resolve_archive_path(&package_path, href)?;
+            let entry_path = resolve_archive_path(&package_path, &manifest_item.href).map_err(
+                |message| {
+                    ApplicationError::ParseFailed(format!(
+                        "EPUB manifest path {:?} is invalid: {message}",
+                        manifest_item.href
+                    ))
+                },
+            )?;
             let xhtml = read_entry(&mut archive, &entry_path, &self.limits, &mut total_read)?;
+            remember_fragment_index(
+                &mut fragment_cache,
+                &entry_path,
+                &manifest_item.media_type,
+                &xhtml,
+            );
             let parsed = self
                 .html
                 .parse(RetrievedResource {
@@ -141,10 +139,65 @@ impl Parser for EpubParser {
             ));
         }
 
+        let navigation_map = build_navigation_map(
+            &mut archive,
+            &package_path,
+            &package_facts,
+            &mut fragment_cache,
+            &self.limits,
+            &mut total_read,
+        )?;
+        let navigation_json = serde_json::to_string(&navigation_map)
+            .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+
         drop(archive);
         let mut metadata = resource.metadata;
         metadata.insert("epub_package_path".into(), package_path);
+        metadata.insert(
+            "epub_package_version".into(),
+            package_facts
+                .version
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+        );
+        metadata.insert(
+            "epub_manifest_items".into(),
+            package_facts.manifest.len().to_string(),
+        );
+        metadata.insert(
+            "epub_spine_items_total".into(),
+            package_facts.spine.len().to_string(),
+        );
+        // Backward-compatible historical key: number of readable spine items actually parsed.
         metadata.insert("epub_spine_items".into(), parsed_spine.to_string());
+        metadata.insert(
+            "epub_navigation_map_version".into(),
+            EPUB_NAVIGATION_MAP_VERSION.into(),
+        );
+        metadata.insert(
+            "epub_navigation_provenance".into(),
+            navigation_map
+                .provenance
+                .map(|value| value.as_str())
+                .unwrap_or("none")
+                .into(),
+        );
+        if let Some(source_path) = &navigation_map.source_path {
+            metadata.insert("epub_navigation_source_path".into(), source_path.clone());
+        }
+        metadata.insert(
+            "epub_navigation_nodes".into(),
+            navigation_map.node_count().to_string(),
+        );
+        metadata.insert(
+            "epub_navigation_resolved_nodes".into(),
+            navigation_map.resolved_node_count().to_string(),
+        );
+        metadata.insert(
+            "epub_navigation_diagnostics".into(),
+            navigation_map.diagnostics.len().to_string(),
+        );
+        metadata.insert("epub_navigation_map".into(), navigation_json);
         let title = package_title
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| title_from_metadata(&metadata, &resource.final_source));
@@ -187,57 +240,4 @@ fn remap_epub_section(
         .map(|child| remap_epub_section(child, spine_index, entry_path, Some(id.clone())))
         .collect();
     section
-}
-
-fn resolve_archive_path(package_path: &str, href: &str) -> Result<String, ApplicationError> {
-    let href = href
-        .split('#')
-        .next()
-        .unwrap_or(href)
-        .split('?')
-        .next()
-        .unwrap_or(href);
-    let base = package_path
-        .rsplit_once('/')
-        .map(|(parent, _)| parent)
-        .unwrap_or_default();
-    let combined = if base.is_empty() {
-        href.to_string()
-    } else {
-        format!("{base}/{href}")
-    };
-    let mut segments = Vec::new();
-    for segment in combined.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                if segments.pop().is_none() {
-                    return Err(ApplicationError::ParseFailed(
-                        "EPUB manifest path escapes archive root".into(),
-                    ));
-                }
-            }
-            value => segments.push(value),
-        }
-    }
-    if segments.is_empty() {
-        return Err(ApplicationError::ParseFailed(
-            "EPUB manifest contains an empty content path".into(),
-        ));
-    }
-    Ok(segments.join("/"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::resolve_archive_path;
-
-    #[test]
-    fn epub_paths_are_resolved_without_leaving_archive_root() {
-        assert_eq!(
-            resolve_archive_path("OPS/package.opf", "text/ch1.xhtml").unwrap(),
-            "OPS/text/ch1.xhtml"
-        );
-        assert!(resolve_archive_path("package.opf", "../outside.xhtml").is_err());
-    }
 }

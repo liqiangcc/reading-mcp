@@ -1,14 +1,16 @@
 # EPUB Structure Validator Contract
 
-> Status: Implemented P1 validator foundation
+> Status: Implemented P1 validator foundation; current TextUnit consumer is v2
 >
-> Branch: `feat/epub-structure-validator`
+> Validator foundation branch: `feat/epub-structure-validator`
 >
-> Related: `docs/adr/0003-epub-first-structure-reliability.md`, `docs/epub-structure-reconciliation-contract.md`, `docs/normalized-block-model-contract.md`
+> Current identity branch: `feat/block-aware-text-unit-identity`
+>
+> Related: `docs/adr/0003-epub-first-structure-reliability.md`, `docs/adr/0005-block-aware-text-unit-identity.md`, `docs/epub-structure-reconciliation-contract.md`, `docs/normalized-block-model-contract.md`
 
 ## 1. Goal
 
-`epub-structure-validator/v1` turns the persisted EPUB structure pipeline into auditable evidence before a later block-aware TextUnit identity migration.
+`epub-structure-validator/v1` turns the persisted EPUB structure pipeline into auditable evidence. It now validates the current block-aware TextUnit v2 materialization from persisted facts.
 
 The validator does **not** reopen the EPUB archive or reparse DOM state. It validates only facts that survive persistence:
 
@@ -17,7 +19,7 @@ canonical Document / Sections
 + epub-navigation-map/v1
 + epub-structure-reconciliation/v1
 + normalized-block-model/v1
-+ deterministic text-segmentation/v1 Paragraph/Sentence materialization
++ deterministic text-segmentation/v2 Paragraph/Sentence materialization
 → epub-structure-validator/v1
 ```
 
@@ -60,8 +62,7 @@ unsupported navigation resource
 unsupported/missing-manifest spine item
 reconciliation fallback diagnostic
 nonempty Section with no normalized native block
-native block != one current text-segmentation/v1 Paragraph
-current Sentence units overlapping native pre/table evidence
+native block/current TextUnit coverage mismatch
 ```
 
 The validator reports degradation; it never changes source text, reorders structure, searches for replacement targets, or fuzzy-rebases locators.
@@ -211,9 +212,20 @@ Every EPUB block must retain EPUB-qualified native provenance. Coverage does not
 
 ## 8. Current TextUnit validation
 
-The validator materializes the current deterministic `text-segmentation/v1` Paragraph/Sentence stream from the persisted canonical Document and checks:
+The validator materializes current deterministic `text-segmentation/v2` Paragraph/Sentence facts from the persisted canonical Document.
 
-Paragraph:
+Paragraph projection under block-model/v1:
+
+```text
+native paragraph    → exact sentence-eligible Paragraph
+native blockquote   → typed coarse Paragraph-level unit
+native list_item    → typed coarse Paragraph-level unit
+native preformatted → coarse Paragraph-level unit
+native table        → coarse Paragraph-level unit
+uncovered content   → deterministic fallback Paragraphs
+```
+
+Paragraph checks include:
 
 ```text
 contiguous source_order
@@ -223,7 +235,7 @@ text == exact owner Section slice
 coverage owner_chars = paragraph_chars + separator_chars
 ```
 
-Sentence:
+Sentence checks include:
 
 ```text
 contiguous source_order
@@ -235,28 +247,22 @@ text == exact owner Section slice
 coverage paragraph_chars = sentence_chars + separator_chars + coarse_only_chars
 ```
 
-This is validation of the **current** TextUnit contract; it does not make normalized blocks identity-bearing yet.
+Only native Paragraph and fallback prose/unknown regions are Sentence-eligible. Flat BlockQuote/ListItem and native Preformatted/Table remain coarse and receive no fabricated Sentence children.
 
-## 9. Evidence for the later block-aware migration
+## 9. Migration history and evidence
 
-The validator intentionally compares native block facts with current `text-segmentation/v1` facts.
+Before ADR 0005, the validator compared native block facts against `text-segmentation/v1` and deliberately reported mismatches such as native pre/table overlaps as migration evidence.
 
-Examples:
+ADR 0005 then advanced current identity to:
 
 ```text
-native block range == one current Paragraph
-→ exact match evidence
-
-native block range != one current Paragraph
-→ degradation: native_blocks_not_exact_current_paragraphs
-
-native pre/table range overlaps current Sentence units
-→ degradation: current_sentences_overlap_native_non_prose_blocks
+normalized-document-hash/v2
+text-segmentation/v2
 ```
 
-These are migration evidence, not a reason to silently reinterpret existing v1 locators.
+The validator remains schema `epub-structure-validator/v1`; its job did not change. What changed is the current deterministic TextUnit contract it validates.
 
-A later block-aware segmentation increment must make an explicit identity-version decision.
+The report itself remains excluded from normalized-document hash identity. Identity-bearing block kind/range/order is bound directly by hash v2 instead.
 
 ## 10. Parser integration
 
@@ -274,21 +280,32 @@ The validator does not repair failed facts.
 
 ## 11. Parsed Cache / identity boundary
 
-Validator report metadata changes parser output, so normalization/cache policy advances:
+Validator report metadata is persisted parser output.
+
+Historical validator introduction advanced:
 
 ```text
 reading-mcp-normalization/v4
 → reading-mcp-normalization/v5
 ```
 
-Current addressing identity remains:
+The later block-aware TextUnit migration changes the Paragraph/Sentence coverage stored in that report, so Parsed Cache policy advances again:
 
 ```text
-normalized-document-hash/v1
-text-segmentation/v1
+reading-mcp-normalization/v5
+→ reading-mcp-normalization/v6
 ```
 
-The validation report itself is derived metadata and is not added to the current normalized-document hash.
+`CachingParser` returns a Parsed Cache hit without rerunning validation. Reusing a v5 cached EPUB could therefore expose a v1-era validation report beside current v2 TextUnits. A v5 key must miss under v6.
+
+Current addressing identity:
+
+```text
+normalized-document-hash/v2
+text-segmentation/v2
+```
+
+The validation report itself remains derived metadata and is not added to normalized-document hash inputs.
 
 ## 12. Persistence / reopen
 
@@ -297,7 +314,7 @@ Because all source-facing inputs and the report are inside the persisted `Docume
 Acceptance requires:
 
 ```text
-parse EPUB
+parse EPUB under current policy
 → persist Document
 → close repository
 → reopen repository
@@ -306,19 +323,21 @@ parse EPUB
 → same report
 ```
 
-No source retrieval/reparse is required for this revalidation.
+No source retrieval/reparse is required for repository-level revalidation. Parsed Cache policy is separate: old v5 parser output is invalidated at cache-key level before it can become the current Document.
 
 ## 13. Acceptance evidence
 
 Tests cover:
 
-- clean EPUB → `integrity=valid`, zero error/degradation and factual coverage counts;
+- clean EPUB → valid integrity and factual coverage;
 - unsupported spine media / missing fragment / unsupported nav target remain readable degradations;
 - tampered persisted summary facts become integrity errors without source reparse;
+- block-aware TextUnit ranges/eligibility feed current validation deterministically;
 - report survives SQLite close/reopen and deterministic revalidation;
-- existing EPUB navigation/reconciliation/block/TextUnit/precise-read/search suites remain subject to the release gate.
+- normalization-v5 Parsed Cache keys miss under v6;
+- existing EPUB navigation/reconciliation/block/precise-read/search suites remain subject to the release gate.
 
-Release gate:
+Final gate:
 
 ```text
 cargo fmt --all -- --check
@@ -328,32 +347,30 @@ cargo test --locked --all-features
 
 ## 14. Explicit non-goals
 
-This increment does not implement:
+The validator still does not implement:
 
 ```text
-text-segmentation/v2
-block-aware Paragraph/Sentence identity
-normalized-document-hash/v2
-nested block-tree identity
+nested/leaf block-tree identity
 new reliability-inspection MCP Tool
 SearchIndex/ranking changes
 SVG/fixed-layout precision
 silent repair / fuzzy rebase
 ```
 
-## 15. Next decision
+TextUnit v2/hash v2 are now implemented by their own identity migration rather than hidden inside the validator.
 
-After validator/coverage evidence is stable, the next separate design/implementation unit can evaluate a block-aware TextUnit identity migration.
+## 15. Current boundary
 
-It must answer explicitly:
+The validator is evidence, not source identity and not a repair engine.
+
+Current pipeline:
 
 ```text
-Which normalized block kinds become Paragraph candidates?
-How are blockquote/list_item represented?
-How are pre/table made coarse non-prose?
-Does segmentation become text-segmentation/v2?
-Which block facts must enter normalized-document-hash/v2, if any?
-How are old v1 locators/cursors made stale rather than reinterpreted?
+persisted package/navigation/reconciliation/block facts
++ canonical Document
++ current text-segmentation/v2 TextUnits
+→ epub-structure-validator/v1
+→ deterministic integrity + coverage report
 ```
 
-Validator evidence informs that migration; it does not silently perform it.
+Any future nested-block or segmentation change that alters persisted validator coverage must again review both normalized identity and Parsed Cache policy explicitly.

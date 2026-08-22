@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::application::ports::{LEXICAL_TOKENIZER_VERSION, SearchHitKind};
+use crate::application::ports::SearchHitKind;
 use crate::domain::{Document, Location, Section, SentenceTextUnit, TextLocator, TextUnit};
 
 pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v2";
@@ -99,14 +99,7 @@ fn collect_section_candidates(
     }
 
     for child in &section.children {
-        collect_section_candidates(
-            document,
-            child,
-            paragraphs,
-            sentences,
-            output,
-            source_order,
-        );
+        collect_section_candidates(document, child, paragraphs, sentences, output, source_order);
     }
 }
 
@@ -182,11 +175,7 @@ fn tokenize_segment(segment: &str, output: &mut Vec<String>, seen: &mut HashSet<
             {
                 index += 1;
             }
-            push_unique(
-                output,
-                seen,
-                chars[start..index].iter().collect::<String>(),
-            );
+            push_unique(output, seen, chars[start..index].iter().collect::<String>());
             continue;
         }
         index += 1;
@@ -282,10 +271,6 @@ pub(crate) fn score_candidate(candidate: &LexicalCandidate, query: &str) -> Opti
         SearchHitKind::Section => 0.25,
     };
     Some(phrase_bonus + query_tokens.len() as f32 + kind_bonus)
-}
-
-pub(crate) fn tokenizer_version() -> &'static str {
-    LEXICAL_TOKENIZER_VERSION
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

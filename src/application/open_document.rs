@@ -86,10 +86,15 @@ impl OpenDocumentUseCase {
             .await?;
 
         let document = self.parser.parse(resource).await?;
-        let paragraph_units = self
-            .text_unit_index
-            .as_ref()
-            .map(|_| document.paragraph_text_units());
+        let paragraph_units = if self.text_unit_index.is_some() {
+            Some(document.try_paragraph_text_units().map_err(|error| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "cannot rebuild Paragraph TextUnits from persisted block evidence: {error}"
+                ))
+            })?)
+        } else {
+            None
+        };
         let result = OpenDocumentResult {
             document_id: document.id.clone(),
             source: document.source.clone(),

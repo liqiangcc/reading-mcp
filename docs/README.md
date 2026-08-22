@@ -15,6 +15,7 @@
 - [EPUB Navigation Map Contract](epub-navigation-map-contract.md)：已实现的 EPUB 3 `properties=nav` discovery、TOC/NCX hierarchy、href/fragment resolution 与 provenance parser facts。
 - [EPUB Structure Reconciliation Contract](epub-structure-reconciliation-contract.md)：已实现的 nav/NCX/heading/spine precedence、spine-authoritative source order、`linear=no` 与 structural provenance。
 - [Normalized Block Model Contract](normalized-block-model-contract.md)：已实现的 HTML/XHTML native body-block kinds、exact Section-relative ranges、EPUB remap、持久化/重启验证与 identity migration 边界。
+- [EPUB Structure Validator Contract](epub-structure-validator-contract.md)：已实现的 persisted-fact integrity validation、error/degradation taxonomy、spine/navigation/structure/block/TextUnit coverage 与 SQLite reopen revalidation。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
 - [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：从 Actor/Goal 和阅读 Use Case 推导 Capability、状态机与 Tool Contract。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
@@ -63,6 +64,8 @@ epub-navigation-map-contract.md
 epub-structure-reconciliation-contract.md
       ↓
 normalized-block-model-contract.md
+      ↓
+epub-structure-validator-contract.md
       ↓
 epub-structure-reliability-design.md
       ↓
@@ -127,6 +130,7 @@ search → precise TextLocator → read/context direct handoff
 EPUB navigation-map/v1 parser facts
 EPUB structure-reconciliation/v1 canonical hierarchy
 normalized-block-model/v1 persisted exact body-block ranges
+epub-structure-validator/v1 integrity + factual coverage evidence
 INVALID_LOCATOR / STALE_LOCATOR fail-closed validation
 ```
 
@@ -140,7 +144,11 @@ normalized-block-model/v1
 → persisted HTML/XHTML native block evidence
 → 当前尚不改变 TextUnit identity
 
-reading-mcp-normalization/v4
+epub-structure-validator/v1
+→ persisted-fact validation / coverage evidence
+→ 不成为 source identity
+
+reading-mcp-normalization/v5
 → Parsed Document policy/cache invalidation
 
 lexical-tokenizer/v1
@@ -149,7 +157,7 @@ lexical-tokenizer/v1
 
 Tokenizer 变化不得重编号 TextUnit 或改变 TextLocator。SQLite lexical index version/tokenizer version 不匹配时，仅丢弃并重建 derived lexical state，不触碰 canonical Document/TextUnit facts；若 persisted Document 存在但 lexical rows 缺失，搜索可直接从 canonical repository 重建，不重新下载/解析来源。
 
-EPUB 当前已经完成 navigation extraction、canonical structure reconciliation 与 native body-block 持久化：
+EPUB 当前已经完成 navigation extraction、canonical structure reconciliation、native body-block 持久化与 persisted-fact validator：
 
 ```text
 manifest properties=nav
@@ -168,13 +176,19 @@ spine-authoritative source order
 HTML/XHTML p / blockquote / li / pre / table
 → exact Section.content ranges
 → normalized-block-model/v1
+        ↓
+persisted navigation / structure / block / canonical TextUnit evidence
+→ epub-structure-validator/v1
+→ integrity errors + readable degradations + factual coverage
 ```
 
 Publisher navigation 只有在能映射到真实 canonical Section boundary 时才可升级 title/parentage；navigation 顺序不能反转 spine/source order。`linear=no` 作为 auxiliary content 仍保持可寻址，不被静默删除。
 
-NormalizedBlock v1 不复制正文：每个 block 都是 owner Section 的 exact normalized range。Heading 继续由 canonical `Section.title/id/parent/level` 表示，因为 heading label 当前不属于 `Section.content`，所以不会伪造 heading body range。Block source order 是 parser/spine source order，独立于 reconciliation 后的 Section-tree DFS。当前 `text-segmentation/v1` 仍未消费 block map，因此 block-only metadata 变化不会偷偷重编号 Paragraph/Sentence；任何 block-aware identity migration 必须显式版本化。
+NormalizedBlock v1 不复制正文：每个 block 都是 owner Section 的 exact normalized range。Heading 继续由 canonical `Section.title/id/parent/level` 表示，因为 heading label 当前不属于 `Section.content`，所以不会伪造 heading body range。Block source order 是 parser/spine source order，独立于 reconciliation 后的 Section-tree DFS。
 
-下一 EPUB 可靠性增量是 `feat/epub-structure-validator`，用已经稳定的 package/navigation/reconciliation/block facts 做结构/range/provenance/coverage 验证，而不是直接修改 Paragraph/Sentence 规则。
+Validator 不重新打开 ZIP/DOM，只消费持久化事实。内部一致性冲突是 `error` 并使 EPUB parser fail closed；missing fragment、unsupported media、fallback、native block 与当前 v1 TextUnit 的差异属于 `degradation`，保留 readable Document 与明确 coverage。报告可随 Document 持久化并在 SQLite reopen 后得到相同 revalidation 结果。
+
+当前 `text-segmentation/v1` 仍未消费 block map。下一独立工作不是静默改现有 locator，而是基于 validator coverage 单独设计/实施 block-aware TextUnit identity migration，显式决定 segmentation/hash version。
 
 当前 direct handoff：
 

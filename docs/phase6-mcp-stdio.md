@@ -32,9 +32,11 @@ read_document
 content_hash
 normalized_document_hash
 normalized-document-hash/v1
-reading-mcp-normalization/v1
+reading-mcp-normalization/v2
 section-content-unicode-scalar/v1
 ```
+
+`reading-mcp-normalization/v2` invalidates Parsed Cache entries created before the EPUB navigation-map parser output was introduced; it does not change `normalized-document-hash/v1` while canonical Section addressing facts remain unchanged.
 
 Paragraph/Sentence：
 
@@ -185,6 +187,21 @@ search_document
 SearchDocumentUseCase revalidates source, tokenizer version, candidate kind and locator identity against canonical Document before returning a precise hit。
 
 Legacy preview fields remain available；`location/search-unit` never becomes canonical identity。
+
+## EPUB navigation-map parser foundation
+
+`feat/epub-navigation-map` adds parser-internal, persisted EPUB navigation facts without changing the seven-Tool surface or rewriting canonical Section hierarchy yet:
+
+```text
+EPUB package / manifest
+→ properties=nav discovery
+→ EPUB 3 toc nav hierarchy
+→ legacy NCX fallback
+→ href / fragment resolution diagnostics
+→ epub-navigation-map/v1 in Document.metadata
+```
+
+The map is an input to the later nav/spine reconciliation increment. It is not yet exposed as a new MCP Tool or treated as canonical Section identity.
 
 ## Default persistent state
 

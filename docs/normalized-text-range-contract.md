@@ -79,13 +79,15 @@ Those fields remain valuable provenance or derived state, but they do not define
 
 ### 2.3 Normalization policy version
 
-Current diagnostic version:
+Current diagnostic/cache version:
 
 ```text
-normalization_version = reading-mcp-normalization/v1
+normalization_version = reading-mcp-normalization/v2
 ```
 
 `normalization_version` identifies parser/normalization policy for cache invalidation, diagnostics, and migration. It is not a substitute for the actual normalized fingerprint.
+
+The v2 bump invalidates Parsed Cache entries created before the EPUB navigation-map parser output was introduced. The navigation map is currently persisted as `Document.metadata` and does not yet alter Section addressing facts, so this cache-version bump does not require changing `normalized-document-hash/v1`.
 
 A policy version may change while producing identical canonical facts; in that case the actual `normalized_document_hash` can remain identical. Conversely, canonical facts changing must change the normalized hash even when raw bytes remain identical.
 

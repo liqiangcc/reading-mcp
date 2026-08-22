@@ -6,6 +6,7 @@
 - Reviewed against main: `97490792ed1207ff27ed795fbc5f42138dc80784`
 - Related design: `docs/epub-structure-reliability-design.md`
 - Related locator architecture: `docs/adr/0002-text-index-locator-identity.md`
+- Implementation status: `feat/epub-navigation-map` is implemented; nav/spine/heading structural reconciliation is the next EPUB increment. Paragraph/Sentence TextUnit foundations are already implemented independently.
 
 ## Context
 
@@ -268,38 +269,40 @@ unsupported SVG/fixed-layout/foreign content
 
 Coverage denominators must be well-defined and not mix prose eligibility with unsupported/non-prose content in misleading percentages.
 
-## Implementation sequence
+## Implementation sequence / status
 
-This work remains separate from `feat/read-continuation`.
-
-After continuation and normalized-range foundations are stable:
+The EPUB reliability work remains separated into short-lived increments:
 
 ```text
-P1 feat/epub-navigation-map
-   - parse package version/properties
+P1 feat/epub-navigation-map                    ✓
+   - package version/properties
    - EPUB 3 nav discovery/hierarchy
-   - target resolution diagnostics
-   - legacy NCX compatibility decision/implementation
+   - archive-safe target/fragment resolution diagnostics
+   - legacy NCX fallback provenance
+   - persisted epub-navigation-map/v1 parser fact
+   - no canonical Section rewrite yet
 
-P1 feat/epub-structure-reconciliation
+P1 feat/epub-structure-reconciliation          next
    - reconcile nav hierarchy with spine/document order
-   - heading/spine fallback
+   - XHTML heading/spine fallback
    - structural provenance
    - linear/non-linear semantics
 
-P1 feat/normalized-block-model
+P1 feat/normalized-block-model                 later
    - persisted addressing-relevant XHTML block boundaries/kinds
 
-P1 feat/text-unit-index
+P1 feat/text-unit-index                        ✓
    - deterministic Paragraph units from persisted canonical state
 
-P1 feat/sentence-locator
+P1 feat/sentence-locator                       ✓
    - deterministic Sentence segmentation
 
-P1 feat/epub-structure-validator
+P1 feat/epub-structure-validator               later
    - structural/range validators
    - coverage diagnostics
 ```
+
+`feat/epub-navigation-map` persists navigation in `Document.metadata` only. Because this changes parser output but not current Section addressing facts, Parsed Cache version advances to `reading-mcp-normalization/v2` while `normalized-document-hash/v1` remains unchanged. The next reconciliation increment may change canonical Section facts and therefore normalized hash values naturally.
 
 SVG/fixed-layout precise-reading support is a separate capability increment unless pre-research proves it can share the XHTML reliability model without weakening invariants.
 
@@ -340,4 +343,4 @@ Costs:
 
 ## Review outcome
 
-Accepted. The architecture is sufficiently constrained to continue detailed pre-research later, but implementation must not start on this design branch and must not be pulled into the current `feat/read-continuation` P0 work.
+Accepted. The architecture is sufficiently constrained to continue detailed pre-research later. The first implementation increment now realizes the navigation-map plane without collapsing it into spine order or canonical Section hierarchy; reconciliation, block persistence, validator and full coverage remain separate evidence-gated steps.

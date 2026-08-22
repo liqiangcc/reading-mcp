@@ -63,6 +63,18 @@ async fn persistent_raw_and_parsed_caches_survive_adapter_recreation() {
         Some(document)
     );
 
+    let previous_version_key = ParsedCacheKey {
+        normalization_version: "reading-mcp-normalization/v1".into(),
+        ..key.clone()
+    };
+    assert_eq!(
+        reopened_parsed_cache
+            .get(&previous_version_key)
+            .await
+            .expect("prior normalization lookup should be a cache miss"),
+        None
+    );
+
     let future_version_key = ParsedCacheKey {
         normalization_version: "reading-mcp-normalization/future-test".into(),
         ..key

@@ -163,6 +163,7 @@ impl ReadingMcpServer {
             normalization_version: result.normalization_version,
             normalized_text_coordinate_space: result.normalized_text_coordinate_space,
             section_count: result.section_count,
+            reading_profile: result.reading_profile.into(),
         }))
     }
 

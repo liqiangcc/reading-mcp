@@ -22,6 +22,132 @@ pub struct OpenDocumentResponse {
     pub normalization_version: String,
     pub normalized_text_coordinate_space: String,
     pub section_count: usize,
+    pub reading_profile: ReadingProfileDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ReadingProfileDto {
+    pub schema_version: String,
+    pub capabilities: ReadingCapabilitiesDto,
+    pub canonical_text_coverage: CanonicalTextCoverageDto,
+    pub reliability: ReliabilitySummaryDto,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadingCapabilityAvailabilityDto {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct StructureCapabilityDto {
+    pub availability: ReadingCapabilityAvailabilityDto,
+    pub section_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SegmentedReadingCapabilityDto {
+    pub availability: ReadingCapabilityAvailabilityDto,
+    pub segmentation_version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SentenceFirstCapabilityDto {
+    pub availability: ReadingCapabilityAvailabilityDto,
+    pub segmentation_version: String,
+    pub source_preserving_coarse_regions: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SimpleReadingCapabilityDto {
+    pub availability: ReadingCapabilityAvailabilityDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct LexicalSearchCapabilityDto {
+    pub availability: ReadingCapabilityAvailabilityDto,
+    pub precise_candidates: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ReadingCapabilitiesDto {
+    pub structural_navigation: StructureCapabilityDto,
+    pub paragraph_enumeration: SegmentedReadingCapabilityDto,
+    pub sentence_first_enumeration: SentenceFirstCapabilityDto,
+    pub exact_locator_read: SimpleReadingCapabilityDto,
+    pub locator_context: SimpleReadingCapabilityDto,
+    pub lexical_search: LexicalSearchCapabilityDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CanonicalTextCoverageDto {
+    pub owner_chars: usize,
+    pub paragraph_chars: usize,
+    pub paragraph_separator_chars: usize,
+    pub paragraph_count: usize,
+    pub native_paragraph_chars: usize,
+    pub native_structural_container_chars: usize,
+    pub native_non_prose_chars: usize,
+    pub fallback_chars: usize,
+    pub sentence_eligible_paragraphs: usize,
+    pub coarse_paragraphs: usize,
+    pub sentence_count: usize,
+    pub sentence_chars: usize,
+    pub sentence_separator_chars: usize,
+    pub sentence_coarse_only_chars: usize,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReliabilityIntegrityDto {
+    Valid,
+    Invalid,
+    NotApplicable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ReliabilityEvidenceDto {
+    pub kind: String,
+    #[serde(default)]
+    pub schema_version: Option<String>,
+    pub integrity: ReliabilityIntegrityDto,
+    pub degradation_count: usize,
+    pub degradation_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PublicationCoverageDto {
+    pub source_units_total: usize,
+    pub source_units_represented: usize,
+    pub source_units_missing: usize,
+    pub source_units_unsupported: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct StructureProvenanceCoverageDto {
+    pub native_navigation_sections: usize,
+    pub legacy_navigation_sections: usize,
+    pub heading_fallback_sections: usize,
+    pub source_item_fallback_sections: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct NavigationResolutionCoverageDto {
+    pub targets_total: usize,
+    pub targets_resolved: usize,
+    pub targets_unresolved_or_unsupported: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ReliabilitySummaryDto {
+    pub evidence: Vec<ReliabilityEvidenceDto>,
+    #[serde(default)]
+    pub publication_coverage: Option<PublicationCoverageDto>,
+    #[serde(default)]
+    pub structure_provenance: Option<StructureProvenanceCoverageDto>,
+    #[serde(default)]
+    pub navigation_resolution: Option<NavigationResolutionCoverageDto>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, Parser, RetrievalOptions, Retriever, SearchIndex,
-    SourcePolicy, TextUnitIndex,
+    ApplicationError, DocumentReliabilityInspector, DocumentRepository, Parser, RetrievalOptions,
+    Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
+};
+use crate::application::reading_profile::{
+    ReadingProfile, ReliabilitySummary, build_reading_profile,
 };
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, MediaType, NORMALIZATION_VERSION,
@@ -27,6 +30,7 @@ pub struct OpenDocumentResult {
     pub normalization_version: String,
     pub normalized_text_coordinate_space: String,
     pub section_count: usize,
+    pub reading_profile: ReadingProfile,
 }
 
 pub struct OpenDocumentUseCase {
@@ -36,6 +40,7 @@ pub struct OpenDocumentUseCase {
     repository: Arc<dyn DocumentRepository>,
     text_unit_index: Option<Arc<dyn TextUnitIndex>>,
     search_index: Arc<dyn SearchIndex>,
+    reliability_inspector: Option<Arc<dyn DocumentReliabilityInspector>>,
 }
 
 impl OpenDocumentUseCase {
@@ -53,6 +58,7 @@ impl OpenDocumentUseCase {
             repository,
             text_unit_index: None,
             search_index,
+            reliability_inspector: None,
         }
     }
 
@@ -71,7 +77,16 @@ impl OpenDocumentUseCase {
             repository,
             text_unit_index: Some(text_unit_index),
             search_index,
+            reliability_inspector: None,
         }
+    }
+
+    pub fn with_reliability_inspector(
+        mut self,
+        reliability_inspector: Arc<dyn DocumentReliabilityInspector>,
+    ) -> Self {
+        self.reliability_inspector = Some(reliability_inspector);
+        self
     }
 
     pub async fn execute(
@@ -86,15 +101,27 @@ impl OpenDocumentUseCase {
             .await?;
 
         let document = self.parser.parse(resource).await?;
-        let paragraph_units = if self.text_unit_index.is_some() {
-            Some(document.try_paragraph_text_units().map_err(|error| {
-                ApplicationError::TextUnitIndexFailed(format!(
-                    "cannot rebuild Paragraph TextUnits from persisted block evidence: {error}"
-                ))
-            })?)
-        } else {
-            None
+        let paragraph_units = document.try_paragraph_text_units().map_err(|error| {
+            ApplicationError::TextUnitIndexFailed(format!(
+                "cannot build current Paragraph coverage from persisted block evidence: {error}"
+            ))
+        })?;
+        let sentence_units = document.try_sentence_text_units().map_err(|error| {
+            ApplicationError::TextUnitIndexFailed(format!(
+                "cannot build current Sentence coverage from persisted block evidence: {error}"
+            ))
+        })?;
+        let reliability = match &self.reliability_inspector {
+            Some(inspector) => inspector.inspect(&document)?,
+            None => ReliabilitySummary::not_applicable(),
         };
+        let reading_profile = build_reading_profile(
+            &document,
+            &paragraph_units,
+            &sentence_units,
+            reliability,
+            self.search_index.supports_precise_lexical_candidates(),
+        )?;
         let result = OpenDocumentResult {
             document_id: document.id.clone(),
             source: document.source.clone(),
@@ -106,10 +133,11 @@ impl OpenDocumentUseCase {
             normalization_version: NORMALIZATION_VERSION.into(),
             normalized_text_coordinate_space: NORMALIZED_TEXT_COORDINATE_SPACE.into(),
             section_count: document.section_count(),
+            reading_profile,
         };
 
         self.repository.save(document.clone()).await?;
-        if let (Some(index), Some(paragraph_units)) = (&self.text_unit_index, paragraph_units) {
+        if let Some(index) = &self.text_unit_index {
             index
                 .replace_document(&document.id, &paragraph_units.units)
                 .await?;

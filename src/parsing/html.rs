@@ -5,7 +5,10 @@ use markup5ever::interface::tree_builder::TreeSink;
 use scraper::{ElementRef, Html, HtmlTreeSink, Selector};
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
-use crate::domain::{Document, Location, Section, SectionId};
+use crate::domain::{
+    Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
+    NormalizedBlockProvenance, NormalizedTextRange, Section, SectionId,
+};
 
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
@@ -13,11 +16,19 @@ use super::common::{content_hash, document_id, slugify, title_from_metadata};
 pub struct HtmlParser;
 
 #[derive(Clone, Debug)]
+struct NativeBodyBlock {
+    kind: NormalizedBlockKind,
+    text: String,
+    anchor: Option<String>,
+    source_ordinal: usize,
+}
+
+#[derive(Clone, Debug)]
 struct HeadingEvent {
     level: u8,
     title: String,
     anchor: Option<String>,
-    body: Vec<String>,
+    body: Vec<NativeBodyBlock>,
     ordinal: usize,
 }
 
@@ -30,6 +41,7 @@ struct SectionNode {
     content: String,
     location: Location,
     path: Vec<String>,
+    blocks: Vec<NormalizedBlock>,
 }
 
 #[async_trait]
@@ -55,31 +67,38 @@ impl Parser for HtmlParser {
             .or_else(|| metadata.get("html_title").cloned())
             .unwrap_or_else(|| fallback_title.clone());
 
-        let root_sections = if events.is_empty() {
-            let content = if preamble.is_empty() {
-                collapse_whitespace(&root.text().collect::<Vec<_>>().join(" "))
+        let (root_sections, blocks) = if events.is_empty() {
+            let section_id = SectionId("section://document".into());
+            let (content, blocks) = if preamble.is_empty() {
+                (
+                    collapse_whitespace(&root.text().collect::<Vec<_>>().join(" ")),
+                    Vec::new(),
+                )
             } else {
-                preamble.join("\n\n")
+                render_blocks(&section_id, &preamble)
             };
 
-            vec![Section {
-                id: SectionId("section://document".into()),
-                parent_id: None,
-                title: title.clone(),
-                level: 1,
-                content,
-                location: Location {
-                    section_path: vec!["document".into()],
-                    native_location: Some("html:document".into()),
-                    ..Location::default()
-                },
-                children: vec![],
-            }]
+            (
+                vec![Section {
+                    id: section_id,
+                    parent_id: None,
+                    title: title.clone(),
+                    level: 1,
+                    content,
+                    location: Location {
+                        section_path: vec!["document".into()],
+                        native_location: Some("html:document".into()),
+                        ..Location::default()
+                    },
+                    children: vec![],
+                }],
+                blocks,
+            )
         } else {
             build_html_sections(&events, &preamble)
         };
 
-        Ok(Document {
+        let mut normalized = Document {
             id,
             source: resource.final_source,
             title,
@@ -87,7 +106,11 @@ impl Parser for HtmlParser {
             content_hash: hash,
             metadata,
             root_sections,
-        })
+        };
+        normalized
+            .set_normalized_block_map(NormalizedBlockMap::new(blocks))
+            .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+        Ok(normalized)
     }
 }
 
@@ -143,10 +166,11 @@ fn capture_html_metadata(
 
 fn collect_content(
     root: ElementRef<'_>,
-) -> Result<(Vec<HeadingEvent>, Vec<String>), ApplicationError> {
+) -> Result<(Vec<HeadingEvent>, Vec<NativeBodyBlock>), ApplicationError> {
     let block_selector = selector("h1, h2, h3, h4, h5, h6, p, pre, blockquote, li, table")?;
     let mut events: Vec<HeadingEvent> = Vec::new();
     let mut preamble = Vec::new();
+    let mut body_ordinal = 0usize;
 
     for element in root.select(&block_selector) {
         let tag = element.value().name();
@@ -165,6 +189,9 @@ fn collect_content(
             continue;
         }
 
+        let Some(kind) = normalized_block_kind(tag) else {
+            continue;
+        };
         let text = if tag == "pre" {
             element
                 .text()
@@ -179,35 +206,48 @@ fn collect_content(
             continue;
         }
 
+        body_ordinal += 1;
+        let block = NativeBodyBlock {
+            kind,
+            text,
+            anchor: element.value().attr("id").map(str::to_string),
+            source_ordinal: body_ordinal,
+        };
         if let Some(current) = events.last_mut() {
-            current.body.push(text);
+            current.body.push(block);
         } else {
-            preamble.push(text);
+            preamble.push(block);
         }
     }
 
     Ok((events, preamble))
 }
 
-fn build_html_sections(events: &[HeadingEvent], preamble: &[String]) -> Vec<Section> {
+fn build_html_sections(
+    events: &[HeadingEvent],
+    preamble: &[NativeBodyBlock],
+) -> (Vec<Section>, Vec<NormalizedBlock>) {
     let mut nodes: Vec<SectionNode> =
         Vec::with_capacity(events.len() + usize::from(!preamble.is_empty()));
     let mut last_at_level: [Option<usize>; 6] = [None; 6];
     let mut id_counts: HashMap<String, usize> = HashMap::new();
 
     if !preamble.is_empty() {
+        let id = SectionId("section://preamble".into());
+        let (content, blocks) = render_blocks(&id, preamble);
         nodes.push(SectionNode {
-            id: SectionId("section://preamble".into()),
+            id,
             parent: None,
             title: "Preamble".into(),
             level: 1,
-            content: preamble.join("\n\n"),
+            content,
             location: Location {
                 section_path: vec!["Preamble".into()],
                 native_location: Some("html:preamble".into()),
                 ..Location::default()
             },
             path: vec!["Preamble".into()],
+            blocks,
         });
     }
 
@@ -238,24 +278,25 @@ fn build_html_sections(events: &[HeadingEvent], preamble: &[String]) -> Vec<Sect
         );
         let count = id_counts.entry(base_id.clone()).or_insert(0);
         *count += 1;
-        let section_id = if *count == 1 {
+        let section_id = SectionId(if *count == 1 {
             base_id
         } else {
             format!("{base_id}-{}", *count)
-        };
+        });
 
         let native_location = event
             .anchor
             .as_ref()
             .map(|anchor| format!("html:#{anchor}"))
             .unwrap_or_else(|| format!("html:heading:{}", event.ordinal));
+        let (content, blocks) = render_blocks(&section_id, &event.body);
 
         nodes.push(SectionNode {
-            id: SectionId(section_id),
+            id: section_id,
             parent,
             title: event.title.clone(),
             level: event.level,
-            content: event.body.join("\n\n"),
+            content,
             location: Location {
                 section_path: path.clone(),
                 anchor: event.anchor.clone(),
@@ -263,15 +304,67 @@ fn build_html_sections(events: &[HeadingEvent], preamble: &[String]) -> Vec<Sect
                 ..Location::default()
             },
             path,
+            blocks,
         });
     }
 
-    nodes
+    let root_sections = nodes
         .iter()
         .enumerate()
         .filter(|(_, node)| node.parent.is_none())
         .map(|(index, _)| build_section(index, &nodes))
-        .collect()
+        .collect();
+    let mut blocks = Vec::new();
+    for node in &nodes {
+        for block in &node.blocks {
+            let mut block = block.clone();
+            block.source_order = blocks.len();
+            blocks.push(block);
+        }
+    }
+    (root_sections, blocks)
+}
+
+fn render_blocks(
+    owner_section_id: &SectionId,
+    blocks: &[NativeBodyBlock],
+) -> (String, Vec<NormalizedBlock>) {
+    let mut content = String::new();
+    let mut normalized_blocks = Vec::with_capacity(blocks.len());
+
+    for (offset, block) in blocks.iter().enumerate() {
+        if !content.is_empty() {
+            content.push_str("\n\n");
+        }
+        let start = content.chars().count();
+        content.push_str(&block.text);
+        let end = content.chars().count();
+        let normalized_range = NormalizedTextRange::new(start, end)
+            .expect("rendered normalized block boundaries must be ordered");
+        let native_location = block
+            .anchor
+            .as_ref()
+            .map(|anchor| format!("html:#{anchor}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "html:block:{}:{}",
+                    block.kind.as_str(),
+                    block.source_ordinal
+                )
+            });
+        normalized_blocks.push(NormalizedBlock {
+            owner_section_id: owner_section_id.clone(),
+            block_index: offset + 1,
+            source_order: 0,
+            kind: block.kind,
+            normalized_range,
+            native_anchor: block.anchor.clone(),
+            native_location: Some(native_location),
+            provenance: NormalizedBlockProvenance::XhtmlNativeBlock,
+        });
+    }
+
+    (content, normalized_blocks)
 }
 
 fn build_section(index: usize, nodes: &[SectionNode]) -> Section {
@@ -302,6 +395,17 @@ fn heading_level(tag: &str) -> Option<u8> {
         "h4" => Some(4),
         "h5" => Some(5),
         "h6" => Some(6),
+        _ => None,
+    }
+}
+
+fn normalized_block_kind(tag: &str) -> Option<NormalizedBlockKind> {
+    match tag {
+        "p" => Some(NormalizedBlockKind::Paragraph),
+        "blockquote" => Some(NormalizedBlockKind::BlockQuote),
+        "li" => Some(NormalizedBlockKind::ListItem),
+        "pre" => Some(NormalizedBlockKind::Preformatted),
+        "table" => Some(NormalizedBlockKind::Table),
         _ => None,
     }
 }

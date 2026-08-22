@@ -132,8 +132,10 @@ pub trait TextUnitIndex: Send + Sync {
         units: &[TextUnit],
     ) -> Result<(), ApplicationError>;
 
-    async fn list_document(&self, document_id: &DocumentId)
-    -> Result<Vec<TextUnit>, ApplicationError>;
+    async fn list_document(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<TextUnit>, ApplicationError>;
 }
 
 #[async_trait]

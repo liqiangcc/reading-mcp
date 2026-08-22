@@ -1,128 +1,159 @@
 # Sentence Locator and Coverage Contract
 
-> Status: Implemented P1 locator foundation; consumed by implemented `get_text_units`
+> Status: Implemented block-aware Sentence locator/coverage contract
 >
-> Branch: `feat/sentence-locator`
+> Foundation branch: `feat/sentence-locator`
 >
-> Follow-up implementation: `feat/text-unit-enumeration-contract`
+> Current identity branch: `feat/block-aware-text-unit-identity`
 >
-> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/paragraph-text-unit-index.md`, `docs/text-unit-enumeration-contract.md`, `docs/tool-contract-use-case-design.md`
+> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/adr/0005-block-aware-text-unit-identity.md`, `docs/paragraph-text-unit-index.md`, `docs/text-unit-enumeration-contract.md`
 
 ## 1. Goal
 
-This increment established deterministic Sentence identity and Paragraph ownership before MCP Sentence enumeration was exposed. The subsequent enumeration increment now consumes this foundation through `get_text_units` without changing its identity rules.
+Sentence identity is deterministic, exact, Paragraph-owned and rebuildable from persisted canonical facts. Current eligibility uses persisted native block evidence where available and conservative fallback classification otherwise.
 
-The implemented dependency chain is:
+Current dependency chain：
 
 ```text
-persisted canonical Document / Section.content
+persisted Document / Section.content
++ optional valid normalized-block-model/v1
         ↓
-Paragraph TextUnit (text-segmentation/v1)
+Paragraph TextUnit (text-segmentation/v2)
         ↓
-Sentence eligibility / content classification
+native/fallback Sentence eligibility
         ↓
-deterministic Sentence segmentation
+deterministic punctuation segmentation
         ↓
 SentenceTextUnit + exact NormalizedTextRange
         ↓
-get_text_units + TextUnitCursor
-        ↓
-future context / search / precise-read locator input
+get_text_units / context / read / lexical search
 ```
 
-`Document / Section` remain source truth. Paragraph and Sentence units remain rebuildable derived state.
+`Document / Section` remain source truth. Paragraph/Sentence remain derived state.
 
 ## 2. Sentence ownership
 
 Every emitted Sentence belongs to exactly one Paragraph and one owner Section.
 
-Implemented Sentence fields:
-
 ```text
 SentenceTextUnit
-├── id: TextUnitId
+├── id
 ├── document_id
-├── content_hash                  # raw-source provenance
-├── normalized_document_hash
+├── content_hash                  # raw provenance
+├── normalized_document_hash      # v2
 ├── owner_section_id
 ├── paragraph_index               # 1-based within Section
 ├── sentence_index                # 1-based within Paragraph
 ├── parent_paragraph_id
-├── source_order                  # deterministic Sentence-stream order
+├── source_order
 ├── normalized_range              # exact Section.content-relative range
 ├── text                          # exact normalized slice
-└── segmentation_version
+└── segmentation_version          # text-segmentation/v2
 ```
 
-The containing Paragraph is not inferred from snippet similarity. `parent_paragraph_id + paragraph_index + owner_section_id` are deterministic handoff facts.
+Containing Paragraph identity is explicit; it is never inferred by snippet similarity.
 
 ## 3. Identity
 
-Sentence IDs use the existing `text-unit-id/v1` identity namespace and are derived from:
+Current versions：
+
+```text
+normalized-document-hash/v2
+text-segmentation/v2
+text-unit-id/v1
+```
+
+Sentence ID derivation includes：
 
 ```text
 document_id
-+ normalized_document_hash
-+ owner_section_id
-+ kind = sentence
-+ paragraph_index
-+ sentence_index
-+ normalized_range [start, end)
-+ text-segmentation/v1
+normalized_document_hash
+owner_section_id
+kind = sentence
+paragraph_index
+sentence_index
+normalized_range [start,end)
+segmentation_version
 ```
 
-Raw `content_hash` remains provenance rather than an additional standalone normalized-text identity input.
+Raw `content_hash` remains provenance rather than an independent normalized identity input.
 
-Paragraph IDs are unchanged by this increment.
+Historical v1 Sentence locators are stale after migration and are never reinterpreted under v2 even when ranges happen to match.
 
-## 4. Sentence segmentation v1
+## 4. Eligibility under block-aware v2
 
-Sentence segmentation is deterministic, non-LLM, Unicode-aware, and works only from exact persisted Paragraph text.
+Native evidence takes priority：
 
-Recognized terminal punctuation includes:
+```text
+native paragraph       → eligible
+native blockquote      → coarse Paragraph only
+native list_item       → coarse Paragraph only
+native preformatted    → coarse Paragraph only
+native table           → coarse Paragraph only
+```
+
+BlockQuote/ListItem remain coarse under flat `normalized-block-model/v1` because their persisted outer range may suppress nested leaf boundaries. This is evidence sufficiency, not a claim that quote/list text is inherently non-prose.
+
+Fallback/no-native-evidence Paragraph classification：
+
+```text
+prose_or_unknown → eligible
+code_block       → coarse Paragraph only
+table            → coarse Paragraph only
+```
+
+Strong fallback code signals remain fenced blocks and fully tab/four-space-indented Paragraphs. Fallback Markdown table detection remains header + delimiter-row based.
+
+Native evidence outranks heuristic appearance. A native `<p>` is sentence-eligible even if its punctuation resembles table/code text.
+
+## 5. Sentence boundary algorithm
+
+The deterministic punctuation algorithm remains Unicode-aware and non-LLM.
+
+Recognized terminal punctuation：
 
 ```text
 . ? ! 。 ？ ！
 ```
 
-Terminal clusters and common closing punctuation are kept with the preceding Sentence.
+Terminal clusters and common closing punctuation remain attached to the preceding Sentence.
 
-The ASCII punctuation policy is deliberately conservative. An ASCII `?` or `!` is accepted as a Sentence terminal only when its terminal/closer cluster is followed by whitespace or the end of the Paragraph. This prevents false splits in technical forms such as URL query strings and operators like `x!=0`.
+ASCII `?` / `!` require whitespace/end-of-Paragraph after the terminal cluster, protecting technical forms such as URL queries and `x!=0`.
 
-ASCII period handling adds further protection for strong technical/non-terminal patterns including:
+ASCII period protection includes：
 
 ```text
-3.14                 # decimal/version-like numeric punctuation
-README.md             # identifier/file member punctuation
-foo.bar               # API/member/domain-like punctuation
-./configure            # path/command punctuation
-e.g. / i.e.           # protected common abbreviations
-Dr. / Prof. / Fig.    # protected common abbreviations
-single-letter initials before an uppercase continuation
+3.14
+README.md
+foo.bar
+./configure
+e.g. / i.e.
+Dr. / Prof. / Fig.
+single-letter initials before uppercase continuation
 ```
 
-CJK terminal punctuation does not require ASCII whitespace, so:
+CJK terminal punctuation does not require ASCII whitespace：
 
 ```text
 第一句。第二句？第三句！
 ```
 
-forms three deterministic Sentence ranges.
+becomes three exact Sentence ranges.
 
-If eligible prose has no recognized terminal punctuation, the remaining non-whitespace text becomes one Sentence rather than disappearing from coverage.
+Eligible trailing non-whitespace text without recognized punctuation becomes one final Sentence instead of disappearing.
 
-## 5. Exact range semantics
+## 6. Exact range semantics
 
-Sentence ranges use the canonical coordinate space:
+Sentence coordinates：
 
 ```text
 section-content-unicode-scalar/v1
 zero-based
-half-open [start, end)
+half-open [start,end)
 Unicode scalar / Rust char
 ```
 
-For every Sentence:
+Invariant：
 
 ```text
 sentence.text
@@ -130,44 +161,13 @@ sentence.text
 owner_section.normalized_text_slice(sentence.normalized_range)
 ```
 
-A Sentence range is Section-relative, not Paragraph-relative and never rendered-response-relative.
+A Sentence range is Section-relative, never rendered-response-relative. No Sentence crosses a Paragraph boundary.
 
-Whitespace between Sentence ranges is factual separator coverage. It is not silently attached to a neighboring Sentence merely to make ranges contiguous.
-
-## 6. Non-prose eligibility
-
-The current canonical Document does not yet persist parser-native block type metadata. Sentence v1 therefore uses a conservative persisted-text classifier and does not claim native block provenance.
-
-Current content classes:
-
-```text
-prose_or_unknown
-code_block
-table
-```
-
-Strong persisted-text signals classified as `code_block` include:
-
-- fenced blocks beginning/ending with triple backticks or tildes;
-- Paragraphs whose non-empty lines are all tab-indented or four-space-indented.
-
-A Markdown-style table is recognized only when the persisted text has a header row plus a pipe-separated delimiter row whose cells are dash/colon delimiters.
-
-Anything without a strong signal is `prose_or_unknown`. This is deliberately different from asserting that the parser proved the content is prose.
-
-Eligibility:
-
-```text
-prose_or_unknown → eligible for deterministic fallback Sentence segmentation
-code_block       → coarse_paragraph_only
-table            → coarse_paragraph_only
-```
-
-Code/table Paragraphs receive zero fabricated Sentence children.
+Whitespace between Sentences is factual separator coverage and is not attached merely to make ranges contiguous.
 
 ## 7. Coverage semantics
 
-Coverage is reported per Paragraph:
+Per-Paragraph Sentence coverage：
 
 ```text
 paragraph_chars
@@ -179,7 +179,7 @@ content_class
 eligibility
 ```
 
-Required invariant:
+Invariant：
 
 ```text
 paragraph_chars
@@ -187,13 +187,13 @@ paragraph_chars
 sentence_chars + separator_chars + coarse_only_chars
 ```
 
-For eligible Paragraphs:
+Eligible Paragraph：
 
 ```text
 coarse_only_chars = 0
 ```
 
-For recognized non-prose Paragraphs:
+Coarse structural/non-prose Paragraph：
 
 ```text
 sentence_chars    = 0
@@ -202,15 +202,41 @@ coarse_only_chars = paragraph_chars
 sentence_count    = 0
 ```
 
-Generated eligible ranges are required to remain inside the containing Paragraph; coverage calculation fails rather than silently hiding a range-accounting bug.
+Generated Sentence ranges must stay inside the containing Paragraph; coverage calculation fails rather than hiding range-accounting bugs.
 
-The implemented `get_text_units(requested_kind=sentence, coverage_policy=preserve_source)` uses this data to return recognized code/table Paragraphs as explicit coarse Paragraph reading items. It never fabricates Sentence identity.
+## 8. Enumeration semantics
 
-`eligible_only` may omit coarse regions, but the enumeration contract therefore never claims all-source `source_complete/section_complete` under that policy.
+`get_text_units(requested_kind=sentence, coverage_policy=preserve_source)` returns：
 
-## 8. Rebuildability
+- exact Sentence items for eligible Paragraphs;
+- coarse Paragraph items for BlockQuote/ListItem/Preformatted/Table/fallback code-table regions;
+- no fabricated Sentence identity.
 
-Given the same persisted canonical Document and `text-segmentation/v1`:
+Structural coarse degradation：
+
+```text
+flat_native_container_no_nested_textunit_evidence
+```
+
+`eligible_only` may omit all coarse items and therefore cannot claim all-source `source_complete/section_complete`.
+
+Coverage distinguishes coarse structural and non-prose counts separately.
+
+## 9. Fallible materialization
+
+Domain exposes：
+
+```text
+try_sentence_text_units()
+```
+
+A declared invalid/corrupt block map returns an error. Enumeration, lexical indexing and shared locator resolution propagate the failure rather than silently switching to fallback or panicking.
+
+Absent block evidence remains supported deterministic fallback.
+
+## 10. Rebuildability and persistence
+
+Given the same persisted canonical Document and current v2 policy：
 
 ```text
 sentence_text_units(document)
@@ -218,105 +244,71 @@ sentence_text_units(document)
 sentence_text_units(repository_round_trip(document))
 ```
 
-Changing normalized text/structure changes `normalized_document_hash` and therefore Sentence identity. TextUnitCursor binds this normalized identity and fails closed after changes; no fuzzy rebasing is performed.
+Sentence SQLite rows are still not required for correctness.
 
-## 9. Persistence boundary
+TextUnitCursor binds normalized identity + segmentation version. Continuation after DocumentRepository reopen reconstructs the same Sentence stream without Sentence persistence.
 
-The existing persisted index remains:
-
-```text
-TextUnitIndex v1 = Paragraph units
-```
-
-The enumeration implementation deliberately chose **not** to add Sentence SQLite rows. Sentence locator state and the declared Sentence stream are rebuilt from canonical Document + deterministic Paragraph/Sentence segmentation.
-
-This is now backed by continuation evidence:
+Sentence persistence remains：
 
 ```text
-open/save canonical Document
-→ get_text_units page 1
-→ persist/reopen SqliteDocumentRepository
-→ continue with TextUnitCursor
-→ same deterministic remaining Sentence stream
-```
-
-Therefore Sentence persistence is currently:
-
-```text
-optional future performance optimization
-≠ correctness dependency
+optional performance optimization
 ≠ source truth
+≠ correctness dependency
 ```
 
-A future persistence migration requires measured performance evidence and must remain fully rebuildable.
+## 11. Search/read/context handoff
 
-## 10. MCP surface
-
-The subsequent enumeration increment added the seventh Tool:
+Current precise flows：
 
 ```text
-list_documents
-open_document
-get_document_structure
-get_text_units
-search_document
-get_context
-read_document
+eligible Sentence
+→ TextLocator
+   ├→ read_document exact target
+   ├→ get_context
+   └→ lexical-search-index/v3 candidate
 ```
 
-`get_text_units` emits Paragraph/Sentence TextLocator output, supports forward/backward source-order pagination and TextUnitCursor continuation, and carries non-prose/coverage semantics.
+Coarse structural/non-prose Paragraphs remain Paragraph search candidates only.
 
-Current v1 begins at a Section boundary. Anchor-based `before/after(locator)` start and TextLocator input to read/context/search are later extensions.
+Old `text-segmentation/v1` Paragraph/Sentence locators fail `STALE_LOCATOR`; old TextUnitCursor state fails `STALE_CURSOR`. No fuzzy rebase.
 
-See [TextUnit Enumeration Contract](text-unit-enumeration-contract.md).
+## 12. Acceptance evidence
 
-## 11. Acceptance evidence
-
-Sentence foundation tests cover:
+Tests cover：
 
 - exact Sentence range/text equality;
 - Paragraph ownership and 1-based Sentence ordinals;
-- deterministic document Sentence source order;
-- English and CJK terminal punctuation;
-- abbreviations, decimals, paths, file/member/API punctuation;
-- ASCII URL-query/operator `?` / `!` protection;
+- deterministic Sentence source order;
+- English/CJK punctuation;
+- abbreviation/decimal/path/file/API protections;
+- URL-query/operator protections;
 - trailing unterminated prose fallback;
-- fenced and indented code as coarse-only Paragraphs;
-- Markdown table as a coarse-only Paragraph;
+- native Paragraph exact Sentence eligibility;
+- native BlockQuote/ListItem zero fabricated Sentences;
+- native Preformatted/Table zero fabricated Sentences;
+- fallback fenced/indented code and Markdown table coarse behavior;
+- source-preserving coarse enumeration;
+- eligible-only no false source-completion claim;
 - factual coverage invariant;
-- deterministic Sentence IDs;
-- raw provenance changes not redefining otherwise identical normalized Sentence identity;
-- normalized text changes invalidating Sentence IDs;
-- canonical Document SQLite round-trip rebuild equality.
+- deterministic IDs under hash-v2/segmentation-v2;
+- old v1 locator/cursor stale migration;
+- repository reopen continuation without Sentence rows;
+- direct search/read/context handoff.
 
-Enumeration follow-up tests additionally cover:
-
-- source-preserving coarse non-prose output;
-- eligible-only no all-source completion claim;
-- forward/backward no-gap/no-overlap pagination;
-- TextUnitCursor stale/mismatch behavior;
-- continuation after persisted Document repository reopen without Sentence rows.
-
-Release gate remains:
+CI #876 passed the implementation head before final docs-only synchronization：
 
 ```text
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
+Format  success
+Clippy  success
+Test    success
 ```
 
-## 12. Current non-goals / next dependency
-
-Still not implemented:
+## 13. Current non-goals
 
 ```text
-Sentence persistence migration
+Sentence SQLite persistence
+nested/leaf Sentence identity inside flat BlockQuote/ListItem evidence
 anchor-based TextUnit before/after start
-TextLocator input to read_document
-Paragraph/Sentence context
-SearchHit → Sentence TextLocator
-Paragraph/Sentence FTS
-EPUB parser/block-type restructuring
+SVG/fixed-layout precise blocks
+fuzzy locator rebasing
 ```
-
-The next dependency step is `feat/context-granularity`, followed by search locator handoff. Sentence persistence remains conditional on performance evidence.

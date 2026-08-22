@@ -165,13 +165,11 @@ async fn sentence_enumeration_preserves_flat_structural_and_non_prose_blocks_coa
 
 #[test]
 fn native_and_fallback_ranges_merge_in_exact_section_source_order() {
-    let mut document = plain_document(
-        "Leading fallback.\n\nNative body.\n\nTrailing fallback.",
-    );
+    let mut document = plain_document("Leading fallback.\n\nNative body.\n\nTrailing fallback.");
     let prefix_len = "Leading fallback.\n\n".chars().count();
     let native_len = "Native body.".chars().count();
-    let native_range = NormalizedTextRange::new(prefix_len, prefix_len + native_len)
-        .expect("native range");
+    let native_range =
+        NormalizedTextRange::new(prefix_len, prefix_len + native_len).expect("native range");
     document
         .set_normalized_block_map(NormalizedBlockMap::new(vec![NormalizedBlock {
             owner_section_id: document.root_sections[0].id.clone(),
@@ -192,7 +190,11 @@ fn native_and_fallback_ranges_merge_in_exact_section_source_order() {
         paragraph_set
             .units
             .iter()
-            .map(|unit| (unit.paragraph_index, unit.text.as_str(), unit.normalized_range))
+            .map(|unit| (
+                unit.paragraph_index,
+                unit.text.as_str(),
+                unit.normalized_range
+            ))
             .collect::<Vec<_>>(),
         vec![
             (
@@ -239,7 +241,10 @@ async fn invalid_declared_block_map_fails_closed_for_text_units_and_lexical_inde
     assert!(matches!(error, ApplicationError::IndexFailed(_)));
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
-    repository.save(document.clone()).await.expect("save corrupt fixture");
+    repository
+        .save(document.clone())
+        .await
+        .expect("save corrupt fixture");
     let error = GetTextUnitsUseCase::new(repository)
         .execute(GetTextUnitsCommand {
             document_id: document.id,
@@ -289,7 +294,10 @@ fn identity_bearing_block_kind_changes_normalized_hash_and_text_unit_ids() {
         }]))
         .expect("quote map");
 
-    assert_ne!(paragraph.normalized_document_hash(), quote.normalized_document_hash());
+    assert_ne!(
+        paragraph.normalized_document_hash(),
+        quote.normalized_document_hash()
+    );
     assert_ne!(
         paragraph.paragraph_text_units().units[0].id,
         quote.paragraph_text_units().units[0].id

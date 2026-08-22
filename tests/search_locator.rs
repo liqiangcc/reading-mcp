@@ -13,12 +13,12 @@ use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn paragraph_like_search_unit_hands_off_only_the_truthful_owner_section_locator() {
+async fn canonical_sentence_search_hands_off_exact_text_locator() {
     let directory = tempdir().expect("temp directory");
     let path = directory.path().join("book.md");
     tokio::fs::write(
         &path,
-        "# Book\n\nOverview.\n\n## Topic\n\nFirst paragraph gives context.\n\nNeedle phrase lives in a narrower retrieval unit.\n\n### Child\n\nChild-only text.\n",
+        "# Book\n\nOverview.\n\n## Topic\n\nFirst paragraph gives context.\n\nNeedle phrase lives in a canonical sentence.\n\n### Child\n\nChild-only text.\n",
     )
     .await
     .expect("fixture");
@@ -47,9 +47,12 @@ async fn paragraph_like_search_unit_hands_off_only_the_truthful_owner_section_lo
         })
         .await
         .expect("search");
-    let hit = searched.hits.first().expect("hit");
+    let hit = searched
+        .hits
+        .iter()
+        .find(|hit| hit.candidate_kind == SearchCandidateKind::Sentence)
+        .expect("canonical sentence hit");
 
-    assert_eq!(hit.candidate_kind, SearchCandidateKind::Section);
     assert_eq!(hit.section_id.0, "section://book/topic");
     assert_eq!(hit.text_locator.owner_section_id, hit.section_id);
     assert_eq!(hit.text_locator.document_id, opened.document_id);
@@ -58,16 +61,12 @@ async fn paragraph_like_search_unit_hands_off_only_the_truthful_owner_section_lo
         hit.text_locator.normalized_document_hash.0,
         opened.normalized_document_hash.0
     );
-    assert!(hit.text_locator.paragraph_index.is_none());
-    assert!(hit.text_locator.sentence_index.is_none());
-    assert!(hit.text_locator.normalized_range.is_none());
-    assert!(hit.text_locator.segmentation_version.is_none());
-    assert!(
-        hit.location
-            .native_location
-            .as_deref()
-            .is_some_and(|value| value.contains("search-unit")),
-        "legacy retrieval location may remain narrower than the canonical handoff"
+    assert_eq!(hit.text_locator.paragraph_index, Some(2));
+    assert_eq!(hit.text_locator.sentence_index, Some(1));
+    assert!(hit.text_locator.normalized_range.is_some());
+    assert_eq!(
+        hit.text_locator.segmentation_version.as_deref(),
+        Some("text-segmentation/v1")
     );
 
     let read = ReadDocumentUseCase::new(repository)
@@ -78,9 +77,7 @@ async fn paragraph_like_search_unit_hands_off_only_the_truthful_owner_section_lo
         })
         .await
         .expect("search locator should hand off to exact read");
-    assert!(read.content.contains("First paragraph gives context."));
-    assert!(read.content.contains("Needle phrase lives"));
-    assert!(!read.content.contains("Child-only text."));
+    assert_eq!(read.content, "Needle phrase lives in a canonical sentence.");
 }
 
 #[tokio::test]

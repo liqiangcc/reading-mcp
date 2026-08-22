@@ -8,6 +8,7 @@ use crate::domain::{
 };
 
 pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
+pub const LEGACY_SEARCH_TOKENIZER_VERSION: &str = "legacy-search-tokenizer/unversioned";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetrievalOptions {
@@ -176,8 +177,12 @@ pub trait TextUnitIndex: Send + Sync {
 
 #[async_trait]
 pub trait SearchIndex: Send + Sync {
+    fn supports_precise_lexical_candidates(&self) -> bool {
+        false
+    }
+
     fn tokenizer_version(&self) -> &'static str {
-        LEXICAL_TOKENIZER_VERSION
+        LEGACY_SEARCH_TOKENIZER_VERSION
     }
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError>;

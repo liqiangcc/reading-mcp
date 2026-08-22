@@ -17,6 +17,10 @@ use super::epub_navigation::{
     is_supported_content_media_type, parse_package_facts, remember_fragment_index,
     resolve_archive_path,
 };
+use super::epub_structure::{
+    EPUB_STRUCTURE_MAP_VERSION, EpubSpineParseStatus, EpubSpineRecord, ParsedSpineDocument,
+    reconcile_epub_structure,
+};
 
 pub struct EpubParser {
     limits: ArchiveLimits,
@@ -84,17 +88,51 @@ impl Parser for EpubParser {
                 "EPUB package has an empty spine".into(),
             ));
         }
+        let spine_linearity = package_xml
+            .descendants()
+            .filter(|node| node.is_element() && node.tag_name().name() == "itemref")
+            .map(|node| {
+                !node
+                    .attribute("linear")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("no"))
+            })
+            .collect::<Vec<_>>();
 
-        let mut root_sections = Vec::new();
+        let mut parsed_spine_documents = Vec::new();
+        let mut spine_records = Vec::with_capacity(package_facts.spine.len());
         let mut parsed_spine = 0usize;
         let mut fragment_cache = FragmentCache::new();
+
         for (spine_index, spine_item) in package_facts.spine.iter().enumerate() {
+            let ordinal = spine_index + 1;
+            let linear = spine_linearity.get(spine_index).copied().unwrap_or(true);
             let Some(manifest_item) = package_facts.manifest_item(&spine_item.idref) else {
+                spine_records.push(EpubSpineRecord {
+                    spine_index: ordinal,
+                    idref: spine_item.idref.clone(),
+                    linear,
+                    manifest_href: None,
+                    resolved_entry_path: None,
+                    media_type: None,
+                    parse_status: EpubSpineParseStatus::MissingManifest,
+                });
                 continue;
             };
+
             if !is_supported_content_media_type(&manifest_item.media_type) {
+                spine_records.push(EpubSpineRecord {
+                    spine_index: ordinal,
+                    idref: spine_item.idref.clone(),
+                    linear,
+                    manifest_href: Some(manifest_item.href.clone()),
+                    resolved_entry_path: resolve_archive_path(&package_path, &manifest_item.href)
+                        .ok(),
+                    media_type: Some(manifest_item.media_type.clone()),
+                    parse_status: EpubSpineParseStatus::UnsupportedMedia,
+                });
                 continue;
             }
+
             let entry_path =
                 resolve_archive_path(&package_path, &manifest_item.href).map_err(|message| {
                     ApplicationError::ParseFailed(format!(
@@ -122,17 +160,30 @@ impl Parser for EpubParser {
                 })
                 .await?;
             parsed_spine += 1;
-            for section in parsed.root_sections {
-                root_sections.push(remap_epub_section(
-                    section,
-                    spine_index + 1,
-                    &entry_path,
-                    None,
-                ));
-            }
+            let sections = parsed
+                .root_sections
+                .into_iter()
+                .map(|section| remap_epub_section(section, ordinal, &entry_path, None))
+                .collect::<Vec<_>>();
+            parsed_spine_documents.push(ParsedSpineDocument {
+                spine_index: ordinal,
+                idref: spine_item.idref.clone(),
+                linear,
+                entry_path: entry_path.clone(),
+                sections,
+            });
+            spine_records.push(EpubSpineRecord {
+                spine_index: ordinal,
+                idref: spine_item.idref.clone(),
+                linear,
+                manifest_href: Some(manifest_item.href.clone()),
+                resolved_entry_path: Some(entry_path),
+                media_type: Some(manifest_item.media_type.clone()),
+                parse_status: EpubSpineParseStatus::Parsed,
+            });
         }
 
-        if root_sections.is_empty() {
+        if parsed_spine_documents.is_empty() {
             return Err(ApplicationError::ParseFailed(
                 "EPUB spine contains no readable XHTML content".into(),
             ));
@@ -147,6 +198,10 @@ impl Parser for EpubParser {
             &mut total_read,
         )?;
         let navigation_json = serde_json::to_string(&navigation_map)
+            .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+        let reconciled =
+            reconcile_epub_structure(parsed_spine_documents, spine_records, &navigation_map);
+        let structure_json = serde_json::to_string(&reconciled.structure_map)
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
 
         drop(archive);
@@ -197,6 +252,34 @@ impl Parser for EpubParser {
             navigation_map.diagnostics.len().to_string(),
         );
         metadata.insert("epub_navigation_map".into(), navigation_json);
+        metadata.insert(
+            "epub_structure_map_version".into(),
+            EPUB_STRUCTURE_MAP_VERSION.into(),
+        );
+        metadata.insert(
+            "epub_structure_sections".into(),
+            reconciled.structure_map.section_count().to_string(),
+        );
+        metadata.insert(
+            "epub_structure_applied_navigation_nodes".into(),
+            reconciled
+                .structure_map
+                .applied_navigation_nodes
+                .to_string(),
+        );
+        metadata.insert(
+            "epub_linear_spine_items".into(),
+            reconciled.structure_map.linear_spine_items.to_string(),
+        );
+        metadata.insert(
+            "epub_non_linear_spine_items".into(),
+            reconciled.structure_map.non_linear_spine_items.to_string(),
+        );
+        metadata.insert(
+            "epub_structure_diagnostics".into(),
+            reconciled.structure_map.diagnostics.len().to_string(),
+        );
+        metadata.insert("epub_structure_map".into(), structure_json);
         let title = package_title
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| title_from_metadata(&metadata, &resource.final_source));
@@ -208,7 +291,7 @@ impl Parser for EpubParser {
             media_type: resource.media_type,
             content_hash: hash,
             metadata,
-            root_sections,
+            root_sections: reconciled.root_sections,
         })
     }
 }

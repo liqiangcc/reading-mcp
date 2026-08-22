@@ -225,7 +225,12 @@ pub fn validate_epub_document(document: &Document) -> EpubValidationReport {
     let canonical_sections = validate_canonical_sections(document, &mut findings);
 
     if let Some(navigation) = navigation.as_ref() {
-        validate_navigation(document, navigation, &mut coverage.navigation, &mut findings);
+        validate_navigation(
+            document,
+            navigation,
+            &mut coverage.navigation,
+            &mut findings,
+        );
     }
 
     if let Some(structure) = structure.as_ref() {
@@ -370,7 +375,10 @@ fn validate_canonical_sections(
                     findings,
                     "structure",
                     "section_parent_cycle",
-                    format!("Section {:?} participates in a parent-reference cycle", id.0),
+                    format!(
+                        "Section {:?} participates in a parent-reference cycle",
+                        id.0
+                    ),
                 );
                 break;
             }
@@ -404,7 +412,10 @@ fn collect_canonical_section(
             findings,
             "structure",
             "duplicate_section_id",
-            format!("canonical Section id {:?} occurs more than once", section.id.0),
+            format!(
+                "canonical Section id {:?} occurs more than once",
+                section.id.0
+            ),
         );
         return;
     }
@@ -536,7 +547,10 @@ fn validate_navigation(
                     findings,
                     "navigation",
                     "navigation_target_missing_fragment",
-                    format!("navigation node {} references a missing fragment", node.source_order),
+                    format!(
+                        "navigation node {} references a missing fragment",
+                        node.source_order
+                    ),
                 );
             }
             NavigationResolutionStatus::MissingResource => {
@@ -545,7 +559,10 @@ fn validate_navigation(
                     findings,
                     "navigation",
                     "navigation_target_missing_resource",
-                    format!("navigation node {} references a missing resource", node.source_order),
+                    format!(
+                        "navigation node {} references a missing resource",
+                        node.source_order
+                    ),
                 );
             }
             NavigationResolutionStatus::UnsupportedResource => {
@@ -554,7 +571,10 @@ fn validate_navigation(
                     findings,
                     "navigation",
                     "navigation_target_unsupported_resource",
-                    format!("navigation node {} targets unsupported media", node.source_order),
+                    format!(
+                        "navigation node {} targets unsupported media",
+                        node.source_order
+                    ),
                 );
             }
             NavigationResolutionStatus::InvalidPath => {
@@ -563,7 +583,10 @@ fn validate_navigation(
                     findings,
                     "navigation",
                     "navigation_target_invalid_path",
-                    format!("navigation node {} has an invalid archive path", node.source_order),
+                    format!(
+                        "navigation node {} has an invalid archive path",
+                        node.source_order
+                    ),
                 );
             }
             NavigationResolutionStatus::MalformedResource => {
@@ -572,7 +595,10 @@ fn validate_navigation(
                     findings,
                     "navigation",
                     "navigation_target_malformed_resource",
-                    format!("navigation node {} targets malformed content", node.source_order),
+                    format!(
+                        "navigation node {} targets malformed content",
+                        node.source_order
+                    ),
                 );
             }
             NavigationResolutionStatus::Unlinked => {
@@ -662,18 +688,14 @@ fn validate_structure(
         );
     }
 
-    coverage.package_spine.manifest_items_total = metadata_usize(
-        document,
-        "epub_manifest_items",
-        "package",
-        findings,
-    )
-    .unwrap_or_default();
+    coverage.package_spine.manifest_items_total =
+        metadata_usize(document, "epub_manifest_items", "package", findings).unwrap_or_default();
     coverage.package_spine.spine_items_total = map.spine.len();
     coverage.package_spine.linear_spine_items = map.spine.iter().filter(|item| item.linear).count();
-    coverage.package_spine.non_linear_spine_items = map.spine.len().saturating_sub(
-        coverage.package_spine.linear_spine_items,
-    );
+    coverage.package_spine.non_linear_spine_items = map
+        .spine
+        .len()
+        .saturating_sub(coverage.package_spine.linear_spine_items);
 
     for (offset, spine) in map.spine.iter().enumerate() {
         let expected_index = offset + 1;
@@ -712,7 +734,10 @@ fn validate_structure(
                     findings,
                     "spine",
                     "spine_missing_manifest_item",
-                    format!("spine idref {:?} does not resolve in the manifest", spine.idref),
+                    format!(
+                        "spine idref {:?} does not resolve in the manifest",
+                        spine.idref
+                    ),
                 );
             }
             StoredSpineParseStatus::UnsupportedMedia => {
@@ -721,7 +746,10 @@ fn validate_structure(
                     findings,
                     "spine",
                     "spine_unsupported_media",
-                    format!("spine idref {:?} uses unsupported top-level media", spine.idref),
+                    format!(
+                        "spine idref {:?} uses unsupported top-level media",
+                        spine.idref
+                    ),
                 );
             }
         }
@@ -855,7 +883,10 @@ fn validate_structure(
                 findings,
                 "structure",
                 "structure_fact_unknown_section",
-                format!("structure map references missing Section {:?}", fact.section_id),
+                format!(
+                    "structure map references missing Section {:?}",
+                    fact.section_id
+                ),
             );
             continue;
         };
@@ -973,7 +1004,8 @@ fn validate_structure(
         }
     }
 
-    let applied_from_sections = coverage.structure.sections_epub_nav + coverage.structure.sections_epub_ncx;
+    let applied_from_sections =
+        coverage.structure.sections_epub_nav + coverage.structure.sections_epub_ncx;
     if applied_from_sections != map.applied_navigation_nodes {
         push_error(
             findings,
@@ -986,11 +1018,7 @@ fn validate_structure(
         );
     }
 
-    validate_canonical_sibling_source_order(
-        &document.root_sections,
-        &fact_by_id,
-        findings,
-    );
+    validate_canonical_sibling_source_order(&document.root_sections, &fact_by_id, findings);
 
     for diagnostic in &map.diagnostics {
         push_degradation(
@@ -1199,7 +1227,10 @@ fn validate_blocks_and_text_units(
                 findings,
                 "text_units",
                 "paragraph_exact_slice_mismatch",
-                format!("Paragraph {} is not the exact persisted owner slice", paragraph.id.0),
+                format!(
+                    "Paragraph {} is not the exact persisted owner slice",
+                    paragraph.id.0
+                ),
             ),
         }
         let expected = expected_paragraph_index
@@ -1312,7 +1343,10 @@ fn validate_blocks_and_text_units(
                 findings,
                 "text_units",
                 "sentence_exact_slice_mismatch",
-                format!("Sentence {} is not the exact persisted owner slice", sentence.id.0),
+                format!(
+                    "Sentence {} is not the exact persisted owner slice",
+                    sentence.id.0
+                ),
             ),
         }
         let Some(paragraph) = paragraph_by_id.get(&sentence.parent_paragraph_id) else {
@@ -1332,7 +1366,10 @@ fn validate_blocks_and_text_units(
                 findings,
                 "text_units",
                 "sentence_outside_parent_paragraph",
-                format!("Sentence {} is not contained by its parent Paragraph", sentence.id.0),
+                format!(
+                    "Sentence {} is not contained by its parent Paragraph",
+                    sentence.id.0
+                ),
             );
         }
         let expected = expected_sentence_index
@@ -1376,11 +1413,12 @@ fn validate_blocks_and_text_units(
         }
     }
 
-    for block in blocks
-        .blocks
-        .iter()
-        .filter(|block| matches!(block.kind, NormalizedBlockKind::Preformatted | NormalizedBlockKind::Table))
-    {
+    for block in blocks.blocks.iter().filter(|block| {
+        matches!(
+            block.kind,
+            NormalizedBlockKind::Preformatted | NormalizedBlockKind::Table
+        )
+    }) {
         if sentence_set.units.iter().any(|sentence| {
             sentence.owner_section_id == block.owner_section_id
                 && ranges_overlap(
@@ -1420,7 +1458,12 @@ fn all_sections(document: &Document) -> Vec<&Section> {
     sections
 }
 
-fn ranges_overlap(first_start: usize, first_end: usize, second_start: usize, second_end: usize) -> bool {
+fn ranges_overlap(
+    first_start: usize,
+    first_end: usize,
+    second_start: usize,
+    second_end: usize,
+) -> bool {
     first_start < second_end && second_start < first_end
 }
 

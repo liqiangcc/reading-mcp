@@ -21,11 +21,13 @@ normalized-document-hash/v1
 
 `text-segmentation/v1` uses blank-line Paragraph splitting and persisted-text heuristics for obvious code/table content. If native block facts begin changing Paragraph/Sentence boundaries without an identity migration, old locators/cursors could be silently reinterpreted and persisted lexical rows could point at a different logical stream.
 
+Independent review also exposed an important evidence limit: `normalized-block-model/v1` is a flat maximal non-overlapping projection. A blockquote containing multiple nested `<p>` elements is persisted as one BlockQuote range, and the normalized body can lose the inner Paragraph separator. Therefore the migration must preserve such content coarsely rather than fabricate nested precision.
+
 ## Decision
 
 ### 1. Advance TextUnit segmentation to v2
 
-Accepted current implementation target:
+Accepted implementation target:
 
 ```text
 text-segmentation/v2
@@ -40,21 +42,23 @@ Document / Section.content
 
 No transient DOM/ZIP state, FTS row, snippet similarity, LLM segmentation, or fuzzy repair is allowed.
 
-### 2. Native block evidence defines primary Paragraph boundaries
+### 2. Native block evidence defines primary Paragraph-level boundaries
 
-Mapping:
+Accepted mapping under flat block-model/v1 evidence:
 
 ```text
-paragraph    → one sentence-eligible Paragraph
-blockquote   → one sentence-eligible Paragraph
-list_item    → one sentence-eligible Paragraph
-preformatted → one coarse Paragraph; no Sentence children
-table        → one coarse Paragraph; no Sentence children
+paragraph    → one exact sentence-eligible Paragraph
+blockquote   → one typed coarse Paragraph-level unit; no Sentence children
+list_item    → one typed coarse Paragraph-level unit; no Sentence children
+preformatted → one coarse Paragraph-level unit; no Sentence children
+table        → one coarse Paragraph-level unit; no Sentence children
 ```
 
-Each native candidate uses the exact persisted block range.
+Every native candidate uses its exact persisted block range.
 
-Because block model v1 is flat/maximal, v2 does not invent nested Paragraph identity inside `blockquote` or other outer blocks. Richer nested identity requires a future versioned block model and another explicit migration.
+The conservative BlockQuote/ListItem rule is about evidence sufficiency, not a claim that quotes or list items are inherently non-prose. Their persisted outer range may hide nested Paragraph/List/Preformatted/Table structure suppressed by the flat maximal projection. Sentence eligibility would therefore overstate what the canonical persisted facts prove.
+
+Precise Paragraph/Sentence identity inside composite BlockQuote/ListItem content requires stronger persisted nested/leaf block evidence and a later explicit identity migration.
 
 ### 3. Preserve uncovered source through deterministic fallback
 
@@ -72,11 +76,13 @@ Current strong text heuristics for fenced/indented code and Markdown tables appl
 
 Absent block map is supported fallback. A declared but invalid block map is an integrity failure and must not silently degrade to fallback.
 
-### 4. Native semantics remain evidence, not a new locator kind
+### 4. Native semantics remain evidence, not new locator kinds
 
 `blockquote`, `list_item`, `preformatted`, and `table` do not create new MCP locator kinds or Tools.
 
-They remain canonical block evidence that can be projected into TextUnit content-class/detail and provenance. Paragraph/Sentence source addresses remain the existing TextLocator shapes.
+They remain canonical block evidence projected into Paragraph-level content-class/detail and provenance. Paragraph/Sentence source addresses retain the existing TextLocator shapes.
+
+Coarse BlockQuote/ListItem/Preformatted/Table units may remain Paragraph search candidates, but they must never receive fabricated Sentence candidates under block-model/v1 evidence.
 
 ### 5. Advance normalized document identity to v2
 
@@ -100,7 +106,7 @@ normalized_range
 
 It excludes provenance/diagnostics that do not define normalized source addressing, including native location/anchor, validator report, coverage counters, and lexical state.
 
-Rationale: changing block kind/range/order under identical Section text can change Paragraph/Sentence boundaries and cursor streams. That change must alter normalized identity.
+Rationale: changing block kind/range/order under identical Section text can change Paragraph/Sentence boundaries, eligibility, ordinals, and cursor streams. That change must alter normalized identity.
 
 ### 6. Keep TextUnit ID derivation namespace unless its algorithm changes
 
@@ -176,9 +182,9 @@ The server exposes one current canonical segmentation policy and rejects stale h
 
 Positive:
 
-- EPUB/HTML Paragraph/Sentence identity can use persisted native structure instead of text-only guessing;
+- native `<p>` boundaries can replace blank-line guessing where persisted evidence is exact;
 - `pre`/table punctuation can no longer fabricate Sentence identity when native evidence is available;
-- list/quote semantics remain explicit evidence without Tool/locator proliferation;
+- composite quote/list structure remains truthfully addressable at coarse Paragraph level instead of receiving invented nested precision;
 - block-map changes cannot silently reuse old normalized identity;
 - persistent search rows migrate coherently with precise locator identity;
 - blockless formats retain deterministic fallback behavior.
@@ -187,30 +193,34 @@ Costs:
 
 - normalized document identity changes globally;
 - all existing locator/read-cursor state bound to the old normalized hash becomes stale;
-- TextUnit materialization must handle native ranges plus uncovered gaps and expose richer coverage;
+- TextUnit materialization must handle native ranges plus uncovered gaps and richer coverage;
+- quote/list Sentence precision remains deferred until nested/leaf evidence exists;
 - lexical persistent state requires v3 rebuild;
 - a malformed declared block map must surface as an integrity error rather than being ignored.
 
 ## Acceptance invariants
 
-1. Native Paragraph/BlockQuote/ListItem ranges become exact sentence-eligible Paragraphs.
-2. Native Preformatted/Table ranges become exact coarse Paragraphs with no fake Sentences.
-3. Native evidence outranks fallback text heuristics.
-4. Uncovered non-whitespace source remains represented through offset-correct deterministic fallback.
-5. Whitespace gaps remain separators.
-6. Mixed native/fallback Paragraph ordering is deterministic.
-7. No Sentence crosses a v2 Paragraph boundary.
-8. Absent block evidence is supported; invalid declared evidence fails closed.
-9. Hash v2 binds identity-bearing block facts but excludes diagnostics/provenance-only changes.
-10. Old locator/cursor identity fails stale and is never fuzzy-rebased.
-11. lexical-search-index/v2 cannot survive as current precise state; v3 rebuild is required.
-12. lexical-tokenizer/v1 remains independent from segmentation.
-13. Runtime Tool count remains seven.
-14. Reopen/restart reproduces identical v2 TextUnits from persisted facts.
+1. Native Paragraph ranges become exact sentence-eligible Paragraphs.
+2. Native BlockQuote/ListItem ranges become typed coarse Paragraph-level units with zero fabricated Sentences under flat block-model/v1 evidence.
+3. Nested BlockQuote/ListItem fixtures do not recover or invent suppressed child Paragraph/Sentence boundaries.
+4. Native Preformatted/Table ranges become exact coarse Paragraph-level units with no fake Sentences.
+5. Native evidence outranks fallback text heuristics.
+6. Uncovered non-whitespace source remains represented through offset-correct deterministic fallback.
+7. Whitespace gaps remain separators.
+8. Mixed native/fallback Paragraph ordering is deterministic.
+9. No Sentence crosses a v2 Paragraph boundary.
+10. Absent block evidence is supported; invalid declared evidence fails closed.
+11. Hash v2 binds identity-bearing block facts but excludes diagnostics/provenance-only changes.
+12. Old locator/cursor identity fails stale and is never fuzzy-rebased.
+13. lexical-search-index/v2 cannot survive as current precise state; v3 rebuild is required.
+14. lexical-tokenizer/v1 remains independent from segmentation.
+15. Coarse structural/non-prose units are Paragraph search candidates only, never fake Sentence candidates.
+16. Runtime Tool count remains seven.
+17. Reopen/restart reproduces identical v2 TextUnits from persisted facts.
 
 ## Explicit non-goals
 
-- nested block-tree identity;
+- nested/leaf block-tree identity;
 - heading-title CharacterRange coordinates;
 - SVG/fixed-layout precise blocks;
 - Sentence SQLite persistence;
@@ -223,7 +233,7 @@ Costs:
 
 ```text
 normalized-document-hash/v2
-→ text-segmentation/v2 Paragraph projection
+→ text-segmentation/v2 native/fallback Paragraph-level projection
 → native/fallback Sentence eligibility + coverage
 → locator/cursor stale gates
 → derived TextUnit replacement
@@ -233,4 +243,4 @@ normalized-document-hash/v2
 
 ## Review outcome
 
-Accepted. The implementation must treat persisted native block evidence as a new identity-bearing input and migrate all dependent derived state explicitly. It must not hide the change behind `text-segmentation/v1`, reuse old precise locators, or add a new MCP Tool for block-specific reading.
+Accepted after source-first correction. The implementation must treat persisted native block evidence as a new identity-bearing input, but it may claim only the precision actually preserved by `normalized-block-model/v1`. Native Paragraphs may be sentence-eligible; flat composite BlockQuote/ListItem and native Preformatted/Table regions remain coarse until stronger nested/leaf evidence exists. All dependent derived state migrates explicitly, old precise state fails stale, and no new MCP Tool is introduced.

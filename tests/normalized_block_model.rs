@@ -164,7 +164,7 @@ async fn epub_blocks_are_remapped_to_reconciled_section_identity_and_native_loca
 }
 
 #[tokio::test]
-async fn block_map_is_persisted_but_does_not_change_current_hash_or_text_unit_identity() {
+async fn block_map_presence_is_part_of_normalized_hash_and_text_unit_identity() {
     let document = HtmlParser
         .parse(html_resource(
             "<html><body><h1>Chapter</h1><p>One sentence.</p></body></html>",
@@ -186,8 +186,8 @@ async fn block_map_is_persisted_but_does_not_change_current_hash_or_text_unit_id
         .remove("normalized_block_map_version");
     without_blocks.metadata.remove("normalized_blocks");
 
-    assert_eq!(without_blocks.normalized_document_hash(), hash);
-    assert_eq!(
+    assert_ne!(without_blocks.normalized_document_hash(), hash);
+    assert_ne!(
         without_blocks
             .paragraph_text_units()
             .units
@@ -196,6 +196,28 @@ async fn block_map_is_persisted_but_does_not_change_current_hash_or_text_unit_id
             .collect::<Vec<_>>(),
         paragraph_ids
     );
+}
+
+#[tokio::test]
+async fn block_native_location_is_not_part_of_normalized_hash_v2() {
+    let document = HtmlParser
+        .parse(html_resource(
+            "<html><body><h1>Chapter</h1><p id='body'>One sentence.</p></body></html>",
+        ))
+        .await
+        .expect("HTML should parse");
+    let expected = document.normalized_document_hash();
+    let mut changed = document.clone();
+    let mut map = changed
+        .normalized_block_map()
+        .expect("block map should validate")
+        .expect("block map should exist");
+    map.blocks[0].native_location = Some("html:#different-provenance-only-location".into());
+    changed
+        .set_normalized_block_map(map)
+        .expect("changed block map should remain valid");
+
+    assert_eq!(changed.normalized_document_hash(), expected);
 }
 
 #[tokio::test]

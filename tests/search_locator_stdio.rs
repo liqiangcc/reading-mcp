@@ -58,11 +58,12 @@ async fn stdio_search_hit_hands_section_locator_directly_to_read_and_context() {
     assert_eq!(hit.text_locator.owner_section_id, hit.section_id);
     assert!(hit.text_locator.paragraph_index.is_none());
     assert!(hit.text_locator.normalized_range.is_none());
-    assert!(hit
-        .location
-        .native_location
-        .as_deref()
-        .is_some_and(|value| value.contains("search-unit")));
+    assert!(
+        hit.location
+            .native_location
+            .as_deref()
+            .is_some_and(|value| value.contains("search-unit"))
+    );
 
     let locator = serde_json::to_value(&hit.text_locator).expect("locator JSON");
     let read = client
@@ -97,9 +98,15 @@ async fn stdio_search_hit_hands_section_locator_directly_to_read_and_context() {
         .expect("context")
         .into_typed::<GetContextResponse>()
         .expect("typed context");
-    assert_eq!(context.anchor_locator.owner_section_id, "section://book/topic");
+    assert_eq!(
+        context.anchor_locator.owner_section_id,
+        "section://book/topic"
+    );
     assert_eq!(context.items.len(), 1);
-    assert_eq!(context.items[0].locator.owner_section_id, "section://book/topic");
+    assert_eq!(
+        context.items[0].locator.owner_section_id,
+        "section://book/topic"
+    );
 
     client.cancel().await.expect("close server");
 }

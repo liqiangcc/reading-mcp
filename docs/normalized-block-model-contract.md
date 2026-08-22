@@ -31,7 +31,7 @@ A block row never becomes a competing source copy. Its text is always obtained b
 
 ```text
 normalized-block-model/v1
-reading-mcp-normalization/v5
+reading-mcp-normalization/v6
 normalized-document-hash/v2
 text-segmentation/v2
 ```
@@ -47,9 +47,12 @@ normalization v5
 
 hash v2 + segmentation v2
 → identity-bearing block evidence becomes current TextUnit input
+
+normalization v6
+→ invalidate Parsed Cache because persisted EPUB validator TextUnit coverage changes under segmentation v2
 ```
 
-Parser/cache normalization remains v5 because the later TextUnit migration changes normalized address/derived identity rather than parser-output policy.
+The block schema remains v1. Parser/cache policy advances separately because the persisted EPUB validator report is parser output and depends on current TextUnit materialization.
 
 ## 3. Persisted shape
 
@@ -293,6 +296,8 @@ native non-prose/current Sentence overlap
 
 Integrity contradictions are errors; source/capability gaps are degradations. The validator never clamps, searches replacement text, or fuzzy-rebases source facts.
 
+Because this validation report is persisted in parser output, switching its TextUnit inputs from segmentation v1 to v2 requires `reading-mcp-normalization/v6` even though the block schema itself stays v1. This prevents reuse of a v5 Parsed Cache document carrying stale TextUnit coverage.
+
 ## 15. Acceptance evidence
 
 Coverage includes：
@@ -312,9 +317,10 @@ Coverage includes：
 - hash-v2 block sensitivity/provenance exclusion;
 - old locator/cursor stale migration;
 - lexical-index/v3 rebuild;
+- normalization-v5 Parsed Cache invalidation under v6;
 - validator deterministic reopen coverage.
 
-CI #876 passed the implementation head before docs-only synchronization：
+CI #898 passed after the v6 cache-policy correction：
 
 ```text
 Format  success

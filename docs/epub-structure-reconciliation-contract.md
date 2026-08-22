@@ -4,7 +4,7 @@
 >
 > Branch: `feat/epub-structure-reconciliation`
 >
-> Related: `docs/epub-navigation-map-contract.md`, `docs/adr/0003-epub-first-structure-reliability.md`
+> Related: `docs/epub-navigation-map-contract.md`, `docs/normalized-block-model-contract.md`, `docs/adr/0003-epub-first-structure-reliability.md`
 
 ## 1. Goal
 
@@ -17,11 +17,11 @@ EPUB nav / NCX  = publisher hierarchy / labels
 XHTML headings  = fallback structural boundaries
 ```
 
-The reconciliation result must preserve canonical readable text while selecting the strongest structural evidence that can be proven against an existing source boundary.
+The reconciliation result preserves canonical readable text while selecting the strongest structural evidence that can be proven against an existing source boundary.
 
 ## 2. Structural precedence
 
-The accepted precedence is now implemented:
+The accepted precedence is implemented:
 
 ```text
 EPUB 3 toc nav
@@ -89,7 +89,7 @@ A fragment that exists in the XHTML DOM but does not correspond to an existing S
 navigation_fragment_not_section_boundary
 ```
 
-XHTML heading structure remains the canonical fallback until the later normalized-block model can represent finer native boundaries reproducibly.
+`normalized-block-model/v1` is now persisted and can preserve supported native body-block boundaries for validation and future explicitly versioned TextUnit migration. Its existence does not retroactively make every block a Section or silently change reconciliation semantics.
 
 ## 5. No TOC wrapper Sections or duplicated text
 
@@ -227,7 +227,7 @@ The map is provenance/diagnostic state derived during parsing; canonical `Docume
 
 ## 11. Normalization and identity
 
-This increment can change addressing-relevant canonical facts:
+Structure reconciliation can change addressing-relevant canonical facts:
 
 ```text
 Section.title
@@ -237,18 +237,13 @@ Section.location.section_path
 children/root hierarchy
 ```
 
-Therefore Parsed Cache policy advances:
+That increment advanced Parsed Cache policy to `reading-mcp-normalization/v3`. The later normalized-block increment advances parser/cache policy again to:
 
 ```text
-reading-mcp-normalization/v2
-→ reading-mcp-normalization/v3
+reading-mcp-normalization/v4
 ```
 
-Parsed-cache identity remains:
-
-```text
-final_source + raw_sha256 + normalization_version
-```
+because persisted parser output and HTML text normalization change.
 
 The normalized hash algorithm/version remains:
 
@@ -256,11 +251,11 @@ The normalized hash algorithm/version remains:
 normalized-document-hash/v1
 ```
 
-No new hash algorithm is needed because hash v1 already includes the canonical Section facts changed by reconciliation. If reconciliation changes title/parent/order/level, the resulting normalized hash changes naturally and old precise locators/cursors fail closed as stale.
+No new hash algorithm was needed for reconciliation because hash v1 already includes canonical Section facts changed by reconciliation. Block metadata alone is not yet an input to current `text-segmentation/v1` identity, so the block-persistence increment also does not silently redefine hash v1 or existing TextUnit locators.
 
 ## 12. Acceptance evidence
 
-Tests cover:
+Reconciliation tests cover:
 
 - EPUB 3 publisher labels replacing XHTML heading titles only at proven boundaries;
 - publisher navigation hierarchy reparenting Sections across spine documents;
@@ -274,7 +269,9 @@ Tests cover:
 - normalization v2 Parsed Cache entries miss after the v3 upgrade;
 - existing precise-read/TextUnit/search invariants remain governed by the resulting canonical Document.
 
-Release gate:
+The follow-on normalized-block tests additionally prove that reconciled Section IDs/content remain valid block owners after EPUB remapping and that native block maps survive repository recreation.
+
+Release gate remains:
 
 ```text
 cargo fmt --all -- --check
@@ -282,19 +279,18 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-## 13. Explicit non-goals
+## 13. Remaining non-goals after reconciliation + block persistence
 
-This increment does not implement:
+The completed reconciliation and normalized-block increments still do not implement:
 
 ```text
-persisted normalized XHTML block model
-native block-kind/range identity
-Paragraph/Sentence segmentation changes
-EPUB full structural/range validator
+block-aware Paragraph/Sentence identity migration
+text-segmentation/v2
+EPUB full structural/range/provenance validator
 complete EPUB coverage report
 SVG/fixed-layout precise reading
 primary-only traversal Tool/mode
-SearchIndex changes
+SearchIndex changes based on block identity
 new MCP Tools
 ```
 
@@ -303,7 +299,7 @@ new MCP Tools
 The next ADR 0003 increment is:
 
 ```text
-feat/normalized-block-model
+feat/epub-structure-validator
 ```
 
-Now that EPUB Section hierarchy has a reliable source/provenance foundation, block evidence such as `p`, `blockquote`, `li`, `pre`, `table`, and headings can be persisted as addressing-relevant normalized facts before EPUB-native Paragraph/Sentence boundaries are allowed to depend on parser-native block structure.
+It can now validate stable package/navigation/reconciliation facts together with `normalized-block-model/v1` exact owner/range/provenance facts. Validator/coverage evidence should precede any separately versioned change that makes Paragraph/Sentence identity depend on native block boundaries.

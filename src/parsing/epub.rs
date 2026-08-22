@@ -7,7 +7,9 @@ use roxmltree::Document as XmlDocument;
 use zip::ZipArchive;
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
-use crate::domain::{Document, DocumentSource, MediaType, Section, SectionId};
+use crate::domain::{
+    Document, DocumentSource, MediaType, NormalizedBlock, NormalizedBlockMap, Section, SectionId,
+};
 
 use super::HtmlParser;
 use super::archive::{ArchiveLimits, read_entry, utf8_entry, validate_archive_entries};
@@ -100,6 +102,7 @@ impl Parser for EpubParser {
 
         let mut parsed_spine_documents = Vec::new();
         let mut spine_records = Vec::with_capacity(package_facts.spine.len());
+        let mut normalized_blocks = Vec::<NormalizedBlock>::new();
         let mut parsed_spine = 0usize;
         let mut fragment_cache = FragmentCache::new();
 
@@ -159,12 +162,17 @@ impl Parser for EpubParser {
                     metadata: BTreeMap::new(),
                 })
                 .await?;
+            let parsed_blocks = parsed
+                .normalized_block_map()
+                .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?
+                .unwrap_or_else(|| NormalizedBlockMap::new(Vec::new()));
             parsed_spine += 1;
             let sections = parsed
                 .root_sections
                 .into_iter()
                 .map(|section| remap_epub_section(section, ordinal, &entry_path, None))
                 .collect::<Vec<_>>();
+            append_remapped_blocks(parsed_blocks, ordinal, &entry_path, &mut normalized_blocks);
             parsed_spine_documents.push(ParsedSpineDocument {
                 spine_index: ordinal,
                 linear,
@@ -221,7 +229,6 @@ impl Parser for EpubParser {
             "epub_spine_items_total".into(),
             package_facts.spine.len().to_string(),
         );
-        // Backward-compatible historical key: number of readable spine items actually parsed.
         metadata.insert("epub_spine_items".into(), parsed_spine.to_string());
         metadata.insert(
             "epub_navigation_map_version".into(),
@@ -283,7 +290,7 @@ impl Parser for EpubParser {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| title_from_metadata(&metadata, &resource.final_source));
 
-        Ok(Document {
+        let mut document = Document {
             id,
             source: resource.final_source,
             title,
@@ -291,7 +298,31 @@ impl Parser for EpubParser {
             content_hash: hash,
             metadata,
             root_sections: reconciled.root_sections,
-        })
+        };
+        document
+            .set_normalized_block_map(NormalizedBlockMap::new(normalized_blocks))
+            .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+        Ok(document)
+    }
+}
+
+fn append_remapped_blocks(
+    map: NormalizedBlockMap,
+    spine_index: usize,
+    entry_path: &str,
+    output: &mut Vec<NormalizedBlock>,
+) {
+    for mut block in map.blocks {
+        block.owner_section_id = remap_epub_section_id(&block.owner_section_id, spine_index);
+        block.source_order = output.len();
+        block.native_location = Some(match block.native_anchor.as_deref() {
+            Some(anchor) => format!("epub:{entry_path}#{anchor}"),
+            None => format!(
+                "epub:{entry_path};{}",
+                block.native_location.as_deref().unwrap_or("html:block")
+            ),
+        });
+        output.push(block);
     }
 }
 
@@ -301,12 +332,7 @@ fn remap_epub_section(
     entry_path: &str,
     parent_id: Option<SectionId>,
 ) -> Section {
-    let suffix = section
-        .id
-        .0
-        .strip_prefix("section://")
-        .unwrap_or(&section.id.0);
-    let id = SectionId(format!("section://epub-{spine_index}/{suffix}"));
+    let id = remap_epub_section_id(&section.id, spine_index);
     let anchor = section.location.anchor.clone();
     section.id = id.clone();
     section.parent_id = parent_id;
@@ -321,4 +347,12 @@ fn remap_epub_section(
         .map(|child| remap_epub_section(child, spine_index, entry_path, Some(id.clone())))
         .collect();
     section
+}
+
+fn remap_epub_section_id(section_id: &SectionId, spine_index: usize) -> SectionId {
+    let suffix = section_id
+        .0
+        .strip_prefix("section://")
+        .unwrap_or(&section_id.0);
+    SectionId(format!("section://epub-{spine_index}/{suffix}"))
 }

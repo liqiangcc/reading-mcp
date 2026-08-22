@@ -1,9 +1,17 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
+mod normalized_block;
 mod normalized_text;
 mod text_locator;
 mod text_unit;
 
+pub use normalized_block::{
+    NORMALIZED_BLOCK_COUNT_METADATA_KEY, NORMALIZED_BLOCK_MAP_METADATA_KEY,
+    NORMALIZED_BLOCK_MAP_VERSION_METADATA_KEY, NORMALIZED_BLOCK_MODEL_VERSION, NormalizedBlock,
+    NormalizedBlockKind, NormalizedBlockMap, NormalizedBlockMapError, NormalizedBlockProvenance,
+};
 pub use normalized_text::{
     NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE,
     NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
@@ -18,7 +26,7 @@ pub use text_unit::{
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DocumentId(pub String);
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SectionId(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -4,11 +4,11 @@
 >
 > Branch: `feat/normalized-text-range`
 >
-> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/tool-contract-use-case-design.md`
+> Related: `docs/adr/0002-text-index-locator-identity.md`, `docs/normalized-block-model-contract.md`, `docs/tool-contract-use-case-design.md`
 
 ## 1. Goal
 
-This contract establishes the P0 foundation required before Paragraph/Sentence TextUnits can receive stable locators.
+This contract establishes the identity/range foundation required by precise Paragraph/Sentence locators and later canonical block facts.
 
 It answers four separate questions:
 
@@ -19,7 +19,7 @@ Did the retrieved source bytes change?
 Did addressing-relevant canonical normalized facts change?
 → normalized_document_hash
 
-Which normalization policy produced the canonical Document?
+Which parser/normalization policy produced the persisted Document?
 → normalization_version
 
 What does [start, end) mean for an exact normalized excerpt?
@@ -36,11 +36,7 @@ The existing `content_hash` remains SHA-256 over retrieved source bytes.
 
 It answers whether the retrieved source representation changed. It does not prove that the persisted normalized `Document / Section` facts are unchanged across parser or normalization-policy revisions.
 
-Its semantics are unchanged for backward compatibility.
-
 ### 2.2 Normalized-document identity
-
-`normalized_document_hash` is a deterministic SHA-256 fingerprint over addressing-relevant canonical facts that can be rebuilt from the persisted `Document`.
 
 Current contract version:
 
@@ -48,7 +44,7 @@ Current contract version:
 normalized_document_hash_version = normalized-document-hash/v1
 ```
 
-The canonical input includes, in deterministic tree/source order:
+The hash is a deterministic fingerprint over addressing-relevant canonical Section facts, in stored/source-tree order:
 
 ```text
 root Section count
@@ -60,8 +56,6 @@ exact persisted Section.content
 child count
 children recursively in stored order
 ```
-
-The encoding is domain-separated and length-prefixed before hashing, so concatenation ambiguity cannot change identity.
 
 The current hash intentionally excludes:
 
@@ -75,30 +69,27 @@ MCP rendering and response offsets
 search/index rows
 ```
 
-Those fields remain valuable provenance or derived state, but they do not define the exact normalized text owned by a Section. A future persisted block/boundary model that affects Paragraph/Sentence segmentation must be added through a new normalized-hash contract version.
+`normalized-block-model/v1` is currently persisted in reserved Document metadata but is **not yet an input to `normalized-document-hash/v1`**, because current `text-segmentation/v1` Paragraph/Sentence identity does not consume the block map. A future block-aware segmentation migration must explicitly version its identity inputs rather than silently redefining existing locators.
 
 ### 2.3 Normalization policy version
 
 Current diagnostic/cache version:
 
 ```text
-normalization_version = reading-mcp-normalization/v3
+normalization_version = reading-mcp-normalization/v4
 ```
 
-`normalization_version` identifies parser/normalization policy for cache invalidation, diagnostics, and migration. It is not a substitute for the actual normalized fingerprint.
-
-Relevant EPUB policy history:
+Relevant EPUB/HTML parser-policy history:
 
 ```text
-v2 = EPUB navigation-map parser facts added to Document metadata
+v2 = EPUB navigation-map parser facts added
 v3 = navigation/spine reconciliation may change canonical Section structure
+v4 = normalized-block-model/v1 persisted + HTML inline text normalization correction
 ```
 
-The v3 bump invalidates Parsed Cache entries from v2 so identical raw EPUB bytes are reparsed under the new structural policy.
+`normalization_version` scopes Parsed Cache policy. It is not a substitute for the actual normalized fingerprint.
 
-`normalized-document-hash/v1` does not need a new algorithm/version for reconciliation: it already includes Section title, parentage, level and child order. When reconciliation changes those canonical facts, the hash value changes naturally. When reconciliation produces identical canonical facts, the hash may remain identical even though normalization policy advanced.
-
-A policy version may therefore change while producing identical canonical facts; conversely, canonical facts changing must change the normalized hash even when raw bytes remain identical.
+A policy version may change while producing identical hash-v1 facts. Conversely, any canonical Section fact that is already part of hash v1 changes the normalized hash even when raw bytes remain identical.
 
 ## 3. Parsed-cache identity
 
@@ -113,9 +104,11 @@ final_source
 Consequences:
 
 - unchanged raw bytes can still reuse Raw Cache;
-- a parser/normalization-policy upgrade does not reuse an old Parsed Document accidentally;
-- old parsed cache files become harmless misses rather than being silently reinterpreted;
+- a parser/normalization-policy upgrade does not accidentally reuse an old Parsed Document;
+- old parsed cache files become harmless misses;
 - DocumentRepository and SearchIndex responsibilities remain unchanged.
+
+Current tests explicitly prove v3 Parsed Cache keys miss under v4.
 
 ## 4. Normalized text range
 
@@ -131,7 +124,7 @@ unit             = Unicode scalar value / Rust char
 owner            = exactly one Section.content
 ```
 
-Examples:
+Example:
 
 ```text
 Section.content = "A中🙂Z"
@@ -139,29 +132,17 @@ range            = [1, 3)
 result           = "中🙂"
 ```
 
-Valid empty ranges are allowed, including `[len, len)` at the end of the owner text.
-
-A valid range must satisfy:
+A valid range satisfies:
 
 ```text
 0 <= start <= end <= Section.content.chars().count()
 ```
 
-The returned excerpt must be an exact slice of persisted owner text. The range implementation does not trim, normalize whitespace, rewrite punctuation, or reconstruct text from another representation.
+Valid empty ranges are allowed for the generic range type, including `[len,len)`. Specific higher-level contracts such as `NormalizedBlock` may impose stricter non-empty requirements.
+
+The range implementation does not trim, rewrite punctuation, normalize whitespace, or reconstruct text from a second representation.
 
 ## 5. Validation behavior
-
-Range construction rejects:
-
-```text
-start > end
-```
-
-Owner validation rejects:
-
-```text
-end > owner Unicode-scalar length
-```
 
 The domain exposes:
 
@@ -174,25 +155,25 @@ Section::validate_normalized_range(range)
 Section::normalized_text_slice(range)
 ```
 
-The validator reports explicit reversed/out-of-bounds errors. It does not clamp or repair invalid ranges.
+Construction rejects `start > end`; owner validation rejects `end > owner length`. Validators report errors and do not clamp or repair ranges.
 
-## 6. Three coordinate spaces remain separate
+`NormalizedBlockMap` reuses this coordinate contract and additionally checks owner existence, non-empty ranges, per-owner order/non-overlap, block ordinals and global block source order.
 
-### 6.1 Parser/native or legacy source coordinates
+## 6. Coordinate spaces remain separate
 
-Current `Location.char_start` / `char_end` retain their parser-defined historical meaning.
+### Parser/native/legacy coordinates
 
-For example, Markdown currently derives them from positions in the source Markdown text, while `Section.content` may be trimmed before persistence. These fields are therefore not normalized ranges and are not silently reinterpreted.
+`Location.char_start/char_end` retain parser-defined historical meaning and are never silently reinterpreted as normalized ranges.
 
-### 6.2 Canonical normalized coordinates
+### Canonical normalized coordinates
 
 ```text
 section-content-unicode-scalar/v1
 ```
 
-This is the only general coordinate space accepted for Paragraph, Sentence, CharacterRange, and exact TextLocator ranges.
+This is the source coordinate space for Paragraph, Sentence, CharacterRange, exact TextLocator ranges, and NormalizedBlock ranges.
 
-### 6.3 Rendered read-stream coordinates
+### Rendered read-stream coordinates
 
 Legacy Section subtree continuation uses:
 
@@ -200,13 +181,11 @@ Legacy Section subtree continuation uses:
 section-tree-rendered-unicode-scalar/v1
 ```
 
-`ReadStreamSegment.start_char/end_char` are positions in `SectionTreeReadStream/v1`, whose rendering version is `section-tree-markdown/v1`.
-
-They are continuation progress only. They are never canonical source ranges or citations.
+These are continuation positions, not citations/source ranges.
 
 ## 7. MCP contract evolution
 
-`open_document` additively returns:
+`open_document` returns:
 
 ```text
 content_hash
@@ -216,25 +195,17 @@ normalization_version
 normalized_text_coordinate_space
 ```
 
-Existing fields retain their meanings.
+The runtime Tool count does not change when normalization policy advances.
 
-`read_document.stream` additively returns:
+## 8. Cursor/locator integration
 
-```text
-coordinate_space = section-tree-rendered-unicode-scalar/v1
-```
+ReadCursor/TextLocator bind the normalized-document hash for stale detection. No cursor or locator is rebased by text similarity.
 
-This makes the rendered-stream/non-source nature of continuation positions explicit.
-
-## 8. ReadCursor integration
-
-`ReadCursor` binds the normalized-document hash in addition to raw source hash, Section target, read mode, rendering version, and next stream position.
-
-A normalized identity mismatch fails closed. No cursor is rebased by text similarity. Because EPUB reconciliation can change canonical Section facts, a cursor/locator issued for a pre-reconciliation normalized hash correctly becomes stale when the reconciled normalized hash differs.
+EPUB reconciliation can change canonical Section title/parent/order/level and therefore naturally changes hash-v1 values. The normalized block increment does not silently stale locators solely because the block metadata map was added; current segmentation/locator identity remains v1 until a separately reviewed migration.
 
 ## 9. Persistence and rebuildability
 
-The normalized hash is computed from the canonical `Document` rather than stored as a second source of truth.
+The normalized hash is computed from canonical `Document` facts rather than stored as a second source of truth.
 
 Required invariant:
 
@@ -244,7 +215,7 @@ hash(document before repository save)
 hash(document restored from repository)
 ```
 
-A future persisted block/boundary model that becomes addressing-relevant must be persisted first and then incorporated through an explicit normalized-hash contract-version decision.
+The normalized block map is also persisted/revalidated through the existing DocumentRepository metadata serialization, without a new SQLite schema. This persistence alone does not make it a hash-v1 identity input.
 
 ## 10. Acceptance evidence
 
@@ -252,16 +223,26 @@ Tests cover:
 
 - Unicode-scalar, zero-based, half-open slicing;
 - exact whitespace preservation;
-- valid empty terminal ranges;
 - reversed and out-of-bounds rejection;
 - hash changes for Section id, parentage, title, level, content, and order;
 - hash stability across raw source/provenance and legacy Location changes;
 - hash rebuild after SQLite persistence;
-- parsed cache misses across normalization versions, including v2 → v3;
+- Parsed Cache misses across normalization versions, now including v3 → v4;
 - additive MCP schema fields;
-- explicit rendered read-stream coordinate space;
-- existing continuation stale/no-gap/no-overlap behavior.
+- rendered read-stream/source-coordinate separation;
+- NormalizedBlock exact-slice and SQLite reopen persistence;
+- current Paragraph TextUnit IDs unchanged when only block metadata is removed.
 
-## 11. Non-goals of the original P0 contract
+## 11. Migration rule
 
-The original normalized-range increment did not itself define Paragraph/Sentence segmentation, TextUnit persistence, FTS, or EPUB structural policy. Those have evolved in separate implementation increments while preserving the identity/range rules above.
+Persisting new evidence and using it as identity are deliberately separate changes.
+
+Current state:
+
+```text
+normalized-block-model/v1 = persisted canonical normalization evidence
+text-segmentation/v1      = current Paragraph/Sentence identity policy
+normalized-hash/v1        = current source-address fingerprint
+```
+
+Before native blocks affect Paragraph/Sentence identity, the new increment must explicitly version segmentation and any required normalized-hash inputs, add stale/migration tests, and must not reinterpret existing locators under the old version names.

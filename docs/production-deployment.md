@@ -96,6 +96,7 @@ sudo RELEASE_BIN_DIR=<binary-directory> \
   TUNNEL_PROFILE_DIR=<profile-directory> \
   TUNNEL_PROFILE=<profile-name> \
   STATE_DIR=<persistent-state-directory> \
+  ENV_FILE=<service-environment-file> \
   scripts/verify-production.sh
 ```
 

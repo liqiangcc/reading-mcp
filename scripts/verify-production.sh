@@ -8,6 +8,7 @@ set -euo pipefail
 : "${TUNNEL_PROFILE_DIR:?set TUNNEL_PROFILE_DIR to the tunnel profile directory}"
 : "${TUNNEL_PROFILE:?set TUNNEL_PROFILE to the configured profile name}"
 : "${STATE_DIR:?set STATE_DIR to persistent Reading MCP state}"
+: "${ENV_FILE:?set ENV_FILE to the service environment file}"
 
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "EXPECTED_SHA must be a 40-character lowercase git SHA" >&2
@@ -16,6 +17,7 @@ set -euo pipefail
 
 command -v systemctl >/dev/null || { echo "systemctl is required" >&2; exit 1; }
 systemctl is-active --quiet "$SERVICE_NAME" || { echo "service is not active" >&2; exit 1; }
+[[ -r "$ENV_FILE" ]] || { echo "service environment file is not readable" >&2; exit 1; }
 
 binary="$RELEASE_BIN_DIR/reading-mcp"
 [[ -x "$binary" ]] || { echo "binary link is not executable" >&2; exit 1; }
@@ -32,7 +34,15 @@ target=$(readlink -f "$binary")
 
 doctor_output=$(mktemp)
 trap 'rm -f "$doctor_output"' EXIT
-"$TUNNEL_CLIENT" doctor --json --profile-dir "$TUNNEL_PROFILE_DIR" --profile "$TUNNEL_PROFILE" >"$doctor_output" 2>/dev/null || {
+(
+  set -a
+  # The service manager loads this file for the running tunnel process. Load it
+  # only in this short-lived verification subprocess so doctor sees the same
+  # credential reference without printing or persisting secret values.
+  . "$ENV_FILE"
+  set +a
+  "$TUNNEL_CLIENT" doctor --json --profile-dir "$TUNNEL_PROFILE_DIR" --profile "$TUNNEL_PROFILE"
+) >"$doctor_output" 2>/dev/null || {
   echo "tunnel-client doctor failed" >&2
   exit 1
 }

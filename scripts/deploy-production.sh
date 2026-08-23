@@ -6,9 +6,14 @@ set -euo pipefail
 : "${RELEASE_BIN_DIR:?set RELEASE_BIN_DIR to the versioned binary directory}"
 : "${SERVICE_NAME:=reading-mcp-tunnel.service}"
 : "${STATE_DIR:?set STATE_DIR to persistent Reading MCP state}"
+: "${ROLLBACK_SHA:?set ROLLBACK_SHA to the current known-good deployed SHA}"
 
 [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "RELEASE_SHA must be a 40-character lowercase git SHA" >&2
+  exit 1
+}
+[[ "$ROLLBACK_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "ROLLBACK_SHA must be a 40-character lowercase git SHA" >&2
   exit 1
 }
 : "${ROLLBACK_DIR:=$RELEASE_BIN_DIR/rollback}"
@@ -33,6 +38,20 @@ command -v cargo >/dev/null || { echo "cargo is required to build the release" >
 command -v systemctl >/dev/null || { echo "systemctl is required" >&2; exit 1; }
 install -d -m 0755 "$RELEASE_BIN_DIR" "$ROLLBACK_DIR"
 install -d -m 0750 "$STATE_DIR"
+
+current_binary="$RELEASE_BIN_DIR/reading-mcp"
+rollback_binary="$RELEASE_BIN_DIR/reading-mcp-$ROLLBACK_SHA"
+if [[ -e "$current_binary" && ! -e "$rollback_binary" ]]; then
+  [[ -x "$current_binary" ]] || {
+    echo "current production binary is not executable: $current_binary" >&2
+    exit 1
+  }
+  install -m 0755 "$current_binary" "$rollback_binary"
+fi
+[[ -x "$rollback_binary" ]] || {
+  echo "known-good rollback binary is not available: $rollback_binary" >&2
+  exit 1
+}
 
 cargo build --release --locked --bin reading-mcp
 built="$REPO_DIR/target/release/reading-mcp"

@@ -7,6 +7,7 @@ set -euo pipefail
 : "${SERVICE_NAME:=reading-mcp-tunnel.service}"
 : "${STATE_DIR:?set STATE_DIR to persistent Reading MCP state}"
 : "${ROLLBACK_SHA:?set ROLLBACK_SHA to the current known-good deployed SHA}"
+: "${BUILD_TARGET_DIR:=$REPO_DIR/target/reading-mcp-build-$RELEASE_SHA}"
 
 [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "RELEASE_SHA must be a 40-character lowercase git SHA" >&2
@@ -53,8 +54,8 @@ fi
   exit 1
 }
 
-cargo build --release --locked --bin reading-mcp
-built="$REPO_DIR/target/release/reading-mcp"
+cargo build --release --locked --bin reading-mcp --target-dir "$BUILD_TARGET_DIR"
+built="$BUILD_TARGET_DIR/release/reading-mcp"
 [[ -x "$built" ]] || { echo "release binary was not produced" >&2; exit 1; }
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)

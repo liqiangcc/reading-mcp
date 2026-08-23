@@ -75,6 +75,7 @@ sudo RELEASE_SHA=<exact-reviewed-main-sha> \
   SERVICE_NAME=<actual-service-name> \
   STATE_DIR=<persistent-state-directory> \
   ROLLBACK_SHA=<current-known-good-deployed-sha> \
+  BUILD_TARGET_DIR=<sha-specific-build-directory> \
   scripts/deploy-production.sh
 ```
 
@@ -85,6 +86,8 @@ surviving the upgrade. Never deploy a feature branch or an unreviewed later
 `main` commit. Derived index changes may rebuild from canonical state;
 deployment must not delete `reading-mcp.sqlite`,
 Raw Cache, Parsed Cache, or canonical Documents.
+The build target must not be the active `reading-mcp` symlink path; use the
+SHA-specific default or an equivalent isolated directory.
 
 ## Verify
 

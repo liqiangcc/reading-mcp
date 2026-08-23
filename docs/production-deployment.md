@@ -74,12 +74,16 @@ sudo RELEASE_SHA=<exact-reviewed-main-sha> \
   RELEASE_BIN_DIR=<versioned-binary-directory> \
   SERVICE_NAME=<actual-service-name> \
   STATE_DIR=<persistent-state-directory> \
+  ROLLBACK_SHA=<current-known-good-deployed-sha> \
   scripts/deploy-production.sh
 ```
 
-The checkout must be clean and `HEAD` must equal `RELEASE_SHA`. Never deploy a
-feature branch or an unreviewed later `main` commit. Derived index changes may
-rebuild from canonical state; deployment must not delete `reading-mcp.sqlite`,
+The checkout must be clean and `HEAD` must equal `RELEASE_SHA`. `ROLLBACK_SHA`
+must identify the current known-good deployed binary; the script retains that
+binary before compiling so a rollback cannot depend on the build directory
+surviving the upgrade. Never deploy a feature branch or an unreviewed later
+`main` commit. Derived index changes may rebuild from canonical state;
+deployment must not delete `reading-mcp.sqlite`,
 Raw Cache, Parsed Cache, or canonical Documents.
 
 ## Verify

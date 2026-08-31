@@ -60,7 +60,7 @@ impl SourcePolicy for LocalFileSourcePolicy {
             let Ok(canonical_root) = tokio::fs::canonicalize(root).await else {
                 continue;
             };
-            if canonical.starts_with(&canonical_root) {
+            if canonical == canonical_root || canonical.strip_prefix(&canonical_root).is_ok() {
                 return Ok(());
             }
         }

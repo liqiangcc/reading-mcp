@@ -2,8 +2,8 @@
 
 Status: accepted bounded design for the `list_documents` continuation phase.
 
-This document freezes the state machine before the runtime DTO and implementation changes. It
-does not add an MCP Tool. The runtime surface remains exactly seven Tools.
+This document freezes the `list_documents` continuation state machine. Directory navigation is a
+separate `list_directory` capability; it does not change this document-discovery contract.
 
 ## 1. Use case
 
@@ -136,7 +136,7 @@ The implementation PR must cover:
 - candidate add/remove/rename or size change producing stale continuation;
 - repository/parser/index side-effect absence;
 - real stdio MCP continuation;
-- exactly seven discovered Tools.
+- existing document-discovery and directory-navigation stdio contracts remain separate.
 
 Whole-document reading order remains a separate bounded design. Discovery order is not reading
 order, structure preorder, or a sentence traversal order.

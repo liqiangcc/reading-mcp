@@ -54,7 +54,7 @@ Second body.
         .map(|tool| tool.name.into_owned())
         .collect::<Vec<_>>();
     tool_names.sort();
-    assert_eq!(tool_names.len(), 7);
+    assert_eq!(tool_names.len(), 8);
     assert!(
         tool_names
             .iter()

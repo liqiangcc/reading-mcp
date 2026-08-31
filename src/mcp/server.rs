@@ -17,6 +17,9 @@ use crate::application::get_text_units::{
     EffectiveTextUnitKind, GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind,
     TextUnitContentClass, TextUnitCoveragePolicy, TextUnitDirection,
 };
+use crate::application::list_directories::{
+    DirectoryEntryKind, ListDirectoryCommand, ListDirectoryResult, ListDirectoryUseCase,
+};
 use crate::application::list_documents::{
     ListDocumentsCommand, ListDocumentsResult, ListDocumentsUseCase,
 };
@@ -37,9 +40,10 @@ use crate::runtime::RuntimeConfig;
 
 use super::contracts::{
     ContextContainerKindDto, ContextItemDto, ContextItemKindDto, ContextItemRoleDto,
-    ContextRelationDto, ContextUnitDto, GetContextRequest, GetContextResponse,
-    GetDocumentStructureRequest, GetDocumentStructureResponse, GetTextUnitsRequest,
-    GetTextUnitsResponse, ListDocumentsRequest, ListDocumentsResponse, ListedDocumentDto,
+    ContextRelationDto, ContextUnitDto, DirectoryEntryKindDto, GetContextRequest,
+    GetContextResponse, GetDocumentStructureRequest, GetDocumentStructureResponse,
+    GetTextUnitsRequest, GetTextUnitsResponse, ListDirectoryRequest, ListDirectoryResponse,
+    ListDocumentsRequest, ListDocumentsResponse, ListedDirectoryEntryDto, ListedDocumentDto,
     LocationDto, NormalizedRangeDto, OpenDocumentRequest, OpenDocumentResponse,
     ReadDocumentRequest, ReadDocumentResponse, ReadStreamSegmentDto, SearchCandidateKindDto,
     SearchDocumentRequest, SearchDocumentResponse, SearchHitDto, SectionNode,
@@ -52,6 +56,7 @@ use super::contracts::{
 pub struct ReadingMcpServer {
     open_document: Arc<OpenDocumentUseCase>,
     list_documents: Arc<ListDocumentsUseCase>,
+    list_directory: Arc<ListDirectoryUseCase>,
     get_structure: Arc<GetDocumentStructureUseCase>,
     get_text_units: Arc<GetTextUnitsUseCase>,
     search_document: Arc<SearchDocumentUseCase>,
@@ -84,9 +89,11 @@ impl ReadingMcpServer {
         crate::runtime::build_server(config).expect("Reading MCP runtime must build")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_use_cases(
         open_document: Arc<OpenDocumentUseCase>,
         list_documents: Arc<ListDocumentsUseCase>,
+        list_directory: Arc<ListDirectoryUseCase>,
         get_structure: Arc<GetDocumentStructureUseCase>,
         get_text_units: Arc<GetTextUnitsUseCase>,
         search_document: Arc<SearchDocumentUseCase>,
@@ -96,6 +103,7 @@ impl ReadingMcpServer {
         Self {
             open_document,
             list_documents,
+            list_directory,
             get_structure,
             get_text_units,
             search_document,
@@ -138,6 +146,47 @@ impl ReadingMcpServer {
                     name: document.name,
                     media_type: document.media_type,
                     size_bytes: document.size_bytes,
+                })
+                .collect(),
+            complete,
+            next_cursor,
+        }))
+    }
+
+    #[tool(
+        description = "Browse authorized local roots or the direct child directories and readable documents of a known directory without opening documents"
+    )]
+    async fn list_directory(
+        &self,
+        Parameters(request): Parameters<ListDirectoryRequest>,
+    ) -> Result<Json<ListDirectoryResponse>, ErrorData> {
+        let result = self
+            .list_directory
+            .execute(ListDirectoryCommand {
+                path: request.path,
+                max_results: request.max_results,
+                cursor: request.cursor,
+            })
+            .await
+            .map_err(to_mcp_error)?;
+        let ListDirectoryResult {
+            entries,
+            complete,
+            next_cursor,
+        } = result;
+
+        Ok(Json(ListDirectoryResponse {
+            entries: entries
+                .into_iter()
+                .map(|entry| ListedDirectoryEntryDto {
+                    kind: match entry.kind {
+                        DirectoryEntryKind::Directory => DirectoryEntryKindDto::Directory,
+                        DirectoryEntryKind::Document => DirectoryEntryKindDto::Document,
+                    },
+                    path: entry.path,
+                    name: entry.name,
+                    media_type: entry.media_type,
+                    size_bytes: entry.size_bytes,
                 })
                 .collect(),
             complete,

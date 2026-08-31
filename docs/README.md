@@ -1,6 +1,7 @@
 # Reading MCP 文档导航
 
 - [需求文档](requirements.md)：项目目标、当前功能范围、安全要求、非目标和验收标准。
+- [Authorized Source Workspace Directory Navigation](directory-navigation-contract.md)：`list_directory` 的授权目录层级浏览、entry 类型、安全边界与 continuation。
 - [设计原则](design-principles.md)：关注点分离（SoC）、单一职责（SRP）、变化原因矩阵、依赖方向、禁止耦合和架构评审清单。
 - [架构设计](architecture.md)：领域模型、Retriever/Parser/Search/Cache 边界、稳定定位与 SSRF 设计。
 - [Text Index & Source Locator Architecture](text-index-and-locator-design.md)：精确阅读的五级寻址、TextUnit/Locator、字符坐标、切分版本与 continuation 契约。
@@ -18,14 +19,14 @@
 - [EPUB Structure Validator Contract](epub-structure-validator-contract.md)：已实现的 persisted-fact integrity validation、error/degradation taxonomy、spine/navigation/structure/block/TextUnit coverage 与 SQLite reopen revalidation。
 - [Block-Aware TextUnit Identity Migration](block-aware-text-unit-identity-migration.md)：已实现的 native-block-aware Paragraph/Sentence、`text-segmentation/v2`、`normalized-document-hash/v2`、stale 与 lexical v3 migration。
 - [EPUB-First Structure Reliability Design](epub-structure-reliability-design.md)：EPUB 优先的目录/阅读顺序/章节/块结构可靠性、provenance、validator 与 coverage 设计。
-- [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：历史设计基线；当前 runtime 已按其决策实现七个 Tool、TextLocator handoff 与 continuation。
+- [Use-Case-First Tool Contract Design](tool-contract-use-case-design.md)：历史设计基线；当前 runtime 已在其七个阅读 Tool 之上增加独立的 `list_directory` 导航能力。
 - [ADR 0002：Text Index、Locator Identity 与 Precise Reading](adr/0002-text-index-locator-identity.md)：规范化身份、TextLocator、ReadCursor、搜索候选与派生索引的稳定决策。
 - [ADR 0003：EPUB-First Structure Reliability](adr/0003-epub-first-structure-reliability.md)：EPUB 结构优先级、provenance、degradation、validator 和 coverage 的稳定决策。
 - [ADR 0004：Use-Case-First MCP Tool Contracts](adr/0004-use-case-first-tool-contracts.md)：从 6 Tool 推导出的第 7 个独立职责 `get_text_units`，以及 read/enumeration/context/search 的责任边界。
 - [ADR 0005：Block-Aware TextUnit Identity Migration](adr/0005-block-aware-text-unit-identity.md)：已实现 block-aware segmentation/hash identity、旧 locator/cursor fail-closed、Parsed Cache v6 与 lexical-index/v3 rebuild 决策。
 - [MVP 实施计划](mvp.md)：历史阶段计划与当前 v0.1 收敛状态。
 - [Phase 5：HTTP、安全与缓存](phase5-security-cache.md)：HTTP Retriever、SSRF/DNS/redirect 安全证据链和缓存边界。
-- [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、当前 7 个 Tool 和 stdio 子进程端到端测试。
+- [Phase 6：MCP stdio 与真实调用验证](phase6-mcp-stdio.md)：真实 `reading-mcp` binary、当前 8 个 Tool 和 stdio 子进程端到端测试。
 - [MVP Hardening Review](mvp-review.md)：发布前架构、安全、契约和真实使用 Review。
 - [Runtime Configuration](runtime-configuration.md)：持久化状态、资源预算、HTTP、auth profile、telemetry 和错误语义配置。
 - [Release Hardening Plan](release-hardening-plan.md)：v0.1.0 前的 hardening 完成矩阵、扩展格式和 Release Gate。
@@ -101,10 +102,11 @@ Reading MCP = 文档上下文基础设施
 不负责：总结 / 问答 / 推理 / 教学 / 通用 Web 搜索 / 通用 RAG
 ```
 
-当前 runtime Tool surface 仍是 7 个：
+当前 runtime Tool surface 仍是 8 个：
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units

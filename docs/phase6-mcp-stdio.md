@@ -10,10 +10,11 @@ mcp → application → domain
 infrastructure/retrieval/parsing/security → ports
 ```
 
-## 7 个 Tool
+## 8 个 Tool
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units

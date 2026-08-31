@@ -32,7 +32,8 @@ TextLocator target
 → exact canonical source represented by that locator
 ```
 
-The runtime Tool surface remains seven Tools.
+The seven document-reading Tools remain unchanged; the runtime additionally exposes the separate
+authorized Source Workspace navigation Tool `list_directory`.
 
 ## 2. Backward-compatible request
 

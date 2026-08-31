@@ -13,6 +13,7 @@ use crate::application::ports::{
 };
 use crate::application::read_document::ReadDocumentUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
+use crate::application::source_view::SourceViewUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
     FileRawResourceCache, InMemoryDocumentRepository, InMemoryParsedDocumentCache,
@@ -21,7 +22,9 @@ use crate::infrastructure::{
     ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex, SqliteTextUnitIndex,
 };
 use crate::mcp::ReadingMcpServer;
-use crate::parsing::{ArchiveLimits, ParserRouter, PersistedDocumentReliabilityInspector};
+use crate::parsing::{
+    ArchiveLimits, ParserRouter, PdfSourceViewRenderer, PersistedDocumentReliabilityInspector,
+};
 use crate::retrieval::{
     EnvironmentCredentialProvider, HttpRetriever, LimitedFileRetriever, RetrieverRouter,
     RevalidatingHttpRetriever, SourcePolicyRouter,
@@ -119,6 +122,12 @@ pub fn build_server(
     let repository = components.repository;
     let text_unit_index = components.text_unit_index;
     let search_index = components.search_index;
+    let source_view = Arc::new(SourceViewUseCase::new(
+        repository.clone(),
+        retriever.clone(),
+        Arc::new(PdfSourceViewRenderer),
+        config.source_view,
+    ));
     let open_document = Arc::new(
         OpenDocumentUseCase::with_text_unit_index(
             source_policy,
@@ -145,6 +154,7 @@ pub fn build_server(
         search_document,
         read_document,
         get_context,
+        source_view,
     ))
 }
 

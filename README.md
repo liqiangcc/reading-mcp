@@ -18,6 +18,7 @@ get_text_units
 search_document
 get_context
 read_document
+get_source_view
 ```
 
 独立格式 Parser：
@@ -88,6 +89,11 @@ read_document
 `get_text_units(requested_kind=sentence, coverage_policy=preserve_source)` 按
 `TextLocator` 和 `TextUnitCursor` 逐项推进。`body-order/v1` 是整本/多 Section
 组合的 canonical body 顺序；结构 preorder 不被当作 EPUB 正文阅读顺序。
+
+需要核对公式、图表、排版或解析顺序时，把已有 `TextLocator` 交给
+`get_source_view`。它只渲染仍与 `document_id`、raw `content_hash`、normalized
+identity 和 source binding 一致的原始 PDF 页面，并返回 `image/png` 视觉证据；
+正常阅读仍使用 `read_document`。
 
 `list_documents` 使用 `discovery-cursor/v1` continuation。所有 cursor 都只表示
 各自 bounded stream 的进度，不是 citation，也不会 fuzzy rebase；raw 或 normalized

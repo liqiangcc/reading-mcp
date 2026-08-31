@@ -76,7 +76,7 @@ Paragraph/Sentence、FTS rows、snippets、MCP rendering、cursor 都不能替�
 
 ## 4. 当前 Application / Tool Surface
 
-当前 7 个 MCP Tool：
+当前 8 个 MCP Tool：
 
 ```text
 list_documents
@@ -86,6 +86,7 @@ get_text_units
 search_document
 get_context
 read_document
+get_source_view
 ```
 
 Application Use Cases：
@@ -98,6 +99,7 @@ GetTextUnitsUseCase
 SearchDocumentUseCase
 GetContextUseCase
 ReadDocumentUseCase
+SourceViewUseCase
 ```
 
 没有格式专属 Tool，也没有 `get_sentences` / `get_paragraphs`。

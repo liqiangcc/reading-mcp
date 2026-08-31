@@ -10,7 +10,7 @@ mcp → application → domain
 infrastructure/retrieval/parsing/security → ports
 ```
 
-## 7 个 Tool
+## 8 个 Tool
 
 ```text
 list_documents
@@ -20,6 +20,7 @@ get_text_units
 search_document
 get_context
 read_document
+get_source_view
 ```
 
 格式扩展、EPUB reconciliation、normalized block persistence、validator 和 block-aware identity migration 都不增加格式专属 Tool。

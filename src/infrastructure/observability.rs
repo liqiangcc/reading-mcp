@@ -254,6 +254,7 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::BlockedSource(_) => "blocked_source",
         ApplicationError::RetrievalFailed(_) => "retrieval_failed",
         ApplicationError::ParseFailed(_) => "parse_failed",
+        ApplicationError::SourceViewFailed(_) => "source_view_failed",
         ApplicationError::ResourceLimitExceeded(_) => "resource_limit",
         ApplicationError::AuthenticationFailed(_) => "authentication_failed",
         ApplicationError::RepositoryFailed(_) => "repository_failed",

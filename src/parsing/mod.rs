@@ -12,6 +12,7 @@ mod openapi;
 mod pdf;
 mod reliability;
 mod router;
+mod source_view;
 mod text;
 
 pub use archive::ArchiveLimits;
@@ -31,4 +32,5 @@ pub use openapi::OpenApiParser;
 pub use pdf::PdfParser;
 pub use reliability::PersistedDocumentReliabilityInspector;
 pub use router::ParserRouter;
+pub use source_view::PdfSourceViewRenderer;
 pub use text::TextParser;

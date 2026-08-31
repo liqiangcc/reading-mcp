@@ -10,6 +10,7 @@
 - [TextUnit Enumeration Contract](text-unit-enumeration-contract.md)：已实现的 `get_text_units`、TextLocator anchor、TextUnitCursor、Paragraph/Sentence source-order pagination 与 coverage/completion 语义。
 - [Context Granularity Contract](context-granularity-contract.md)：已实现的 TextLocator-driven `neighbor / container / structural` context、stale validation、coarse source-preserving context 与 legacy Section compatibility。
 - [Precise Read Locator Contract](precise-read-locator-contract.md)：已实现的 TextLocator → exact `read_document`、CharacterRange、exact-target ReadCursor continuation 与 returned source locator。
+- [Original Source View](source-view.md)：已实现的 TextLocator → 原始 PDF 页面渲染、视觉证据、identity binding、fail-closed 与 render limits。
 - [Search Locator Handoff Contract](search-locator-contract.md)：已实现的 SearchHit → TextLocator direct handoff 与 shared locator resolver。
 - [Lexical TextUnit Index Contract](lexical-text-unit-index.md)：canonical Section/Paragraph/Sentence lexical candidates、`lexical-tokenizer/v1`、CJK/技术标识检索、SQLite lexical-index v3 migration/rebuild。
 - [EPUB Navigation Map Contract](epub-navigation-map-contract.md)：已实现的 EPUB 3 `properties=nav` discovery、TOC/NCX hierarchy、href/fragment resolution 与 provenance parser facts。
@@ -101,7 +102,7 @@ Reading MCP = 文档上下文基础设施
 不负责：总结 / 问答 / 推理 / 教学 / 通用 Web 搜索 / 通用 RAG
 ```
 
-当前 runtime Tool surface 仍是 7 个：
+当前 runtime Tool surface 是 8 个：
 
 ```text
 list_documents
@@ -111,6 +112,7 @@ get_text_units
 search_document
 get_context
 read_document
+get_source_view
 ```
 
 当前 precise-reading / retrieval foundation：
@@ -231,11 +233,13 @@ Validator 不重新打开 ZIP/DOM，只消费持久化事实。内部一致性�
 ```text
 get_text_units ─→ TextLocator ─┬→ read_document
                                ├→ get_context
-                               └→ get_text_units(anchor_locator)
+                               ├→ get_text_units(anchor_locator)
+                               └→ get_source_view
 
 search_document → SearchHit.text_locator ─┬→ read_document
                                          ├→ get_context
-                                         └→ get_text_units(anchor_locator)
+                                         ├→ get_text_units(anchor_locator)
+                                         └→ get_source_view
 ```
 
 `get_text_units(anchor_locator)` 是 Section-scoped、排他的精确续读：`forward` 从 anchor 之后开始，`backward` 从 anchor 之前开始；anchor 必须是 requested kind / coverage policy 声明流中的真实 item。续页只携带 cursor，cursor 会保留 origin anchor 证据。到达某一方向边界只表示该 traversal `complete`，不会把中间起点误报为整个 Section `section_complete`。

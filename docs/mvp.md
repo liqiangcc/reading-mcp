@@ -33,7 +33,7 @@ MVP 首批验证：
 
 ### 当前 MCP Tools
 
-当前 runtime 实际暴露 7 个 Tool：
+当前 runtime 实际暴露 8 个 Tool：
 
 ```text
 list_documents
@@ -42,6 +42,7 @@ get_document_structure
 get_text_units
 search_document
 read_document
+get_source_view
 get_context
 ```
 
@@ -51,6 +52,7 @@ get_context
 Phase 0 初始 document-scoped surface = 5 Tools
 + list_documents                    = 6 Tools
 + get_text_units                    = 7 Tools
++ get_source_view                   = 8 Tools
 ```
 
 `list_documents` 是独立 DocumentDiscovery；不打开或解析文档。

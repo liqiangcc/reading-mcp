@@ -103,6 +103,13 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 | `READING_MCP_MAX_SECTIONS` | 20000 | Normalized Document 最大 Section 数 |
 | `READING_MCP_MAX_SECTION_DEPTH` | 32 | Section Tree 最大深度 |
 | `READING_MCP_MAX_NORMALIZED_CHARS` | 16000000 | 规范化正文最大字符数 |
+| `READING_MCP_SOURCE_VIEW_MAX_DPI` | 144 | 原始页面渲染最大 DPI |
+| `READING_MCP_SOURCE_VIEW_MAX_WIDTH` | 2400 | 单页渲染最大宽度（像素） |
+| `READING_MCP_SOURCE_VIEW_MAX_HEIGHT` | 3200 | 单页渲染最大高度（像素） |
+| `READING_MCP_SOURCE_VIEW_MAX_PIXELS` | 4000000 | 单页渲染最大像素数 |
+| `READING_MCP_SOURCE_VIEW_MAX_IMAGE_BYTES` | 8388608 | PNG 响应最大字节数 |
+| `READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES` | 16777216 | 单页 PDF 解压 stream 最大字节数 |
+| `READING_MCP_SOURCE_VIEW_TIMEOUT_SECS` | 10 | 单页渲染超时 |
 | `READING_MCP_PARSE_TIMEOUT_SECS` | 30 | Parser cooperative timeout |
 
 说明：Parser timeout 是 Tokio cooperative timeout。对于长时间不 yield 的同步 CPU 操作，它不是 OS 级硬抢占。因此 PDF 页数、ZIP 解压大小等前置限制仍然是资源安全的主要证据。

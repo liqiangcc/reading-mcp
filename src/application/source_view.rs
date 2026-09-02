@@ -3,14 +3,17 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::task::spawn_blocking;
-use tokio::time::timeout;
 
 use crate::application::locator_resolution::resolve_text_locator;
 use crate::application::ports::{
     ApplicationError, DocumentRepository, RenderedSourceView, RetrievalOptions, Retriever,
     SourceViewRenderOptions, SourceViewRenderer,
 };
-use crate::domain::{DocumentId, DocumentSource, MediaType, NormalizedDocumentHash, TextLocator};
+use crate::domain::{
+    DocumentId, DocumentSource, MediaType, OriginalSourceBindingError, OriginalSourceTarget,
+    Section, TextLocator, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
+    ORIGINAL_SOURCE_BINDING_MODEL_VERSION,
+};
 
 pub const DEFAULT_SOURCE_VIEW_DPI: u32 = 144;
 pub const DEFAULT_SOURCE_VIEW_MAX_PAGES: usize = 2_000;
@@ -75,6 +78,8 @@ pub struct SourceViewResult {
     pub source: DocumentSource,
     pub content_hash: String,
     pub normalized_document_hash: NormalizedDocumentHash,
+    pub normalized_document_hash_version: String,
+    pub source_binding_version: String,
     pub target_locator: TextLocator,
     pub representation: SourceViewRepresentation,
     pub page_number: u32,
@@ -128,11 +133,11 @@ impl SourceViewUseCase {
             .ok_or(ApplicationError::InvalidLocator(
                 "resolved source-view section disappeared".into(),
             ))?;
-        let page_number = section.location.page.ok_or_else(|| {
-            ApplicationError::InvalidRequest(
-                "target locator has no original source page binding".into(),
-            )
-        })?;
+        let (page_number, source_binding_version) = resolve_original_page(
+            &document,
+            section,
+            resolved.range,
+        )?;
 
         if !is_pdf(&document.media_type) {
             return Err(ApplicationError::InvalidRequest(format!(
@@ -171,19 +176,10 @@ impl SourceViewUseCase {
             max_image_bytes: self.limits.max_image_bytes,
             max_decoded_stream_bytes: self.limits.max_decoded_stream_bytes,
         };
-        let render = timeout(
-            self.limits.timeout,
-            spawn_blocking(move || {
-                renderer.render(resource.bytes, media_type, page_number, options)
-            }),
-        )
+        let render = spawn_blocking(move || {
+            renderer.render(resource.bytes, media_type, page_number, options)
+        })
         .await
-        .map_err(|_| {
-            ApplicationError::ResourceLimitExceeded(format!(
-                "source view renderer exceeded {:?} timeout",
-                self.limits.timeout
-            ))
-        })?
         .map_err(|error| {
             ApplicationError::SourceViewFailed(format!("source view worker failed: {error}"))
         })??;
@@ -195,6 +191,8 @@ impl SourceViewUseCase {
             source: document.source,
             content_hash: document.content_hash.0,
             normalized_document_hash,
+            normalized_document_hash_version: NORMALIZED_DOCUMENT_HASH_VERSION.into(),
+            source_binding_version,
             target_locator: resolved.locator,
             representation: command.representation,
             page_number,
@@ -202,6 +200,57 @@ impl SourceViewUseCase {
             dpi,
             view: render,
         })
+    }
+}
+
+fn resolve_original_page(
+    document: &crate::domain::Document,
+    section: &Section,
+    range: crate::domain::NormalizedTextRange,
+) -> Result<(u32, String), ApplicationError> {
+    let binding_map = document
+        .original_source_binding_map()
+        .map_err(source_binding_error)?;
+    if binding_map.is_some() {
+        return match document
+            .original_source_target_for_range(&section.id, range)
+            .map_err(source_binding_error)?
+        {
+            Some(OriginalSourceTarget::Page { page_number }) => Ok((
+                page_number,
+                ORIGINAL_SOURCE_BINDING_MODEL_VERSION.into(),
+            )),
+            None => Err(ApplicationError::InvalidLocator(
+                "target locator has no precise original source binding".into(),
+            )),
+        };
+    }
+
+    legacy_single_page_binding(section)
+        .map(|page| (page, "legacy-single-page-section/v1".into()))
+        .ok_or_else(|| {
+            ApplicationError::StaleLocator(
+                "persisted PDF lacks precise page binding evidence for this locator; reopen the document with the current parser"
+                    .into(),
+            )
+        })
+}
+
+fn legacy_single_page_binding(section: &Section) -> Option<u32> {
+    let page = section.location.page?;
+    let expected = format!("pdf:page:{page}");
+    (section.location.native_location.as_deref() == Some(expected.as_str())).then_some(page)
+}
+
+fn source_binding_error(error: OriginalSourceBindingError) -> ApplicationError {
+    match error {
+        OriginalSourceBindingError::AmbiguousTarget => ApplicationError::InvalidRequest(
+            "target locator spans multiple original source pages; use a narrower Paragraph/Sentence locator"
+                .into(),
+        ),
+        other => ApplicationError::SourceViewFailed(format!(
+            "invalid persisted original source binding evidence: {other}"
+        )),
     }
 }
 

@@ -26,6 +26,10 @@ struct AuthState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if reading_mcp::parsing::run_source_view_worker_if_requested()? {
+        return Ok(());
+    }
+
     let token = env::var("READING_MCP_HTTP_TOKEN")
         .map_err(|_| "READING_MCP_HTTP_TOKEN must be set for the HTTP server")?;
     if token.len() < 32 {

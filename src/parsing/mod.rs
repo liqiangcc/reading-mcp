@@ -13,6 +13,7 @@ mod pdf;
 mod reliability;
 mod router;
 mod source_view;
+mod source_view_process;
 mod text;
 
 pub use archive::ArchiveLimits;
@@ -35,5 +36,8 @@ pub use router::ParserRouter;
 pub use source_view::{
     PdfSourceViewRenderer, ProcessIsolatedPdfSourceViewRenderer,
     run_source_view_worker_if_requested,
+};
+pub use source_view_process::{
+    FileProcessIsolatedPdfSourceViewRenderer, run_file_source_view_worker_if_requested,
 };
 pub use text::TextParser;

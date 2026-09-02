@@ -10,7 +10,7 @@ use reading_mcp::domain::{
 };
 use reading_mcp::mcp::contracts::{GetTextUnitsResponse, OpenDocumentResponse};
 use reading_mcp::mcp::source_view_contracts::GetSourceViewResponse;
-use reading_mcp::parsing::ProcessIsolatedPdfSourceViewRenderer;
+use reading_mcp::parsing::FileProcessIsolatedPdfSourceViewRenderer;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
 use rmcp::transport::TokioChildProcess;
@@ -112,7 +112,7 @@ fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
 
     let directory = tempfile::tempdir().expect("worker directory should be created");
     let worker = directory.path().join("sleep-worker.sh");
-    std::fs::write(&worker, "#!/bin/sh\ncat >/dev/null\nsleep 5\n")
+    std::fs::write(&worker, "#!/bin/sh\nsleep 5\n")
         .expect("worker script should be written");
     let mut permissions = std::fs::metadata(&worker)
         .expect("worker metadata should be available")
@@ -120,8 +120,10 @@ fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
     permissions.set_mode(0o700);
     std::fs::set_permissions(&worker, permissions).expect("worker should be executable");
 
-    let renderer =
-        ProcessIsolatedPdfSourceViewRenderer::with_executable(worker, Duration::from_millis(25));
+    let renderer = FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+        worker,
+        Duration::from_millis(25),
+    );
     let error = renderer
         .render(
             build_pdf(),

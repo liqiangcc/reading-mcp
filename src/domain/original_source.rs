@@ -51,7 +51,9 @@ pub enum OriginalSourceBindingError {
         owner_section_id: String,
         message: String,
     },
-    #[error("original source binding for Section {owner_section_id:?} has an empty normalized range")]
+    #[error(
+        "original source binding for Section {owner_section_id:?} has an empty normalized range"
+    )]
     EmptyRange { owner_section_id: String },
     #[error("original source page numbers are 1-based")]
     InvalidPage,
@@ -154,7 +156,10 @@ impl Document {
                     owner_section_id: binding.owner_section_id.0.clone(),
                 });
             }
-            if matches!(binding.target, OriginalSourceTarget::Page { page_number: 0 }) {
+            if matches!(
+                binding.target,
+                OriginalSourceTarget::Page { page_number: 0 }
+            ) {
                 return Err(OriginalSourceBindingError::InvalidPage);
             }
             if let Some(previous_end) = last_range_end.get(&binding.owner_section_id).copied()
@@ -164,7 +169,10 @@ impl Document {
                     owner_section_id: binding.owner_section_id.0.clone(),
                 });
             }
-            last_range_end.insert(binding.owner_section_id.clone(), binding.normalized_range.end());
+            last_range_end.insert(
+                binding.owner_section_id.clone(),
+                binding.normalized_range.end(),
+            );
         }
         Ok(())
     }

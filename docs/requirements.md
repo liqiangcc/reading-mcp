@@ -39,10 +39,11 @@ GitHub README/Wiki、Javadoc、MkDocs/Docusaurus/GitBook 静态输出复用 Mark
 
 ## MCP Tools
 
-当前 runtime 实际暴露 7 个 Tool：
+当前 runtime 实际暴露 8 个 Tool：
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units

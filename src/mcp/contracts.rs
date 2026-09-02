@@ -187,6 +187,46 @@ pub struct ListedDocumentDto {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListDirectoryRequest {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_directory_limit")]
+    pub max_results: usize,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+fn default_directory_limit() -> usize {
+    100
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListDirectoryResponse {
+    pub entries: Vec<ListedDirectoryEntryDto>,
+    pub complete: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListedDirectoryEntryDto {
+    pub kind: DirectoryEntryKindDto,
+    pub path: String,
+    pub name: String,
+    #[serde(default)]
+    pub media_type: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryEntryKindDto {
+    Directory,
+    Document,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct GetDocumentStructureRequest {
     pub document_id: String,
     #[serde(default)]

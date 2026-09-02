@@ -62,6 +62,7 @@ Beta sentence one. Beta sentence two.
             "get_context",
             "get_document_structure",
             "get_text_units",
+            "list_directory",
             "list_documents",
             "open_document",
             "read_document",

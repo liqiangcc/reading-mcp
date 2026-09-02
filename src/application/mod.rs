@@ -1,9 +1,12 @@
 mod body_order;
+mod directory_cursor;
 mod discovery_cursor;
 pub mod get_context;
 pub mod get_document_structure;
 pub mod get_text_units;
+pub mod list_directories;
 pub mod list_documents;
+mod local_path;
 mod locator_resolution;
 pub mod open_document;
 pub mod ports;

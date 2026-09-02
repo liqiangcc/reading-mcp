@@ -7,7 +7,7 @@
 > Scope: architecture and contract design only. This document does not authorize implementation changes on a design branch.
 >
 > Historical snapshot: sections below retain the pre-implementation six-Tool/future-
-> `get_text_units` discussion. Current runtime has seven Tools; use `docs/requirements.md`,
+> `get_text_units` discussion. Current runtime has eight Tools; use `docs/requirements.md`,
 > the current contract documents, and `tools/list` tests for implemented behavior.
 
 ## 1. Problem statement

@@ -72,6 +72,7 @@ The current runtime Tool surface remains:
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units
@@ -80,7 +81,8 @@ get_context
 read_document
 ```
 
-A new Tool requires a separate use-case-first decision proving an independent responsibility.
+Each Tool requires a separate use-case-first responsibility; `list_directory` is the independent
+authorized Source Workspace navigation capability documented in `directory-navigation-contract.md`.
 
 ## 4. Required Sentence-Reading P0 Closure
 
@@ -348,7 +350,7 @@ Never leave a live production-only edit uncommitted.
 Through the actual production Secure MCP Tunnel, prove at minimum:
 
 ```text
-Tools/list = exactly seven Tools
+Tools/list = exactly eight Tools, including `list_directory`
 
 discovery → open → reading_profile
 

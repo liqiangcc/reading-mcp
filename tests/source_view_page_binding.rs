@@ -11,7 +11,7 @@ use reading_mcp::application::ports::RetrievalOptions;
 use reading_mcp::application::source_view::{
     GetSourceViewCommand, SourceViewLimits, SourceViewRepresentation, SourceViewUseCase,
 };
-use reading_mcp::domain::{DocumentSource, SectionId, ORIGINAL_SOURCE_BINDING_MODEL_VERSION};
+use reading_mcp::domain::{DocumentSource, ORIGINAL_SOURCE_BINDING_MODEL_VERSION, SectionId};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
 use reading_mcp::parsing::{ParserRouter, PdfSourceViewRenderer};
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
@@ -77,7 +77,10 @@ async fn sentence_on_second_page_of_multi_page_toc_section_renders_page_two() {
 
     assert_eq!(result.page_number, 2);
     assert_eq!(result.page_count, 3);
-    assert_eq!(result.source_binding_version, ORIGINAL_SOURCE_BINDING_MODEL_VERSION);
+    assert_eq!(
+        result.source_binding_version,
+        ORIGINAL_SOURCE_BINDING_MODEL_VERSION
+    );
 }
 
 fn build_multi_page_toc_pdf() -> Vec<u8> {

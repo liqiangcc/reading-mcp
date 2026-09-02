@@ -74,9 +74,11 @@ async fn stdio_source_view_returns_structured_audit_metadata_and_png_image_block
     let content = wire["content"]
         .as_array()
         .expect("tool result content should be an array");
-    assert!(content.iter().any(|block| {
-        block["type"] == "image" && block["mimeType"] == "image/png"
-    }));
+    assert!(
+        content
+            .iter()
+            .any(|block| { block["type"] == "image" && block["mimeType"] == "image/png" })
+    );
 
     let response = result
         .into_typed::<GetSourceViewResponse>()
@@ -87,7 +89,10 @@ async fn stdio_source_view_returns_structured_audit_metadata_and_png_image_block
     assert!(response.content_hash.starts_with("sha256:"));
     assert!(response.normalized_document_hash.starts_with("sha256:"));
 
-    client.cancel().await.expect("MCP process should close cleanly");
+    client
+        .cancel()
+        .await
+        .expect("MCP process should close cleanly");
 }
 
 #[cfg(unix)]
@@ -97,21 +102,16 @@ fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
 
     let directory = tempfile::tempdir().expect("worker directory should be created");
     let worker = directory.path().join("sleep-worker.sh");
-    std::fs::write(
-        &worker,
-        "#!/bin/sh\ncat >/dev/null\nsleep 5\n",
-    )
-    .expect("worker script should be written");
+    std::fs::write(&worker, "#!/bin/sh\ncat >/dev/null\nsleep 5\n")
+        .expect("worker script should be written");
     let mut permissions = std::fs::metadata(&worker)
         .expect("worker metadata should be available")
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&worker, permissions).expect("worker should be executable");
 
-    let renderer = ProcessIsolatedPdfSourceViewRenderer::with_executable(
-        worker,
-        Duration::from_millis(25),
-    );
+    let renderer =
+        ProcessIsolatedPdfSourceViewRenderer::with_executable(worker, Duration::from_millis(25));
     let error = renderer
         .render(
             build_pdf(),

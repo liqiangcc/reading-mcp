@@ -300,8 +300,7 @@ pub fn run_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error:
     let max_height = parse_worker_arg::<u32>(&mut args, "max height")?;
     let max_pixels = parse_worker_arg::<u64>(&mut args, "max pixels")?;
     let max_image_bytes = parse_worker_arg::<usize>(&mut args, "max image bytes")?;
-    let max_decoded_stream_bytes =
-        parse_worker_arg::<u64>(&mut args, "max decoded stream bytes")?;
+    let max_decoded_stream_bytes = parse_worker_arg::<u64>(&mut args, "max decoded stream bytes")?;
     if args.next().is_some() {
         return Err("source-view worker received unexpected trailing arguments".into());
     }

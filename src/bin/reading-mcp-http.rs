@@ -26,6 +26,9 @@ struct AuthState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if reading_mcp::parsing::run_file_source_view_worker_if_requested()? {
+        return Ok(());
+    }
     if reading_mcp::parsing::run_source_view_worker_if_requested()? {
         return Ok(());
     }

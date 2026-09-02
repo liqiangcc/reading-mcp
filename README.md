@@ -2,13 +2,13 @@
 
 > 面向 AI 的统一文档与书籍阅读上下文基础设施。
 
-Reading MCP 让 MCP Client / Agent 能够**精确地与用户阅读同一份文档**：先打开来源、查看结构、搜索位置，再按逻辑章节读取并展开上下文，同时保留来源和格式特有定位。
+Reading MCP 让 MCP Client / Agent 能够**精确地与用户阅读同一份文档**：先发现来源、打开文档、查看结构、枚举或搜索精确位置，再读取 canonical normalized source；当公式、图表、排版或 parser fidelity 需要核对时，还可以从 `TextLocator` 回到绑定的原始 PDF 页面。
 
 它只提供可靠的文档上下文，不在内核中实现 AI 总结、问答、教学、笔记或通用 RAG。
 
 ## v0.1.0 当前能力
 
-统一 MCP Tools：
+当前 runtime 实际暴露 **9 个 MCP Tool**：
 
 ```text
 list_documents
@@ -19,7 +19,14 @@ get_text_units
 search_document
 get_context
 read_document
+get_source_view
 ```
+
+其中：
+
+- `list_directory` 负责已授权 Source Workspace 的目录导航；
+- `list_documents` 负责已知目录 scope 内的可打开文档发现；
+- `get_source_view` 负责从精确 `TextLocator` 回到 identity-bound 原始视觉 Source，当前首个实现为 PDF page fidelity review。
 
 独立格式 Parser：
 
@@ -63,7 +70,7 @@ Repository  SearchIndex
         ↓
  Application UseCases
         ↓
-    MCP stdio
+ stdio / Streamable HTTP
         ↓
        AI
 ```
@@ -79,11 +86,11 @@ open_document
       ↓
 get_document_structure
       ↓
-search_document
+get_text_units / search_document
       ↓
-get_context
+get_context / read_document
       ↓
-read_document
+必要时：TextLocator → get_source_view（原始视觉 fidelity review）
 ```
 
 需要逐句阅读时，在 `open_document` 后先读取 `reading_profile/v1`，再用
@@ -103,10 +110,35 @@ identity 变化会明确返回 stale。
 Search Unit ≠ Read Unit
 Index ≠ Document
 Search ≠ Read
+Original visual view ≠ Canonical normalized text
 ```
 
 `search_document` 的 `SearchHit.text_locator` 可以直接交给 `read_document`、
-`get_context` 或 anchored `get_text_units`，禁止复制 snippet 后重新搜索。
+`get_context`、anchored `get_text_units`，或在需要视觉核对时交给 `get_source_view`；禁止复制 snippet 后重新搜索定位。
+
+## Original Source View / Source Fidelity
+
+正常阅读仍然走：
+
+```text
+TextLocator
+→ read_document
+→ exact canonical normalized source
+```
+
+只有公式、Figure / Table、多栏排版、特殊符号或 parser fidelity 可疑时，才进入：
+
+```text
+TextLocator normalized range
+→ original-source-binding/v1
+→ original PDF page
+→ get_source_view
+→ image/png
+```
+
+PDF parser 会持久化 Section-relative normalized range → original page 的精确绑定，因此一个逻辑 Section 跨多页时，page 2 中的句子不会错误回到 Section 起始页。跨越多个原始页面的 locator 会被拒绝，调用方需要缩小到 Paragraph/Sentence locator；缺少精确 page-binding evidence 的旧多页持久化 PDF 会 fail closed，并要求使用当前 parser 重新打开。
+
+`get_source_view` 响应包含 `content_hash`、`normalized_document_hash`、`normalized_document_hash_version`、`source_binding_version`、`page_number`、PDF page count、image dimensions/bytes 等审计信息，并返回真正从原始 PDF bytes 渲染的 `image/png`，不会用 OCR 或 normalized text 重绘冒充原始页面。
 
 ## 安全默认
 
@@ -120,7 +152,9 @@ Search ≠ Read
 - PDF 总页数与单页解压上限；
 - EPUB/DOCX ZIP entry 数、单 entry 和总解压大小限制；
 - Parser timeout；
-- Normalized Document 字符数、Section 数和深度限制。
+- Normalized Document 字符数、Section 数和深度限制；
+- Source View 的 page count、DPI、尺寸、pixel、decoded stream、encoded image size 限制；
+- Source View 在独立 worker process 中渲染，输入/输出/metadata/diagnostic 使用私有临时目录，超时 worker 会 `kill + wait`，不会仅停止等待而让渲染继续后台消耗资源。
 
 本地文件默认关闭。只有部署者配置允许目录后才能读取：
 
@@ -128,7 +162,7 @@ Search ≠ Read
 READING_MCP_LOCAL_ROOTS=/home/me/books:/home/me/docs reading-mcp
 ```
 
-请求路径和授权目录都会 canonicalize，目标必须位于显式 root 内。
+请求路径和授权目录都会 canonicalize，目标必须位于显式 root 内。目录导航会跳过 symlink entry；broken symlink 不会导致整个目录 discovery 失败，外部 symlink 也不能逃出授权 root。
 
 ## 持久化状态
 
@@ -205,19 +239,21 @@ MCP 返回尽可能保留：
 ```text
 source
 content_hash
+normalized_document_hash / normalized_document_hash_version
 section_id / parent_id / title
 page
 chapter
 section_path
 paragraph
 anchor
-char range
+normalized char range
 native_location
+source_binding_version（Original Source View）
 ```
 
-例如 PDF 通过 `page` / `pdf:page:N` 定位；HTML 通过 anchor；EPUB 通过 spine + archive entry/anchor；DOCX 通过 paragraph 位置；OpenAPI 通过 JSON-pointer-like location。
+例如 PDF canonical structure 通过 `page` / `pdf:page:N` 保留结构定位，并通过 `original-source-binding/v1` 把精确 normalized ranges 绑定回实际 PDF page；HTML 通过 anchor；EPUB 通过 spine + archive entry/anchor；DOCX 通过 paragraph 位置；OpenAPI 通过 JSON-pointer-like location。
 
-MVP 的读取单元是 `Section`。不会增加 `read_pdf_page_range` 等格式专属 Tool；如真实使用证明需要范围读取，应扩展统一的 `read_document` 契约。
+Canonical normalized reading 继续由统一的 `read_document` / `get_text_units` 契约负责；原始视觉核对使用统一的 `get_source_view`，不会新增 `read_pdf_page` / `read_pdf_page_range` 这类永久格式特化 Tool。
 
 ## 结构优先
 
@@ -226,7 +262,7 @@ Reading MCP 不把整篇文档默认切成固定字符块。
 ```text
 Section
   ↓
-Paragraph / Search Unit
+Paragraph / Sentence / Search Candidate
   ↓
 必要时长度限制
 ```
@@ -261,15 +297,17 @@ MCP error data 包含稳定：
 }
 ```
 
-可区分参数错误、安全策略拒绝、认证失败、资源限制、来源故障、解析失败以及 Repository/Cache/Index 内部故障。
+可区分参数错误、安全策略拒绝、认证失败、资源限制、来源故障、解析失败、stale/invalid locator/cursor、Source View failure，以及 Repository/Cache/Index 内部故障。
 
 ## 架构边界
 
 ```text
-来源获取
+Source discovery / directory navigation
+≠ 来源获取
 ≠ 安全策略
 ≠ 格式解析
 ≠ Normalized Document
+≠ Original Source View rendering
 ≠ Repository
 ≠ Cache
 ≠ SearchIndex
@@ -296,7 +334,7 @@ infrastructure ────┘
 ## 运行
 
 ```bash
-cargo build --release --locked --bin reading-mcp
+cargo build --release --locked --bin reading-mcp --bin reading-mcp-http
 ./target/release/reading-mcp
 ```
 
@@ -312,11 +350,11 @@ cargo build --release --locked --bin reading-mcp
 }
 ```
 
-详细运行配置见 [`docs/runtime-configuration.md`](docs/runtime-configuration.md)。完整 hardening 状态见 [`docs/release-hardening-plan.md`](docs/release-hardening-plan.md)。
+详细运行配置见 [`docs/runtime-configuration.md`](docs/runtime-configuration.md)。Original Source View 见 [`docs/source-view.md`](docs/source-view.md)。目录导航见 [`docs/directory-navigation-contract.md`](docs/directory-navigation-contract.md)。完整 hardening 状态见 [`docs/release-hardening-plan.md`](docs/release-hardening-plan.md)。
 
 ### Streamable HTTP / 隧道模式
 
-如果 GPT 或其他远程 MCP Client 需要通过 HTTPS 访问，可使用新增的 HTTP binary：
+如果 GPT 或其他远程 MCP Client 需要通过 HTTPS 访问，可使用 HTTP binary：
 
 ```bash
 export READING_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
@@ -328,6 +366,8 @@ export READING_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
 ```text
 Authorization: Bearer <READING_MCP_HTTP_TOKEN>
 ```
+
+stdio 与 Streamable HTTP 使用同一 Application/Tool surface；Source View 的隔离 worker mode 在两个 binary 中都可用，并分别有真实 E2E 验证。
 
 临时隧道示例：
 
@@ -347,7 +387,9 @@ cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
 
 v0.1.0 不包含：
 
-- OCR / 扫描 PDF；
+- OCR / 扫描 PDF 全面支持；
+- 浏览器式完整 PDF UI、PDF 编辑或标注；
+- 任意多页批量截图或用视觉结果替代 canonical normalized source；
 - JavaScript-heavy 页面浏览器渲染；
 - Confluence / Notion / 飞书 / 语雀等产品 API；
 - OAuth / Cookie 交互登录；

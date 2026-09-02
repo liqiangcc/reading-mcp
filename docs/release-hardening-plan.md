@@ -53,6 +53,11 @@
 - [x] whole-document body-order composition and multi-Section evidence
 - [x] TextLocator restart/resume after MCP/server restart
 - [x] Streamable HTTP full reading lifecycle E2E
+- [x] authorized Source Workspace directory navigation + bounded continuation
+- [x] precise TextLocator -> original PDF page binding
+- [x] real stdio `get_source_view` image/png acceptance
+- [x] Streamable HTTP `get_source_view` image/png acceptance
+- [x] source-view worker process isolation + timeout kill/wait containment
 
 ## Merge Review
 
@@ -60,6 +65,7 @@
 - [x] add `/target/` to `.gitignore`
 - [x] remove temporary release workflows
 - [x] align requirements/Phase5/Phase6/MVP review docs
+- [x] align directory-navigation and original-source-view public contracts
 
 ## v0.1 Release Gate
 
@@ -68,13 +74,16 @@
 [x] cargo clippy --locked --all-targets --all-features -- -D warnings
 [x] cargo test --locked --all-features
 [x] real stdio acceptance matrix
+[x] Streamable HTTP lifecycle/source-view acceptance
 [x] architecture boundary tests
 [x] README/runtime/requirements aligned
-[x] current runtime exposes exactly eight MCP Tools, including authorized directory navigation
+[x] current runtime exposes exactly nine MCP Tools
+[x] list_directory authorized navigation contract verified
+[x] get_source_view precise page binding and worker containment verified
 [x] no build artifacts or temporary release workflows
 ```
 
-PR creation、merge、tag 与 GitHub Release 仍是独立授权动作。
+正式版本的长期发布规则见 [`release-process.md`](release-process.md)。PR creation、merge、freeze、tag、GitHub Release 与生产部署是不同阶段，必须分别取得证据后推进。
 
 ## Future / 非 v0.1 阻断项
 

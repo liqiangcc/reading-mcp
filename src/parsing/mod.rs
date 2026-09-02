@@ -32,5 +32,8 @@ pub use openapi::OpenApiParser;
 pub use pdf::PdfParser;
 pub use reliability::PersistedDocumentReliabilityInspector;
 pub use router::ParserRouter;
-pub use source_view::PdfSourceViewRenderer;
+pub use source_view::{
+    PdfSourceViewRenderer, ProcessIsolatedPdfSourceViewRenderer,
+    run_source_view_worker_if_requested,
+};
 pub use text::TextParser;

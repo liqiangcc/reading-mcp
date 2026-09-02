@@ -70,7 +70,7 @@
 [x] real stdio acceptance matrix
 [x] architecture boundary tests
 [x] README/runtime/requirements aligned
-[x] current runtime exposes exactly seven MCP Tools
+[x] current runtime exposes exactly eight MCP Tools, including authorized directory navigation
 [x] no build artifacts or temporary release workflows
 ```
 

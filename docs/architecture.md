@@ -80,26 +80,26 @@ Paragraph/Sentence、FTS rows、snippets、MCP rendering、cursor 都不能替�
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units
 search_document
 get_context
 read_document
-get_source_view
 ```
 
 Application Use Cases：
 
 ```text
 ListDocumentsUseCase
+ListDirectoryUseCase
 OpenDocumentUseCase
 GetDocumentStructureUseCase
 GetTextUnitsUseCase
 SearchDocumentUseCase
 GetContextUseCase
 ReadDocumentUseCase
-SourceViewUseCase
 ```
 
 没有格式专属 Tool，也没有 `get_sentences` / `get_paragraphs`。

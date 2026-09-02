@@ -43,13 +43,13 @@ GitHub README/Wiki、Javadoc、MkDocs/Docusaurus/GitBook 静态输出复用 Mark
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units
 search_document
 get_context
 read_document
-get_source_view
 ```
 
 格式扩展不得增加格式专属 Tool。

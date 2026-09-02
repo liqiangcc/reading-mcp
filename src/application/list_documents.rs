@@ -6,6 +6,9 @@ use serde::Serialize;
 use crate::application::discovery_cursor::{
     DiscoveryCursorClaims, decode_discovery_cursor, encode_discovery_cursor, manifest_hash,
 };
+use crate::application::local_path::{
+    canonical_roots, canonicalize_authorized_directory, is_within_any_root,
+};
 use crate::application::ports::ApplicationError;
 
 pub const DEFAULT_DISCOVERY_MAX_RESULTS: usize = 100;
@@ -132,28 +135,8 @@ async fn resolve_scope(
 
     let requested_path = match command.path.as_deref() {
         Some(path) => {
-            let path = PathBuf::from(path.strip_prefix("file://").unwrap_or(path));
-            let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
-                ApplicationError::RetrievalFailed(format!("{}: {error}", path.display()))
-            })?;
-            if !allowed_roots
-                .iter()
-                .any(|root| canonical.starts_with(Path::new(root)))
-            {
-                return Err(ApplicationError::BlockedSource(format!(
-                    "document listing path is outside configured roots: {}",
-                    canonical.display()
-                )));
-            }
-            let metadata = tokio::fs::metadata(&canonical).await.map_err(|error| {
-                ApplicationError::RetrievalFailed(format!("{}: {error}", canonical.display()))
-            })?;
-            if !metadata.is_dir() {
-                return Err(ApplicationError::InvalidRequest(format!(
-                    "document listing path is not a directory: {}",
-                    canonical.display()
-                )));
-            }
+            let canonical =
+                canonicalize_authorized_directory(path, &allowed_roots, "document listing").await?;
             Some(canonical.to_string_lossy().into_owned())
         }
         None => None,
@@ -191,21 +174,6 @@ async fn resolve_scope(
     })
 }
 
-async fn canonical_roots(allowed_roots: &[PathBuf]) -> Vec<String> {
-    let mut roots = Vec::new();
-    for root in allowed_roots {
-        if let Ok(canonical) = tokio::fs::canonicalize(root).await {
-            roots.push(canonical);
-        }
-    }
-    roots.sort();
-    roots.dedup();
-    roots
-        .into_iter()
-        .map(|root| root.to_string_lossy().into_owned())
-        .collect()
-}
-
 async fn scan_scope(scope: &DiscoveryScope) -> Result<Vec<ListedDocument>, ApplicationError> {
     let mut documents = BTreeMap::new();
     for root in &scope.search_roots {
@@ -222,6 +190,12 @@ async fn collect_documents(
 ) -> Result<(), ApplicationError> {
     let mut directories = vec![directory.to_path_buf()];
     while let Some(current) = directories.pop() {
+        let current = tokio::fs::canonicalize(&current).await.map_err(|error| {
+            ApplicationError::RetrievalFailed(format!("{}: {error}", current.display()))
+        })?;
+        if !is_within_any_root(allowed_roots, &current) {
+            continue;
+        }
         let mut entries = tokio::fs::read_dir(&current).await.map_err(|error| {
             ApplicationError::RetrievalFailed(format!("{}: {error}", current.display()))
         })?;
@@ -236,7 +210,12 @@ async fn collect_documents(
 
             if file_type.is_dir() {
                 if recursive {
-                    directories.push(path);
+                    let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
+                        ApplicationError::RetrievalFailed(format!("{}: {error}", path.display()))
+                    })?;
+                    if is_within_any_root(allowed_roots, &canonical) {
+                        directories.push(canonical);
+                    }
                 }
                 continue;
             }
@@ -247,10 +226,7 @@ async fn collect_documents(
             let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
                 ApplicationError::RetrievalFailed(format!("{}: {error}", path.display()))
             })?;
-            if !allowed_roots
-                .iter()
-                .any(|root| canonical.starts_with(Path::new(root)))
-            {
+            if !is_within_any_root(allowed_roots, &canonical) {
                 continue;
             }
 
@@ -287,7 +263,7 @@ fn effective_max_results(requested: usize) -> Result<usize, ApplicationError> {
     Ok(requested.min(MAX_DISCOVERY_RESULTS))
 }
 
-fn is_supported_document(path: &Path) -> bool {
+pub(crate) fn is_supported_document(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|value| value.to_str())
@@ -308,7 +284,7 @@ fn is_supported_document(path: &Path) -> bool {
     )
 }
 
-fn media_type_for_path(path: &Path) -> &'static str {
+pub(crate) fn media_type_for_path(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|value| value.to_str())

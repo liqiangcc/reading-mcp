@@ -12,13 +12,13 @@ Reading MCP 让 MCP Client / Agent 能够**精确地与用户阅读同一份文�
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units
 search_document
 get_context
 read_document
-get_source_view
 ```
 
 独立格式 Parser：
@@ -71,7 +71,9 @@ Repository  SearchIndex
 Agent 的推荐调用顺序：
 
 ```text
-list_documents（可选，用于发现授权目录中的文档）
+list_directory（浏览授权 roots 和已知目录的直接 children）
+      ↓
+list_documents（在已知目录中发现可打开文档）
       ↓
 open_document
       ↓
@@ -90,12 +92,8 @@ read_document
 `TextLocator` 和 `TextUnitCursor` 逐项推进。`body-order/v1` 是整本/多 Section
 组合的 canonical body 顺序；结构 preorder 不被当作 EPUB 正文阅读顺序。
 
-需要核对公式、图表、排版或解析顺序时，把已有 `TextLocator` 交给
-`get_source_view`。它只渲染仍与 `document_id`、raw `content_hash`、normalized
-identity 和 source binding 一致的原始 PDF 页面，并返回 `image/png` 视觉证据；
-正常阅读仍使用 `read_document`。
-
-`list_documents` 使用 `discovery-cursor/v1` continuation。所有 cursor 都只表示
+`list_directory` 使用独立的 `directory-cursor/v1` continuation；目录 entry 与 document
+candidate 有明确类型区分。`list_documents` 使用 `discovery-cursor/v1` continuation。所有 cursor 都只表示
 各自 bounded stream 的进度，不是 citation，也不会 fuzzy rebase；raw 或 normalized
 identity 变化会明确返回 stale。
 

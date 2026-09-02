@@ -14,13 +14,13 @@ infrastructure/retrieval/parsing/security → ports
 
 ```text
 list_documents
+list_directory
 open_document
 get_document_structure
 get_text_units
 search_document
 get_context
 read_document
-get_source_view
 ```
 
 格式扩展、EPUB reconciliation、normalized block persistence、validator 和 block-aware identity migration 都不增加格式专属 Tool。

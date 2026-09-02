@@ -112,8 +112,7 @@ fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
 
     let directory = tempfile::tempdir().expect("worker directory should be created");
     let worker = directory.path().join("sleep-worker.sh");
-    std::fs::write(&worker, "#!/bin/sh\nsleep 5\n")
-        .expect("worker script should be written");
+    std::fs::write(&worker, "#!/bin/sh\nsleep 5\n").expect("worker script should be written");
     let mut permissions = std::fs::metadata(&worker)
         .expect("worker metadata should be available")
         .permissions();

@@ -169,7 +169,10 @@ fn build_pdf() -> Vec<u8> {
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["F1".into(), 14.into()]),
             Operation::new("Td", vec![72.into(), 720.into()]),
-            Operation::new("Tj", vec![Object::string_literal("HTTP SOURCE VIEW SENTENCE.")]),
+            Operation::new(
+                "Tj",
+                vec![Object::string_literal("HTTP SOURCE VIEW SENTENCE.")],
+            ),
             Operation::new("ET", vec![]),
         ],
     };

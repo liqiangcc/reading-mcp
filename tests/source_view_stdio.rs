@@ -5,9 +5,9 @@ use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
 use reading_mcp::application::ports::{
     ApplicationError, SourceViewRenderOptions, SourceViewRenderer,
 };
-use reading_mcp::mcp::contracts::{
-    GetSourceViewResponse, GetTextUnitsResponse, OpenDocumentResponse,
-};
+use reading_mcp::domain::{NORMALIZED_DOCUMENT_HASH_VERSION, ORIGINAL_SOURCE_BINDING_MODEL_VERSION};
+use reading_mcp::mcp::contracts::{GetTextUnitsResponse, OpenDocumentResponse};
+use reading_mcp::mcp::source_view_contracts::GetSourceViewResponse;
 use reading_mcp::parsing::ProcessIsolatedPdfSourceViewRenderer;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
@@ -88,6 +88,11 @@ async fn stdio_source_view_returns_structured_audit_metadata_and_png_image_block
     assert_eq!(response.image_media_type, "image/png");
     assert!(response.content_hash.starts_with("sha256:"));
     assert!(response.normalized_document_hash.starts_with("sha256:"));
+    assert_eq!(
+        response.normalized_document_hash_version,
+        NORMALIZED_DOCUMENT_HASH_VERSION
+    );
+    assert_eq!(response.source_binding_version, ORIGINAL_SOURCE_BINDING_MODEL_VERSION);
 
     client
         .cancel()

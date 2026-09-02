@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::application::source_view::SourceViewLimits;
 use crate::infrastructure::ResourceBudget;
 use crate::retrieval::HttpRetrieverConfig;
 
@@ -11,6 +12,7 @@ pub struct RuntimeConfig {
     pub allow_http: bool,
     pub telemetry: bool,
     pub resource_budget: ResourceBudget,
+    pub source_view: SourceViewLimits,
     pub http: HttpRetrieverConfig,
 }
 
@@ -27,6 +29,7 @@ impl Default for RuntimeConfig {
             allow_http: false,
             telemetry: true,
             resource_budget,
+            source_view: SourceViewLimits::default(),
             http,
         }
     }
@@ -62,6 +65,7 @@ impl RuntimeConfig {
             "READING_MCP_MAX_PDF_PAGES",
             config.resource_budget.max_pdf_pages,
         )?;
+        config.source_view.max_pages = config.resource_budget.max_pdf_pages;
         config.resource_budget.max_archive_entries = env_usize(
             "READING_MCP_MAX_ARCHIVE_ENTRIES",
             config.resource_budget.max_archive_entries,
@@ -89,6 +93,35 @@ impl RuntimeConfig {
         config.resource_budget.parse_timeout = Duration::from_secs(env_u64(
             "READING_MCP_PARSE_TIMEOUT_SECS",
             config.resource_budget.parse_timeout.as_secs(),
+        )?);
+
+        config.source_view.max_dpi = env_u32(
+            "READING_MCP_SOURCE_VIEW_MAX_DPI",
+            config.source_view.max_dpi,
+        )?;
+        config.source_view.max_width = env_u32(
+            "READING_MCP_SOURCE_VIEW_MAX_WIDTH",
+            config.source_view.max_width,
+        )?;
+        config.source_view.max_height = env_u32(
+            "READING_MCP_SOURCE_VIEW_MAX_HEIGHT",
+            config.source_view.max_height,
+        )?;
+        config.source_view.max_pixels = env_u64(
+            "READING_MCP_SOURCE_VIEW_MAX_PIXELS",
+            config.source_view.max_pixels,
+        )?;
+        config.source_view.max_image_bytes = env_usize(
+            "READING_MCP_SOURCE_VIEW_MAX_IMAGE_BYTES",
+            config.source_view.max_image_bytes,
+        )?;
+        config.source_view.max_decoded_stream_bytes = env_u64(
+            "READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES",
+            config.source_view.max_decoded_stream_bytes,
+        )?;
+        config.source_view.timeout = Duration::from_secs(env_u64(
+            "READING_MCP_SOURCE_VIEW_TIMEOUT_SECS",
+            config.source_view.timeout.as_secs(),
         )?);
 
         config.http.max_redirects =
@@ -131,6 +164,32 @@ fn validate(config: &RuntimeConfig) -> Result<(), String> {
     if config.resource_budget.parse_timeout.is_zero() {
         return Err("READING_MCP_PARSE_TIMEOUT_SECS must be greater than zero".into());
     }
+    if config.source_view.max_dpi == 0 {
+        return Err("READING_MCP_SOURCE_VIEW_MAX_DPI must be greater than zero".into());
+    }
+    if config.source_view.max_pages == 0 {
+        return Err("READING_MCP_MAX_PDF_PAGES must be greater than zero".into());
+    }
+    if config.source_view.max_width == 0 {
+        return Err("READING_MCP_SOURCE_VIEW_MAX_WIDTH must be greater than zero".into());
+    }
+    if config.source_view.max_height == 0 {
+        return Err("READING_MCP_SOURCE_VIEW_MAX_HEIGHT must be greater than zero".into());
+    }
+    if config.source_view.max_pixels == 0 {
+        return Err("READING_MCP_SOURCE_VIEW_MAX_PIXELS must be greater than zero".into());
+    }
+    if config.source_view.max_image_bytes == 0 {
+        return Err("READING_MCP_SOURCE_VIEW_MAX_IMAGE_BYTES must be greater than zero".into());
+    }
+    if config.source_view.max_decoded_stream_bytes == 0 {
+        return Err(
+            "READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES must be greater than zero".into(),
+        );
+    }
+    if config.source_view.timeout.is_zero() {
+        return Err("READING_MCP_SOURCE_VIEW_TIMEOUT_SECS must be greater than zero".into());
+    }
     if config.http.max_concurrency == 0 {
         return Err("READING_MCP_HTTP_MAX_CONCURRENCY must be greater than zero".into());
     }
@@ -161,6 +220,15 @@ fn env_usize(name: &str, default: usize) -> Result<usize, String> {
     };
     value
         .parse::<usize>()
+        .map_err(|_| format!("{name} must be a non-negative integer"))
+}
+
+fn env_u32(name: &str, default: u32) -> Result<u32, String> {
+    let Ok(value) = std::env::var(name) else {
+        return Ok(default);
+    };
+    value
+        .parse::<u32>()
         .map_err(|_| format!("{name} must be a non-negative integer"))
 }
 

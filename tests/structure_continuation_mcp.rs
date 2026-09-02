@@ -54,12 +54,14 @@ Second body.
         .map(|tool| tool.name.into_owned())
         .collect::<Vec<_>>();
     tool_names.sort();
-    assert_eq!(tool_names.len(), 8);
+    assert_eq!(tool_names.len(), 9);
     assert!(
         tool_names
             .iter()
             .any(|name| name == "get_document_structure")
     );
+    assert!(tool_names.iter().any(|name| name == "list_directory"));
+    assert!(tool_names.iter().any(|name| name == "get_source_view"));
 
     let opened = client
         .call_tool(

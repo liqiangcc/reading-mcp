@@ -61,6 +61,7 @@ Beta sentence one. Beta sentence two.
         vec![
             "get_context",
             "get_document_structure",
+            "get_source_view",
             "get_text_units",
             "list_directory",
             "list_documents",

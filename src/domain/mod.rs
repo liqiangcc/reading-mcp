@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod normalized_block;
 mod normalized_text;
+mod original_source;
 mod text_locator;
 mod text_unit;
 
@@ -15,6 +16,12 @@ pub use normalized_block::{
 pub use normalized_text::{
     NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE,
     NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
+};
+pub use original_source::{
+    ORIGINAL_SOURCE_BINDING_COUNT_METADATA_KEY, ORIGINAL_SOURCE_BINDING_METADATA_KEY,
+    ORIGINAL_SOURCE_BINDING_MODEL_VERSION, ORIGINAL_SOURCE_BINDING_VERSION_METADATA_KEY,
+    OriginalSourceBinding, OriginalSourceBindingError, OriginalSourceBindingMap,
+    OriginalSourceTarget,
 };
 pub use text_locator::TextLocator;
 pub use text_unit::{

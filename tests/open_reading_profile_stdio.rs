@@ -42,6 +42,7 @@ async fn stdio_open_returns_reading_profile_without_expanding_tool_surface() {
         vec![
             "get_context",
             "get_document_structure",
+            "get_source_view",
             "get_text_units",
             "list_directory",
             "list_documents",

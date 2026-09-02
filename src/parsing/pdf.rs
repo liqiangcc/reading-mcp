@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use lopdf::{Document as LopdfDocument, Object, TocType, decode_text_string};
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
-use crate::domain::{Document, Location, Section, SectionId};
+use crate::domain::{
+    Document, Location, NormalizedTextRange, OriginalSourceBinding, OriginalSourceBindingMap,
+    OriginalSourceTarget, Section, SectionId,
+};
 
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
@@ -88,15 +91,14 @@ impl Parser for PdfParser {
             metadata.insert("pdf_toc_entries".into(), entries.len().to_string());
         }
 
-        let root_sections = match toc {
+        let (root_sections, source_bindings) = match toc {
             Some(entries) => build_toc_sections(&entries, &pages, max_page),
             None => build_page_sections(&pages),
         };
 
         let fallback_title = title_from_metadata(&metadata, &resource.final_source);
         let title = pdf_title.unwrap_or(fallback_title);
-
-        Ok(Document {
+        let mut document = Document {
             id,
             source: resource.final_source,
             title,
@@ -104,7 +106,15 @@ impl Parser for PdfParser {
             content_hash: hash,
             metadata,
             root_sections,
-        })
+        };
+        document
+            .set_original_source_binding_map(OriginalSourceBindingMap::new(source_bindings))
+            .map_err(|error| {
+                ApplicationError::ParseFailed(format!(
+                    "invalid original PDF source binding evidence: {error}"
+                ))
+            })?;
+        Ok(document)
     }
 }
 
@@ -168,13 +178,26 @@ fn normalize_toc(entries: &[TocType], max_page: u32) -> Vec<PdfTocEntry> {
         .collect()
 }
 
-fn build_page_sections(pages: &[PageText]) -> Vec<Section> {
-    pages
+fn build_page_sections(pages: &[PageText]) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
+    let mut bindings = Vec::new();
+    let sections = pages
         .iter()
         .map(|page| {
             let title = format!("Page {}", page.number);
+            let id = SectionId(format!("section://page-{}", page.number));
+            let content_len = page.text.chars().count();
+            if content_len > 0 {
+                bindings.push(OriginalSourceBinding {
+                    owner_section_id: id.clone(),
+                    normalized_range: NormalizedTextRange::new(0, content_len)
+                        .expect("page content range must be ordered"),
+                    target: OriginalSourceTarget::Page {
+                        page_number: page.number,
+                    },
+                });
+            }
             Section {
-                id: SectionId(format!("section://page-{}", page.number)),
+                id,
                 parent_id: None,
                 title: title.clone(),
                 level: 1,
@@ -188,10 +211,15 @@ fn build_page_sections(pages: &[PageText]) -> Vec<Section> {
                 children: vec![],
             }
         })
-        .collect()
+        .collect();
+    (sections, bindings)
 }
 
-fn build_toc_sections(entries: &[PdfTocEntry], pages: &[PageText], max_page: u32) -> Vec<Section> {
+fn build_toc_sections(
+    entries: &[PdfTocEntry],
+    pages: &[PageText],
+    max_page: u32,
+) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
     let page_map = pages
         .iter()
         .map(|page| (page.number, page.text.as_str()))
@@ -243,6 +271,7 @@ fn build_toc_sections(entries: &[PdfTocEntry], pages: &[PageText], max_page: u32
         });
     }
 
+    let mut bindings = Vec::new();
     for index in 0..nodes.len() {
         let start_page = nodes[index].start_page;
         let first_child_page = nodes
@@ -267,9 +296,17 @@ fn build_toc_sections(entries: &[PdfTocEntry], pages: &[PageText], max_page: u32
             })
         };
 
-        let content = end_page
-            .map(|end| text_for_page_range(&page_map, start_page, end))
+        let (content, section_bindings) = end_page
+            .map(|end| {
+                source_text_and_bindings_for_page_range(
+                    &page_map,
+                    &nodes[index].id,
+                    start_page,
+                    end,
+                )
+            })
             .unwrap_or_default();
+        bindings.extend(section_bindings);
         let native_location = match end_page {
             Some(end) if end > start_page => format!("pdf:pages:{start_page}-{end}"),
             _ => format!("pdf:page:{start_page}"),
@@ -285,20 +322,46 @@ fn build_toc_sections(entries: &[PdfTocEntry], pages: &[PageText], max_page: u32
         };
     }
 
-    nodes
+    let sections = nodes
         .iter()
         .enumerate()
         .filter(|(_, node)| node.parent.is_none())
         .map(|(index, _)| build_section(index, &nodes))
-        .collect()
+        .collect();
+    (sections, bindings)
 }
 
-fn text_for_page_range(pages: &BTreeMap<u32, &str>, start_page: u32, end_page: u32) -> String {
-    (start_page..=end_page)
-        .filter_map(|page| pages.get(&page).copied())
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+fn source_text_and_bindings_for_page_range(
+    pages: &BTreeMap<u32, &str>,
+    owner_section_id: &SectionId,
+    start_page: u32,
+    end_page: u32,
+) -> (String, Vec<OriginalSourceBinding>) {
+    let mut content = String::new();
+    let mut bindings = Vec::new();
+
+    for page_number in start_page..=end_page {
+        let Some(text) = pages.get(&page_number).copied() else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        if !content.is_empty() {
+            content.push_str("\n\n");
+        }
+        let start = content.chars().count();
+        content.push_str(text);
+        let end = content.chars().count();
+        bindings.push(OriginalSourceBinding {
+            owner_section_id: owner_section_id.clone(),
+            normalized_range: NormalizedTextRange::new(start, end)
+                .expect("page binding range must be ordered"),
+            target: OriginalSourceTarget::Page { page_number },
+        });
+    }
+
+    (content, bindings)
 }
 
 fn build_section(index: usize, nodes: &[SectionNode]) -> Section {

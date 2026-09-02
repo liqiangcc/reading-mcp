@@ -16,8 +16,11 @@ path = "src/bin/reading-mcp.rs"
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 lopdf = { version = "0.44", default-features = false }
 markup5ever = "0.39"
+pdf-render = { version = "1.0.0-beta.18", default-features = true }
 reqwest = { version = "0.12", default-features = false, features = ["brotli", "deflate", "gzip", "rustls-tls"] }
 rmcp = { version = "2.2", features = ["schemars", "transport-io", "transport-streamable-http-server"] }
 roxmltree = "0.21.1"

@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine;
 use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde_json::json;
 
@@ -32,6 +34,9 @@ use crate::application::read_document::{
 use crate::application::search_document::{
     SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
 };
+use crate::application::source_view::{
+    GetSourceViewCommand, SourceViewRepresentation, SourceViewUseCase,
+};
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, Location, NormalizedDocumentHash, NormalizedTextRange,
     SectionId, TextLocator,
@@ -51,6 +56,9 @@ use super::contracts::{
     TextUnitCoverageDto, TextUnitCoveragePolicyDto, TextUnitDirectionDto, TextUnitItemDto,
     TextUnitKindDto, TextUnitStreamSegmentDto,
 };
+use super::source_view_contracts::{
+    GetSourceViewRequest, GetSourceViewResponse, SourceViewRepresentationDto,
+};
 
 #[derive(Clone)]
 pub struct ReadingMcpServer {
@@ -62,6 +70,7 @@ pub struct ReadingMcpServer {
     search_document: Arc<SearchDocumentUseCase>,
     read_document: Arc<ReadDocumentUseCase>,
     get_context: Arc<GetContextUseCase>,
+    source_view: Arc<SourceViewUseCase>,
 }
 
 impl Default for ReadingMcpServer {
@@ -99,6 +108,7 @@ impl ReadingMcpServer {
         search_document: Arc<SearchDocumentUseCase>,
         read_document: Arc<ReadDocumentUseCase>,
         get_context: Arc<GetContextUseCase>,
+        source_view: Arc<SourceViewUseCase>,
     ) -> Self {
         Self {
             open_document,
@@ -109,6 +119,7 @@ impl ReadingMcpServer {
             search_document,
             read_document,
             get_context,
+            source_view,
         }
     }
 }
@@ -461,6 +472,62 @@ impl ReadingMcpServer {
         .map_err(to_mcp_error)?;
 
         Ok(Json(GetReadDocumentResponse::from_result(result)))
+    }
+
+    #[tool(
+        description = "Render the original source page bound to a precise TextLocator for fidelity review; returns audit metadata and an image without OCR or fuzzy rebasing"
+    )]
+    async fn get_source_view(
+        &self,
+        Parameters(request): Parameters<GetSourceViewRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let result = self
+            .source_view
+            .execute(GetSourceViewCommand {
+                document_id: DocumentId(request.document_id),
+                target_locator: text_locator_from_dto(request.target_locator)
+                    .map_err(to_mcp_error)?,
+                representation: match request.representation {
+                    SourceViewRepresentationDto::Original => SourceViewRepresentation::Original,
+                },
+                dpi: request.dpi,
+            })
+            .await
+            .map_err(to_mcp_error)?;
+
+        let response = GetSourceViewResponse {
+            document_id: result.document_id.0,
+            source: result.source.0,
+            content_hash: result.content_hash,
+            normalized_document_hash: result.normalized_document_hash.0,
+            normalized_document_hash_version: result.normalized_document_hash_version,
+            source_binding_version: result.source_binding_version,
+            representation: match result.representation {
+                SourceViewRepresentation::Original => SourceViewRepresentationDto::Original,
+            },
+            page_number: result.page_number,
+            page_count: result.page_count,
+            dpi: result.dpi,
+            image_media_type: result.view.media_type.0.clone(),
+            image_width: result.view.width,
+            image_height: result.view.height,
+            image_bytes: result.view.bytes.len(),
+            target_locator: text_locator_dto(&result.target_locator),
+        };
+        let structured = serde_json::to_value(&response).map_err(|error| {
+            ErrorData::internal_error(
+                format!("failed to serialize source-view metadata: {error}"),
+                None,
+            )
+        })?;
+        let metadata_text = structured.to_string();
+        let image = base64::engine::general_purpose::STANDARD.encode(&result.view.bytes);
+        let mut tool_result = CallToolResult::success(vec![
+            ContentBlock::text(metadata_text),
+            ContentBlock::image(image, result.view.media_type.0),
+        ]);
+        tool_result.structured_content = Some(structured);
+        Ok(tool_result)
     }
 
     #[tool(
@@ -830,6 +897,7 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::ResourceLimitExceeded(_)
         | ApplicationError::RetrievalFailed(_)
         | ApplicationError::ParseFailed(_)
+        | ApplicationError::SourceViewFailed(_)
         | ApplicationError::DocumentNotFound
         | ApplicationError::SectionNotFound => ErrorData::invalid_params(message, data),
         ApplicationError::CursorEncodingFailed(_)
@@ -854,6 +922,7 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::ResourceLimitExceeded(_) => ("RESOURCE_LIMIT_EXCEEDED", false),
         ApplicationError::RetrievalFailed(_) => ("RETRIEVAL_FAILED", true),
         ApplicationError::ParseFailed(_) => ("PARSE_FAILED", false),
+        ApplicationError::SourceViewFailed(_) => ("SOURCE_VIEW_FAILED", false),
         ApplicationError::DocumentNotFound => ("DOCUMENT_NOT_FOUND", false),
         ApplicationError::SectionNotFound => ("SECTION_NOT_FOUND", false),
         ApplicationError::RepositoryFailed(_) => ("REPOSITORY_FAILED", true),

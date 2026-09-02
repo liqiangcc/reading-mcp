@@ -29,6 +29,26 @@ pub struct RetrievedResource {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceViewRenderOptions {
+    pub dpi: u32,
+    pub max_pages: usize,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_pixels: u64,
+    pub max_image_bytes: usize,
+    pub max_decoded_stream_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderedSourceView {
+    pub media_type: MediaType,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub page_count: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchHit {
     pub section_id: SectionId,
@@ -114,6 +134,8 @@ pub enum ApplicationError {
     CursorEncodingFailed(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("source view failed: {0}")]
+    SourceViewFailed(String),
 }
 
 #[async_trait]
@@ -133,6 +155,16 @@ pub trait Retriever: Send + Sync {
 #[async_trait]
 pub trait Parser: Send + Sync {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError>;
+}
+
+pub trait SourceViewRenderer: Send + Sync {
+    fn render(
+        &self,
+        bytes: Vec<u8>,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError>;
 }
 
 pub trait DocumentReliabilityInspector: Send + Sync {

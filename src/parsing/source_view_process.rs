@@ -139,11 +139,12 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
                 "failed to read isolated source-view metadata: {error}"
             ))
         })?;
-        let metadata: WorkerMetadata = serde_json::from_slice(&metadata_bytes).map_err(|error| {
-            ApplicationError::SourceViewFailed(format!(
-                "invalid source-view worker metadata: {error}"
-            ))
-        })?;
+        let metadata: WorkerMetadata =
+            serde_json::from_slice(&metadata_bytes).map_err(|error| {
+                ApplicationError::SourceViewFailed(format!(
+                    "invalid source-view worker metadata: {error}"
+                ))
+            })?;
         validate_metadata(&metadata, &options)?;
 
         let encoded = fs::read(&output_path).map_err(|error| {

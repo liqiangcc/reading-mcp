@@ -15,8 +15,11 @@ mod unix {
         tokio::fs::write(root.path().join("paper.md"), "# Paper\n")
             .await
             .expect("document sibling should be created");
-        symlink(root.path().join("missing-target"), root.path().join("broken"))
-            .expect("broken symlink should be created");
+        symlink(
+            root.path().join("missing-target"),
+            root.path().join("broken"),
+        )
+        .expect("broken symlink should be created");
 
         let result = ListDirectoryUseCase::new(vec![root.path().to_path_buf()])
             .execute(ListDirectoryCommand {

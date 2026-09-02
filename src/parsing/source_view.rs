@@ -288,7 +288,7 @@ pub fn run_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error:
     let Some(mode) = args.next() else {
         return Ok(false);
     };
-    if mode != OsString::from(SOURCE_VIEW_WORKER_FLAG) {
+    if mode != SOURCE_VIEW_WORKER_FLAG {
         return Ok(false);
     }
 

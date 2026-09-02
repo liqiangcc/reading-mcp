@@ -220,13 +220,13 @@ async fn collect_direct_children(
         let file_type = entry.file_type().await.map_err(|error| {
             ApplicationError::RetrievalFailed(format!("{}: {error}", path.display()))
         })?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
             ApplicationError::RetrievalFailed(format!("{}: {error}", path.display()))
         })?;
         if !is_within_any_root(allowed_roots, &canonical) {
-            continue;
-        }
-        if file_type.is_symlink() {
             continue;
         }
         let metadata = tokio::fs::metadata(&canonical).await.map_err(|error| {

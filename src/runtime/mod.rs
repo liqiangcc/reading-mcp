@@ -23,7 +23,8 @@ use crate::infrastructure::{
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::{
-    ArchiveLimits, ParserRouter, PdfSourceViewRenderer, PersistedDocumentReliabilityInspector,
+    ArchiveLimits, ParserRouter, PersistedDocumentReliabilityInspector,
+    ProcessIsolatedPdfSourceViewRenderer,
 };
 use crate::retrieval::{
     EnvironmentCredentialProvider, HttpRetriever, LimitedFileRetriever, RetrieverRouter,
@@ -122,10 +123,13 @@ pub fn build_server(
     let repository = components.repository;
     let text_unit_index = components.text_unit_index;
     let search_index = components.search_index;
+    let source_view_renderer = Arc::new(
+        ProcessIsolatedPdfSourceViewRenderer::current_executable(config.source_view.timeout)?,
+    );
     let source_view = Arc::new(SourceViewUseCase::new(
         repository.clone(),
         retriever.clone(),
-        Arc::new(PdfSourceViewRenderer),
+        source_view_renderer,
         config.source_view,
     ));
     let open_document = Arc::new(

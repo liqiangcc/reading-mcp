@@ -10,9 +10,9 @@ use crate::application::ports::{
     SourceViewRenderOptions, SourceViewRenderer,
 };
 use crate::domain::{
-    DocumentId, DocumentSource, MediaType, OriginalSourceBindingError, OriginalSourceTarget,
-    Section, TextLocator, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
-    ORIGINAL_SOURCE_BINDING_MODEL_VERSION,
+    DocumentId, DocumentSource, MediaType, NORMALIZED_DOCUMENT_HASH_VERSION,
+    NormalizedDocumentHash, ORIGINAL_SOURCE_BINDING_MODEL_VERSION, OriginalSourceBindingError,
+    OriginalSourceTarget, Section, TextLocator,
 };
 
 pub const DEFAULT_SOURCE_VIEW_DPI: u32 = 144;
@@ -133,11 +133,8 @@ impl SourceViewUseCase {
             .ok_or(ApplicationError::InvalidLocator(
                 "resolved source-view section disappeared".into(),
             ))?;
-        let (page_number, source_binding_version) = resolve_original_page(
-            &document,
-            section,
-            resolved.range,
-        )?;
+        let (page_number, source_binding_version) =
+            resolve_original_page(&document, section, resolved.range)?;
 
         if !is_pdf(&document.media_type) {
             return Err(ApplicationError::InvalidRequest(format!(
@@ -216,10 +213,9 @@ fn resolve_original_page(
             .original_source_target_for_range(&section.id, range)
             .map_err(source_binding_error)?
         {
-            Some(OriginalSourceTarget::Page { page_number }) => Ok((
-                page_number,
-                ORIGINAL_SOURCE_BINDING_MODEL_VERSION.into(),
-            )),
+            Some(OriginalSourceTarget::Page { page_number }) => {
+                Ok((page_number, ORIGINAL_SOURCE_BINDING_MODEL_VERSION.into()))
+            }
             None => Err(ApplicationError::InvalidLocator(
                 "target locator has no precise original source binding".into(),
             )),

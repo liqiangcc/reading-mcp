@@ -70,6 +70,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Restore clean checkout for packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f clippy.log test.log
+          test -z "$(git status --porcelain)"
+
       - name: Package protocol smoke test
         shell: bash
         run: |

@@ -2,7 +2,9 @@
 set -euo pipefail
 
 : "${RELEASE_BIN_DIR:?set RELEASE_BIN_DIR to the binary directory}"
-: "${EXPECTED_SHA:?set EXPECTED_SHA to the exact deployed SHA}"
+: "${EXPECTED_VERSION:?set EXPECTED_VERSION to the deployed release version}"
+: "${EXPECTED_SHA:?set EXPECTED_SHA to the exact deployed source SHA}"
+: "${EXPECTED_BINARY_SHA256:?set EXPECTED_BINARY_SHA256 from the verified release manifest}"
 : "${SERVICE_NAME:=reading-mcp-tunnel.service}"
 : "${TUNNEL_CLIENT:?set TUNNEL_CLIENT to tunnel-client}"
 : "${TUNNEL_PROFILE_DIR:?set TUNNEL_PROFILE_DIR to the tunnel profile directory}"
@@ -14,7 +16,16 @@ set -euo pipefail
   echo "EXPECTED_SHA must be a 40-character lowercase git SHA" >&2
   exit 1
 }
+[[ "$EXPECTED_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "EXPECTED_BINARY_SHA256 must be a 64-character lowercase SHA256" >&2
+  exit 1
+}
+[[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+  echo "EXPECTED_VERSION must be a SemVer-like version" >&2
+  exit 1
+}
 
+command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "systemctl is required" >&2; exit 1; }
 systemctl is-active --quiet "$SERVICE_NAME" || { echo "service is not active" >&2; exit 1; }
 [[ -r "$ENV_FILE" ]] || { echo "service environment file is not readable" >&2; exit 1; }
@@ -24,6 +35,11 @@ binary="$RELEASE_BIN_DIR/reading-mcp"
 target=$(readlink -f "$binary")
 [[ "$target" == "$RELEASE_BIN_DIR/reading-mcp-$EXPECTED_SHA" ]] || {
   echo "binary link does not target EXPECTED_SHA" >&2
+  exit 1
+}
+actual_binary_sha256=$(sha256sum "$target" | awk '{print $1}')
+[[ "$actual_binary_sha256" == "$EXPECTED_BINARY_SHA256" ]] || {
+  echo "production binary SHA256 does not match packaged artifact" >&2
   exit 1
 }
 
@@ -53,7 +69,9 @@ if journalctl -u "$SERVICE_NAME" -n 200 --no-pager 2>/dev/null | rg -i '(authori
 fi
 
 echo "service=active"
+echo "version=$EXPECTED_VERSION"
+echo "source_sha=$EXPECTED_SHA"
 echo "binary=$target"
-echo "binary_sha256=$(sha256sum "$target" | awk '{print $1}')"
+echo "binary_sha256=$actual_binary_sha256"
 echo "state_dir=$STATE_DIR"
 echo "tunnel_doctor=pass"

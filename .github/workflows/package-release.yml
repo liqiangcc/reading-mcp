@@ -1,0 +1,124 @@
+name: Package reading-mcp release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable release tag, for example v0.1.0
+        required: true
+      expected_sha:
+        description: Exact frozen source commit SHA
+        required: true
+      target_triple:
+        description: Rust target triple
+        required: true
+        default: x86_64-unknown-linux-gnu
+      platform:
+        description: Artifact platform label
+        required: true
+        default: linux-x86_64
+      publish_assets:
+        description: Upload archive and SHA256SUMS to the existing GitHub Release
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.platform }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout packaging infrastructure
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: packaging
+
+      - name: Record packaging infrastructure identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PACKAGING_COMMIT_SHA=$(git -C packaging rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Checkout immutable release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          path: source
+
+      - name: Verify source identity before build
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          actual_sha=$(git -C source rev-parse HEAD)
+          tag_sha=$(git -C source rev-parse "$RELEASE_TAG^{commit}")
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]]
+          [[ "$tag_sha" == "$EXPECTED_SHA" ]]
+          [[ -z "$(git -C source status --porcelain)" ]]
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+
+      - name: Build and verify package
+        shell: bash
+        env:
+          REPO_DIR: ${{ github.workspace }}/source
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SHA: ${{ inputs.expected_sha }}
+          TARGET_TRIPLE: ${{ inputs.target_triple }}
+          PLATFORM: ${{ inputs.platform }}
+          OUTPUT_DIR: ${{ github.workspace }}/dist
+          PACKAGING_COMMIT_SHA: ${{ env.PACKAGING_COMMIT_SHA }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          [[ "v$version" == "$RELEASE_TAG" ]]
+          export RELEASE_VERSION="$version"
+          bash packaging/scripts/package-release.sh
+
+      - name: Upload package as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reading-mcp-${{ inputs.tag }}-${{ inputs.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish immutable GitHub Release assets
+        if: ${{ inputs.publish_assets }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null
+          archive=$(find dist -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
+          test -n "$archive"
+          for asset in "$archive" dist/SHA256SUMS; do
+            name=$(basename "$asset")
+            if gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              echo "refusing to overwrite existing release asset: $name" >&2
+              exit 1
+            fi
+          done
+          gh release upload "$RELEASE_TAG" "$archive" dist/SHA256SUMS

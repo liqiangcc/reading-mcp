@@ -40,7 +40,7 @@ Release:    v0.1.0
 [Release] reading-mcp v0.1.0
 ```
 
-Release Issue 是该版本的发布状态机和审计记录，至少包含：
+Release Issue 是该版本的源码发布状态机和审计记录，至少包含：
 
 - target branch；
 - baseline / candidate / frozen commit；
@@ -53,9 +53,11 @@ Release Issue 是该版本的发布状态机和审计记录，至少包含：
 
 禁止只依赖聊天上下文、人工记忆或临时 TODO 发布。
 
+正式可部署二进制由独立 Package Issue 驱动，规则见 [`package-process.md`](package-process.md)。Production Deployment 再由独立 Deployment Issue 驱动。
+
 ## 4. 发布状态机
 
-正式流程固定为：
+源码正式发布固定为：
 
 ```text
 Issue / PR development
@@ -76,6 +78,22 @@ post-release verification
 ```
 
 只有前一阶段有明确证据通过，才能进入下一阶段。
+
+完整交付链在源码 Release 完成后继续：
+
+```text
+Source Release
+        ↓
+Package Issue
+        ↓
+verified immutable artifact
+        ↓
+Deployment Issue
+        ↓
+production verification
+```
+
+Source Release、Package 与 Deployment 不能合并成一个含糊的“发布”动作。
 
 ## 5. Release Gate
 
@@ -137,7 +155,7 @@ Freeze 后：
 - 发布后发现问题，只能发布新版本，例如 `v0.1.1`；
 - 不允许为了修正文档或二进制而重写 `v0.1.0`。
 
-Tag 是正式版本身份，不是“最新代码”的别名。
+Tag 是正式 Source identity，不是“最新代码”的别名。
 
 ## 8. GitHub Release 规则
 
@@ -156,6 +174,8 @@ Release Notes 至少包含：
 
 正式版本默认不得标记为 draft 或 prerelease；只有 Release Issue 明确声明为 RC / beta 时例外。
 
+GitHub Release 创建时可以暂时只有 source archive。正式可部署二进制 asset 由 Package Protocol 生成并验证后加入；Production Deployment 只能消费已经通过 Package Issue 验证的 artifact。
+
 ## 9. Post-release Verification
 
 创建 Release 后不能立即关闭 Release Issue。至少执行：
@@ -173,27 +193,37 @@ Release Notes 至少包含：
 - 判断是否仅为 Release metadata 可修正问题；
 - 若代码或版本内容有问题，创建新的 patch/minor Release Issue 处理。
 
-## 10. GitHub Release 与部署分离
+## 10. Release、Package 与部署分离
 
-仓库正式发布与生产部署是两个不同生命周期：
+三个生命周期必须显式分离：
 
 ```text
-GitHub Release
+Source Release
 ≠
-production deployment
+Package
+≠
+Production Deployment
 ```
 
-发布完成只证明某个源码版本已经冻结并公开，不代表任意 Secure MCP Tunnel、systemd 服务、远程服务器或 ChatGPT 连接器已经升级。
+Source Release 证明：
 
-生产升级必须单独验证：
+- 某个源码版本已经冻结；
+- tag / version / frozen commit 身份一致；
+- Release Gate 已通过。
 
-- 部署目标；
-- 实际运行 commit/version；
-- transport 健康；
--真实 MCP capability；
-- rollback 路径。
+Package 证明：
 
-禁止通过“GitHub main 已更新”推断生产环境已经更新。
+- 从该 frozen source 构建了一个确定的 deployable artifact；
+- archive SHA256、manifest、binary SHA256 已验证；
+- 生产可以复用同一个二进制而无需重新编译。
+
+Production Deployment 证明：
+
+- 某个具体环境安装了该已验证 artifact；
+- 生产 binary SHA256 与 package manifest 精确一致；
+- service、transport、真实 MCP capability 与 rollback 都已验证。
+
+禁止通过“GitHub main 已更新”推断生产环境已经更新；禁止通过“生产从同一 SHA 重新 cargo build”推断运行的是同一个正式 artifact。
 
 ## 11. Release Blocker
 
@@ -211,6 +241,8 @@ production deployment
 
 对 blocker 必须修复或明确取消发布，不能仅在 Release Notes 中降级成已知问题后继续发布。
 
+Package blocker 与 Deployment blocker 分别由 Package Protocol 和 Production Deployment 文档定义，不应该回写或移动已经正确发布的旧 tag。
+
 ## 12. 非 blocker 与版本后移
 
 以下内容通常可以后移到下一版本：
@@ -224,6 +256,8 @@ Release Gate 的目标是冻结已经完成的版本，而不是继续扩张版�
 
 ## 13. v0.1.0 首次执行
 
-`v0.1.0` 的正式发布由 Release Issue #59 驱动。
+`v0.1.0` 的正式 Source Release 由 Release Issue #59 驱动并已完成。
 
-本协议的首次落地由 Issue #60 驱动。一次性的 hardening 完成矩阵继续保存在 `docs/release-hardening-plan.md`，但长期发布规则以本文为准。
+本协议的首次落地由 Issue #60 驱动。一次性的 hardening 完成矩阵继续保存在 `docs/release-hardening-plan.md`。
+
+`v0.1.0` 的首次正式 Package 由 Issue #64 驱动。它属于 bootstrap：Source Release 已经完成后才建立 Package Protocol，因此允许在不移动 `v0.1.0` tag、不修改 frozen source 的前提下首次补充 deployable Release assets。

@@ -57,7 +57,7 @@ tunnel-client doctor --json --profile-dir <profile-dir> --profile <profile>
 
 Never print the environment file, API key, Bearer token, profile secret, or private document content. Inspect only variable names or redact values.
 
-The Deployment Issue must record the current known-good source SHA and binary identity before rollout so rollback does not depend on memory.
+The Deployment Issue must record both the current known-good source SHA and its current binary SHA256 before rollout. `ROLLBACK_SHA` is never accepted as a label for an unverified binary.
 
 ## Install the service asset
 
@@ -97,11 +97,16 @@ Before invoking the deployment script, the Deployment Issue should already conta
 - archive SHA256;
 - binary SHA256.
 
+It must also contain the discovered current production rollback identity:
+
+- current known-good source SHA;
+- current known-good binary SHA256.
+
 The separately recorded archive SHA256 is a trust input to deployment. `SHA256SUMS` must agree with that recorded value; the deployment script does not treat a self-consistent archive/checksum pair as sufficient identity evidence.
 
 ## Deploy the verified artifact
 
-Create a rollback checkpoint before changing the active link. The deployment script verifies the recorded archive identity, checksum file and manifest, verifies the package target/platform and packaged binary checksum, preserves canonical state, retains the known-good binary, atomically switches the `reading-mcp` symlink, and restarts systemd.
+Create a rollback checkpoint before changing the active link. The deployment script verifies the recorded archive identity, checksum file and manifest, verifies the package target/platform and packaged binary checksum, verifies the current rollback binary identity, preserves canonical state, retains the known-good binary, atomically switches the `reading-mcp` symlink, and restarts systemd.
 
 ```bash
 sudo PACKAGE_FILE=<reading-mcp-v0.1.0-linux-x86_64.tar.gz> \
@@ -115,6 +120,7 @@ sudo PACKAGE_FILE=<reading-mcp-v0.1.0-linux-x86_64.tar.gz> \
   SERVICE_NAME=<actual-service-name> \
   STATE_DIR=<persistent-state-directory> \
   ROLLBACK_SHA=<current-known-good-deployed-sha> \
+  ROLLBACK_BINARY_SHA256=<current-known-good-binary-sha256> \
   scripts/deploy-production.sh
 ```
 
@@ -130,6 +136,7 @@ The script rejects:
 - unsupported manifest schema;
 - version/source/target/platform mismatch;
 - packaged binary checksum mismatch;
+- current or saved rollback binary checksum mismatch;
 - missing rollback binary.
 
 Deployment must not delete `reading-mcp.sqlite`, Raw Cache, Parsed Cache, or canonical Documents. Derived indexes may rebuild from canonical state when runtime compatibility rules require it.
@@ -191,6 +198,7 @@ v0.1.0
   -> GitHub Release archive SHA256
   -> release-manifest binary SHA256
   -> installed production binary SHA256 (exact match)
+  -> previous rollback SHA + binary SHA256 (verified before switch)
   -> systemd active
   -> tunnel doctor pass
   -> real MCP 9-tool acceptance pass

@@ -63,15 +63,25 @@ actual_archive_sha=$(sha256sum "$package_file" | awk '{print $1}')
   exit 1
 }
 
-# Reject archive paths that could escape the private extraction directory.
-if tar -tzf "$package_file" | awk '
-  /^\// { bad=1 }
-  /(^|\/)\.\.($|\/)/ { bad=1 }
-  END { exit bad ? 0 : 1 }
-'; then
-  echo "release archive contains an unsafe path" >&2
-  exit 1
-fi
+# Deployment runs as root. Reject all archive entry types except regular files
+# and directories before tar is allowed to extract anything.
+python3 - "$package_file" <<'PY'
+import pathlib
+import sys
+import tarfile
+
+archive = sys.argv[1]
+with tarfile.open(archive, mode="r:gz") as tf:
+    members = tf.getmembers()
+    if not members:
+        raise SystemExit("release archive is empty")
+    for member in members:
+        path = pathlib.PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts:
+            raise SystemExit(f"unsafe archive path: {member.name}")
+        if not (member.isdir() or member.isfile()):
+            raise SystemExit(f"unsupported archive entry type: {member.name}")
+PY
 
 extract_dir=$(mktemp -d)
 trap 'rm -rf "$extract_dir"' EXIT
@@ -85,8 +95,8 @@ mapfile -t manifests < <(find "$extract_dir" -mindepth 2 -maxdepth 2 -type f -na
 manifest=${manifests[0]}
 package_root=$(dirname "$manifest")
 packaged_binary="$package_root/reading-mcp"
-[[ -x "$packaged_binary" ]] || {
-  echo "release archive does not contain an executable reading-mcp" >&2
+[[ -f "$packaged_binary" && -x "$packaged_binary" && ! -L "$packaged_binary" ]] || {
+  echo "release archive does not contain a regular executable reading-mcp" >&2
   exit 1
 }
 

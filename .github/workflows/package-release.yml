@@ -33,6 +33,7 @@ jobs:
       - name: Checkout packaging infrastructure
         uses: actions/checkout@v4
         with:
+          ref: main
           path: packaging
 
       - name: Record packaging infrastructure identity

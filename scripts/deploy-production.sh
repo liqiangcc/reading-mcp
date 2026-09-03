@@ -6,6 +6,7 @@ set -euo pipefail
 : "${EXPECTED_ARCHIVE_SHA256:?set EXPECTED_ARCHIVE_SHA256 from the completed Package Issue}"
 : "${EXPECTED_VERSION:?set EXPECTED_VERSION to the release version}"
 : "${EXPECTED_SHA:?set EXPECTED_SHA to the frozen source SHA}"
+: "${EXPECTED_TARGET_TRIPLE:?set EXPECTED_TARGET_TRIPLE to the package Rust target triple}"
 : "${EXPECTED_PLATFORM:?set EXPECTED_PLATFORM to the package platform, for example linux-x86_64}"
 : "${RELEASE_BIN_DIR:?set RELEASE_BIN_DIR to the versioned binary directory}"
 : "${SERVICE_NAME:=reading-mcp-tunnel.service}"
@@ -100,7 +101,7 @@ packaged_binary="$package_root/reading-mcp"
   exit 1
 }
 
-read -r manifest_version manifest_sha manifest_platform manifest_binary_sha < <(
+read -r manifest_version manifest_sha manifest_target manifest_platform manifest_binary_sha < <(
   python3 - "$manifest" <<'PY'
 import json
 import pathlib
@@ -109,11 +110,11 @@ import sys
 data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 if data.get("schema") != "reading-mcp-release-manifest/v1":
     raise SystemExit("unsupported release manifest schema")
-for key in ("version", "git_sha", "platform", "binary_sha256"):
+for key in ("version", "git_sha", "target", "platform", "binary_sha256"):
     value = data.get(key)
     if not isinstance(value, str) or not value:
         raise SystemExit(f"manifest is missing {key}")
-print(data["version"], data["git_sha"], data["platform"], data["binary_sha256"])
+print(data["version"], data["git_sha"], data["target"], data["platform"], data["binary_sha256"])
 PY
 )
 
@@ -123,6 +124,10 @@ PY
 }
 [[ "$manifest_sha" == "$EXPECTED_SHA" ]] || {
   echo "package source SHA mismatch: expected $EXPECTED_SHA, got $manifest_sha" >&2
+  exit 1
+}
+[[ "$manifest_target" == "$EXPECTED_TARGET_TRIPLE" ]] || {
+  echo "package target mismatch: expected $EXPECTED_TARGET_TRIPLE, got $manifest_target" >&2
   exit 1
 }
 [[ "$manifest_platform" == "$EXPECTED_PLATFORM" ]] || {

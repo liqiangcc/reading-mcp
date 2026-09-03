@@ -20,10 +20,18 @@ set -euo pipefail
   echo "RELEASE_VERSION must be a SemVer-like version" >&2
   exit 1
 }
+[[ "$RELEASE_TAG" == "v$RELEASE_VERSION" ]] || {
+  echo "RELEASE_TAG must equal v<RELEASE_VERSION> exactly" >&2
+  exit 1
+}
 [[ "$VERIFY_RELEASE_TAG" == "true" || "$VERIFY_RELEASE_TAG" == "false" ]] || {
   echo "VERIFY_RELEASE_TAG must be true or false" >&2
   exit 1
 }
+if [[ "$VERIFY_RELEASE_TAG" == "true" && ! "$PACKAGING_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "PACKAGING_COMMIT_SHA must identify the packaging infrastructure commit" >&2
+  exit 1
+fi
 
 for cmd in cargo git gzip python3 sha256sum tar; do
   command -v "$cmd" >/dev/null || {

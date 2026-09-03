@@ -31,14 +31,14 @@ A production rollout must preserve all three identities:
 ```text
 source tag + git SHA
         ↓
-release-manifest.json
+release-manifest.json (target + platform)
         ↓
 archive SHA256 + binary SHA256
         ↓
 installed production binary SHA256
 ```
 
-A matching git SHA alone is not sufficient evidence. The production binary checksum must match the package manifest exactly.
+A matching git SHA alone is not sufficient evidence. The production binary checksum must match the package manifest exactly, and the target/platform fields must match the artifact selected for this host.
 
 ## Discover before changing a server
 
@@ -92,6 +92,7 @@ Before invoking the deployment script, the Deployment Issue should already conta
 
 - version;
 - source SHA;
+- target triple;
 - platform;
 - archive SHA256;
 - binary SHA256.
@@ -100,7 +101,7 @@ The separately recorded archive SHA256 is a trust input to deployment. `SHA256SU
 
 ## Deploy the verified artifact
 
-Create a rollback checkpoint before changing the active link. The deployment script verifies the recorded archive identity, checksum file and manifest, verifies the packaged binary checksum, preserves canonical state, retains the known-good binary, atomically switches the `reading-mcp` symlink, and restarts systemd.
+Create a rollback checkpoint before changing the active link. The deployment script verifies the recorded archive identity, checksum file and manifest, verifies the package target/platform and packaged binary checksum, preserves canonical state, retains the known-good binary, atomically switches the `reading-mcp` symlink, and restarts systemd.
 
 ```bash
 sudo PACKAGE_FILE=<reading-mcp-v0.1.0-linux-x86_64.tar.gz> \
@@ -108,6 +109,7 @@ sudo PACKAGE_FILE=<reading-mcp-v0.1.0-linux-x86_64.tar.gz> \
   EXPECTED_ARCHIVE_SHA256=<package-issue-archive-sha256> \
   EXPECTED_VERSION=0.1.0 \
   EXPECTED_SHA=<frozen-source-sha> \
+  EXPECTED_TARGET_TRIPLE=x86_64-unknown-linux-gnu \
   EXPECTED_PLATFORM=linux-x86_64 \
   RELEASE_BIN_DIR=<versioned-binary-directory> \
   SERVICE_NAME=<actual-service-name> \
@@ -123,10 +125,10 @@ The script rejects:
 - malformed version/SHA/checksum identities;
 - checksum file that does not match the Package Issue archive identity;
 - archive checksum mismatch;
-- unsafe archive paths;
+- unsafe archive paths or special archive entry types;
 - missing or multiple manifests;
 - unsupported manifest schema;
-- version/source/platform mismatch;
+- version/source/target/platform mismatch;
 - packaged binary checksum mismatch;
 - missing rollback binary.
 
@@ -185,6 +187,7 @@ A Deployment Issue is complete only when it records a chain equivalent to:
 ```text
 v0.1.0
   -> frozen source SHA
+  -> target + platform
   -> GitHub Release archive SHA256
   -> release-manifest binary SHA256
   -> installed production binary SHA256 (exact match)

@@ -3,6 +3,7 @@ set -euo pipefail
 
 : "${PACKAGE_FILE:?set PACKAGE_FILE to the verified release archive}"
 : "${CHECKSUM_FILE:?set CHECKSUM_FILE to the matching SHA256SUMS file}"
+: "${EXPECTED_ARCHIVE_SHA256:?set EXPECTED_ARCHIVE_SHA256 from the completed Package Issue}"
 : "${EXPECTED_VERSION:?set EXPECTED_VERSION to the release version}"
 : "${EXPECTED_SHA:?set EXPECTED_SHA to the frozen source SHA}"
 : "${EXPECTED_PLATFORM:?set EXPECTED_PLATFORM to the package platform, for example linux-x86_64}"
@@ -11,6 +12,10 @@ set -euo pipefail
 : "${STATE_DIR:?set STATE_DIR to persistent Reading MCP state}"
 : "${ROLLBACK_SHA:?set ROLLBACK_SHA to the current known-good deployed SHA}"
 
+[[ "$EXPECTED_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "EXPECTED_ARCHIVE_SHA256 must be a 64-character lowercase SHA256" >&2
+  exit 1
+}
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "EXPECTED_SHA must be a 40-character lowercase git SHA" >&2
   exit 1
@@ -43,14 +48,18 @@ checksum_file=$(readlink -f "$CHECKSUM_FILE")
 [[ -f "$checksum_file" ]] || { echo "checksum file not found" >&2; exit 1; }
 
 package_name=$(basename "$package_file")
-read -r expected_archive_sha checksum_name < <(awk 'NF >= 2 { print $1, $2; exit }' "$checksum_file")
-[[ -n "${expected_archive_sha:-}" && "$checksum_name" == "$package_name" ]] || {
+read -r checksum_archive_sha checksum_name < <(awk 'NF >= 2 { print $1, $2; exit }' "$checksum_file")
+[[ -n "${checksum_archive_sha:-}" && "$checksum_name" == "$package_name" ]] || {
   echo "SHA256SUMS does not identify the selected package exactly" >&2
   exit 1
 }
+[[ "$checksum_archive_sha" == "$EXPECTED_ARCHIVE_SHA256" ]] || {
+  echo "SHA256SUMS does not match the Package Issue archive identity" >&2
+  exit 1
+}
 actual_archive_sha=$(sha256sum "$package_file" | awk '{print $1}')
-[[ "$actual_archive_sha" == "$expected_archive_sha" ]] || {
-  echo "release archive SHA256 mismatch" >&2
+[[ "$actual_archive_sha" == "$EXPECTED_ARCHIVE_SHA256" ]] || {
+  echo "release archive SHA256 does not match the Package Issue identity" >&2
   exit 1
 }
 

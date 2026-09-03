@@ -12,9 +12,14 @@ set -euo pipefail
 : "${SERVICE_NAME:=reading-mcp-tunnel.service}"
 : "${STATE_DIR:?set STATE_DIR to persistent Reading MCP state}"
 : "${ROLLBACK_SHA:?set ROLLBACK_SHA to the current known-good deployed SHA}"
+: "${ROLLBACK_BINARY_SHA256:?set ROLLBACK_BINARY_SHA256 to the recorded current known-good binary SHA256}"
 
 [[ "$EXPECTED_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
   echo "EXPECTED_ARCHIVE_SHA256 must be a 64-character lowercase SHA256" >&2
+  exit 1
+}
+[[ "$ROLLBACK_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "ROLLBACK_BINARY_SHA256 must be a 64-character lowercase SHA256" >&2
   exit 1
 }
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -145,15 +150,27 @@ install -d -m 0750 "$STATE_DIR"
 
 current_binary="$RELEASE_BIN_DIR/reading-mcp"
 rollback_binary="$RELEASE_BIN_DIR/reading-mcp-$ROLLBACK_SHA"
-if [[ -e "$current_binary" && ! -e "$rollback_binary" ]]; then
+if [[ -e "$current_binary" ]]; then
   [[ -x "$current_binary" ]] || {
     echo "current production binary is not executable: $current_binary" >&2
     exit 1
   }
-  install -m 0755 "$current_binary" "$rollback_binary"
+  current_binary_sha=$(sha256sum "$current_binary" | awk '{print $1}')
+  [[ "$current_binary_sha" == "$ROLLBACK_BINARY_SHA256" ]] || {
+    echo "current production binary does not match the recorded rollback identity" >&2
+    exit 1
+  }
+  if [[ ! -e "$rollback_binary" ]]; then
+    install -m 0755 "$current_binary" "$rollback_binary"
+  fi
 fi
 [[ -x "$rollback_binary" ]] || {
   echo "known-good rollback binary is not available: $rollback_binary" >&2
+  exit 1
+}
+rollback_binary_sha=$(sha256sum "$rollback_binary" | awk '{print $1}')
+[[ "$rollback_binary_sha" == "$ROLLBACK_BINARY_SHA256" ]] || {
+  echo "saved rollback binary does not match the recorded rollback identity" >&2
   exit 1
 }
 
@@ -178,8 +195,10 @@ installed_binary_sha=$(sha256sum "$release_binary" | awk '{print $1}')
 ln -sfn "$(basename "$release_binary")" "$RELEASE_BIN_DIR/reading-mcp"
 printf '%s  %s\n' "$actual_archive_sha" "$package_name" > "$checkpoint/package.sha256"
 printf '%s  %s\n' "$installed_binary_sha" "$(basename "$release_binary")" > "$checkpoint/binary.sha256"
+printf '%s  %s\n' "$rollback_binary_sha" "$(basename "$rollback_binary")" > "$checkpoint/rollback-binary.sha256"
 printf '%s\n' "$EXPECTED_SHA" > "$checkpoint/release.sha"
 printf '%s\n' "$EXPECTED_VERSION" > "$checkpoint/release.version"
+printf '%s\n' "$ROLLBACK_SHA" > "$checkpoint/rollback.sha"
 install -m 0644 "$manifest" "$checkpoint/release-manifest.json"
 
 systemctl daemon-reload
@@ -192,4 +211,6 @@ systemctl is-active --quiet "$SERVICE_NAME" || {
 echo "deployed package version=$EXPECTED_VERSION source_sha=$EXPECTED_SHA"
 echo "archive_sha256=$actual_archive_sha"
 echo "binary_sha256=$installed_binary_sha"
+echo "rollback_source_sha=$ROLLBACK_SHA"
+echo "rollback_binary_sha256=$rollback_binary_sha"
 echo "rollback_checkpoint=$checkpoint"

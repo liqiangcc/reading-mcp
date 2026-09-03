@@ -69,3 +69,29 @@ jobs:
           path: test.log
           if-no-files-found: error
           retention-days: 1
+
+      - name: Package protocol smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 - <<'PY'
+          import pathlib
+          import re
+          text = pathlib.Path('Cargo.toml').read_text(encoding='utf-8')
+          match = re.search(r'^version\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+          if not match:
+              raise SystemExit('could not read package version')
+          print(match.group(1))
+          PY
+          )
+          release_sha=$(git rev-parse HEAD)
+          REPO_DIR="$GITHUB_WORKSPACE" \
+          RELEASE_VERSION="$version" \
+          RELEASE_TAG="v$version" \
+          RELEASE_SHA="$release_sha" \
+          VERIFY_RELEASE_TAG=false \
+          TARGET_TRIPLE=x86_64-unknown-linux-gnu \
+          PLATFORM=linux-x86_64 \
+          OUTPUT_DIR="$RUNNER_TEMP/package-smoke" \
+          PACKAGING_COMMIT_SHA="$release_sha" \
+          bash scripts/package-release.sh

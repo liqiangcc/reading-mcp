@@ -71,6 +71,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Shell deployment syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n \
+            scripts/package-release.sh \
+            scripts/install-production.sh \
+            scripts/deploy-production.sh \
+            scripts/verify-production.sh \
+            scripts/rollback-production.sh
+
       - name: Restore clean checkout for packaging
         shell: bash
         run: |

@@ -98,8 +98,10 @@ impl Parser for PdfParser {
 
 fn first_numbered_top_level_section(sections: &[Section]) -> Option<(u32, String)> {
     sections.iter().find_map(|section| {
-        (top_level_number(&section.title) == Some(1))
-            .then(|| (section.location.page?, section.title.clone()))
+        if top_level_number(&section.title) != Some(1) {
+            return None;
+        }
+        Some((section.location.page?, section.title.clone()))
     })
 }
 

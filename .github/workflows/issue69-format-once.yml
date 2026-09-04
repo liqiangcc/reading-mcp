@@ -30,38 +30,13 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path("src/application/get_document_structure.rs")
           text = path.read_text(encoding="utf-8")
-          old = '''    normalized
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-fn strip_section_prefix(value: &str) -> String {
-    value.strip_prefix("section ").unwrap_or(value).to_string()
-}'''
-          new = '''    normalized
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn strip_section_prefix(value: &str) -> String {
-    let mut parts = value.split_whitespace();
-    let Some(first) = parts.next() else {
-        return String::new();
-    };
-    if first.eq_ignore_ascii_case("section") {
-        parts.collect::<Vec<_>>().join(" ")
-    } else {
-        value.to_string()
-    }
-}'''
-          if text.count(old) != 1:
-              raise SystemExit(f"resolver normalization: expected one match, got {text.count(old)}")
+          old = "    normalized\n        .split_whitespace()\n        .collect::<Vec<_>>()\n        .join(\" \")\n        .to_lowercase()\n}\n\nfn strip_section_prefix(value: &str) -> String {\n    value.strip_prefix(\"section \").unwrap_or(value).to_string()\n}"
+          new = "    normalized\n        .split_whitespace()\n        .collect::<Vec<_>>()\n        .join(\" \")\n}\n\nfn strip_section_prefix(value: &str) -> String {\n    let mut parts = value.split_whitespace();\n    let Some(first) = parts.next() else {\n        return String::new();\n    };\n    if first.eq_ignore_ascii_case(\"section\") {\n        parts.collect::<Vec<_>>().join(\" \")\n    } else {\n        value.to_string()\n    }\n}"
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"resolver normalization: expected one match, got {count}")
           path.write_text(text.replace(old, new, 1), encoding="utf-8")
           PY
 

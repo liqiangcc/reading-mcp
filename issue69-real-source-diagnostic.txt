@@ -1,0 +1,89 @@
+raft_curl_status=0
+kafka_curl_status=0
+test_status=101
+probe_status=0
+e6345fcba31cbc747ab41755aa62654859c4403dbb687da0021079f78181a7b5  RAFT_PDF
+4abdeba2503eb20a5d7ed84aa8e7680bcbe3088541712626315deae0b07c2821  KAFKA_PDF
+
+=== RAFT CURL tail ===
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100  595k    0  595k    0     0  1957k      0 --:--:-- --:--:-- --:--:-- 1959k
+
+=== KAFKA CURL tail ===
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100 2200k  100 2200k    0     0  7784k      0 --:--:-- --:--:-- --:--:-- 7803k
+
+=== REAL-SOURCE TEST tail ===
+[1m[92m    Updating[0m crates.io index
+[1m[92m   Compiling[0m reading-mcp v0.1.0 (/home/runner/work/reading-mcp/reading-mcp)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 18.49s
+[1m[92m     Running[0m tests/raft_named_section_evidence.rs (target/debug/deps/raft_named_section_evidence-f0d793d7807c89f3)
+
+running 2 tests
+EVIDENCE_F_KAFKA content_hash=sha256:4abdeba2503eb20a5d7ed84aa8e7680bcbe3088541712626315deae0b07c2821 page_count=7 structure_nodes=7 provenance=page_fallback
+test real_kafka_pdf_regression_preserves_raw_identity_and_structure_navigation ... ok
+
+thread 'real_raft_named_section_scope_gate_is_structure_only_and_fail_closed' (2521) panicked at tests/raft_named_section_evidence.rs:53:5:
+assertion `left == right` failed
+  left: Some("page_fallback")
+ right: Some("inferred_numbered_headings")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test real_raft_named_section_scope_gate_is_structure_only_and_fail_closed ... FAILED
+
+failures:
+
+failures:
+    real_raft_named_section_scope_gate_is_structure_only_and_fail_closed
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+[1m[91merror[0m: test failed, to rerun pass `--test raft_named_section_evidence`
+
+=== STRUCTURAL HEADING PROBE ===
+INLINE page=2 line=1 pos=2 candidate=2014 USENIX Annual Technical Conference 305 InSearchofanUnderstandableConsensusAlgorithm
+INLINE page=2 line=1 pos=7 candidate=305 InSearchofanUnderstandableConsensusAlgorithm DiegoOngaroandJohnOusterhout StanfordUniversity Abstract Raftisaconsensusalgorithmfor managingareplicated
+INLINE page=3 line=1 pos=1 candidate=2014 USENIX Annual Technical Conference USENIX Association
+INLINE page=4 line=1 pos=2 candidate=2014 USENIX Annual Technical Conference 307 lished.
+INLINE page=5 line=1 pos=1 candidate=2014 USENIX Annual Technical Conference USENIX Association
+INLINE page=6 line=1 pos=2 candidate=2014 USENIX Annual Technical Conference 309
+INLINE page=7 line=1 pos=1 candidate=2014 USENIX Annual Technical Conference USENIX Association
+INLINE page=8 line=1 pos=2 candidate=2014 USENIX Annual Technical Conference 311
+INLINE page=9 line=1 pos=1 candidate=2014 USENIX Annual Technical Conference USENIX Association
+INLINE page=10 line=1 pos=2 candidate=2014 USENIX Annual Technical Conference 313
+INLINE page=11 line=1 pos=1 candidate=2014 USENIX Annual Technical Conference USENIX Association
+INLINE page=12 line=1 pos=2 candidate=2014 USENIX Annual Technical Conference 315
+INLINE page=13 line=1 pos=1 candidate=2014 USENIX Annual Technical Conference USENIX Association
+SPLIT page=13 line=2 number=0 next=10
+SPLIT page=13 line=3 number=10 next=20
+SPLIT page=13 line=4 number=20 next=30
+SPLIT page=13 line=5 number=30 next=40
+SPLIT page=13 line=6 number=40 next=50
+SPLIT page=13 line=7 number=50 next=60
+SPLIT page=13 line=8 number=60 next=0
+SPLIT page=13 line=9 number=0 next=10
+SPLIT page=13 line=10 number=10 next=20
+SPLIT page=13 line=11 number=20 next=30
+SPLIT page=13 line=12 number=30 next=40
+SPLIT page=13 line=13 number=40 next=50
+SPLIT page=13 line=14 number=50 next=60
+SPLIT page=13 line=15 number=60 next=Raft gradePaxos gradeRaft then Paxos
+SPLIT page=13 line=23 number=0 next=5
+SPLIT page=13 line=24 number=5 next=10
+SPLIT page=13 line=25 number=10 next=15
+SPLIT page=13 line=26 number=15 next=20
+SPLIT page=13 line=27 number=20 next=implementexplain
+INLINE page=14 line=1 pos=2 candidate=2014 USENIX Annual Technical Conference 317
+SPLIT page=14 line=8 number=100 next=1000
+SPLIT page=14 line=9 number=1000 next=10000
+SPLIT page=14 line=10 number=10000 next=100000
+SPLIT page=14 line=11 number=100000 next=cumulative percent150-150ms
+SPLIT page=14 line=24 number=0 next=100
+SPLIT page=14 line=25 number=100 next=200
+SPLIT page=14 line=26 number=200 next=300
+SPLIT page=14 line=27 number=300 next=400
+SPLIT page=14 line=28 number=400 next=500
+SPLIT page=14 line=29 number=500 next=600
+SPLIT page=14 line=30 number=600 next=cumulative percenttime without leader (ms)12-24ms
+INLINE page=15 line=1 pos=1 candidate=2014 USENIX Annual Technical Conference USENIX Association

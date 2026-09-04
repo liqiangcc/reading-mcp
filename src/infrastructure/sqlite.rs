@@ -10,8 +10,9 @@ use crate::application::ports::{
     ApplicationError, DocumentRepository, SearchHit, SearchIndex, TextUnitIndex,
 };
 use crate::domain::{
-    ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NormalizedDocumentHash,
-    NormalizedTextRange, Section, SectionId, TextUnit, TextUnitId, TextUnitKind,
+    ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
+    NormalizedDocumentHash, NormalizedTextRange, Section, SectionId, TextUnit, TextUnitId,
+    TextUnitKind,
 };
 
 pub struct SqliteDocumentRepository {
@@ -93,9 +94,9 @@ impl DocumentRepository for SqliteDocumentRepository {
             .optional()
             .map_err(repository_error)?;
         json.map(|json| {
-            serde_json::from_str::<StoredDocument>(&json)
-                .map(StoredDocument::into_document)
-                .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))
+            let stored = serde_json::from_str::<StoredDocument>(&json)
+                .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+            stored.into_document()
         })
         .transpose()
     }
@@ -596,6 +597,8 @@ fn i64_to_usize(value: i64, field: &str) -> Result<usize, ApplicationError> {
 
 #[derive(Serialize, Deserialize)]
 struct StoredDocument {
+    #[serde(default)]
+    normalization_version: Option<String>,
     id: String,
     source: String,
     title: String,
@@ -608,6 +611,7 @@ struct StoredDocument {
 impl StoredDocument {
     fn from_document(document: &Document) -> Self {
         Self {
+            normalization_version: Some(NORMALIZATION_VERSION.into()),
             id: document.id.0.clone(),
             source: document.source.0.clone(),
             title: document.title.clone(),
@@ -622,8 +626,19 @@ impl StoredDocument {
         }
     }
 
-    fn into_document(self) -> Document {
-        Document {
+    fn into_document(self) -> Result<Document, ApplicationError> {
+        let persisted_version = self.normalization_version.ok_or_else(|| {
+            ApplicationError::StaleDocument(format!(
+                "persisted document has no normalization version; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
+            ))
+        })?;
+        if persisted_version != NORMALIZATION_VERSION {
+            return Err(ApplicationError::StaleDocument(format!(
+                "persisted document normalization version {persisted_version} is stale; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
+            )));
+        }
+
+        Ok(Document {
             id: DocumentId(self.id),
             source: DocumentSource(self.source),
             title: self.title,
@@ -635,7 +650,7 @@ impl StoredDocument {
                 .into_iter()
                 .map(StoredSection::into_section)
                 .collect(),
-        }
+        })
     }
 }
 

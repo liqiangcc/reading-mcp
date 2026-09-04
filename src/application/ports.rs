@@ -124,6 +124,10 @@ pub enum ApplicationError {
     InvalidLocator(String),
     #[error("stale source locator: {0}")]
     StaleLocator(String),
+    #[error("stale structure resolution: {0}")]
+    StaleStructure(String),
+    #[error("stale persisted document: {0}")]
+    StaleDocument(String),
     #[error("invalid read cursor: {0}")]
     InvalidCursor(String),
     #[error("stale read cursor: {0}")]

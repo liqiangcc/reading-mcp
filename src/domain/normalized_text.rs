@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Document, Section};
 
-pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v6";
+pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v7";
 pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v2";
 pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scalar/v1";
 

@@ -237,17 +237,93 @@ pub struct GetDocumentStructureRequest {
     pub max_nodes: Option<usize>,
     #[serde(default)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub named_section_query: Option<String>,
+    #[serde(default)]
+    pub expected_content_hash: Option<String>,
+    #[serde(default)]
+    pub expected_normalized_document_hash: Option<String>,
+    #[serde(default)]
+    pub expected_structure_resolution_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct GetDocumentStructureResponse {
     pub document_id: String,
+    pub content_hash: String,
+    pub normalized_document_hash: String,
+    pub normalized_document_hash_version: String,
+    pub normalization_version: String,
+    pub segmentation_version: String,
     pub sections: Vec<SectionNode>,
     pub truncated: bool,
     pub complete: bool,
     #[serde(default)]
     pub next_cursor: Option<String>,
     pub stream: StructureStreamSegmentDto,
+    #[serde(default)]
+    pub resolution: Option<NamedSectionResolutionDto>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedSectionResolutionStatusDto {
+    Resolved,
+    Ambiguous,
+    NotFound,
+    Unavailable,
+    BoundaryUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedSectionMatchKindDto {
+    ExactTitle,
+    SectionPrefixedTitle,
+    TitleOnly,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct NamedSectionCandidateDto {
+    pub section_id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    pub title: String,
+    pub level: u8,
+    pub location: LocationDto,
+    pub body_order: usize,
+    pub start_locator: TextLocatorDto,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct BodyOrderIntervalDto {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct NamedSectionBoundaryDto {
+    pub version: String,
+    pub body_order_version: String,
+    pub intervals: Vec<BodyOrderIntervalDto>,
+    #[serde(default)]
+    pub end_exclusive: Option<NamedSectionCandidateDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct NamedSectionResolutionDto {
+    pub version: String,
+    pub status: NamedSectionResolutionStatusDto,
+    pub query: String,
+    #[serde(default)]
+    pub match_kind: Option<NamedSectionMatchKindDto>,
+    #[serde(default)]
+    pub matched: Option<NamedSectionCandidateDto>,
+    pub candidates: Vec<NamedSectionCandidateDto>,
+    #[serde(default)]
+    pub boundary: Option<NamedSectionBoundaryDto>,
+    #[serde(default)]
+    pub degradation: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

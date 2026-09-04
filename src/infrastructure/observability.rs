@@ -265,6 +265,8 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::SectionNotFound => "section_not_found",
         ApplicationError::InvalidLocator(_) => "invalid_locator",
         ApplicationError::StaleLocator(_) => "stale_locator",
+        ApplicationError::StaleStructure(_) => "stale_structure",
+        ApplicationError::StaleDocument(_) => "stale_document",
         ApplicationError::InvalidCursor(_) => "invalid_cursor",
         ApplicationError::StaleCursor(_) => "stale_cursor",
         ApplicationError::CursorTargetMismatch(_) => "cursor_target_mismatch",

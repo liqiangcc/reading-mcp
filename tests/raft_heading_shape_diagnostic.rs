@@ -84,14 +84,10 @@ fn raft_numbered_line_shape_is_reported_without_body_text() {
                 );
             }
 
-            let numeric_first = first
-                .trim_end_matches('.')
-                .split('.')
-                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
             let intro_pos = tokens.iter().position(|token| {
                 token.trim_matches(|c: char| !c.is_alphanumeric()) == "Introduction"
             });
-            if (numeric_first && words <= 28) || intro_pos.is_some() {
+            if digit_prefix_len > 0 || intro_pos.is_some() {
                 let start = intro_pos.map(|pos| pos.saturating_sub(2)).unwrap_or(0);
                 let end = tokens.len().min(start + 10);
                 println!(

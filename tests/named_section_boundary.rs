@@ -227,6 +227,53 @@ async fn epub_subtree_boundary_uses_body_order_intervals_not_tree_preorder() {
     assert!(boundary.end_exclusive.is_none());
 }
 
+#[tokio::test]
+async fn number_separator_is_normalized_but_title_hyphen_is_not_fuzzy() {
+    let document = Document {
+        id: DocumentId("doc:punctuation".into()),
+        source: DocumentSource("memory:punctuation.md".into()),
+        title: "Punctuation".into(),
+        media_type: MediaType("text/markdown".into()),
+        content_hash: ContentHash("sha256:punctuation".into()),
+        metadata: Default::default(),
+        root_sections: vec![
+            section(
+                "section://state-machine",
+                "1. State-machine Safety",
+                1,
+                "body",
+                vec![],
+            ),
+            section("section://next", "2 Next", 1, "next", vec![]),
+        ],
+    };
+    let normalized = document.normalized_document_hash().0;
+    let repository = repository_with(document.clone()).await;
+    let use_case = GetDocumentStructureUseCase::new(repository);
+
+    let resolved = use_case
+        .resolve_named_section(command_for(
+            &document,
+            &normalized,
+            "Section 1 — State-machine Safety",
+        ))
+        .await
+        .expect("number separator normalization should resolve");
+    assert_eq!(
+        resolved.resolution.status,
+        NamedSectionResolutionStatus::Resolved
+    );
+
+    let not_fuzzy = use_case
+        .resolve_named_section(command_for(&document, &normalized, "State machine Safety"))
+        .await
+        .expect("title-only non-match should be explicit");
+    assert_eq!(
+        not_fuzzy.resolution.status,
+        NamedSectionResolutionStatus::NotFound
+    );
+}
+
 fn command_for(
     document: &Document,
     normalized_hash: &str,

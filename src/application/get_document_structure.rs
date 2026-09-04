@@ -431,14 +431,23 @@ fn resolve_named_section(
 }
 
 fn normalize_heading_key(value: &str) -> String {
-    let normalized = value
-        .chars()
-        .map(|character| match character {
-            '-' | '–' | '—' | ':' => ' ',
-            _ => character,
-        })
-        .collect::<String>();
-    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.is_empty() {
+        return String::new();
+    }
+    let numeric_index = usize::from(parts[0].eq_ignore_ascii_case("section"));
+    let mut normalized = Vec::with_capacity(parts.len());
+    for (index, part) in parts.into_iter().enumerate() {
+        if index == numeric_index {
+            normalized.push(part.trim_end_matches(&['.', ':', '-', '–', '—'][..]));
+        } else if index == numeric_index.saturating_add(1) && matches!(part, "-" | "–" | "—" | ":")
+        {
+            continue;
+        } else {
+            normalized.push(part);
+        }
+    }
+    normalized.join(" ")
 }
 
 fn strip_section_prefix(value: &str) -> String {

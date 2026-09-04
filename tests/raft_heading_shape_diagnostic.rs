@@ -63,26 +63,44 @@ fn raft_numbered_line_shape_is_reported_without_body_text() {
             if trimmed.is_empty() {
                 continue;
             }
-            let first = trimmed.split_whitespace().next().unwrap_or_default();
+            let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+            let first = tokens.first().copied().unwrap_or_default();
             let digit_prefix_len = first.bytes().take_while(u8::is_ascii_digit).count();
             let chars = trimmed.chars().count();
-            let words = trimmed.split_whitespace().count();
+            let words = tokens.len();
             let short_structural = chars <= 180 && words <= 28;
-            if digit_prefix_len == 0 && !short_structural {
-                continue;
+            if digit_prefix_len > 0 || short_structural {
+                println!(
+                    "CHUNK_SHAPE page={} chunk={} chars={} words={} lines={} first_len={} digit_prefix_len={} first_starts_alpha={} short_structural={}",
+                    page_number,
+                    chunk_index,
+                    chars,
+                    words,
+                    trimmed.lines().count(),
+                    first.chars().count(),
+                    digit_prefix_len,
+                    first.chars().next().is_some_and(char::is_alphabetic),
+                    short_structural,
+                );
             }
-            println!(
-                "CHUNK_SHAPE page={} chunk={} chars={} words={} lines={} first_len={} digit_prefix_len={} first_starts_alpha={} short_structural={}",
-                page_number,
-                chunk_index,
-                chars,
-                words,
-                trimmed.lines().count(),
-                first.chars().count(),
-                digit_prefix_len,
-                first.chars().next().is_some_and(char::is_alphabetic),
-                short_structural,
-            );
+
+            let numeric_first = first
+                .trim_end_matches('.')
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+            let intro_pos = tokens.iter().position(|token| {
+                token.trim_matches(|c: char| !c.is_alphanumeric()) == "Introduction"
+            });
+            if (numeric_first && words <= 28) || intro_pos.is_some() {
+                let start = intro_pos.map(|pos| pos.saturating_sub(2)).unwrap_or(0);
+                let end = tokens.len().min(start + 10);
+                println!(
+                    "CHUNK_CANDIDATE page={} chunk={} context={}",
+                    page_number,
+                    chunk_index,
+                    tokens[start..end].join(" ")
+                );
+            }
         }
     }
 }

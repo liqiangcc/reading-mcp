@@ -438,15 +438,19 @@ fn normalize_heading_key(value: &str) -> String {
             _ => character,
         })
         .collect::<String>();
-    normalized
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn strip_section_prefix(value: &str) -> String {
-    value.strip_prefix("section ").unwrap_or(value).to_string()
+    let mut parts = value.split_whitespace();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    if first.eq_ignore_ascii_case("section") {
+        parts.collect::<Vec<_>>().join(" ")
+    } else {
+        value.to_string()
+    }
 }
 
 fn strip_numeric_designator(value: &str) -> String {

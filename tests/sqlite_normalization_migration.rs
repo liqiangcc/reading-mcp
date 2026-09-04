@@ -40,7 +40,7 @@ async fn sqlite_document_repository_rejects_unversioned_and_stale_normalization(
         .await
         .expect_err("unversioned persisted canonical facts must fail closed");
     assert!(matches!(error, ApplicationError::StaleDocument(_)));
-    assert!(error.to_string().contains("normalization-version"));
+    assert!(error.to_string().contains("normalization version"));
     drop(repository);
 
     let repository =

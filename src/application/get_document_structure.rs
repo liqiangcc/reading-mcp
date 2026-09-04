@@ -7,10 +7,16 @@ use crate::application::structure_cursor::{
     STRUCTURE_TRAVERSAL_VERSION, StructureCursorClaims, decode_structure_cursor,
     encode_structure_cursor,
 };
-use crate::domain::{Document, DocumentId, Location, Section, SectionId};
+use crate::domain::{
+    ContentHash, Document, DocumentId, Location, NORMALIZATION_VERSION,
+    NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash, Section, SectionId,
+    TEXT_SEGMENTATION_VERSION, TextLocator,
+};
 
 pub const DEFAULT_STRUCTURE_MAX_NODES: usize = 1_000;
 pub const MAX_STRUCTURE_RESPONSE_NODES: usize = 1_000;
+pub const NAMED_SECTION_RESOLUTION_VERSION: &str = "named-section-resolution/v1";
+pub const NAMED_SECTION_BOUNDARY_VERSION: &str = "named-section-boundary/v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GetDocumentStructureCommand {
@@ -33,6 +39,79 @@ pub struct SectionOutline {
     pub children: Vec<SectionOutline>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamedSectionResolutionStatus {
+    Resolved,
+    Ambiguous,
+    NotFound,
+    Unavailable,
+    BoundaryUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamedSectionMatchKind {
+    ExactTitle,
+    SectionPrefixedTitle,
+    TitleOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedSectionCandidate {
+    pub section_id: SectionId,
+    pub parent_id: Option<SectionId>,
+    pub title: String,
+    pub level: u8,
+    pub location: Location,
+    pub body_order: usize,
+    pub start_locator: TextLocator,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BodyOrderInterval {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedSectionBoundary {
+    pub version: String,
+    pub body_order_version: String,
+    pub intervals: Vec<BodyOrderInterval>,
+    pub end_exclusive: Option<NamedSectionCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedSectionResolution {
+    pub version: String,
+    pub status: NamedSectionResolutionStatus,
+    pub query: String,
+    pub match_kind: Option<NamedSectionMatchKind>,
+    pub matched: Option<NamedSectionCandidate>,
+    pub candidates: Vec<NamedSectionCandidate>,
+    pub boundary: Option<NamedSectionBoundary>,
+    pub degradation: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveNamedSectionCommand {
+    pub document_id: DocumentId,
+    pub query: String,
+    pub expected_content_hash: String,
+    pub expected_normalized_document_hash: String,
+    pub expected_structure_resolution_version: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveNamedSectionResult {
+    pub document_id: DocumentId,
+    pub content_hash: ContentHash,
+    pub normalized_document_hash: NormalizedDocumentHash,
+    pub normalized_document_hash_version: String,
+    pub normalization_version: String,
+    pub segmentation_version: String,
+    pub resolution: NamedSectionResolution,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructureStreamSegment {
     pub traversal_version: String,
@@ -48,6 +127,11 @@ pub struct StructureStreamSegment {
 pub struct DocumentStructureResult {
     pub document_id: DocumentId,
     pub title: String,
+    pub content_hash: ContentHash,
+    pub normalized_document_hash: NormalizedDocumentHash,
+    pub normalized_document_hash_version: String,
+    pub normalization_version: String,
+    pub segmentation_version: String,
     pub sections: Vec<SectionOutline>,
     pub truncated: bool,
     pub complete: bool,
@@ -79,6 +163,29 @@ impl GetDocumentStructureUseCase {
             cursor: None,
         })
         .await
+    }
+
+    pub async fn resolve_named_section(
+        &self,
+        command: ResolveNamedSectionCommand,
+    ) -> Result<ResolveNamedSectionResult, ApplicationError> {
+        let document = self
+            .repository
+            .get(&command.document_id)
+            .await?
+            .ok_or(ApplicationError::DocumentNotFound)?;
+        let normalized_hash = document.normalized_document_hash();
+        let body_order = section_body_order(&document)?;
+        let resolution = resolve_named_section(&document, &body_order, &command, &normalized_hash)?;
+        Ok(ResolveNamedSectionResult {
+            document_id: document.id.clone(),
+            content_hash: document.content_hash.clone(),
+            normalized_document_hash: normalized_hash,
+            normalized_document_hash_version: NORMALIZED_DOCUMENT_HASH_VERSION.into(),
+            normalization_version: NORMALIZATION_VERSION.into(),
+            segmentation_version: TEXT_SEGMENTATION_VERSION.into(),
+            resolution,
+        })
     }
 
     pub async fn execute_command(
@@ -162,6 +269,11 @@ impl GetDocumentStructureUseCase {
         Ok(DocumentStructureResult {
             document_id: document.id.clone(),
             title: document.title,
+            content_hash: document.content_hash.clone(),
+            normalized_document_hash: normalized_hash,
+            normalized_document_hash_version: NORMALIZED_DOCUMENT_HASH_VERSION.into(),
+            normalization_version: NORMALIZATION_VERSION.into(),
+            segmentation_version: TEXT_SEGMENTATION_VERSION.into(),
             sections,
             truncated: !complete,
             complete,
@@ -177,6 +289,302 @@ impl GetDocumentStructureUseCase {
             },
         })
     }
+}
+
+fn resolve_named_section(
+    document: &Document,
+    body_order: &HashMap<SectionId, usize>,
+    command: &ResolveNamedSectionCommand,
+    normalized_hash: &NormalizedDocumentHash,
+) -> Result<NamedSectionResolution, ApplicationError> {
+    let query = command.query.trim();
+    if query.is_empty() {
+        return Err(ApplicationError::InvalidRequest(
+            "named_section_query must not be empty".into(),
+        ));
+    }
+    let expected_content_hash = command.expected_content_hash.as_str();
+    let expected_normalized_hash = command.expected_normalized_document_hash.as_str();
+    if expected_content_hash != document.content_hash.0 {
+        return Err(ApplicationError::StaleStructure(format!(
+            "raw content hash changed from {expected_content_hash} to {}",
+            document.content_hash.0
+        )));
+    }
+    if expected_normalized_hash != normalized_hash.0 {
+        return Err(ApplicationError::StaleStructure(format!(
+            "normalized document hash changed from {expected_normalized_hash} to {}",
+            normalized_hash.0
+        )));
+    }
+    if let Some(expected_version) = command.expected_structure_resolution_version.as_deref()
+        && expected_version != NAMED_SECTION_RESOLUTION_VERSION
+    {
+        return Err(ApplicationError::StaleStructure(format!(
+            "structure resolution version {expected_version} is unsupported; expected {NAMED_SECTION_RESOLUTION_VERSION}"
+        )));
+    }
+
+    if is_page_only_pdf_fallback(document) {
+        return Ok(NamedSectionResolution {
+            version: NAMED_SECTION_RESOLUTION_VERSION.into(),
+            status: NamedSectionResolutionStatus::Unavailable,
+            query: query.into(),
+            match_kind: None,
+            matched: None,
+            candidates: Vec::new(),
+            boundary: None,
+            degradation: Some(
+                "canonical PDF structure is page-only; named structural headings are unavailable"
+                    .into(),
+            ),
+        });
+    }
+
+    let refs = all_section_refs(document);
+    let normalized_query = normalize_heading_key(query);
+    let without_section_prefix = strip_section_prefix(&normalized_query);
+    let query_has_section_prefix = without_section_prefix != normalized_query;
+    let query_has_number = first_token_is_numeric_designator(&without_section_prefix);
+
+    let exact = refs
+        .iter()
+        .copied()
+        .filter(|section| normalize_heading_key(&section.title) == normalized_query)
+        .collect::<Vec<_>>();
+    let prefixed = if query_has_section_prefix {
+        refs.iter()
+            .copied()
+            .filter(|section| normalize_heading_key(&section.title) == without_section_prefix)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let title_only = if !query_has_number {
+        refs.iter()
+            .copied()
+            .filter(|section| {
+                strip_numeric_designator(&normalize_heading_key(&section.title)) == normalized_query
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let (matches, match_kind) = if !exact.is_empty() {
+        (exact, NamedSectionMatchKind::ExactTitle)
+    } else if !prefixed.is_empty() {
+        (prefixed, NamedSectionMatchKind::SectionPrefixedTitle)
+    } else if !title_only.is_empty() {
+        (title_only, NamedSectionMatchKind::TitleOnly)
+    } else {
+        return Ok(NamedSectionResolution {
+            version: NAMED_SECTION_RESOLUTION_VERSION.into(),
+            status: NamedSectionResolutionStatus::NotFound,
+            query: query.into(),
+            match_kind: None,
+            matched: None,
+            candidates: Vec::new(),
+            boundary: None,
+            degradation: None,
+        });
+    };
+
+    let candidates = matches
+        .iter()
+        .map(|section| candidate_metadata(document, section, body_order))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Ok(NamedSectionResolution {
+            version: NAMED_SECTION_RESOLUTION_VERSION.into(),
+            status: NamedSectionResolutionStatus::Ambiguous,
+            query: query.into(),
+            match_kind: Some(match_kind),
+            matched: None,
+            candidates,
+            boundary: None,
+            degradation: None,
+        });
+    }
+
+    let matched_section = matches[0];
+    let matched = candidate_metadata(document, matched_section, body_order);
+    let boundary = build_named_boundary(document, matched_section, body_order);
+    let status = if boundary.is_some() {
+        NamedSectionResolutionStatus::Resolved
+    } else {
+        NamedSectionResolutionStatus::BoundaryUnavailable
+    };
+    Ok(NamedSectionResolution {
+        version: NAMED_SECTION_RESOLUTION_VERSION.into(),
+        status,
+        query: query.into(),
+        match_kind: Some(match_kind),
+        matched: Some(matched),
+        candidates: Vec::new(),
+        boundary,
+        degradation: (status == NamedSectionResolutionStatus::BoundaryUnavailable).then(|| {
+            "named Section resolved, but its executable body-order boundary exceeds the response budget"
+                .into()
+        }),
+    })
+}
+
+fn normalize_heading_key(value: &str) -> String {
+    let normalized = value
+        .chars()
+        .map(|character| match character {
+            '-' | '–' | '—' | ':' => ' ',
+            _ => character,
+        })
+        .collect::<String>();
+    normalized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn strip_section_prefix(value: &str) -> String {
+    value
+        .strip_prefix("section ")
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn strip_numeric_designator(value: &str) -> String {
+    let mut parts = value.split_whitespace();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    if is_numeric_designator(first) {
+        parts.collect::<Vec<_>>().join(" ")
+    } else {
+        value.to_string()
+    }
+}
+
+fn first_token_is_numeric_designator(value: &str) -> bool {
+    value
+        .split_whitespace()
+        .next()
+        .is_some_and(is_numeric_designator)
+}
+
+fn is_numeric_designator(value: &str) -> bool {
+    let value = value.trim_end_matches('.');
+    !value.is_empty()
+        && value
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn all_section_refs(document: &Document) -> Vec<&Section> {
+    fn collect<'a>(section: &'a Section, output: &mut Vec<&'a Section>) {
+        output.push(section);
+        for child in &section.children {
+            collect(child, output);
+        }
+    }
+    let mut output = Vec::new();
+    for section in &document.root_sections {
+        collect(section, &mut output);
+    }
+    output
+}
+
+fn is_page_only_pdf_fallback(document: &Document) -> bool {
+    document.media_type.0.eq_ignore_ascii_case("application/pdf")
+        && document
+            .metadata
+            .get("pdf_structure_provenance")
+            .is_some_and(|value| value == "page_fallback")
+}
+
+fn candidate_metadata(
+    document: &Document,
+    section: &Section,
+    body_order: &HashMap<SectionId, usize>,
+) -> NamedSectionCandidate {
+    NamedSectionCandidate {
+        section_id: section.id.clone(),
+        parent_id: section.parent_id.clone(),
+        title: section.title.clone(),
+        level: section.level,
+        location: section.location.clone(),
+        body_order: body_order[&section.id],
+        start_locator: TextLocator::for_section(document, section),
+    }
+}
+
+fn build_named_boundary(
+    document: &Document,
+    section: &Section,
+    body_order: &HashMap<SectionId, usize>,
+) -> Option<NamedSectionBoundary> {
+    let mut orders = Vec::new();
+    collect_scope_body_orders(section, body_order, &mut orders);
+    orders.sort_unstable();
+    orders.dedup();
+    let intervals = compress_body_order_intervals(&orders);
+    if intervals.len() > MAX_STRUCTURE_RESPONSE_NODES {
+        return None;
+    }
+
+    let end_exclusive = if intervals.len() == 1 {
+        let next_order = intervals[0].end;
+        section_at_body_order(document, body_order, next_order)
+            .map(|next| candidate_metadata(document, next, body_order))
+    } else {
+        None
+    };
+    Some(NamedSectionBoundary {
+        version: NAMED_SECTION_BOUNDARY_VERSION.into(),
+        body_order_version: BODY_ORDER_VERSION.into(),
+        intervals,
+        end_exclusive,
+    })
+}
+
+fn collect_scope_body_orders(
+    section: &Section,
+    body_order: &HashMap<SectionId, usize>,
+    output: &mut Vec<usize>,
+) {
+    output.push(body_order[&section.id]);
+    for child in &section.children {
+        collect_scope_body_orders(child, body_order, output);
+    }
+}
+
+fn compress_body_order_intervals(orders: &[usize]) -> Vec<BodyOrderInterval> {
+    let Some(first) = orders.first().copied() else {
+        return Vec::new();
+    };
+    let mut intervals = Vec::new();
+    let mut start = first;
+    let mut end = first.saturating_add(1);
+    for order in orders.iter().copied().skip(1) {
+        if order == end {
+            end = end.saturating_add(1);
+        } else {
+            intervals.push(BodyOrderInterval { start, end });
+            start = order;
+            end = order.saturating_add(1);
+        }
+    }
+    intervals.push(BodyOrderInterval { start, end });
+    intervals
+}
+
+fn section_at_body_order<'a>(
+    document: &'a Document,
+    body_order: &HashMap<SectionId, usize>,
+    target: usize,
+) -> Option<&'a Section> {
+    all_section_refs(document)
+        .into_iter()
+        .find(|section| body_order.get(&section.id).copied() == Some(target))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

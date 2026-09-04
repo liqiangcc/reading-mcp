@@ -48,16 +48,17 @@ use crate::runtime::RuntimeConfig;
 use super::contracts::{
     BodyOrderIntervalDto, ContextContainerKindDto, ContextItemDto, ContextItemKindDto,
     ContextItemRoleDto, ContextRelationDto, ContextUnitDto, DirectoryEntryKindDto,
-    GetContextRequest, GetContextResponse, GetDocumentStructureRequest, GetDocumentStructureResponse,
-    GetTextUnitsRequest, GetTextUnitsResponse, ListDirectoryRequest, ListDirectoryResponse,
-    ListDocumentsRequest, ListDocumentsResponse, ListedDirectoryEntryDto, ListedDocumentDto,
-    LocationDto, NamedSectionBoundaryDto, NamedSectionCandidateDto, NamedSectionMatchKindDto,
-    NamedSectionResolutionDto, NamedSectionResolutionStatusDto, NormalizedRangeDto,
-    OpenDocumentRequest, OpenDocumentResponse, ReadDocumentRequest, ReadDocumentResponse,
-    ReadStreamSegmentDto, SearchCandidateKindDto, SearchDocumentRequest, SearchDocumentResponse,
-    SearchHitDto, SectionNode, StructuralContextKindDto, StructureStreamSegmentDto, TextLocatorDto,
-    TextUnitContentClassDto, TextUnitCoverageDto, TextUnitCoveragePolicyDto, TextUnitDirectionDto,
-    TextUnitItemDto, TextUnitKindDto, TextUnitStreamSegmentDto,
+    GetContextRequest, GetContextResponse, GetDocumentStructureRequest,
+    GetDocumentStructureResponse, GetTextUnitsRequest, GetTextUnitsResponse, ListDirectoryRequest,
+    ListDirectoryResponse, ListDocumentsRequest, ListDocumentsResponse, ListedDirectoryEntryDto,
+    ListedDocumentDto, LocationDto, NamedSectionBoundaryDto, NamedSectionCandidateDto,
+    NamedSectionMatchKindDto, NamedSectionResolutionDto, NamedSectionResolutionStatusDto,
+    NormalizedRangeDto, OpenDocumentRequest, OpenDocumentResponse, ReadDocumentRequest,
+    ReadDocumentResponse, ReadStreamSegmentDto, SearchCandidateKindDto, SearchDocumentRequest,
+    SearchDocumentResponse, SearchHitDto, SectionNode, StructuralContextKindDto,
+    StructureStreamSegmentDto, TextLocatorDto, TextUnitContentClassDto, TextUnitCoverageDto,
+    TextUnitCoveragePolicyDto, TextUnitDirectionDto, TextUnitItemDto, TextUnitKindDto,
+    TextUnitStreamSegmentDto,
 };
 use super::source_view_contracts::{
     GetSourceViewRequest, GetSourceViewResponse, SourceViewRepresentationDto,
@@ -294,8 +295,8 @@ impl ReadingMcpServer {
                         "named section resolution requires expected_content_hash".into(),
                     ))
                 })?;
-                let expected_normalized_document_hash =
-                    expected_normalized_document_hash.ok_or_else(|| {
+                let expected_normalized_document_hash = expected_normalized_document_hash
+                    .ok_or_else(|| {
                         to_mcp_error(ApplicationError::InvalidRequest(
                             "named section resolution requires expected_normalized_document_hash"
                                 .into(),
@@ -736,9 +737,7 @@ impl GetReadDocumentResponse {
 )]
 impl ServerHandler for ReadingMcpServer {}
 
-fn named_section_resolution_dto(
-    resolution: &NamedSectionResolution,
-) -> NamedSectionResolutionDto {
+fn named_section_resolution_dto(resolution: &NamedSectionResolution) -> NamedSectionResolutionDto {
     NamedSectionResolutionDto {
         version: resolution.version.clone(),
         status: named_section_status_dto(resolution.status),

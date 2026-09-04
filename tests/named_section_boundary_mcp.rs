@@ -85,12 +85,17 @@ FUTURE_BODY_SENTINEL_SHOULD_NOT_APPEAR_IN_STRUCTURE.
     let response = raw
         .into_typed::<GetDocumentStructureResponse>()
         .expect("structure response should deserialize");
-    assert_eq!(response.normalization_version, "reading-mcp-normalization/v7");
+    assert_eq!(
+        response.normalization_version,
+        "reading-mcp-normalization/v7"
+    );
     let resolution = response
         .resolution
         .expect("named-section resolution metadata should be present");
     assert_eq!(resolution.status, NamedSectionResolutionStatusDto::Resolved);
-    let matched = resolution.matched.expect("resolved metadata should include match");
+    let matched = resolution
+        .matched
+        .expect("resolved metadata should include match");
     assert_eq!(matched.title, "1 Introduction");
     assert!(matched.start_locator.normalized_range.is_none());
     let boundary = resolution

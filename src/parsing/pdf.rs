@@ -334,7 +334,8 @@ fn parse_numbered_heading(line: &str) -> Option<(Vec<u32>, String)> {
     let number_path = number
         .split('.')
         .map(|part| {
-            if part.is_empty() || part.len() > 3 || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            if part.is_empty() || part.len() > 3 || !part.bytes().all(|byte| byte.is_ascii_digit())
+            {
                 return None;
             }
             let value = part.parse::<u32>().ok()?;

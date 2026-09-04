@@ -32,7 +32,10 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
         .expect("coherent numbered headings should parse");
 
     assert_eq!(
-        parsed.metadata.get("pdf_structure_provenance").map(String::as_str),
+        parsed
+            .metadata
+            .get("pdf_structure_provenance")
+            .map(String::as_str),
         Some("inferred_numbered_headings")
     );
     assert_eq!(
@@ -43,7 +46,11 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
         Some("pdf-numbered-heading-inference/v1")
     );
     assert_eq!(parsed.root_sections[0].id.0, "section://preamble");
-    assert!(parsed.root_sections[0].content.contains("Conference paper title"));
+    assert!(
+        parsed.root_sections[0]
+            .content
+            .contains("Conference paper title")
+    );
 
     let introduction = parsed
         .root_sections
@@ -55,7 +62,11 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
     assert_eq!(introduction.location.page, Some(1));
     assert_eq!(introduction.children.len(), 1);
     assert_eq!(introduction.children[0].title, "1.1 Scope");
-    assert!(introduction.children[0].content.contains("Scope body sentinel"));
+    assert!(
+        introduction.children[0]
+            .content
+            .contains("Scope body sentinel")
+    );
 
     let replication = parsed
         .root_sections
@@ -92,10 +103,7 @@ fn build_multiline_pdf(page_lines: &[&[&str]]) -> Vec<u8> {
             if index > 0 {
                 operations.push(Operation::new("T*", vec![]));
             }
-            operations.push(Operation::new(
-                "Tj",
-                vec![Object::string_literal(*line)],
-            ));
+            operations.push(Operation::new("Tj", vec![Object::string_literal(*line)]));
         }
         operations.push(Operation::new("ET", vec![]));
 

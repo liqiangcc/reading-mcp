@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use reading_mcp::application::get_document_structure::{
-    NAMED_SECTION_RESOLUTION_VERSION, GetDocumentStructureUseCase, NamedSectionResolutionStatus,
+    GetDocumentStructureUseCase, NAMED_SECTION_RESOLUTION_VERSION, NamedSectionResolutionStatus,
     ResolveNamedSectionCommand,
 };
 use reading_mcp::application::get_text_units::{
@@ -15,7 +15,8 @@ use reading_mcp::domain::{DocumentSource, MediaType};
 use reading_mcp::infrastructure::InMemoryDocumentRepository;
 use reading_mcp::parsing::PdfParser;
 
-const RAFT_URL: &str = "https://www.usenix.org/system/files/conference/atc14/atc14-paper-ongaro.pdf";
+const RAFT_URL: &str =
+    "https://www.usenix.org/system/files/conference/atc14/atc14-paper-ongaro.pdf";
 const BASELINE_DOCUMENT_ID: &str =
     "doc:sha256:6b910bccce5cabc0f7e14f4c131c361edc055fb5b0703b0a1aac2049a379bbdf";
 const BASELINE_CONTENT_HASH: &str =
@@ -81,7 +82,10 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
             })
             .await
             .expect("Raft Section 1 should resolve structurally");
-        assert_eq!(result.resolution.status, NamedSectionResolutionStatus::Resolved);
+        assert_eq!(
+            result.resolution.status,
+            NamedSectionResolutionStatus::Resolved
+        );
         let matched = result
             .resolution
             .matched

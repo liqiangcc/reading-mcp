@@ -63,9 +63,7 @@ async fn sqlite_document_repository_rejects_unversioned_and_stale_normalization(
         .await
         .expect_err("v6 persisted canonical facts must not be reinterpreted as v7");
     assert!(matches!(error, ApplicationError::RepositoryFailed(_)));
-    assert!(error
-        .to_string()
-        .contains("reading-mcp-normalization/v6"));
+    assert!(error.to_string().contains("reading-mcp-normalization/v6"));
 }
 
 fn rewrite_normalization_version(

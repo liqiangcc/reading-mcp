@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use reading_mcp::application::get_document_structure::{
-    NAMED_SECTION_RESOLUTION_VERSION, GetDocumentStructureUseCase, NamedSectionMatchKind,
+    GetDocumentStructureUseCase, NAMED_SECTION_RESOLUTION_VERSION, NamedSectionMatchKind,
     NamedSectionResolutionStatus, ResolveNamedSectionCommand,
 };
 use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
@@ -38,7 +38,10 @@ async fn resolves_exact_prefixed_and_title_only_with_executable_boundary() {
             .await
             .expect("named section should resolve");
 
-        assert_eq!(result.resolution.status, NamedSectionResolutionStatus::Resolved);
+        assert_eq!(
+            result.resolution.status,
+            NamedSectionResolutionStatus::Resolved
+        );
         assert_eq!(result.resolution.match_kind, Some(expected_kind));
         let matched = result
             .resolution
@@ -191,13 +194,7 @@ async fn epub_subtree_boundary_uses_body_order_intervals_not_tree_preorder() {
         )],
     );
     parent.children[0].parent_id = Some(parent.id.clone());
-    let sibling = section(
-        "section://sibling",
-        "2 Sibling",
-        1,
-        "sibling body",
-        vec![],
-    );
+    let sibling = section("section://sibling", "2 Sibling", 1, "sibling body", vec![]);
     let mut document = Document {
         id: DocumentId("doc:epub-boundary".into()),
         source: DocumentSource("memory:boundary.epub".into()),
@@ -288,13 +285,7 @@ fn numbered_document() -> Document {
     }
 }
 
-fn section(
-    id: &str,
-    title: &str,
-    level: u8,
-    content: &str,
-    children: Vec<Section>,
-) -> Section {
+fn section(id: &str, title: &str, level: u8, content: &str, children: Vec<Section>) -> Section {
     Section {
         id: SectionId(id.into()),
         parent_id: None,

@@ -1,0 +1,52 @@
+name: v0.3.0 release prep once
+"on":
+  push:
+    branches:
+      - release/v0.3.0-prep
+permissions:
+  contents: write
+jobs:
+  prep:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v0.3.0-prep
+      - name: Update release identity and self-delete
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cargo = Path('Cargo.toml')
+          s = cargo.read_text()
+          old = 'name = "reading-mcp"\nversion = "0.2.0"'
+          new = 'name = "reading-mcp"\nversion = "0.3.0"'
+          if s.count(old) != 1:
+              raise SystemExit('Cargo.toml release identity not unique')
+          cargo.write_text(s.replace(old, new, 1))
+
+          lock = Path('Cargo.lock')
+          s = lock.read_text()
+          old = '[[package]]\nname = "reading-mcp"\nversion = "0.2.0"'
+          new = '[[package]]\nname = "reading-mcp"\nversion = "0.3.0"'
+          if s.count(old) != 1:
+              raise SystemExit('Cargo.lock root package identity not unique')
+          lock.write_text(s.replace(old, new, 1))
+
+          server = Path('src/mcp/server.rs')
+          s = server.read_text()
+          old = 'name = "reading-mcp",\n    version = "0.2.0",'
+          new = 'name = "reading-mcp",\n    version = "0.3.0",'
+          if s.count(old) != 1:
+              raise SystemExit('MCP server release identity not unique')
+          server.write_text(s.replace(old, new, 1))
+          PY
+          rm .github/workflows/v0-3-0-release-prep-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.toml Cargo.lock src/mcp/server.rs .github/workflows/v0-3-0-release-prep-once.yml
+          git commit -m 'chore: prepare v0.3.0 release identity'
+          git push origin HEAD:release/v0.3.0-prep

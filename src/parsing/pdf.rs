@@ -12,6 +12,15 @@ use crate::domain::{
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
+const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
+const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";
+const PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS: &str = "inferred_numbered_headings";
+const PDF_STRUCTURE_PAGE_FALLBACK: &str = "page_fallback";
+const PDF_HEADING_INFERENCE_VERSION_METADATA_KEY: &str = "pdf_heading_inference_version";
+const PDF_HEADING_INFERENCE_COUNT_METADATA_KEY: &str = "pdf_heading_inference_count";
+const PDF_HEADING_INFERENCE_VERSION: &str = "pdf-numbered-heading-inference/v1";
+const MAX_INFERRED_HEADING_CHARS: usize = 160;
+const MAX_INFERRED_HEADING_WORDS: usize = 24;
 
 #[derive(Default)]
 pub struct PdfParser;
@@ -27,6 +36,38 @@ struct PdfTocEntry {
     level: u8,
     title: String,
     page: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PdfHeadingCandidate {
+    number_path: Vec<u32>,
+    title: String,
+    page: u32,
+    global_line: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PdfSourceLine {
+    page: u32,
+    global_line: usize,
+    text: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PageFragments(Vec<(u32, String)>);
+
+impl PageFragments {
+    fn push_line(&mut self, page: u32, text: &str) {
+        match self.0.last_mut() {
+            Some((last_page, fragment)) if *last_page == page => {
+                if !fragment.is_empty() {
+                    fragment.push('\n');
+                }
+                fragment.push_str(text);
+            }
+            _ => self.0.push((page, text.to_string())),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -92,8 +133,37 @@ impl Parser for PdfParser {
         }
 
         let (root_sections, source_bindings) = match toc {
-            Some(entries) => build_toc_sections(&entries, &pages, max_page),
-            None => build_page_sections(&pages),
+            Some(entries) => {
+                metadata.insert(
+                    PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                    PDF_STRUCTURE_NATIVE_TOC.into(),
+                );
+                build_toc_sections(&entries, &pages, max_page)
+            }
+            None => match infer_numbered_headings(&pages) {
+                Some(headings) => {
+                    metadata.insert(
+                        PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                        PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS.into(),
+                    );
+                    metadata.insert(
+                        PDF_HEADING_INFERENCE_VERSION_METADATA_KEY.into(),
+                        PDF_HEADING_INFERENCE_VERSION.into(),
+                    );
+                    metadata.insert(
+                        PDF_HEADING_INFERENCE_COUNT_METADATA_KEY.into(),
+                        headings.len().to_string(),
+                    );
+                    build_inferred_heading_sections(&headings, &pages)
+                }
+                None => {
+                    metadata.insert(
+                        PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                        PDF_STRUCTURE_PAGE_FALLBACK.into(),
+                    );
+                    build_page_sections(&pages)
+                }
+            },
         };
 
         let fallback_title = title_from_metadata(&metadata, &resource.final_source);
@@ -176,6 +246,265 @@ fn normalize_toc(entries: &[TocType], max_page: u32) -> Vec<PdfTocEntry> {
             })
         })
         .collect()
+}
+
+fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate>> {
+    let lines = source_lines(pages);
+    let parsed = lines
+        .iter()
+        .filter_map(|line| {
+            parse_numbered_heading(&line.text).map(|(number_path, title)| PdfHeadingCandidate {
+                number_path,
+                title,
+                page: line.page,
+                global_line: line.global_line,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut accepted = Vec::new();
+    let mut expected_top = 1_u32;
+    let mut current_top = None;
+    let mut started = false;
+
+    for candidate in parsed {
+        let top = candidate.number_path[0];
+        if candidate.number_path.len() == 1 {
+            if top == expected_top {
+                started = true;
+                current_top = Some(top);
+                expected_top = expected_top.saturating_add(1);
+                accepted.push(candidate);
+            } else if started && top > expected_top {
+                break;
+            }
+            continue;
+        }
+
+        if started
+            && current_top == Some(top)
+            && has_parent_heading(&accepted, &candidate.number_path)
+        {
+            accepted.push(candidate);
+        }
+    }
+
+    let top_level_count = accepted
+        .iter()
+        .filter(|candidate| candidate.number_path.len() == 1)
+        .count();
+    (top_level_count >= 2).then_some(accepted)
+}
+
+fn source_lines(pages: &[PageText]) -> Vec<PdfSourceLine> {
+    let mut lines = Vec::new();
+    let mut global_line = 0_usize;
+    for page in pages {
+        for text in page.text.lines() {
+            lines.push(PdfSourceLine {
+                page: page.number,
+                global_line,
+                text: text.to_string(),
+            });
+            global_line = global_line.saturating_add(1);
+        }
+    }
+    lines
+}
+
+fn parse_numbered_heading(line: &str) -> Option<(Vec<u32>, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.chars().count() > MAX_INFERRED_HEADING_CHARS {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let raw_number = parts.next()?;
+    let title = parts.collect::<Vec<_>>().join(" ");
+    if title.is_empty()
+        || title.split_whitespace().count() > MAX_INFERRED_HEADING_WORDS
+        || !title.chars().any(char::is_alphabetic)
+    {
+        return None;
+    }
+
+    let number = raw_number.trim_end_matches('.');
+    if number.is_empty() {
+        return None;
+    }
+    let number_path = number
+        .split('.')
+        .map(|part| {
+            if part.is_empty() || part.len() > 3 || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let value = part.parse::<u32>().ok()?;
+            (value > 0).then_some(value)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if number_path.is_empty() || number_path.len() > 6 {
+        return None;
+    }
+    Some((number_path, format!("{} {}", number, title)))
+}
+
+fn has_parent_heading(accepted: &[PdfHeadingCandidate], path: &[u32]) -> bool {
+    if path.len() <= 1 {
+        return true;
+    }
+    let parent = &path[..path.len() - 1];
+    accepted
+        .iter()
+        .rev()
+        .any(|candidate| candidate.number_path == parent)
+}
+
+fn build_inferred_heading_sections(
+    headings: &[PdfHeadingCandidate],
+    pages: &[PageText],
+) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
+    let lines = source_lines(pages);
+    let heading_by_line = headings
+        .iter()
+        .enumerate()
+        .map(|(index, heading)| (heading.global_line, index))
+        .collect::<HashMap<_, _>>();
+
+    let mut fragments = vec![PageFragments::default(); headings.len()];
+    let mut preamble = PageFragments::default();
+    let mut current_heading = None;
+    for line in &lines {
+        if let Some(index) = heading_by_line.get(&line.global_line).copied() {
+            current_heading = Some(index);
+            continue;
+        }
+        match current_heading {
+            Some(index) => fragments[index].push_line(line.page, &line.text),
+            None => preamble.push_line(line.page, &line.text),
+        }
+    }
+
+    let mut nodes = Vec::<SectionNode>::with_capacity(headings.len());
+    let mut id_counts = HashMap::<String, usize>::new();
+    for (index, heading) in headings.iter().enumerate() {
+        let parent = if heading.number_path.len() == 1 {
+            None
+        } else {
+            let parent_path = &heading.number_path[..heading.number_path.len() - 1];
+            headings[..index]
+                .iter()
+                .rposition(|candidate| candidate.number_path == parent_path)
+        };
+        let mut path = parent
+            .map(|parent_index| nodes[parent_index].path.clone())
+            .unwrap_or_default();
+        path.push(heading.title.clone());
+        let base_id = format!(
+            "section://{}",
+            path.iter()
+                .map(|segment| slugify(segment))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let count = id_counts.entry(base_id.clone()).or_insert(0);
+        *count += 1;
+        let id = if *count == 1 {
+            base_id
+        } else {
+            format!("{base_id}-{}", *count)
+        };
+        nodes.push(SectionNode {
+            id: SectionId(id),
+            parent,
+            title: heading.title.clone(),
+            level: heading.number_path.len() as u8,
+            start_page: heading.page,
+            content: String::new(),
+            location: Location::default(),
+            path,
+        });
+    }
+
+    let mut bindings = Vec::new();
+    for (index, section_fragments) in fragments.iter().enumerate() {
+        let (content, section_bindings, end_page) =
+            content_and_bindings_from_fragments(section_fragments, &nodes[index].id);
+        bindings.extend(section_bindings);
+        nodes[index].content = content;
+        nodes[index].location = Location {
+            page: Some(nodes[index].start_page),
+            chapter: nodes[index].path.first().cloned(),
+            section_path: nodes[index].path.clone(),
+            native_location: Some(pdf_page_range_location(nodes[index].start_page, end_page)),
+            ..Location::default()
+        };
+    }
+
+    let mut sections = Vec::new();
+    let (preamble_content, preamble_bindings, preamble_end_page) =
+        content_and_bindings_from_fragments(&preamble, &SectionId("section://preamble".into()));
+    if !preamble_content.trim().is_empty() {
+        let start_page = preamble.0.first().map(|(page, _)| *page).unwrap_or(1);
+        sections.push(Section {
+            id: SectionId("section://preamble".into()),
+            parent_id: None,
+            title: "Preamble".into(),
+            level: 1,
+            content: preamble_content,
+            location: Location {
+                page: Some(start_page),
+                section_path: vec!["Preamble".into()],
+                native_location: Some(pdf_page_range_location(start_page, preamble_end_page)),
+                ..Location::default()
+            },
+            children: Vec::new(),
+        });
+        bindings.extend(preamble_bindings);
+    }
+    sections.extend(
+        nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.parent.is_none())
+            .map(|(index, _)| build_section(index, &nodes)),
+    );
+    (sections, bindings)
+}
+
+fn content_and_bindings_from_fragments(
+    fragments: &PageFragments,
+    owner_section_id: &SectionId,
+) -> (String, Vec<OriginalSourceBinding>, u32) {
+    let mut content = String::new();
+    let mut bindings = Vec::new();
+    let mut end_page = fragments.0.first().map(|(page, _)| *page).unwrap_or(1);
+    for (page, fragment) in &fragments.0 {
+        let fragment = fragment.trim();
+        if fragment.is_empty() {
+            continue;
+        }
+        if !content.is_empty() {
+            content.push_str("\n\n");
+        }
+        let start = content.chars().count();
+        content.push_str(fragment);
+        let end = content.chars().count();
+        bindings.push(OriginalSourceBinding {
+            owner_section_id: owner_section_id.clone(),
+            normalized_range: NormalizedTextRange::new(start, end)
+                .expect("inferred PDF fragment range must be ordered"),
+            target: OriginalSourceTarget::Page { page_number: *page },
+        });
+        end_page = *page;
+    }
+    (content, bindings, end_page)
+}
+
+fn pdf_page_range_location(start_page: u32, end_page: u32) -> String {
+    if end_page > start_page {
+        format!("pdf:pages:{start_page}-{end_page}")
+    } else {
+        format!("pdf:page:{start_page}")
+    }
 }
 
 fn build_page_sections(pages: &[PageText]) -> (Vec<Section>, Vec<OriginalSourceBinding>) {

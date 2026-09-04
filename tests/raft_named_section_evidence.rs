@@ -11,7 +11,7 @@ use reading_mcp::application::get_text_units::{
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievedResource,
 };
-use reading_mcp::domain::{DocumentSource, MediaType};
+use reading_mcp::domain::{DocumentSource, MediaType, NORMALIZATION_VERSION};
 use reading_mcp::infrastructure::InMemoryDocumentRepository;
 use reading_mcp::parsing::PdfParser;
 
@@ -50,6 +50,7 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
 
     assert_eq!(document.id.0, BASELINE_DOCUMENT_ID);
     assert_eq!(document.content_hash.0, BASELINE_CONTENT_HASH);
+    assert_eq!(NORMALIZATION_VERSION, "reading-mcp-normalization/v8");
     assert_eq!(
         document
             .metadata
@@ -57,11 +58,35 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
             .map(String::as_str),
         Some("inferred_numbered_headings")
     );
+    assert_eq!(
+        document
+            .metadata
+            .get("pdf_front_matter_inference_version")
+            .map(String::as_str),
+        Some("pdf-front-matter-inference/v1")
+    );
+    assert_eq!(
+        document
+            .metadata
+            .get("pdf_front_matter_abstract_count")
+            .map(String::as_str),
+        Some("1"),
+        "real Raft must promote exactly one reliable front-matter Abstract"
+    );
+    let abstract_section = document
+        .root_sections
+        .iter()
+        .find(|section| section.id.0 == "section://abstract")
+        .expect("real Raft must expose Abstract as canonical structure");
+    assert_eq!(abstract_section.title, "Abstract");
+    assert!(!abstract_section.content.trim().is_empty());
+    assert!(!abstract_section.content.contains("1 Introduction"));
+
     let normalized_hash = document.normalized_document_hash();
     assert_ne!(normalized_hash.0, V6_NORMALIZED_HASH);
     println!(
-        "EVIDENCE_A document_id={} content_hash={} normalized_document_hash={}",
-        document.id.0, document.content_hash.0, normalized_hash.0
+        "EVIDENCE_A document_id={} content_hash={} normalized_document_hash={} normalization_version={}",
+        document.id.0, document.content_hash.0, normalized_hash.0, NORMALIZATION_VERSION
     );
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
@@ -70,6 +95,55 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
         .await
         .expect("Raft canonical document should save");
     let structure = GetDocumentStructureUseCase::new(repository.clone());
+
+    let abstract_resolution = structure
+        .resolve_named_section(ResolveNamedSectionCommand {
+            document_id: document.id.clone(),
+            query: "Abstract".into(),
+            expected_content_hash: document.content_hash.0.clone(),
+            expected_normalized_document_hash: normalized_hash.0.clone(),
+            expected_structure_resolution_version: Some(NAMED_SECTION_RESOLUTION_VERSION.into()),
+        })
+        .await
+        .expect("Raft Abstract should resolve structurally");
+    assert_eq!(
+        abstract_resolution.resolution.status,
+        NamedSectionResolutionStatus::Resolved
+    );
+    let abstract_match = abstract_resolution
+        .resolution
+        .matched
+        .expect("resolved Abstract metadata should be present");
+    assert_eq!(abstract_match.section_id.0, "section://abstract");
+    assert_eq!(abstract_match.title, "Abstract");
+    assert!(abstract_match.start_locator.normalized_range.is_none());
+    let abstract_boundary = abstract_resolution
+        .resolution
+        .boundary
+        .expect("Abstract should have an executable boundary");
+    let introduction_owner = abstract_boundary
+        .end_exclusive
+        .as_ref()
+        .expect("Abstract should stop before Introduction");
+    assert_eq!(introduction_owner.title, "1 Introduction");
+    assert!(
+        abstract_boundary.intervals.iter().all(|interval| {
+            introduction_owner.body_order < interval.start
+                || introduction_owner.body_order >= interval.end
+        }),
+        "Introduction owner must be outside the Abstract-only allowed intervals"
+    );
+    println!(
+        "EVIDENCE_ABSTRACT section_id={} intervals={:?} next_owner={} next_body_order={}",
+        abstract_match.section_id.0,
+        abstract_boundary
+            .intervals
+            .iter()
+            .map(|interval| (interval.start, interval.end))
+            .collect::<Vec<_>>(),
+        introduction_owner.title,
+        introduction_owner.body_order
+    );
 
     let mut resolved_section_id = None;
     let mut resolved_boundary = None;
@@ -144,9 +218,30 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
             expected_structure_resolution_version: Some(NAMED_SECTION_RESOLUTION_VERSION.into()),
         })
         .await
-        .expect_err("v6 normalized identity must fail closed after normalization v7");
+        .expect_err("v6 normalized identity must fail closed after normalization v8");
     assert!(matches!(stale, ApplicationError::StaleStructure(_)));
     println!("EVIDENCE_E stale_v6_identity=PASS");
+
+    let abstract_reveal = GetTextUnitsUseCase::new(repository.clone())
+        .execute(GetTextUnitsCommand {
+            document_id: document.id.clone(),
+            section_id: abstract_match.section_id.clone(),
+            requested_kind: RequestedTextUnitKind::Sentence,
+            direction: TextUnitDirection::Forward,
+            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
+            max_items: 1,
+            max_chars: None,
+            cursor: None,
+        })
+        .await
+        .expect("explicit Abstract-only body reveal should remain available");
+    assert_eq!(abstract_reveal.items.len(), 1);
+    assert_eq!(
+        abstract_reveal.items[0].locator.owner_section_id,
+        abstract_match.section_id
+    );
+    assert!(!abstract_reveal.items[0].text.is_empty());
+    println!("EVIDENCE_ABSTRACT_BODY explicit_abstract_body_reveal=PASS");
 
     let revealed = GetTextUnitsUseCase::new(repository)
         .execute(GetTextUnitsCommand {
@@ -186,7 +281,7 @@ async fn real_kafka_pdf_regression_preserves_raw_identity_and_structure_navigati
             metadata: Default::default(),
         })
         .await
-        .expect("real Kafka PDF should still parse under normalization v7");
+        .expect("real Kafka PDF should still parse under normalization v8");
 
     assert_eq!(document.content_hash.0, KAFKA_CONTENT_HASH);
     assert_eq!(

@@ -198,6 +198,7 @@ fn binding_page(binding: &OriginalSourceBinding) -> Option<u32> {
     }
 }
 
+#[cfg(test)]
 fn split_abstract_line(content: &str) -> Option<(String, String)> {
     let split = split_abstract_line_ranges(content)?;
     Some((split.before, split.after))

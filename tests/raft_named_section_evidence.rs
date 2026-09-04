@@ -23,8 +23,7 @@ const BASELINE_CONTENT_HASH: &str =
     "sha256:e6345fcba31cbc747ab41755aa62654859c4403dbb687da0021079f78181a7b5";
 const V6_NORMALIZED_HASH: &str =
     "sha256:bced1dc57972b784215245749745ab33d34267463a451384c9372aa8e145432f";
-const KAFKA_URL: &str =
-    "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf?msockid=34f2cedc4c716aeb0399dbe34d3b6bcf";
+const KAFKA_URL: &str = "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf?msockid=34f2cedc4c716aeb0399dbe34d3b6bcf";
 const KAFKA_CONTENT_HASH: &str =
     "sha256:4abdeba2503eb20a5d7ed84aa8e7680bcbe3088541712626315deae0b07c2821";
 

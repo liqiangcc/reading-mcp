@@ -207,13 +207,74 @@ pub(super) fn extract_text_fragment_evidence(
     (evidence, errors)
 }
 
+pub(super) fn abstract_heading_inference_status(
+    evidence: &[PdfTextFragmentEvidence],
+    first_section_page: u32,
+    first_section_title: &str,
+) -> &'static str {
+    let Some(first_page) = evidence.iter().map(|item| item.page).min() else {
+        return "no_layout_evidence";
+    };
+    if first_section_page != first_page {
+        return "first_section_not_on_first_page";
+    }
+
+    let lines = layout_lines(evidence);
+    let section_label = strip_number_prefix(first_section_title);
+    let Some(boundary_index) = lines.iter().position(|line| {
+        line.page == first_section_page
+            && (same_heading_text(&line.text, first_section_title)
+                || same_heading_text(&line.text, section_label))
+    }) else {
+        return "first_section_layout_not_found";
+    };
+
+    let candidates = lines[..boundary_index]
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.page == first_page && normalized_heading_text(&line.text) == "abstract"
+        })
+        .collect::<Vec<_>>();
+    let [(candidate_index, candidate)] = candidates.as_slice() else {
+        return "abstract_candidate_count_not_one";
+    };
+
+    let Some(body) = lines[candidate_index + 1..boundary_index]
+        .iter()
+        .find(|line| {
+            line.page == candidate.page
+                && line
+                    .text
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .count()
+                    >= 12
+        })
+    else {
+        return "abstract_body_layout_not_found";
+    };
+
+    if !has_distinct_heading_style(candidate, body) {
+        return "abstract_style_not_distinct";
+    }
+    if let (Some(heading_y), Some(body_y)) = (candidate.y, body.y)
+        && heading_y + 0.5 < body_y
+    {
+        return "abstract_position_invalid";
+    }
+
+    "resolved"
+}
+
 pub(super) fn infer_abstract_heading<'a>(
     evidence: &'a [PdfTextFragmentEvidence],
     first_section_page: u32,
     first_section_title: &str,
 ) -> Option<&'a PdfTextFragmentEvidence> {
-    let first_page = evidence.iter().map(|item| item.page).min()?;
-    if first_section_page != first_page {
+    if abstract_heading_inference_status(evidence, first_section_page, first_section_title)
+        != "resolved"
+    {
         return None;
     }
 
@@ -224,40 +285,10 @@ pub(super) fn infer_abstract_heading<'a>(
             && (same_heading_text(&line.text, first_section_title)
                 || same_heading_text(&line.text, section_label))
     })?;
-
-    let candidates = lines[..boundary_index]
+    lines[..boundary_index]
         .iter()
-        .enumerate()
-        .filter(|(_, line)| {
-            line.page == first_page && normalized_heading_text(&line.text) == "abstract"
-        })
-        .collect::<Vec<_>>();
-    let [(candidate_index, candidate)] = candidates.as_slice() else {
-        return None;
-    };
-
-    let body = lines[candidate_index + 1..boundary_index]
-        .iter()
-        .find(|line| {
-            line.page == candidate.page
-                && line
-                    .text
-                    .chars()
-                    .filter(|character| !character.is_whitespace())
-                    .count()
-                    >= 12
-        })?;
-
-    if !has_distinct_heading_style(candidate, body) {
-        return None;
-    }
-    if let (Some(heading_y), Some(body_y)) = (candidate.y, body.y)
-        && heading_y + 0.5 < body_y
-    {
-        return None;
-    }
-
-    Some(candidate.first_fragment)
+        .find(|line| normalized_heading_text(&line.text) == "abstract")
+        .map(|line| line.first_fragment)
 }
 
 fn layout_lines(evidence: &[PdfTextFragmentEvidence]) -> Vec<PdfTextLineEvidence<'_>> {
@@ -408,7 +439,7 @@ fn decode_text_object(
 
 #[cfg(test)]
 mod tests {
-    use super::{PdfTextFragmentEvidence, infer_abstract_heading};
+    use super::{PdfTextFragmentEvidence, abstract_heading_inference_status, infer_abstract_heading};
 
     fn fragment(
         sequence_index: usize,
@@ -444,6 +475,10 @@ mod tests {
             fragment(4, "Introduction", "FHeading", 12.0, 640.0),
         ];
 
+        assert_eq!(
+            abstract_heading_inference_status(&evidence, 1, "1 Introduction"),
+            "resolved"
+        );
         let candidate = infer_abstract_heading(&evidence, 1, "1 Introduction")
             .expect("split Abstract layout line should resolve");
         assert_eq!(candidate.sequence_index, 0);
@@ -463,6 +498,10 @@ mod tests {
             fragment(2, "1 Introduction", "FHeading", 12.0, 640.0),
         ];
 
+        assert_eq!(
+            abstract_heading_inference_status(&evidence, 1, "1 Introduction"),
+            "abstract_style_not_distinct"
+        );
         assert!(infer_abstract_heading(&evidence, 1, "1 Introduction").is_none());
     }
 }

@@ -38,16 +38,7 @@ jobs:
             "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf" \
             --output "$kafka" > /tmp/kafka-curl.log 2>&1
           kafka_curl_status=$?
-          shape_status=125
           test_status=125
-          if [ "$raft_curl_status" -eq 0 ]; then
-            READING_MCP_RAFT_EVIDENCE_PDF="$raft" \
-              cargo test --locked --test raft_heading_shape_diagnostic -- --ignored --nocapture \
-              > /tmp/issue69-heading-shape.log 2>&1
-            shape_status=$?
-          else
-            : > /tmp/issue69-heading-shape.log
-          fi
           if [ "$raft_curl_status" -eq 0 ] && [ "$kafka_curl_status" -eq 0 ]; then
             READING_MCP_RAFT_EVIDENCE_PDF="$raft" \
             READING_MCP_KAFKA_EVIDENCE_PDF="$kafka" \
@@ -57,19 +48,115 @@ jobs:
           else
             : > /tmp/issue69-real-source-test.log
           fi
+
+          probe_status=125
+          : > /tmp/issue69-heading-probe.log
+          if [ "$raft_curl_status" -eq 0 ]; then
+            mkdir -p examples
+            cat > examples/issue69_heading_probe.rs <<'RS'
+          use lopdf::Document;
+
+          const LIMIT: usize = 16 * 1024 * 1024;
+
+          fn is_designator(token: &str) -> bool {
+              let token = token.trim_end_matches('.');
+              !token.is_empty()
+                  && token
+                      .split('.')
+                      .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+          }
+
+          fn candidate(tokens: &[&str], start: usize) -> String {
+              tokens[start..tokens.len().min(start + 7)].join(" ")
+          }
+
+          fn main() {
+              let path = std::env::var("READING_MCP_RAFT_EVIDENCE_PDF").unwrap();
+              let pdf = Document::load(path).unwrap();
+              for page in pdf.get_pages().keys().copied() {
+                  let text = pdf.extract_text_with_limit(&[page], LIMIT).unwrap_or_default();
+                  let lines = text.lines().collect::<Vec<_>>();
+                  for (line_index, raw) in lines.iter().enumerate() {
+                      let line = raw.trim();
+                      if line.is_empty() {
+                          continue;
+                      }
+                      let tokens = line.split_whitespace().collect::<Vec<_>>();
+                      if tokens.len() == 1 && is_designator(tokens[0]) {
+                          let next = lines
+                              .iter()
+                              .skip(line_index + 1)
+                              .map(|value| value.trim())
+                              .find(|value| !value.is_empty())
+                              .unwrap_or("");
+                          let next_tokens = next.split_whitespace().collect::<Vec<_>>();
+                          println!(
+                              "SPLIT page={} line={} number={} next={}",
+                              page,
+                              line_index + 1,
+                              tokens[0],
+                              candidate(&next_tokens, 0)
+                          );
+                      }
+                      for (position, token) in tokens.iter().enumerate() {
+                          if is_designator(token)
+                              && position <= 12
+                              && tokens.len() <= 40
+                              && tokens.get(position + 1).is_some_and(|next| {
+                                  next.chars().next().is_some_and(char::is_uppercase)
+                              })
+                          {
+                              println!(
+                                  "INLINE page={} line={} pos={} candidate={}",
+                                  page,
+                                  line_index + 1,
+                                  position,
+                                  candidate(&tokens, position)
+                              );
+                          }
+                      }
+                      if let Some(position) = tokens.iter().position(|token| {
+                          token.trim_matches(|c: char| !c.is_alphanumeric()) == "Introduction"
+                      }) {
+                          let start = position.saturating_sub(2);
+                          println!(
+                              "INTRO page={} line={} pos={} context={}",
+                              page,
+                              line_index + 1,
+                              position,
+                              candidate(&tokens, start)
+                          );
+                      }
+                  }
+              }
+          }
+          RS
+            READING_MCP_RAFT_EVIDENCE_PDF="$raft" \
+              cargo run --quiet --example issue69_heading_probe \
+              > /tmp/issue69-heading-probe.log 2>&1
+            probe_status=$?
+            rm -f examples/issue69_heading_probe.rs
+          fi
+
           {
             echo "raft_curl_status=$raft_curl_status"
             echo "kafka_curl_status=$kafka_curl_status"
-            echo "shape_status=$shape_status"
             echo "test_status=$test_status"
+            echo "probe_status=$probe_status"
             if [ -f "$raft" ]; then sha256sum "$raft" | sed 's#  .*#  RAFT_PDF#'; fi
             if [ -f "$kafka" ]; then sha256sum "$kafka" | sed 's#  .*#  KAFKA_PDF#'; fi
             echo
-            echo "=== HEADING SHAPE (sanitized) ==="
-            grep 'HEADING_SHAPE' /tmp/issue69-heading-shape.log || true
+            echo "=== RAFT CURL tail ==="
+            tail -n 40 /tmp/raft-curl.log
+            echo
+            echo "=== KAFKA CURL tail ==="
+            tail -n 40 /tmp/kafka-curl.log
             echo
             echo "=== REAL-SOURCE TEST tail ==="
-            tail -n 180 /tmp/issue69-real-source-test.log
+            tail -n 260 /tmp/issue69-real-source-test.log
+            echo
+            echo "=== STRUCTURAL HEADING PROBE ==="
+            cat /tmp/issue69-heading-probe.log
           } > issue69-real-source-diagnostic.txt
           exit 0
 

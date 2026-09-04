@@ -9,7 +9,6 @@ on:
       - "src/mcp/contracts.rs"
       - "src/mcp/server.rs"
       - "tests/raft_named_section_evidence.rs"
-      - "tests/kafka_pdf_regression_evidence.rs"
       - ".github/workflows/raft-named-section-evidence.yml"
   push:
     branches:
@@ -21,7 +20,6 @@ on:
       - "src/mcp/contracts.rs"
       - "src/mcp/server.rs"
       - "tests/raft_named_section_evidence.rs"
-      - "tests/kafka_pdf_regression_evidence.rs"
       - ".github/workflows/raft-named-section-evidence.yml"
 
 jobs:
@@ -51,11 +49,6 @@ jobs:
             "https://www.usenix.org/system/files/conference/atc14/atc14-paper-ongaro.pdf" \
             --output "$RUNNER_TEMP/atc14-paper-ongaro.pdf"
 
-      - name: Verify structure-only named-section scope gate
-        env:
-          READING_MCP_RAFT_EVIDENCE_PDF: ${{ runner.temp }}/atc14-paper-ongaro.pdf
-        run: cargo test --locked --test raft_named_section_evidence -- --nocapture
-
       - name: Download canonical Kafka 2011 regression source
         shell: bash
         run: |
@@ -69,7 +62,8 @@ jobs:
             "https://raw.githubusercontent.com/liqiangcc/classic-papers-system-design/9469b1f0e83bfd3d5c59d15c6bfe42074139320e/sources/kafka/kafka-2011-distributed-messaging/paper.pdf" \
             --output "$RUNNER_TEMP/kafka-2011-paper.pdf"
 
-      - name: Verify Kafka PDF structural regression
+      - name: Verify structure-only scope gate and real-source regression
         env:
+          READING_MCP_RAFT_EVIDENCE_PDF: ${{ runner.temp }}/atc14-paper-ongaro.pdf
           READING_MCP_KAFKA_EVIDENCE_PDF: ${{ runner.temp }}/kafka-2011-paper.pdf
-        run: cargo test --locked --test kafka_pdf_regression_evidence -- --nocapture
+        run: cargo test --locked --test raft_named_section_evidence -- --nocapture

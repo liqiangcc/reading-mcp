@@ -10,6 +10,7 @@ mod limited_pdf;
 mod markdown;
 mod openapi;
 mod pdf;
+mod pdf_front_matter;
 mod pdf_layout;
 mod reliability;
 mod router;

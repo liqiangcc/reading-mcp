@@ -1,0 +1,64 @@
+name: Issue 69 diagnostic
+
+on:
+  push:
+    branches:
+      - feat/issue-69-named-section-boundary
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/issue-69-named-section-boundary
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run gates and capture diagnostics
+        shell: bash
+        run: |
+          set +e
+          cargo fmt --all -- --check > /tmp/issue69-fmt.log 2>&1
+          fmt_status=$?
+          cargo clippy --locked --all-targets --all-features -- -D warnings > /tmp/issue69-clippy.log 2>&1
+          clippy_status=$?
+          cargo test --locked --all-features > /tmp/issue69-test.log 2>&1
+          test_status=$?
+          {
+            echo "fmt_status=$fmt_status"
+            echo "clippy_status=$clippy_status"
+            echo "test_status=$test_status"
+            echo
+            echo "=== FMT tail ==="
+            tail -n 120 /tmp/issue69-fmt.log
+            echo
+            echo "=== CLIPPY tail ==="
+            tail -n 240 /tmp/issue69-clippy.log
+            echo
+            echo "=== TEST tail ==="
+            tail -n 300 /tmp/issue69-test.log
+          } > issue69-ci-diagnostic.txt
+          exit 0
+
+      - name: Commit diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add issue69-ci-diagnostic.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "ci: record issue69 diagnostic output"
+          git push origin HEAD:feat/issue-69-named-section-boundary

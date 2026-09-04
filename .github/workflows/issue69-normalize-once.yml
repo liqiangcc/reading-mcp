@@ -33,100 +33,19 @@ jobs:
 
           path = Path("src/application/get_document_structure.rs")
           text = path.read_text(encoding="utf-8")
-          old = '''fn normalize_heading_key(value: &str) -> String {
-              let normalized = value
-                  .chars()
-                  .map(|character| match character {
-                      '-' | '–' | '—' | ':' => ' ',
-                      _ => character,
-                  })
-                  .collect::<String>();
-              normalized.split_whitespace().collect::<Vec<_>>().join(" ")
-          }'''.replace('          ', '')
-          new = '''fn normalize_heading_key(value: &str) -> String {
-              let parts = value.split_whitespace().collect::<Vec<_>>();
-              if parts.is_empty() {
-                  return String::new();
-              }
-              let numeric_index = usize::from(parts[0].eq_ignore_ascii_case("section"));
-              let mut normalized = Vec::with_capacity(parts.len());
-              for (index, part) in parts.into_iter().enumerate() {
-                  if index == numeric_index {
-                      normalized.push(part.trim_end_matches(&['.', ':', '-', '–', '—'][..]));
-                  } else if index == numeric_index.saturating_add(1)
-                      && matches!(part, "-" | "–" | "—" | ":")
-                  {
-                      continue;
-                  } else {
-                      normalized.push(part);
-                  }
-              }
-              normalized.join(" ")
-          }'''.replace('          ', '')
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f"normalize_heading_key: expected one match, got {count}")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          start = text.index("fn normalize_heading_key(value: &str) -> String {")
+          end = text.index("\n\nfn strip_section_prefix", start)
+          new = "fn normalize_heading_key(value: &str) -> String {\n    let parts = value.split_whitespace().collect::<Vec<_>>();\n    if parts.is_empty() {\n        return String::new();\n    }\n    let numeric_index = usize::from(parts[0].eq_ignore_ascii_case(\"section\"));\n    let mut normalized = Vec::with_capacity(parts.len());\n    for (index, part) in parts.into_iter().enumerate() {\n        if index == numeric_index {\n            normalized.push(part.trim_end_matches(&['.', ':', '-', '–', '—'][..]));\n        } else if index == numeric_index.saturating_add(1)\n            && matches!(part, \"-\" | \"–\" | \"—\" | \":\")\n        {\n            continue;\n        } else {\n            normalized.push(part);\n        }\n    }\n    normalized.join(\" \")\n}"
+          path.write_text(text[:start] + new + text[end:], encoding="utf-8")
 
           test = Path("tests/named_section_boundary.rs")
           text = test.read_text(encoding="utf-8")
-          marker = '''fn command_for(
-          '''
-          addition = r'''#[tokio::test]
-          async fn number_separator_is_normalized_but_title_hyphen_is_not_fuzzy() {
-              let document = Document {
-                  id: DocumentId("doc:punctuation".into()),
-                  source: DocumentSource("memory:punctuation.md".into()),
-                  title: "Punctuation".into(),
-                  media_type: MediaType("text/markdown".into()),
-                  content_hash: ContentHash("sha256:punctuation".into()),
-                  metadata: Default::default(),
-                  root_sections: vec![
-                      section(
-                          "section://state-machine",
-                          "1. State-machine Safety",
-                          1,
-                          "body",
-                          vec![],
-                      ),
-                      section("section://next", "2 Next", 1, "next", vec![]),
-                  ],
-              };
-              let normalized = document.normalized_document_hash().0;
-              let repository = repository_with(document.clone()).await;
-              let use_case = GetDocumentStructureUseCase::new(repository);
-
-              let resolved = use_case
-                  .resolve_named_section(command_for(
-                      &document,
-                      &normalized,
-                      "Section 1 — State-machine Safety",
-                  ))
-                  .await
-                  .expect("number separator normalization should resolve");
-              assert_eq!(
-                  resolved.resolution.status,
-                  NamedSectionResolutionStatus::Resolved
-              );
-
-              let not_fuzzy = use_case
-                  .resolve_named_section(command_for(
-                      &document,
-                      &normalized,
-                      "State machine Safety",
-                  ))
-                  .await
-                  .expect("title-only non-match should be explicit");
-              assert_eq!(
-                  not_fuzzy.resolution.status,
-                  NamedSectionResolutionStatus::NotFound
-              );
-          }
-
-          '''.replace('          ', '')
-          if marker not in text:
-              raise SystemExit("named-section test insertion marker not found")
-          test.write_text(text.replace(marker, addition + marker, 1), encoding="utf-8")
+          if "number_separator_is_normalized_but_title_hyphen_is_not_fuzzy" not in text:
+              marker = "fn command_for(\n"
+              addition = "#[tokio::test]\nasync fn number_separator_is_normalized_but_title_hyphen_is_not_fuzzy() {\n    let document = Document {\n        id: DocumentId(\"doc:punctuation\".into()),\n        source: DocumentSource(\"memory:punctuation.md\".into()),\n        title: \"Punctuation\".into(),\n        media_type: MediaType(\"text/markdown\".into()),\n        content_hash: ContentHash(\"sha256:punctuation\".into()),\n        metadata: Default::default(),\n        root_sections: vec![\n            section(\"section://state-machine\", \"1. State-machine Safety\", 1, \"body\", vec![]),\n            section(\"section://next\", \"2 Next\", 1, \"next\", vec![]),\n        ],\n    };\n    let normalized = document.normalized_document_hash().0;\n    let repository = repository_with(document.clone()).await;\n    let use_case = GetDocumentStructureUseCase::new(repository);\n\n    let resolved = use_case\n        .resolve_named_section(command_for(&document, &normalized, \"Section 1 — State-machine Safety\"))\n        .await\n        .expect(\"number separator normalization should resolve\");\n    assert_eq!(resolved.resolution.status, NamedSectionResolutionStatus::Resolved);\n\n    let not_fuzzy = use_case\n        .resolve_named_section(command_for(&document, &normalized, \"State machine Safety\"))\n        .await\n        .expect(\"title-only non-match should be explicit\");\n    assert_eq!(not_fuzzy.resolution.status, NamedSectionResolutionStatus::NotFound);\n}\n\n"
+              if marker not in text:
+                  raise SystemExit("test insertion marker missing")
+              test.write_text(text.replace(marker, addition + marker, 1), encoding="utf-8")
           PY
 
       - name: Format all Rust

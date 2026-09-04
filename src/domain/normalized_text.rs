@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Document, Section};
 
-pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v7";
+pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v8";
 pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v2";
 pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scalar/v1";
 
@@ -179,9 +179,6 @@ fn hash_normalized_block_projection(hasher: &mut Sha256, document: &Document) {
             }
         }
         Err(error) => {
-            // The hash API remains infallible for document-level identity. Invalid declared
-            // block evidence still receives a deterministic identity marker, while TextUnit
-            // materialization separately rejects the invalid map instead of falling back.
             hasher.update(b"invalid\0");
             hash_text(hasher, &error.to_string());
         }

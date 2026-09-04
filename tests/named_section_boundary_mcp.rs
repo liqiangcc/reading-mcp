@@ -87,7 +87,7 @@ FUTURE_BODY_SENTINEL_SHOULD_NOT_APPEAR_IN_STRUCTURE.
         .expect("structure response should deserialize");
     assert_eq!(
         response.normalization_version,
-        "reading-mcp-normalization/v7"
+        "reading-mcp-normalization/v8"
     );
     let resolution = response
         .resolution

@@ -41,7 +41,9 @@ otherwise
 
 推断只使用 deterministic parser text-line / numbering evidence，不使用 LLM、BM25、OCR 或文档特判。
 
-如果证据不足，保持 Page fallback 并让 named-section resolution 返回 `unavailable`；false negative 优先于制造假结构。
+在 numbered-heading fallback 已经可靠成立时，front matter 可以进一步使用 PDF content-stream 中的 layout evidence（例如 font resource、font size、text position）做保守结构化。当前 `pdf-front-matter-inference/v1` 只在 `Abstract` 是 standalone heading、位于首个 top-level numbered section 之前且与后续正文存在可靠 layout 区分时，将其从 `section://preamble` 拆为独立 `section://abstract`。如果 layout evidence 不足、候选不唯一或边界无法证明，则保持 coarse `Preamble`，不使用纯 lexical hit 制造 canonical structure。
+
+如果证据不足，保持 Page/Preamble fallback 并让 named-section resolution 返回 `unavailable`；false negative 优先于制造假结构。
 
 ## 3. Public API
 
@@ -193,17 +195,27 @@ planned_scope = Section 1
 → STOP before Section 2 body reveal
 ```
 
+Abstract-only gate 在可靠 front-matter evidence 下同样成立：
+
+```text
+planned_scope = Abstract
+→ resolve section://abstract structure only
+→ reveal Abstract owned TextUnits
+→ next canonical owner = Section 1
+→ STOP before Section 1 body reveal
+```
+
 ## 7. Identity / stale behavior
 
 当前 addressing-relevant normalization：
 
 ```text
-reading-mcp-normalization/v7
+reading-mcp-normalization/v8
 normalized-document-hash/v2
 text-segmentation/v2
 ```
 
-PDF 从 Page-owned structure 迁移到可信 heading-owned structure 会改变 canonical `Section` facts，因此 normalized identity 会改变。
+PDF 从 Page-owned structure 迁移到可信 heading-owned structure，或将可信 `Abstract` ownership 从 `Preamble` 拆为独立 canonical Section，都会改变 canonical `Section` facts，因此 normalized identity 会改变。
 
 named-section request 中以下任一不匹配都会 fail closed：
 

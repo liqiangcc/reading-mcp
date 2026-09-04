@@ -258,7 +258,7 @@ impl GetDocumentStructureUseCase {
             Some(encode_structure_cursor(StructureCursorClaims::new(
                 document.id.0.clone(),
                 document.content_hash.0.clone(),
-                normalized_hash.0,
+                normalized_hash.0.clone(),
                 scope.root_section_id.as_ref().map(|id| id.0.clone()),
                 scope.effective_max_depth,
                 end_index,
@@ -446,10 +446,7 @@ fn normalize_heading_key(value: &str) -> String {
 }
 
 fn strip_section_prefix(value: &str) -> String {
-    value
-        .strip_prefix("section ")
-        .unwrap_or(value)
-        .to_string()
+    value.strip_prefix("section ").unwrap_or(value).to_string()
 }
 
 fn strip_numeric_designator(value: &str) -> String {
@@ -494,7 +491,10 @@ fn all_section_refs(document: &Document) -> Vec<&Section> {
 }
 
 fn is_page_only_pdf_fallback(document: &Document) -> bool {
-    document.media_type.0.eq_ignore_ascii_case("application/pdf")
+    document
+        .media_type
+        .0
+        .eq_ignore_ascii_case("application/pdf")
         && document
             .metadata
             .get("pdf_structure_provenance")

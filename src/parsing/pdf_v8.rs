@@ -8,10 +8,11 @@ use super::pdf_front_matter::{
     PDF_FRONT_MATTER_ABSTRACT_COUNT_METADATA_KEY, PDF_FRONT_MATTER_INFERENCE_VERSION,
     PDF_FRONT_MATTER_INFERENCE_VERSION_METADATA_KEY, split_reliable_abstract_from_preamble,
 };
-use super::pdf_layout::extract_text_fragment_evidence;
+use super::pdf_layout::{abstract_heading_inference_status, extract_text_fragment_evidence};
 
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_LAYOUT_EXTRACTION_ERRORS_METADATA_KEY: &str = "pdf_layout_extraction_errors";
+const PDF_FRONT_MATTER_INFERENCE_STATUS_METADATA_KEY: &str = "pdf_front_matter_inference_status";
 
 #[derive(Default)]
 pub struct PdfParser;
@@ -54,6 +55,11 @@ impl Parser for PdfParser {
         document.metadata.insert(
             PDF_FRONT_MATTER_INFERENCE_VERSION_METADATA_KEY.into(),
             PDF_FRONT_MATTER_INFERENCE_VERSION.into(),
+        );
+        document.metadata.insert(
+            PDF_FRONT_MATTER_INFERENCE_STATUS_METADATA_KEY.into(),
+            abstract_heading_inference_status(&evidence, first_section_page, &first_section_title)
+                .into(),
         );
 
         let mut bindings = document

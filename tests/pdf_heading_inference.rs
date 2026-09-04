@@ -20,7 +20,7 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
                 "1.1Scope",
                 "Scope body sentinel.",
             ],
-            &["2Replication", "Future body sentinel."],
+            &["2Replication", "Future body sentinel.", "3Evaluation"],
         ]),
         etag: None,
         last_modified: None,
@@ -81,6 +81,45 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
         .expect("second top-level numbered heading should be canonical structure");
     assert_eq!(replication.location.page, Some(2));
     assert!(replication.content.contains("Future body sentinel"));
+
+    let evaluation = parsed
+        .root_sections
+        .iter()
+        .find(|section| section.title == "3 Evaluation")
+        .expect("third top-level numbered heading should become canonical structure");
+    assert_eq!(evaluation.location.page, Some(2));
+}
+
+#[tokio::test]
+async fn short_numbered_list_remains_page_fallback() {
+    let resource = RetrievedResource {
+        source: DocumentSource("memory:short-numbered-list.pdf".into()),
+        final_source: DocumentSource("memory:short-numbered-list.pdf".into()),
+        media_type: MediaType("application/pdf".into()),
+        bytes: build_multiline_pdf(&[&[
+            "1 First item",
+            "2 Second item",
+            "Only a short numbered list.",
+        ]]),
+        etag: None,
+        last_modified: None,
+        metadata: Default::default(),
+    };
+
+    let parsed = PdfParser
+        .parse(resource)
+        .await
+        .expect("short numbered list PDF should parse");
+
+    assert_eq!(
+        parsed
+            .metadata
+            .get("pdf_structure_provenance")
+            .map(String::as_str),
+        Some("page_fallback")
+    );
+    assert_eq!(parsed.root_sections.len(), 1);
+    assert_eq!(parsed.root_sections[0].title, "Page 1");
 }
 
 fn build_multiline_pdf(page_lines: &[&[&str]]) -> Vec<u8> {

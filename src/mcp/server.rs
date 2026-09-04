@@ -1036,6 +1036,7 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::InvalidLocator(_)
         | ApplicationError::StaleLocator(_)
         | ApplicationError::StaleStructure(_)
+        | ApplicationError::StaleDocument(_)
         | ApplicationError::InvalidCursor(_)
         | ApplicationError::StaleCursor(_)
         | ApplicationError::CursorTargetMismatch(_)
@@ -1061,6 +1062,7 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::InvalidLocator(_) => ("INVALID_LOCATOR", false),
         ApplicationError::StaleLocator(_) => ("STALE_LOCATOR", false),
         ApplicationError::StaleStructure(_) => ("STALE_STRUCTURE", false),
+        ApplicationError::StaleDocument(_) => ("STALE_DOCUMENT", false),
         ApplicationError::InvalidCursor(_) => ("INVALID_CURSOR", false),
         ApplicationError::StaleCursor(_) => ("STALE_CURSOR", false),
         ApplicationError::CursorTargetMismatch(_) => ("CURSOR_TARGET_MISMATCH", false),
@@ -1114,6 +1116,10 @@ mod tests {
         assert_eq!(
             error_descriptor(&ApplicationError::StaleStructure("changed".into())),
             ("STALE_STRUCTURE", false)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::StaleDocument("changed".into())),
+            ("STALE_DOCUMENT", false)
         );
         assert_eq!(
             error_descriptor(&ApplicationError::InvalidLocator("bad".into())),

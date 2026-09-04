@@ -23,6 +23,10 @@ async fn resolves_exact_prefixed_and_title_only_with_executable_boundary() {
             "Section 1 — Introduction",
             NamedSectionMatchKind::SectionPrefixedTitle,
         ),
+        (
+            "section 1 — Introduction",
+            NamedSectionMatchKind::SectionPrefixedTitle,
+        ),
         ("Introduction", NamedSectionMatchKind::TitleOnly),
     ] {
         let result = use_case
@@ -72,6 +76,15 @@ async fn resolves_exact_prefixed_and_title_only_with_executable_boundary() {
                 .all(|interval| next.body_order < interval.start || next.body_order >= interval.end)
         );
     }
+
+    let case_mismatch = use_case
+        .resolve_named_section(command_for(&identity, &normalized, "introduction"))
+        .await
+        .expect("case-mismatched title query should be a normal resolution outcome");
+    assert_eq!(
+        case_mismatch.resolution.status,
+        NamedSectionResolutionStatus::NotFound
+    );
 }
 
 #[tokio::test]

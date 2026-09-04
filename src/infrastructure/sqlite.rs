@@ -627,16 +627,17 @@ impl StoredDocument {
     }
 
     fn into_document(self) -> Result<Document, ApplicationError> {
-        let persisted_version = self.normalization_version.as_deref().ok_or_else(|| {
-            ApplicationError::RepositoryFailed(
-                "persisted Document predates normalization-version binding; reopen the source with the current runtime".into(),
-            )
+        let persisted_version = self.normalization_version.ok_or_else(|| {
+            ApplicationError::StaleDocument(format!(
+                "persisted document has no normalization version; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
+            ))
         })?;
         if persisted_version != NORMALIZATION_VERSION {
-            return Err(ApplicationError::RepositoryFailed(format!(
-                "persisted Document normalization version {persisted_version} is incompatible with {NORMALIZATION_VERSION}; reopen the source with the current runtime"
+            return Err(ApplicationError::StaleDocument(format!(
+                "persisted document normalization version {persisted_version} is stale; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
             )));
         }
+
         Ok(Document {
             id: DocumentId(self.id),
             source: DocumentSource(self.source),

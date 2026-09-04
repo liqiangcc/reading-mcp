@@ -311,7 +311,12 @@ fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate
         .iter()
         .filter(|candidate| candidate.number_path.len() == 1)
         .count();
-    (top_level_count >= 2).then_some(accepted)
+    let top_level_pages = accepted
+        .iter()
+        .filter(|candidate| candidate.number_path.len() == 1)
+        .map(|candidate| candidate.page)
+        .collect::<std::collections::BTreeSet<_>>();
+    (top_level_count >= 2 && top_level_pages.len() >= 2).then_some(accepted)
 }
 
 fn source_fragments(pages: &[PageText]) -> Vec<PdfSourceFragment> {

@@ -8,24 +8,24 @@ e6345fcba31cbc747ab41755aa62654859c4403dbb687da0021079f78181a7b5  RAFT_PDF
 === RAFT CURL tail ===
   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100  595k    0  595k    0     0  3128k      0 --:--:-- --:--:-- --:--:-- 3118k
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100  595k    0  595k    0     0  1957k      0 --:--:-- --:--:-- --:--:-- 1959k
 
 === KAFKA CURL tail ===
   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
                                  Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100 2200k  100 2200k    0     0  13.7M      0 --:--:-- --:--:-- --:--:-- 13.7M
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100 2200k  100 2200k    0     0  7784k      0 --:--:-- --:--:-- --:--:-- 7803k
 
 === REAL-SOURCE TEST tail ===
 [1m[92m    Updating[0m crates.io index
 [1m[92m   Compiling[0m reading-mcp v0.1.0 (/home/runner/work/reading-mcp/reading-mcp)
-[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 17.48s
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 18.49s
 [1m[92m     Running[0m tests/raft_named_section_evidence.rs (target/debug/deps/raft_named_section_evidence-f0d793d7807c89f3)
 
 running 2 tests
 EVIDENCE_F_KAFKA content_hash=sha256:4abdeba2503eb20a5d7ed84aa8e7680bcbe3088541712626315deae0b07c2821 page_count=7 structure_nodes=7 provenance=page_fallback
 test real_kafka_pdf_regression_preserves_raw_identity_and_structure_navigation ... ok
 
-thread 'real_raft_named_section_scope_gate_is_structure_only_and_fail_closed' (2547) panicked at tests/raft_named_section_evidence.rs:53:5:
+thread 'real_raft_named_section_scope_gate_is_structure_only_and_fail_closed' (2521) panicked at tests/raft_named_section_evidence.rs:53:5:
 assertion `left == right` failed
   left: Some("page_fallback")
  right: Some("inferred_numbered_headings")
@@ -37,7 +37,7 @@ failures:
 failures:
     real_raft_named_section_scope_gate_is_structure_only_and_fail_closed
 
-test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
 
 [1m[91merror[0m: test failed, to rerun pass `--test raft_named_section_evidence`
 

@@ -1,0 +1,39 @@
+name: Issue 69 fix implementation script once
+
+on:
+  push:
+    branches:
+      - feat/issue-69-named-section-boundary
+
+permissions:
+  contents: write
+
+jobs:
+  fix-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-69-named-section-boundary
+      - name: Remove brittle assertion replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/issue69-chunk-implement-once.yml')
+          lines = path.read_text().splitlines()
+          start = next(i for i, line in enumerate(lines) if line.strip().startswith("old_assert = '''"))
+          end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'test = test.replace(old_assert, new_assert)')
+          del lines[start:end + 1]
+          path.write_text('\n'.join(lines) + '\n')
+          PY
+      - name: Commit script fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/issue69-chunk-implement-once.yml
+          git commit -m "ci: remove brittle issue69 assertion patch"
+          git push origin HEAD:feat/issue-69-named-section-boundary

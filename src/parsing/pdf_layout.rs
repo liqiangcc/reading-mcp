@@ -228,7 +228,9 @@ pub(super) fn infer_abstract_heading<'a>(
     let candidates = lines[..boundary_index]
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.page == first_page && normalized_heading_text(&line.text) == "abstract")
+        .filter(|(_, line)| {
+            line.page == first_page && normalized_heading_text(&line.text) == "abstract"
+        })
         .collect::<Vec<_>>();
     let [(candidate_index, candidate)] = candidates.as_slice() else {
         return None;
@@ -279,10 +281,8 @@ fn layout_lines(evidence: &[PdfTextFragmentEvidence]) -> Vec<PdfTextLineEvidence
                 line.font_resources.insert(font);
             }
             if let Some(size) = fragment.font_size {
-                line.max_font_size = Some(
-                    line.max_font_size
-                        .map_or(size, |current| current.max(size)),
-                );
+                line.max_font_size =
+                    Some(line.max_font_size.map_or(size, |current| current.max(size)));
             }
             continue;
         }
@@ -433,7 +433,13 @@ mod tests {
         let evidence = vec![
             fragment(0, "Ab", "FHeading", 12.0, 700.0),
             fragment(1, "stract", "FHeading", 12.0, 700.0),
-            fragment(2, "This is a sufficiently long abstract body line.", "FBody", 10.0, 682.0),
+            fragment(
+                2,
+                "This is a sufficiently long abstract body line.",
+                "FBody",
+                10.0,
+                682.0,
+            ),
             fragment(3, "1", "FHeading", 12.0, 640.0),
             fragment(4, "Introduction", "FHeading", 12.0, 640.0),
         ];
@@ -447,7 +453,13 @@ mod tests {
     fn same_style_abstract_line_still_fails_closed() {
         let evidence = vec![
             fragment(0, "Abstract", "FBody", 10.0, 700.0),
-            fragment(1, "This is a sufficiently long abstract body line.", "FBody", 10.0, 682.0),
+            fragment(
+                1,
+                "This is a sufficiently long abstract body line.",
+                "FBody",
+                10.0,
+                682.0,
+            ),
             fragment(2, "1 Introduction", "FHeading", 12.0, 640.0),
         ];
 

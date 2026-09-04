@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lopdf::content::Content;
 use lopdf::{Dictionary, Document as LopdfDocument, Object};
@@ -12,6 +12,16 @@ pub(super) struct PdfTextFragmentEvidence {
     pub font_size: Option<f32>,
     pub x: Option<f32>,
     pub y: Option<f32>,
+}
+
+#[derive(Clone, Debug)]
+struct PdfTextLineEvidence<'a> {
+    page: u32,
+    first_fragment: &'a PdfTextFragmentEvidence,
+    text: String,
+    font_resources: BTreeSet<&'a str>,
+    max_font_size: Option<f32>,
+    y: Option<f32>,
 }
 
 #[derive(Default)]
@@ -206,49 +216,101 @@ pub(super) fn infer_abstract_heading<'a>(
     if first_section_page != first_page {
         return None;
     }
+
+    let lines = layout_lines(evidence);
     let section_label = strip_number_prefix(first_section_title);
-    let boundary_index = evidence.iter().position(|item| {
-        item.page == first_section_page
-            && (same_heading_text(&item.text, first_section_title)
-                || same_heading_text(&item.text, section_label))
+    let boundary_index = lines.iter().position(|line| {
+        line.page == first_section_page
+            && (same_heading_text(&line.text, first_section_title)
+                || same_heading_text(&line.text, section_label))
     })?;
 
-    let candidates = evidence[..boundary_index]
+    let candidates = lines[..boundary_index]
         .iter()
-        .filter(|item| item.page == first_page && item.text.trim().eq_ignore_ascii_case("Abstract"))
+        .enumerate()
+        .filter(|(_, line)| line.page == first_page && normalized_heading_text(&line.text) == "abstract")
         .collect::<Vec<_>>();
-    let [candidate] = candidates.as_slice() else {
+    let [(candidate_index, candidate)] = candidates.as_slice() else {
         return None;
     };
 
-    let candidate_index = evidence
+    let body = lines[candidate_index + 1..boundary_index]
         .iter()
-        .position(|item| item.sequence_index == candidate.sequence_index)?;
-    let next_text = evidence[candidate_index + 1..boundary_index]
-        .iter()
-        .find(|item| item.page == candidate.page && item.text.trim().chars().count() >= 12)?;
+        .find(|line| {
+            line.page == candidate.page
+                && line
+                    .text
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .count()
+                    >= 12
+        })?;
 
-    if !has_distinct_heading_style(candidate, next_text) {
+    if !has_distinct_heading_style(candidate, body) {
         return None;
     }
-    if let (Some(heading_y), Some(body_y)) = (candidate.y, next_text.y)
+    if let (Some(heading_y), Some(body_y)) = (candidate.y, body.y)
         && heading_y + 0.5 < body_y
     {
         return None;
     }
 
-    Some(candidate)
+    Some(candidate.first_fragment)
+}
+
+fn layout_lines(evidence: &[PdfTextFragmentEvidence]) -> Vec<PdfTextLineEvidence<'_>> {
+    let mut lines = Vec::<PdfTextLineEvidence<'_>>::new();
+    for fragment in evidence {
+        let can_join = lines.last().is_some_and(|line| {
+            line.page == fragment.page
+                && match (line.y, fragment.y) {
+                    (Some(left), Some(right)) => (left - right).abs() <= 1.0,
+                    _ => false,
+                }
+        });
+
+        if can_join {
+            let line = lines.last_mut().expect("joinable line must exist");
+            if !line.text.is_empty() && !fragment.text.starts_with(char::is_whitespace) {
+                line.text.push(' ');
+            }
+            line.text.push_str(fragment.text.trim());
+            if let Some(font) = fragment.font_resource.as_deref() {
+                line.font_resources.insert(font);
+            }
+            if let Some(size) = fragment.font_size {
+                line.max_font_size = Some(
+                    line.max_font_size
+                        .map_or(size, |current| current.max(size)),
+                );
+            }
+            continue;
+        }
+
+        let mut font_resources = BTreeSet::new();
+        if let Some(font) = fragment.font_resource.as_deref() {
+            font_resources.insert(font);
+        }
+        lines.push(PdfTextLineEvidence {
+            page: fragment.page,
+            first_fragment: fragment,
+            text: fragment.text.trim().to_string(),
+            font_resources,
+            max_font_size: fragment.font_size,
+            y: fragment.y,
+        });
+    }
+    lines
 }
 
 fn has_distinct_heading_style(
-    heading: &PdfTextFragmentEvidence,
-    body: &PdfTextFragmentEvidence,
+    heading: &PdfTextLineEvidence<'_>,
+    body: &PdfTextLineEvidence<'_>,
 ) -> bool {
-    let font_differs = match (&heading.font_resource, &body.font_resource) {
-        (Some(left), Some(right)) => left != right,
-        _ => false,
-    };
-    let size_is_larger = match (heading.font_size, body.font_size) {
+    let font_differs = heading.font_resources.len() == 1
+        && body.font_resources.len() == 1
+        && heading.font_resources != body.font_resources;
+    let size_is_larger = match (heading.max_font_size, body.max_font_size) {
         (Some(left), Some(right)) => left >= right + 0.25,
         _ => false,
     };
@@ -265,11 +327,15 @@ fn strip_number_prefix(title: &str) -> &str {
 }
 
 fn same_heading_text(left: &str, right: &str) -> bool {
-    left.split_whitespace()
-        .map(|part| part.to_ascii_lowercase())
-        .eq(right
-            .split_whitespace()
-            .map(|part| part.to_ascii_lowercase()))
+    normalized_heading_text(left) == normalized_heading_text(right)
+}
+
+fn normalized_heading_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn apply_translation(state: &mut TextState, operands: &[Object]) {
@@ -338,4 +404,53 @@ fn decode_text_object(
         .iter()
         .all(|byte| byte.is_ascii_graphic() || byte.is_ascii_whitespace())
         .then(|| String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PdfTextFragmentEvidence, infer_abstract_heading};
+
+    fn fragment(
+        sequence_index: usize,
+        text: &str,
+        font: &str,
+        size: f32,
+        y: f32,
+    ) -> PdfTextFragmentEvidence {
+        PdfTextFragmentEvidence {
+            page: 1,
+            sequence_index,
+            text: text.into(),
+            font_resource: Some(font.into()),
+            font_size: Some(size),
+            x: Some(72.0),
+            y: Some(y),
+        }
+    }
+
+    #[test]
+    fn operator_split_abstract_line_is_reconstructed_before_inference() {
+        let evidence = vec![
+            fragment(0, "Ab", "FHeading", 12.0, 700.0),
+            fragment(1, "stract", "FHeading", 12.0, 700.0),
+            fragment(2, "This is a sufficiently long abstract body line.", "FBody", 10.0, 682.0),
+            fragment(3, "1", "FHeading", 12.0, 640.0),
+            fragment(4, "Introduction", "FHeading", 12.0, 640.0),
+        ];
+
+        let candidate = infer_abstract_heading(&evidence, 1, "1 Introduction")
+            .expect("split Abstract layout line should resolve");
+        assert_eq!(candidate.sequence_index, 0);
+    }
+
+    #[test]
+    fn same_style_abstract_line_still_fails_closed() {
+        let evidence = vec![
+            fragment(0, "Abstract", "FBody", 10.0, 700.0),
+            fragment(1, "This is a sufficiently long abstract body line.", "FBody", 10.0, 682.0),
+            fragment(2, "1 Introduction", "FHeading", 12.0, 640.0),
+        ];
+
+        assert!(infer_abstract_heading(&evidence, 1, "1 Introduction").is_none());
+    }
 }

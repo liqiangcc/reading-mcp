@@ -71,7 +71,8 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
             .get("pdf_front_matter_abstract_count")
             .map(String::as_str),
         Some("1"),
-        "real Raft must promote exactly one reliable front-matter Abstract"
+        "real Raft must promote exactly one reliable front-matter Abstract; inference_status={:?}",
+        document.metadata.get("pdf_front_matter_inference_status")
     );
     let abstract_section = document
         .root_sections

@@ -1,0 +1,80 @@
+name: Issue 69 real-source diagnostic
+
+on:
+  push:
+    branches:
+      - feat/issue-69-named-section-boundary
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose-real-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/issue-69-named-section-boundary
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Capture real-source evidence diagnostics
+        shell: bash
+        run: |
+          set +e
+          raft="$RUNNER_TEMP/atc14-paper-ongaro.pdf"
+          kafka="$RUNNER_TEMP/kafka-2011-paper.pdf"
+          curl --fail --location --retry 3 --retry-delay 2 --max-time 60 \
+            "https://www.usenix.org/system/files/conference/atc14/atc14-paper-ongaro.pdf" \
+            --output "$raft" > /tmp/raft-curl.log 2>&1
+          raft_curl_status=$?
+          curl --fail --location --retry 3 --retry-delay 2 --max-time 60 \
+            "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf" \
+            --output "$kafka" > /tmp/kafka-curl.log 2>&1
+          kafka_curl_status=$?
+          test_status=125
+          if [ "$raft_curl_status" -eq 0 ] && [ "$kafka_curl_status" -eq 0 ]; then
+            READING_MCP_RAFT_EVIDENCE_PDF="$raft" \
+            READING_MCP_KAFKA_EVIDENCE_PDF="$kafka" \
+              cargo test --locked --test raft_named_section_evidence -- --ignored --nocapture \
+              > /tmp/issue69-real-source-test.log 2>&1
+            test_status=$?
+          else
+            : > /tmp/issue69-real-source-test.log
+          fi
+          {
+            echo "raft_curl_status=$raft_curl_status"
+            echo "kafka_curl_status=$kafka_curl_status"
+            echo "test_status=$test_status"
+            if [ -f "$raft" ]; then sha256sum "$raft" | sed 's#  .*#  RAFT_PDF#'; fi
+            if [ -f "$kafka" ]; then sha256sum "$kafka" | sed 's#  .*#  KAFKA_PDF#'; fi
+            echo
+            echo "=== RAFT CURL tail ==="
+            tail -n 40 /tmp/raft-curl.log
+            echo
+            echo "=== KAFKA CURL tail ==="
+            tail -n 40 /tmp/kafka-curl.log
+            echo
+            echo "=== REAL-SOURCE TEST tail ==="
+            tail -n 260 /tmp/issue69-real-source-test.log
+          } > issue69-real-source-diagnostic.txt
+          exit 0
+
+      - name: Commit diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add issue69-real-source-diagnostic.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "ci: record issue69 real-source diagnostic output"
+          git push origin HEAD:feat/issue-69-named-section-boundary

@@ -33,7 +33,7 @@ jobs:
 
           path = Path("src/application/get_document_structure.rs")
           text = path.read_text(encoding="utf-8")
-          old = """    normalized
+          old = '''    normalized
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -41,12 +41,9 @@ jobs:
 }
 
 fn strip_section_prefix(value: &str) -> String {
-    value
-        .strip_prefix("section ")
-        .unwrap_or(value)
-        .to_string()
-}"""
-          new = """    normalized
+    value.strip_prefix("section ").unwrap_or(value).to_string()
+}'''
+          new = '''    normalized
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -62,7 +59,7 @@ fn strip_section_prefix(value: &str) -> String {
     } else {
         value.to_string()
     }
-}"""
+}'''
           if text.count(old) != 1:
               raise SystemExit(f"resolver normalization: expected one match, got {text.count(old)}")
           path.write_text(text.replace(old, new, 1), encoding="utf-8")

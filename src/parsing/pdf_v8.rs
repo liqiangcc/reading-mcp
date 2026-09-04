@@ -56,10 +56,23 @@ impl Parser for PdfParser {
             PDF_FRONT_MATTER_INFERENCE_VERSION_METADATA_KEY.into(),
             PDF_FRONT_MATTER_INFERENCE_VERSION.into(),
         );
+
+        // Proceedings PDFs may contain cover/front pages before the paper itself.  Front-matter
+        // inference is intentionally scoped to the page that owns the first numbered section,
+        // while the canonical Preamble keeps its original multi-page bindings.
+        let front_matter_evidence = evidence
+            .iter()
+            .filter(|item| item.page == first_section_page)
+            .cloned()
+            .collect::<Vec<_>>();
         document.metadata.insert(
             PDF_FRONT_MATTER_INFERENCE_STATUS_METADATA_KEY.into(),
-            abstract_heading_inference_status(&evidence, first_section_page, &first_section_title)
-                .into(),
+            abstract_heading_inference_status(
+                &front_matter_evidence,
+                first_section_page,
+                &first_section_title,
+            )
+            .into(),
         );
 
         let mut bindings = document
@@ -75,7 +88,7 @@ impl Parser for PdfParser {
         let abstract_count = if split_reliable_abstract_from_preamble(
             &mut document.root_sections,
             &mut bindings,
-            &evidence,
+            &front_matter_evidence,
             first_section_page,
             &first_section_title,
         ) {

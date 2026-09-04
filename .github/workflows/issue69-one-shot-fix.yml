@@ -1,0 +1,292 @@
+name: Issue 69 one-shot fix
+
+on:
+  push:
+    branches:
+      - feat/issue-69-named-section-boundary
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/issue-69-named-section-boundary
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply correctness fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          structure = Path('src/application/get_document_structure.rs')
+          text = structure.read_text(encoding='utf-8')
+          old = """                document.content_hash.0.clone(),
+                          normalized_hash.0,
+                          scope.root_section_id.as_ref().map(|id| id.0.clone()),"""
+          if old not in text:
+              raise SystemExit('expected normalized_hash cursor snippet not found')
+          structure.write_text(
+              text.replace(
+                  old,
+                  """                document.content_hash.0.clone(),
+                          normalized_hash.0.clone(),
+                          scope.root_section_id.as_ref().map(|id| id.0.clone()),""",
+                  1,
+              ),
+              encoding='utf-8',
+          )
+
+          sqlite = Path('src/infrastructure/sqlite.rs')
+          text = sqlite.read_text(encoding='utf-8')
+          old_import = """use crate::domain::{
+              ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NormalizedDocumentHash,
+              NormalizedTextRange, Section, SectionId, TextUnit, TextUnitId, TextUnitKind,
+          };"""
+          new_import = """use crate::domain::{
+              ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
+              NormalizedDocumentHash, NormalizedTextRange, Section, SectionId, TextUnit, TextUnitId,
+              TextUnitKind,
+          };"""
+          if old_import not in text:
+              raise SystemExit('expected sqlite domain import not found')
+          text = text.replace(old_import, new_import, 1)
+
+          old_get = """        json.map(|json| {
+              serde_json::from_str::<StoredDocument>(&json)
+                  .map(StoredDocument::into_document)
+                  .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))
+          })
+          .transpose()"""
+          new_get = """        json.map(|json| {
+              let stored = serde_json::from_str::<StoredDocument>(&json)
+                  .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+              stored.into_document()
+          })
+          .transpose()"""
+          if old_get not in text:
+              raise SystemExit('expected sqlite repository get snippet not found')
+          text = text.replace(old_get, new_get, 1)
+
+          old_struct = """#[derive(Serialize, Deserialize)]
+          struct StoredDocument {
+              id: String,"""
+          new_struct = """#[derive(Serialize, Deserialize)]
+          struct StoredDocument {
+              #[serde(default)]
+              normalization_version: Option<String>,
+              id: String,"""
+          if old_struct not in text:
+              raise SystemExit('expected StoredDocument declaration not found')
+          text = text.replace(old_struct, new_struct, 1)
+
+          old_from = """        Self {
+              id: document.id.0.clone(),"""
+          new_from = """        Self {
+              normalization_version: Some(NORMALIZATION_VERSION.into()),
+              id: document.id.0.clone(),"""
+          if old_from not in text:
+              raise SystemExit('expected StoredDocument::from_document body not found')
+          text = text.replace(old_from, new_from, 1)
+
+          old_into = """    fn into_document(self) -> Document {
+              Document {
+                  id: DocumentId(self.id),
+                  source: DocumentSource(self.source),
+                  title: self.title,
+                  media_type: MediaType(self.media_type),
+                  content_hash: ContentHash(self.content_hash),
+                  metadata: self.metadata,
+                  root_sections: self
+                      .root_sections
+                      .into_iter()
+                      .map(StoredSection::into_section)
+                      .collect(),
+              }
+          }"""
+          new_into = """    fn into_document(self) -> Result<Document, ApplicationError> {
+              let persisted_version = self.normalization_version.as_deref().ok_or_else(|| {
+                  ApplicationError::RepositoryFailed(
+                      "persisted Document predates normalization-version binding; reopen the source with the current runtime"
+                          .into(),
+                  )
+              })?;
+              if persisted_version != NORMALIZATION_VERSION {
+                  return Err(ApplicationError::RepositoryFailed(format!(
+                      "persisted Document normalization version {persisted_version} is incompatible with {NORMALIZATION_VERSION}; reopen the source with the current runtime"
+                  )));
+              }
+              Ok(Document {
+                  id: DocumentId(self.id),
+                  source: DocumentSource(self.source),
+                  title: self.title,
+                  media_type: MediaType(self.media_type),
+                  content_hash: ContentHash(self.content_hash),
+                  metadata: self.metadata,
+                  root_sections: self
+                      .root_sections
+                      .into_iter()
+                      .map(StoredSection::into_section)
+                      .collect(),
+              })
+          }"""
+          if old_into not in text:
+              raise SystemExit('expected StoredDocument::into_document body not found')
+          text = text.replace(old_into, new_into, 1)
+          sqlite.write_text(text, encoding='utf-8')
+
+          test = Path('tests/sqlite_normalization_migration.rs')
+          test.write_text(r'''use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
+          use reading_mcp::domain::{
+              ContentHash, Document, DocumentId, DocumentSource, MediaType, Section, SectionId,
+          };
+          use reading_mcp::infrastructure::SqliteDocumentRepository;
+          use rusqlite::{Connection, params};
+          use serde_json::Value;
+
+          #[tokio::test]
+          async fn sqlite_document_repository_rejects_unversioned_and_stale_normalization() {
+              let directory = tempfile::tempdir().expect("temporary state directory should be created");
+              let database = directory.path().join("reading-mcp.sqlite");
+              let document = fixture_document();
+
+              let repository = SqliteDocumentRepository::open(&database)
+                  .expect("SQLite repository should open");
+              repository
+                  .save(document.clone())
+                  .await
+                  .expect("current document should save");
+              drop(repository);
+
+              let current = SqliteDocumentRepository::open(&database)
+                  .expect("SQLite repository should reopen");
+              assert_eq!(
+                  current
+                      .get(&document.id)
+                      .await
+                      .expect("current normalization should load")
+                      .expect("current document should exist"),
+                  document
+              );
+              drop(current);
+
+              rewrite_normalization_version(&database, &document.id, None);
+              let repository = SqliteDocumentRepository::open(&database)
+                  .expect("SQLite repository should reopen after legacy rewrite");
+              let error = repository
+                  .get(&document.id)
+                  .await
+                  .expect_err("unversioned persisted canonical facts must fail closed");
+              assert!(matches!(error, ApplicationError::RepositoryFailed(_)));
+              assert!(error.to_string().contains("normalization-version"));
+              drop(repository);
+
+              let repository = SqliteDocumentRepository::open(&database)
+                  .expect("SQLite repository should reopen for restore");
+              repository
+                  .save(document.clone())
+                  .await
+                  .expect("current document should restore");
+              drop(repository);
+
+              rewrite_normalization_version(
+                  &database,
+                  &document.id,
+                  Some("reading-mcp-normalization/v6"),
+              );
+              let repository = SqliteDocumentRepository::open(&database)
+                  .expect("SQLite repository should reopen after stale rewrite");
+              let error = repository
+                  .get(&document.id)
+                  .await
+                  .expect_err("v6 persisted canonical facts must not be reinterpreted as v7");
+              assert!(matches!(error, ApplicationError::RepositoryFailed(_)));
+              assert!(error.to_string().contains("reading-mcp-normalization/v6"));
+          }
+
+          fn rewrite_normalization_version(
+              database: &std::path::Path,
+              document_id: &DocumentId,
+              version: Option<&str>,
+          ) {
+              let connection = Connection::open(database).expect("SQLite database should open directly");
+              let json: String = connection
+                  .query_row(
+                      "SELECT document_json FROM documents WHERE id = ?1",
+                      params![&document_id.0],
+                      |row| row.get(0),
+                  )
+                  .expect("persisted document JSON should exist");
+              let mut value: Value = serde_json::from_str(&json).expect("document JSON should decode");
+              let object = value
+                  .as_object_mut()
+                  .expect("persisted document JSON should be an object");
+              match version {
+                  Some(version) => {
+                      object.insert(
+                          "normalization_version".into(),
+                          Value::String(version.into()),
+                      );
+                  }
+                  None => {
+                      object.remove("normalization_version");
+                  }
+              }
+              connection
+                  .execute(
+                      "UPDATE documents SET document_json = ?1 WHERE id = ?2",
+                      params![value.to_string(), &document_id.0],
+                  )
+                  .expect("persisted document JSON should update");
+          }
+
+          fn fixture_document() -> Document {
+              Document {
+                  id: DocumentId("doc:normalization-migration".into()),
+                  source: DocumentSource("memory:normalization-migration.md".into()),
+                  title: "Normalization migration".into(),
+                  media_type: MediaType("text/markdown".into()),
+                  content_hash: ContentHash("sha256:normalization-migration".into()),
+                  metadata: Default::default(),
+                  root_sections: vec![Section {
+                      id: SectionId("section://one".into()),
+                      parent_id: None,
+                      title: "One".into(),
+                      level: 1,
+                      content: "body".into(),
+                      location: Default::default(),
+                      children: Vec::new(),
+                  }],
+              }
+          }
+          ''', encoding='utf-8')
+          PY
+
+      - name: Format all Rust
+        run: cargo fmt --all
+
+      - name: Commit one-shot fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/application/get_document_structure.rs src/infrastructure/sqlite.rs tests/sqlite_normalization_migration.rs
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "fix: preserve normalization migration identity"
+          git push origin HEAD:feat/issue-69-named-section-boundary

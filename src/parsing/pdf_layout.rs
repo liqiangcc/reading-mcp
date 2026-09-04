@@ -37,19 +37,20 @@ pub(super) fn extract_text_fragment_evidence(
         let Some(page_id) = pages.get(page_number).copied() else {
             continue;
         };
-        let content_bytes = match pdf
-            .get_page_content_with_limit(page_id, max_page_decompressed_bytes)
-        {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                errors.push(format!("page {page_number}: {error}"));
-                continue;
-            }
-        };
+        let content_bytes =
+            match pdf.get_page_content_with_limit(page_id, max_page_decompressed_bytes) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    errors.push(format!("page {page_number}: {error}"));
+                    continue;
+                }
+            };
         let content = match Content::decode(&content_bytes) {
             Ok(content) => content,
             Err(error) => {
-                errors.push(format!("page {page_number}: cannot decode content stream: {error}"));
+                errors.push(format!(
+                    "page {page_number}: cannot decode content stream: {error}"
+                ));
                 continue;
             }
         };
@@ -63,10 +64,18 @@ pub(super) fn extract_text_fragment_evidence(
                     state.y = None;
                 }
                 "Tf" => {
-                    if let Some(name) = operation.operands.first().and_then(|value| value.as_name().ok()) {
+                    if let Some(name) = operation
+                        .operands
+                        .first()
+                        .and_then(|value| value.as_name().ok())
+                    {
                         state.font_resource = Some(name.to_vec());
                     }
-                    if let Some(size) = operation.operands.get(1).and_then(|value| value.as_float().ok()) {
+                    if let Some(size) = operation
+                        .operands
+                        .get(1)
+                        .and_then(|value| value.as_float().ok())
+                    {
                         state.font_size = Some(size.abs());
                     }
                 }
@@ -95,11 +104,15 @@ pub(super) fn extract_text_fragment_evidence(
                 }
                 "T*" => move_to_next_line(&mut state),
                 "Tj" => {
-                    if let Some(text) = operation
-                        .operands
-                        .first()
-                        .and_then(|value| decode_text_object(pdf, &fonts, state.font_resource.as_deref(), value, max_page_decompressed_bytes))
-                    {
+                    if let Some(text) = operation.operands.first().and_then(|value| {
+                        decode_text_object(
+                            pdf,
+                            &fonts,
+                            state.font_resource.as_deref(),
+                            value,
+                            max_page_decompressed_bytes,
+                        )
+                    }) {
                         push_evidence(
                             &mut evidence,
                             *page_number,
@@ -110,7 +123,11 @@ pub(super) fn extract_text_fragment_evidence(
                     }
                 }
                 "TJ" => {
-                    if let Some(array) = operation.operands.first().and_then(|value| value.as_array().ok()) {
+                    if let Some(array) = operation
+                        .operands
+                        .first()
+                        .and_then(|value| value.as_array().ok())
+                    {
                         let text = array
                             .iter()
                             .filter_map(|value| {
@@ -134,11 +151,15 @@ pub(super) fn extract_text_fragment_evidence(
                 }
                 "'" => {
                     move_to_next_line(&mut state);
-                    if let Some(text) = operation
-                        .operands
-                        .first()
-                        .and_then(|value| decode_text_object(pdf, &fonts, state.font_resource.as_deref(), value, max_page_decompressed_bytes))
-                    {
+                    if let Some(text) = operation.operands.first().and_then(|value| {
+                        decode_text_object(
+                            pdf,
+                            &fonts,
+                            state.font_resource.as_deref(),
+                            value,
+                            max_page_decompressed_bytes,
+                        )
+                    }) {
                         push_evidence(
                             &mut evidence,
                             *page_number,
@@ -150,11 +171,15 @@ pub(super) fn extract_text_fragment_evidence(
                 }
                 "\"" => {
                     move_to_next_line(&mut state);
-                    if let Some(text) = operation
-                        .operands
-                        .get(2)
-                        .and_then(|value| decode_text_object(pdf, &fonts, state.font_resource.as_deref(), value, max_page_decompressed_bytes))
-                    {
+                    if let Some(text) = operation.operands.get(2).and_then(|value| {
+                        decode_text_object(
+                            pdf,
+                            &fonts,
+                            state.font_resource.as_deref(),
+                            value,
+                            max_page_decompressed_bytes,
+                        )
+                    }) {
                         push_evidence(
                             &mut evidence,
                             *page_number,
@@ -248,7 +273,9 @@ fn strip_number_prefix(title: &str) -> &str {
 fn same_heading_text(left: &str, right: &str) -> bool {
     left.split_whitespace()
         .map(|part| part.to_ascii_lowercase())
-        .eq(right.split_whitespace().map(|part| part.to_ascii_lowercase()))
+        .eq(right
+            .split_whitespace()
+            .map(|part| part.to_ascii_lowercase()))
 }
 
 fn apply_translation(state: &mut TextState, operands: &[Object]) {

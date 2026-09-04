@@ -17,11 +17,8 @@ pub(super) fn split_reliable_abstract_from_preamble(
     first_section_page: u32,
     first_section_title: &str,
 ) -> bool {
-    let Some(candidate) = infer_abstract_heading(
-        evidence,
-        first_section_page,
-        first_section_title,
-    ) else {
+    let Some(candidate) = infer_abstract_heading(evidence, first_section_page, first_section_title)
+    else {
         return false;
     };
 
@@ -139,9 +136,7 @@ mod tests {
 
     #[test]
     fn body_occurrence_does_not_split() {
-        assert!(
-            split_abstract_line("Title\nThis abstract discusses replication.").is_none()
-        );
+        assert!(split_abstract_line("Title\nThis abstract discusses replication.").is_none());
     }
 
     #[test]

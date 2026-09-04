@@ -6,10 +6,7 @@ use reading_mcp::parsing::PdfParser;
 
 #[tokio::test]
 async fn reliable_abstract_heading_becomes_its_own_canonical_section() {
-    let resource = pdf_resource(
-        "memory:abstract-structure.pdf",
-        build_pdf(true),
-    );
+    let resource = pdf_resource("memory:abstract-structure.pdf", build_pdf(true));
 
     let parsed = PdfParser
         .parse(resource)
@@ -77,10 +74,7 @@ async fn reliable_abstract_heading_becomes_its_own_canonical_section() {
 
 #[tokio::test]
 async fn lexical_abstract_without_distinct_layout_evidence_fails_closed() {
-    let resource = pdf_resource(
-        "memory:abstract-degraded.pdf",
-        build_pdf(false),
-    );
+    let resource = pdf_resource("memory:abstract-degraded.pdf", build_pdf(false));
 
     let parsed = PdfParser
         .parse(resource)
@@ -145,13 +139,23 @@ fn build_pdf(distinct_abstract_style: bool) -> Vec<u8> {
         text_line("FHeading", 16, 72, 760, "Conference paper title"),
         text_line("FBody", 10, 72, 736, "Author Name"),
         text_line(
-            if distinct_abstract_style { "FHeading" } else { "FBody" },
+            if distinct_abstract_style {
+                "FHeading"
+            } else {
+                "FBody"
+            },
             if distinct_abstract_style { 12 } else { 10 },
             72,
             700,
             "Abstract",
         ),
-        text_line("FBody", 10, 72, 682, "Abstract body sentinel with enough text."),
+        text_line(
+            "FBody",
+            10,
+            72,
+            682,
+            "Abstract body sentinel with enough text.",
+        ),
         text_line("FHeading", 12, 72, 640, "1 Introduction"),
         text_line("FBody", 10, 72, 622, "Introduction body sentinel."),
     ]
@@ -205,17 +209,14 @@ fn build_pdf(distinct_abstract_style: bool) -> Vec<u8> {
     bytes
 }
 
-fn text_line(
-    font: &str,
-    size: i64,
-    x: i64,
-    y: i64,
-    text: &str,
-) -> Vec<Operation> {
+fn text_line(font: &str, size: i64, x: i64, y: i64, text: &str) -> Vec<Operation> {
     vec![
         Operation::new("BT", vec![]),
         Operation::new("Tf", vec![font.into(), size.into()]),
-        Operation::new("Tm", vec![1.into(), 0.into(), 0.into(), 1.into(), x.into(), y.into()]),
+        Operation::new(
+            "Tm",
+            vec![1.into(), 0.into(), 0.into(), 1.into(), x.into(), y.into()],
+        ),
         Operation::new("Tj", vec![Object::string_literal(text)]),
         Operation::new("ET", vec![]),
     ]

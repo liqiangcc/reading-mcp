@@ -43,11 +43,8 @@ impl Parser for PdfParser {
             ))
         })?;
         let page_numbers = pdf.get_pages().keys().copied().collect::<Vec<_>>();
-        let (evidence, layout_errors) = extract_text_fragment_evidence(
-            &pdf,
-            &page_numbers,
-            MAX_PAGE_DECOMPRESSED_BYTES,
-        );
+        let (evidence, layout_errors) =
+            extract_text_fragment_evidence(&pdf, &page_numbers, MAX_PAGE_DECOMPRESSED_BYTES);
         if !layout_errors.is_empty() {
             document.metadata.insert(
                 PDF_LAYOUT_EXTRACTION_ERRORS_METADATA_KEY.into(),

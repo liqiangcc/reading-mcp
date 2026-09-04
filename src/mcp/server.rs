@@ -13,7 +13,9 @@ use crate::application::get_context::{
     StructuralContextKind,
 };
 use crate::application::get_document_structure::{
-    GetDocumentStructureCommand, GetDocumentStructureUseCase, SectionOutline,
+    BodyOrderInterval, GetDocumentStructureCommand, GetDocumentStructureUseCase,
+    NamedSectionBoundary, NamedSectionCandidate, NamedSectionMatchKind, NamedSectionResolution,
+    NamedSectionResolutionStatus, ResolveNamedSectionCommand, SectionOutline,
 };
 use crate::application::get_text_units::{
     EffectiveTextUnitKind, GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind,
@@ -44,17 +46,18 @@ use crate::domain::{
 use crate::runtime::RuntimeConfig;
 
 use super::contracts::{
-    ContextContainerKindDto, ContextItemDto, ContextItemKindDto, ContextItemRoleDto,
-    ContextRelationDto, ContextUnitDto, DirectoryEntryKindDto, GetContextRequest,
-    GetContextResponse, GetDocumentStructureRequest, GetDocumentStructureResponse,
+    BodyOrderIntervalDto, ContextContainerKindDto, ContextItemDto, ContextItemKindDto,
+    ContextItemRoleDto, ContextRelationDto, ContextUnitDto, DirectoryEntryKindDto,
+    GetContextRequest, GetContextResponse, GetDocumentStructureRequest, GetDocumentStructureResponse,
     GetTextUnitsRequest, GetTextUnitsResponse, ListDirectoryRequest, ListDirectoryResponse,
     ListDocumentsRequest, ListDocumentsResponse, ListedDirectoryEntryDto, ListedDocumentDto,
-    LocationDto, NormalizedRangeDto, OpenDocumentRequest, OpenDocumentResponse,
-    ReadDocumentRequest, ReadDocumentResponse, ReadStreamSegmentDto, SearchCandidateKindDto,
-    SearchDocumentRequest, SearchDocumentResponse, SearchHitDto, SectionNode,
-    StructuralContextKindDto, StructureStreamSegmentDto, TextLocatorDto, TextUnitContentClassDto,
-    TextUnitCoverageDto, TextUnitCoveragePolicyDto, TextUnitDirectionDto, TextUnitItemDto,
-    TextUnitKindDto, TextUnitStreamSegmentDto,
+    LocationDto, NamedSectionBoundaryDto, NamedSectionCandidateDto, NamedSectionMatchKindDto,
+    NamedSectionResolutionDto, NamedSectionResolutionStatusDto, NormalizedRangeDto,
+    OpenDocumentRequest, OpenDocumentResponse, ReadDocumentRequest, ReadDocumentResponse,
+    ReadStreamSegmentDto, SearchCandidateKindDto, SearchDocumentRequest, SearchDocumentResponse,
+    SearchHitDto, SectionNode, StructuralContextKindDto, StructureStreamSegmentDto, TextLocatorDto,
+    TextUnitContentClassDto, TextUnitCoverageDto, TextUnitCoveragePolicyDto, TextUnitDirectionDto,
+    TextUnitItemDto, TextUnitKindDto, TextUnitStreamSegmentDto,
 };
 use super::source_view_contracts::{
     GetSourceViewRequest, GetSourceViewResponse, SourceViewRepresentationDto,
@@ -240,26 +243,95 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Return a bounded page of the canonical section hierarchy with deterministic StructureCursor continuation and source locations, without returning full body text"
+        description = "Return a bounded page of the canonical section hierarchy with deterministic StructureCursor continuation and source locations, optionally resolving one identity-bound named section to a metadata-only executable body-order boundary without body snippets"
     )]
     async fn get_document_structure(
         &self,
         Parameters(request): Parameters<GetDocumentStructureRequest>,
     ) -> Result<Json<GetDocumentStructureResponse>, ErrorData> {
+        let GetDocumentStructureRequest {
+            document_id,
+            root_section_id,
+            max_depth,
+            max_nodes,
+            cursor,
+            named_section_query,
+            expected_content_hash,
+            expected_normalized_document_hash,
+            expected_structure_resolution_version,
+        } = request;
+        if cursor.is_some() && named_section_query.is_some() {
+            return Err(to_mcp_error(ApplicationError::InvalidRequest(
+                "named_section_query is only valid on an initial get_document_structure request"
+                    .into(),
+            )));
+        }
+        if named_section_query.is_none()
+            && (expected_content_hash.is_some()
+                || expected_normalized_document_hash.is_some()
+                || expected_structure_resolution_version.is_some())
+        {
+            return Err(to_mcp_error(ApplicationError::InvalidRequest(
+                "expected named-section identity fields require named_section_query".into(),
+            )));
+        }
+        let document_id = DocumentId(document_id);
         let result = self
             .get_structure
             .execute_command(GetDocumentStructureCommand {
-                document_id: DocumentId(request.document_id),
-                root_section_id: request.root_section_id.map(SectionId),
-                max_depth: request.max_depth,
-                max_nodes: request.max_nodes,
-                cursor: request.cursor,
+                document_id: document_id.clone(),
+                root_section_id: root_section_id.map(SectionId),
+                max_depth,
+                max_nodes,
+                cursor,
             })
             .await
             .map_err(to_mcp_error)?;
+        let resolution = match named_section_query {
+            Some(query) => {
+                let expected_content_hash = expected_content_hash.ok_or_else(|| {
+                    to_mcp_error(ApplicationError::InvalidRequest(
+                        "named section resolution requires expected_content_hash".into(),
+                    ))
+                })?;
+                let expected_normalized_document_hash =
+                    expected_normalized_document_hash.ok_or_else(|| {
+                        to_mcp_error(ApplicationError::InvalidRequest(
+                            "named section resolution requires expected_normalized_document_hash"
+                                .into(),
+                        ))
+                    })?;
+                let resolved = self
+                    .get_structure
+                    .resolve_named_section(ResolveNamedSectionCommand {
+                        document_id,
+                        query,
+                        expected_content_hash,
+                        expected_normalized_document_hash,
+                        expected_structure_resolution_version,
+                    })
+                    .await
+                    .map_err(to_mcp_error)?;
+                if resolved.content_hash != result.content_hash
+                    || resolved.normalized_document_hash != result.normalized_document_hash
+                {
+                    return Err(to_mcp_error(ApplicationError::StaleStructure(
+                        "canonical document identity changed while resolving named structure"
+                            .into(),
+                    )));
+                }
+                Some(resolved.resolution)
+            }
+            None => None,
+        };
 
         Ok(Json(GetDocumentStructureResponse {
             document_id: result.document_id.0,
+            content_hash: result.content_hash.0,
+            normalized_document_hash: result.normalized_document_hash.0,
+            normalized_document_hash_version: result.normalized_document_hash_version,
+            normalization_version: result.normalization_version,
+            segmentation_version: result.segmentation_version,
             sections: result.sections.iter().map(section_node).collect(),
             truncated: result.truncated,
             complete: result.complete,
@@ -273,6 +345,7 @@ impl ReadingMcpServer {
                 end_index: result.stream.end_index,
                 total_nodes: result.stream.total_nodes,
             },
+            resolution: resolution.as_ref().map(named_section_resolution_dto),
         }))
     }
 
@@ -663,6 +736,80 @@ impl GetReadDocumentResponse {
 )]
 impl ServerHandler for ReadingMcpServer {}
 
+fn named_section_resolution_dto(
+    resolution: &NamedSectionResolution,
+) -> NamedSectionResolutionDto {
+    NamedSectionResolutionDto {
+        version: resolution.version.clone(),
+        status: named_section_status_dto(resolution.status),
+        query: resolution.query.clone(),
+        match_kind: resolution.match_kind.map(named_section_match_kind_dto),
+        matched: resolution.matched.as_ref().map(named_section_candidate_dto),
+        candidates: resolution
+            .candidates
+            .iter()
+            .map(named_section_candidate_dto)
+            .collect(),
+        boundary: resolution.boundary.as_ref().map(named_section_boundary_dto),
+        degradation: resolution.degradation.clone(),
+    }
+}
+
+fn named_section_status_dto(
+    status: NamedSectionResolutionStatus,
+) -> NamedSectionResolutionStatusDto {
+    match status {
+        NamedSectionResolutionStatus::Resolved => NamedSectionResolutionStatusDto::Resolved,
+        NamedSectionResolutionStatus::Ambiguous => NamedSectionResolutionStatusDto::Ambiguous,
+        NamedSectionResolutionStatus::NotFound => NamedSectionResolutionStatusDto::NotFound,
+        NamedSectionResolutionStatus::Unavailable => NamedSectionResolutionStatusDto::Unavailable,
+        NamedSectionResolutionStatus::BoundaryUnavailable => {
+            NamedSectionResolutionStatusDto::BoundaryUnavailable
+        }
+    }
+}
+
+fn named_section_match_kind_dto(kind: NamedSectionMatchKind) -> NamedSectionMatchKindDto {
+    match kind {
+        NamedSectionMatchKind::ExactTitle => NamedSectionMatchKindDto::ExactTitle,
+        NamedSectionMatchKind::SectionPrefixedTitle => {
+            NamedSectionMatchKindDto::SectionPrefixedTitle
+        }
+        NamedSectionMatchKind::TitleOnly => NamedSectionMatchKindDto::TitleOnly,
+    }
+}
+
+fn named_section_candidate_dto(candidate: &NamedSectionCandidate) -> NamedSectionCandidateDto {
+    NamedSectionCandidateDto {
+        section_id: candidate.section_id.0.clone(),
+        parent_id: candidate.parent_id.as_ref().map(|id| id.0.clone()),
+        title: candidate.title.clone(),
+        level: candidate.level,
+        location: location_dto(&candidate.location),
+        body_order: candidate.body_order,
+        start_locator: text_locator_dto(&candidate.start_locator),
+    }
+}
+
+fn named_section_boundary_dto(boundary: &NamedSectionBoundary) -> NamedSectionBoundaryDto {
+    NamedSectionBoundaryDto {
+        version: boundary.version.clone(),
+        body_order_version: boundary.body_order_version.clone(),
+        intervals: boundary
+            .intervals
+            .iter()
+            .map(|interval: &BodyOrderInterval| BodyOrderIntervalDto {
+                start: interval.start,
+                end: interval.end,
+            })
+            .collect(),
+        end_exclusive: boundary
+            .end_exclusive
+            .as_ref()
+            .map(named_section_candidate_dto),
+    }
+}
+
 fn section_node(section: &SectionOutline) -> SectionNode {
     SectionNode {
         section_id: section.section_id.0.clone(),
@@ -889,6 +1036,7 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         ApplicationError::InvalidRequest(_)
         | ApplicationError::InvalidLocator(_)
         | ApplicationError::StaleLocator(_)
+        | ApplicationError::StaleStructure(_)
         | ApplicationError::InvalidCursor(_)
         | ApplicationError::StaleCursor(_)
         | ApplicationError::CursorTargetMismatch(_)
@@ -913,6 +1061,7 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::InvalidRequest(_) => ("INVALID_REQUEST", false),
         ApplicationError::InvalidLocator(_) => ("INVALID_LOCATOR", false),
         ApplicationError::StaleLocator(_) => ("STALE_LOCATOR", false),
+        ApplicationError::StaleStructure(_) => ("STALE_STRUCTURE", false),
         ApplicationError::InvalidCursor(_) => ("INVALID_CURSOR", false),
         ApplicationError::StaleCursor(_) => ("STALE_CURSOR", false),
         ApplicationError::CursorTargetMismatch(_) => ("CURSOR_TARGET_MISMATCH", false),
@@ -962,6 +1111,10 @@ mod tests {
         assert_eq!(
             error_descriptor(&ApplicationError::StaleLocator("changed".into())),
             ("STALE_LOCATOR", false)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::StaleStructure("changed".into())),
+            ("STALE_STRUCTURE", false)
         );
         assert_eq!(
             error_descriptor(&ApplicationError::InvalidLocator("bad".into())),

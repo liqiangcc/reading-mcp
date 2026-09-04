@@ -1,0 +1,55 @@
+name: Raft named-section evidence
+
+on:
+  pull_request:
+    paths:
+      - "src/parsing/pdf.rs"
+      - "src/application/get_document_structure.rs"
+      - "src/domain/normalized_text.rs"
+      - "src/mcp/contracts.rs"
+      - "src/mcp/server.rs"
+      - "tests/raft_named_section_evidence.rs"
+      - ".github/workflows/raft-named-section-evidence.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "src/parsing/pdf.rs"
+      - "src/application/get_document_structure.rs"
+      - "src/domain/normalized_text.rs"
+      - "src/mcp/contracts.rs"
+      - "src/mcp/server.rs"
+      - "tests/raft_named_section_evidence.rs"
+      - ".github/workflows/raft-named-section-evidence.yml"
+
+jobs:
+  raft-structure-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Download canonical Raft 2014 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-delay 2 \
+            --max-time 60 \
+            "https://www.usenix.org/system/files/conference/atc14/atc14-paper-ongaro.pdf" \
+            --output "$RUNNER_TEMP/atc14-paper-ongaro.pdf"
+
+      - name: Verify structure-only named-section scope gate
+        env:
+          READING_MCP_RAFT_EVIDENCE_PDF: ${{ runner.temp }}/atc14-paper-ongaro.pdf
+        run: cargo test --locked --test raft_named_section_evidence -- --nocapture

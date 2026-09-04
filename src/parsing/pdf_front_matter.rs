@@ -87,7 +87,7 @@ pub(super) fn split_reliable_abstract_from_preamble(
             .iter()
             .filter(|binding| binding.normalized_range.start() < split.before_range.end())
             .filter_map(binding_page)
-            .last()
+            .next_back()
             .unwrap_or(start_page);
         sections[preamble_index].location.native_location = Some(if end_page > start_page {
             format!("pdf:pages:{start_page}-{end_page}")

@@ -39,7 +39,7 @@ async fn sqlite_document_repository_rejects_unversioned_and_stale_normalization(
         .get(&document.id)
         .await
         .expect_err("unversioned persisted canonical facts must fail closed");
-    assert!(matches!(error, ApplicationError::RepositoryFailed(_)));
+    assert!(matches!(error, ApplicationError::StaleDocument(_)));
     assert!(error.to_string().contains("normalization-version"));
     drop(repository);
 
@@ -62,7 +62,7 @@ async fn sqlite_document_repository_rejects_unversioned_and_stale_normalization(
         .get(&document.id)
         .await
         .expect_err("v6 persisted canonical facts must not be reinterpreted as v7");
-    assert!(matches!(error, ApplicationError::RepositoryFailed(_)));
+    assert!(matches!(error, ApplicationError::StaleDocument(_)));
     assert!(error.to_string().contains("reading-mcp-normalization/v6"));
 }
 

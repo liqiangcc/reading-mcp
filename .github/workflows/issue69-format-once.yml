@@ -24,35 +24,19 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Align resolver normalization contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("src/application/get_document_structure.rs")
-          text = path.read_text(encoding="utf-8")
-          old = "    normalized\n        .split_whitespace()\n        .collect::<Vec<_>>()\n        .join(\" \")\n        .to_lowercase()\n}\n\nfn strip_section_prefix(value: &str) -> String {\n    value.strip_prefix(\"section \").unwrap_or(value).to_string()\n}"
-          new = "    normalized\n        .split_whitespace()\n        .collect::<Vec<_>>()\n        .join(\" \")\n}\n\nfn strip_section_prefix(value: &str) -> String {\n    let mut parts = value.split_whitespace();\n    let Some(first) = parts.next() else {\n        return String::new();\n    };\n    if first.eq_ignore_ascii_case(\"section\") {\n        parts.collect::<Vec<_>>().join(\" \")\n    } else {\n        value.to_string()\n    }\n}"
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f"resolver normalization: expected one match, got {count}")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
-          PY
-
       - name: Format all Rust
         run: cargo fmt --all
 
-      - name: Commit changes
+      - name: Commit formatting
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/application/get_document_structure.rs tests/sqlite_normalization_migration.rs
+          git add '*.rs' 'src/**/*.rs' 'tests/*.rs'
           if git diff --cached --quiet; then
-            echo "No changes"
+            echo "No formatting changes"
             exit 0
           fi
-          git commit -m "fix: preserve exact named-section title semantics"
+          git commit -m "style: format real PDF regression evidence"
           git push origin HEAD:feat/issue-69-named-section-boundary

@@ -23,6 +23,10 @@ const BASELINE_CONTENT_HASH: &str =
     "sha256:e6345fcba31cbc747ab41755aa62654859c4403dbb687da0021079f78181a7b5";
 const V6_NORMALIZED_HASH: &str =
     "sha256:bced1dc57972b784215245749745ab33d34267463a451384c9372aa8e145432f";
+const KAFKA_URL: &str =
+    "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf?msockid=34f2cedc4c716aeb0399dbe34d3b6bcf";
+const KAFKA_CONTENT_HASH: &str =
+    "sha256:4abdeba2503eb20a5d7ed84aa8e7680bcbe3088541712626315deae0b07c2821";
 
 #[tokio::test]
 async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() {
@@ -161,4 +165,63 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
     assert_eq!(revealed.items[0].locator.owner_section_id, section_id);
     assert!(!revealed.items[0].text.is_empty());
     println!("EVIDENCE_D explicit_allowed_body_reveal=PASS");
+}
+
+#[tokio::test]
+async fn real_kafka_pdf_regression_preserves_raw_identity_and_structure_navigation() {
+    let path = std::env::var("READING_MCP_KAFKA_EVIDENCE_PDF")
+        .expect("dedicated Kafka regression workflow must provide the downloaded PDF path");
+    let bytes = tokio::fs::read(path)
+        .await
+        .expect("Kafka evidence PDF should be readable");
+    let document = PdfParser
+        .parse(RetrievedResource {
+            source: DocumentSource(KAFKA_URL.into()),
+            final_source: DocumentSource(KAFKA_URL.into()),
+            media_type: MediaType("application/pdf".into()),
+            bytes,
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        })
+        .await
+        .expect("real Kafka PDF should still parse under normalization v7");
+
+    assert_eq!(document.content_hash.0, KAFKA_CONTENT_HASH);
+    assert_eq!(
+        document.metadata.get("pdf_page_count").map(String::as_str),
+        Some("7")
+    );
+    assert!(document.section_count() >= 7);
+    assert!(matches!(
+        document
+            .metadata
+            .get("pdf_structure_provenance")
+            .map(String::as_str),
+        Some("native_toc" | "inferred_numbered_headings" | "page_fallback")
+    ));
+
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    repository
+        .save(document.clone())
+        .await
+        .expect("Kafka canonical document should save");
+    let result = GetDocumentStructureUseCase::new(repository)
+        .execute(document.id.clone(), None)
+        .await
+        .expect("Kafka canonical structure should remain enumerable");
+    assert!(result.complete);
+    assert!(!result.truncated);
+    assert_eq!(result.stream.total_nodes, document.section_count());
+    assert!(!result.sections.is_empty());
+
+    println!(
+        "EVIDENCE_F_KAFKA content_hash={} page_count=7 structure_nodes={} provenance={}",
+        document.content_hash.0,
+        result.stream.total_nodes,
+        document
+            .metadata
+            .get("pdf_structure_provenance")
+            .expect("PDF structure provenance should be recorded")
+    );
 }

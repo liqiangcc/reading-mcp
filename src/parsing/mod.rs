@@ -12,6 +12,7 @@ mod openapi;
 mod pdf;
 mod pdf_front_matter;
 mod pdf_layout;
+mod pdf_v8;
 mod reliability;
 mod router;
 mod source_view;
@@ -32,7 +33,7 @@ pub use html::HtmlParser;
 pub use limited_pdf::LimitedPdfParser;
 pub use markdown::MarkdownParser;
 pub use openapi::OpenApiParser;
-pub use pdf::PdfParser;
+pub use pdf_v8::PdfParser;
 pub use reliability::PersistedDocumentReliabilityInspector;
 pub use router::ParserRouter;
 pub use source_view::{

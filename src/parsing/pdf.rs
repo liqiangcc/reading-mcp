@@ -18,7 +18,7 @@ const PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS: &str = "inferred_numbered_headin
 const PDF_STRUCTURE_PAGE_FALLBACK: &str = "page_fallback";
 const PDF_HEADING_INFERENCE_VERSION_METADATA_KEY: &str = "pdf_heading_inference_version";
 const PDF_HEADING_INFERENCE_COUNT_METADATA_KEY: &str = "pdf_heading_inference_count";
-const PDF_HEADING_INFERENCE_VERSION: &str = "pdf-numbered-heading-inference/v1";
+const PDF_HEADING_INFERENCE_VERSION: &str = "pdf-numbered-heading-inference/v2";
 const MAX_INFERRED_HEADING_CHARS: usize = 160;
 const MAX_INFERRED_HEADING_WORDS: usize = 24;
 
@@ -29,6 +29,7 @@ pub struct PdfParser;
 struct PageText {
     number: u32,
     text: String,
+    chunks: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -43,13 +44,13 @@ struct PdfHeadingCandidate {
     number_path: Vec<u32>,
     title: String,
     page: u32,
-    global_line: usize,
+    global_fragment: usize,
 }
 
 #[derive(Clone, Debug)]
-struct PdfSourceLine {
+struct PdfSourceFragment {
     page: u32,
-    global_line: usize,
+    global_fragment: usize,
     text: String,
 }
 
@@ -193,16 +194,25 @@ fn extract_page_texts(pdf: &LopdfDocument, page_numbers: &[u32]) -> (Vec<PageTex
     let mut errors = Vec::new();
 
     for page_number in page_numbers {
+        let chunks = pdf
+            .extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
+            .into_iter()
+            .filter_map(Result::ok)
+            .map(|chunk| normalize_pdf_text(&chunk))
+            .filter(|chunk| !chunk.is_empty())
+            .collect::<Vec<_>>();
         match pdf.extract_text_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES) {
             Ok(text) => pages.push(PageText {
                 number: *page_number,
                 text: normalize_pdf_text(&text),
+                chunks,
             }),
             Err(error) => {
                 errors.push(format!("page {page_number}: {error}"));
                 pages.push(PageText {
                     number: *page_number,
                     text: String::new(),
+                    chunks,
                 });
             }
         }
@@ -249,15 +259,15 @@ fn normalize_toc(entries: &[TocType], max_page: u32) -> Vec<PdfTocEntry> {
 }
 
 fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate>> {
-    let lines = source_lines(pages);
-    let parsed = lines
+    let fragments = source_fragments(pages);
+    let parsed = fragments
         .iter()
-        .filter_map(|line| {
-            parse_numbered_heading(&line.text).map(|(number_path, title)| PdfHeadingCandidate {
+        .filter_map(|fragment| {
+            parse_numbered_heading(&fragment.text).map(|(number_path, title)| PdfHeadingCandidate {
                 number_path,
                 title,
-                page: line.page,
-                global_line: line.global_line,
+                page: fragment.page,
+                global_fragment: fragment.global_fragment,
             })
         })
         .collect::<Vec<_>>();
@@ -265,28 +275,36 @@ fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate
     let mut accepted = Vec::new();
     let mut expected_top = 1_u32;
     let mut current_top = None;
-    let mut started = false;
+    let mut expected_child = HashMap::<Vec<u32>, u32>::new();
 
     for candidate in parsed {
         let top = candidate.number_path[0];
         if candidate.number_path.len() == 1 {
-            if top == expected_top {
-                started = true;
+            if top == expected_top && top <= 99 {
                 current_top = Some(top);
                 expected_top = expected_top.saturating_add(1);
+                expected_child
+                    .entry(candidate.number_path.clone())
+                    .or_insert(1);
                 accepted.push(candidate);
-            } else if started && top > expected_top {
-                break;
             }
             continue;
         }
 
-        if started
-            && current_top == Some(top)
-            && has_parent_heading(&accepted, &candidate.number_path)
-        {
-            accepted.push(candidate);
+        if current_top != Some(top) || !has_parent_heading(&accepted, &candidate.number_path) {
+            continue;
         }
+        let parent = candidate.number_path[..candidate.number_path.len() - 1].to_vec();
+        let child = *candidate.number_path.last().unwrap_or(&0);
+        let expected = expected_child.entry(parent).or_insert(1);
+        if child != *expected {
+            continue;
+        }
+        *expected = (*expected).saturating_add(1);
+        expected_child
+            .entry(candidate.number_path.clone())
+            .or_insert(1);
+        accepted.push(candidate);
     }
 
     let top_level_count = accepted
@@ -296,41 +314,59 @@ fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate
     (top_level_count >= 2).then_some(accepted)
 }
 
-fn source_lines(pages: &[PageText]) -> Vec<PdfSourceLine> {
-    let mut lines = Vec::new();
-    let mut global_line = 0_usize;
+fn source_fragments(pages: &[PageText]) -> Vec<PdfSourceFragment> {
+    let mut fragments = Vec::new();
+    let mut global_fragment = 0_usize;
     for page in pages {
-        for text in page.text.lines() {
-            lines.push(PdfSourceLine {
+        for text in &page.chunks {
+            fragments.push(PdfSourceFragment {
                 page: page.number,
-                global_line,
-                text: text.to_string(),
+                global_fragment,
+                text: text.clone(),
             });
-            global_line = global_line.saturating_add(1);
+            global_fragment = global_fragment.saturating_add(1);
         }
     }
-    lines
+    fragments
 }
 
-fn parse_numbered_heading(line: &str) -> Option<(Vec<u32>, String)> {
-    let line = line.trim();
-    if line.is_empty() || line.chars().count() > MAX_INFERRED_HEADING_CHARS {
-        return None;
-    }
-    let mut parts = line.split_whitespace();
-    let raw_number = parts.next()?;
-    let title = parts.collect::<Vec<_>>().join(" ");
-    if title.is_empty()
-        || title.split_whitespace().count() > MAX_INFERRED_HEADING_WORDS
-        || !title.chars().any(char::is_alphabetic)
+fn parse_numbered_heading(fragment: &str) -> Option<(Vec<u32>, String)> {
+    let fragment = fragment.trim();
+    if fragment.is_empty()
+        || fragment.contains('\n')
+        || fragment.chars().count() > MAX_INFERRED_HEADING_CHARS
     {
         return None;
     }
 
-    let number = raw_number.trim_end_matches('.');
-    if number.is_empty() {
+    let mut prefix_end = 0_usize;
+    for (index, character) in fragment.char_indices() {
+        if character.is_ascii_digit() || character == '.' {
+            prefix_end = index + character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if prefix_end == 0 {
         return None;
     }
+
+    let raw_number = &fragment[..prefix_end];
+    let number = raw_number.trim_end_matches('.');
+    let title = fragment[prefix_end..]
+        .trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '.' | ':' | '-' | '–' | '—')
+        })
+        .trim();
+    if number.is_empty()
+        || title.is_empty()
+        || title.split_whitespace().count() > MAX_INFERRED_HEADING_WORDS
+        || !title.chars().any(char::is_alphabetic)
+        || !title.chars().next().is_some_and(char::is_uppercase)
+    {
+        return None;
+    }
+
     let number_path = number
         .split('.')
         .map(|part| {
@@ -363,24 +399,24 @@ fn build_inferred_heading_sections(
     headings: &[PdfHeadingCandidate],
     pages: &[PageText],
 ) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
-    let lines = source_lines(pages);
-    let heading_by_line = headings
+    let fragments_source = source_fragments(pages);
+    let heading_by_fragment = headings
         .iter()
         .enumerate()
-        .map(|(index, heading)| (heading.global_line, index))
+        .map(|(index, heading)| (heading.global_fragment, index))
         .collect::<HashMap<_, _>>();
 
     let mut fragments = vec![PageFragments::default(); headings.len()];
     let mut preamble = PageFragments::default();
     let mut current_heading = None;
-    for line in &lines {
-        if let Some(index) = heading_by_line.get(&line.global_line).copied() {
+    for fragment in &fragments_source {
+        if let Some(index) = heading_by_fragment.get(&fragment.global_fragment).copied() {
             current_heading = Some(index);
             continue;
         }
         match current_heading {
-            Some(index) => fragments[index].push_line(line.page, &line.text),
-            None => preamble.push_line(line.page, &line.text),
+            Some(index) => fragments[index].push_line(fragment.page, &fragment.text),
+            None => preamble.push_line(fragment.page, &fragment.text),
         }
     }
 

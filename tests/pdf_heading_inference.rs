@@ -14,12 +14,13 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
             &[
                 "Conference paper title",
                 "Author Name",
-                "1 Introduction",
+                "1Introduction",
                 "Introduction body sentinel.",
-                "1.1 Scope",
+                "1.2 indicates where details are discussed.",
+                "1.1Scope",
                 "Scope body sentinel.",
             ],
-            &["2 Replication", "Future body sentinel."],
+            &["2Replication", "Future body sentinel."],
         ]),
         etag: None,
         last_modified: None,
@@ -43,7 +44,7 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
             .metadata
             .get("pdf_heading_inference_version")
             .map(String::as_str),
-        Some("pdf-numbered-heading-inference/v1")
+        Some("pdf-numbered-heading-inference/v2")
     );
     assert_eq!(parsed.root_sections[0].id.0, "section://preamble");
     assert!(
@@ -58,7 +59,12 @@ async fn pdf_without_native_toc_infers_coherent_numbered_heading_structure() {
         .find(|section| section.title == "1 Introduction")
         .expect("top-level Introduction heading should become canonical structure");
     assert!(introduction.content.contains("Introduction body sentinel"));
-    assert!(!introduction.content.contains("1 Introduction"));
+    assert!(
+        introduction
+            .content
+            .contains("1.2 indicates where details are discussed.")
+    );
+    assert!(!introduction.content.contains("1Introduction"));
     assert_eq!(introduction.location.page, Some(1));
     assert_eq!(introduction.children.len(), 1);
     assert_eq!(introduction.children[0].title, "1.1 Scope");
@@ -93,19 +99,17 @@ fn build_multiline_pdf(page_lines: &[&[&str]]) -> Vec<u8> {
 
     let mut page_ids = Vec::new();
     for lines in page_lines {
-        let mut operations = vec![
-            Operation::new("BT", vec![]),
-            Operation::new("Tf", vec!["F1".into(), 12.into()]),
-            Operation::new("TL", vec![18.into()]),
-            Operation::new("Td", vec![72.into(), 720.into()]),
-        ];
+        let mut operations = Vec::new();
         for (index, line) in lines.iter().enumerate() {
-            if index > 0 {
-                operations.push(Operation::new("T*", vec![]));
-            }
+            operations.push(Operation::new("BT", vec![]));
+            operations.push(Operation::new("Tf", vec!["F1".into(), 12.into()]));
+            operations.push(Operation::new(
+                "Td",
+                vec![72.into(), (720_i64 - (index as i64 * 18)).into()],
+            ));
             operations.push(Operation::new("Tj", vec![Object::string_literal(*line)]));
+            operations.push(Operation::new("ET", vec![]));
         }
-        operations.push(Operation::new("ET", vec![]));
 
         let content_id = document.add_object(Stream::new(
             dictionary! {},

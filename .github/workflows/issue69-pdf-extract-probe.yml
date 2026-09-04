@@ -1,0 +1,105 @@
+name: Issue 69 pdf-extract probe
+
+on:
+  push:
+    branches:
+      - feat/issue-69-named-section-boundary
+
+permissions:
+  contents: write
+
+jobs:
+  probe-pdf-extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/issue-69-named-section-boundary
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compare extractor heading shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          raft="$RUNNER_TEMP/atc14-paper-ongaro.pdf"
+          curl --fail --location --retry 3 --retry-delay 2 --max-time 60 \
+            "https://www.usenix.org/system/files/conference/atc14/atc14-paper-ongaro.pdf" \
+            --output "$raft"
+
+          cargo add pdf-extract@0.12.0 --quiet
+          mkdir -p examples
+          cat > examples/issue69_pdf_extract_probe.rs <<'RS'
+          fn is_designator(token: &str) -> bool {
+              let token = token.trim_end_matches('.');
+              !token.is_empty()
+                  && token.len() <= 12
+                  && token
+                      .split('.')
+                      .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+          }
+
+          fn main() {
+              let path = std::env::var("READING_MCP_RAFT_EVIDENCE_PDF").unwrap();
+              let bytes = std::fs::read(path).unwrap();
+              let pages = pdf_extract::extract_text_from_mem_by_pages(&bytes).unwrap();
+              for (page_index, text) in pages.iter().enumerate() {
+                  for (line_index, raw) in text.lines().enumerate() {
+                      let line = raw.trim();
+                      if line.is_empty() {
+                          continue;
+                      }
+                      let tokens = line.split_whitespace().collect::<Vec<_>>();
+                      if let Some(first) = tokens.first()
+                          && is_designator(first)
+                          && tokens.len() >= 2
+                          && tokens.len() <= 28
+                      {
+                          println!(
+                              "CANDIDATE page={} line={} tokens={}",
+                              page_index + 1,
+                              line_index + 1,
+                              tokens.iter().take(9).copied().collect::<Vec<_>>().join(" ")
+                          );
+                      }
+                      if let Some(pos) = tokens.iter().position(|token| {
+                          token.trim_matches(|c: char| !c.is_alphanumeric()) == "Introduction"
+                      }) {
+                          let start = pos.saturating_sub(2);
+                          println!(
+                              "INTRO page={} line={} pos={} context={}",
+                              page_index + 1,
+                              line_index + 1,
+                              pos,
+                              tokens[start..tokens.len().min(start + 8)].join(" ")
+                          );
+                      }
+                  }
+              }
+          }
+          RS
+
+          READING_MCP_RAFT_EVIDENCE_PDF="$raft" \
+            cargo run --quiet --example issue69_pdf_extract_probe \
+            > issue69-pdf-extract-probe.txt 2>&1
+          rm -f examples/issue69_pdf_extract_probe.rs
+          git checkout -- Cargo.toml Cargo.lock
+
+      - name: Commit probe output
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add issue69-pdf-extract-probe.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "ci: record issue69 pdf-extract probe"
+          git push origin HEAD:feat/issue-69-named-section-boundary

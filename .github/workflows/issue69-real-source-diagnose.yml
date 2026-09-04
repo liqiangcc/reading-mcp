@@ -38,7 +38,16 @@ jobs:
             "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf" \
             --output "$kafka" > /tmp/kafka-curl.log 2>&1
           kafka_curl_status=$?
+          shape_status=125
           test_status=125
+          if [ "$raft_curl_status" -eq 0 ]; then
+            READING_MCP_RAFT_EVIDENCE_PDF="$raft" \
+              cargo test --locked --test raft_heading_shape_diagnostic -- --ignored --nocapture \
+              > /tmp/issue69-heading-shape.log 2>&1
+            shape_status=$?
+          else
+            : > /tmp/issue69-heading-shape.log
+          fi
           if [ "$raft_curl_status" -eq 0 ] && [ "$kafka_curl_status" -eq 0 ]; then
             READING_MCP_RAFT_EVIDENCE_PDF="$raft" \
             READING_MCP_KAFKA_EVIDENCE_PDF="$kafka" \
@@ -51,18 +60,16 @@ jobs:
           {
             echo "raft_curl_status=$raft_curl_status"
             echo "kafka_curl_status=$kafka_curl_status"
+            echo "shape_status=$shape_status"
             echo "test_status=$test_status"
             if [ -f "$raft" ]; then sha256sum "$raft" | sed 's#  .*#  RAFT_PDF#'; fi
             if [ -f "$kafka" ]; then sha256sum "$kafka" | sed 's#  .*#  KAFKA_PDF#'; fi
             echo
-            echo "=== RAFT CURL tail ==="
-            tail -n 40 /tmp/raft-curl.log
-            echo
-            echo "=== KAFKA CURL tail ==="
-            tail -n 40 /tmp/kafka-curl.log
+            echo "=== HEADING SHAPE (sanitized) ==="
+            grep 'HEADING_SHAPE' /tmp/issue69-heading-shape.log || true
             echo
             echo "=== REAL-SOURCE TEST tail ==="
-            tail -n 260 /tmp/issue69-real-source-test.log
+            tail -n 180 /tmp/issue69-real-source-test.log
           } > issue69-real-source-diagnostic.txt
           exit 0
 

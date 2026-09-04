@@ -28,11 +28,11 @@ fn raft_numbered_line_shape_is_reported_without_body_text() {
                 .trim_end_matches('.')
                 .split('.')
                 .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
-            let rest = trimmed
-                .strip_prefix(first)
-                .unwrap_or_default()
-                .trim();
-            let next = lines.get(index + 1).map(|value| value.trim()).unwrap_or_default();
+            let rest = trimmed.strip_prefix(first).unwrap_or_default().trim();
+            let next = lines
+                .get(index + 1)
+                .map(|value| value.trim())
+                .unwrap_or_default();
             println!(
                 "HEADING_SHAPE page={} first_len={} digit_prefix_len={} pure_numeric={} first_has_dot={} line_chars={} line_words={} rest_chars={} rest_words={} next_chars={} next_words={} next_starts_alpha={}",
                 page_number,
@@ -47,6 +47,41 @@ fn raft_numbered_line_shape_is_reported_without_body_text() {
                 next.chars().count(),
                 next.split_whitespace().count(),
                 next.chars().next().is_some_and(char::is_alphabetic),
+            );
+        }
+
+        let chunks = pdf.extract_text_chunks_with_limit(
+            &[page_number],
+            MAX_PAGE_DECOMPRESSED_BYTES,
+        );
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+            let Ok(chunk) = chunk else {
+                println!("CHUNK_SHAPE page={} chunk={} decode_error=true", page_number, chunk_index);
+                continue;
+            };
+            let trimmed = chunk.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let first = trimmed.split_whitespace().next().unwrap_or_default();
+            let digit_prefix_len = first.bytes().take_while(u8::is_ascii_digit).count();
+            let chars = trimmed.chars().count();
+            let words = trimmed.split_whitespace().count();
+            let short_structural = chars <= 180 && words <= 28;
+            if digit_prefix_len == 0 && !short_structural {
+                continue;
+            }
+            println!(
+                "CHUNK_SHAPE page={} chunk={} chars={} words={} lines={} first_len={} digit_prefix_len={} first_starts_alpha={} short_structural={}",
+                page_number,
+                chunk_index,
+                chars,
+                words,
+                trimmed.lines().count(),
+                first.chars().count(),
+                digit_prefix_len,
+                first.chars().next().is_some_and(char::is_alphabetic),
+                short_structural,
             );
         }
     }

@@ -1,0 +1,233 @@
+name: Issue80 multi-page preamble fix once
+on:
+  push:
+    branches: [feat/issue80-abstract-front-matter]
+    paths: [.github/workflows/issue80-multipage-preamble-fix-once.yml]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue80-abstract-front-matter
+      - name: Apply precise multi-page preamble fix and self-delete
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/parsing/pdf_layout.rs')
+          s = p.read_text()
+          s = s.replace('''    let Some(first_page) = evidence.iter().map(|item| item.page).min() else {\n        return "no_layout_evidence";\n    };\n    if first_section_page != first_page {\n        return "first_section_not_on_first_page";\n    }\n\n    let lines = layout_lines(evidence);''', '''    if evidence.is_empty() {\n        return "no_layout_evidence";\n    }\n\n    let lines = layout_lines(evidence);''')
+          s = s.replace('''            line.page == first_page && normalized_heading_text(&line.text) == "abstract"''', '''            line.page == first_section_page\n                && normalized_heading_text(&line.text) == "abstract"''')
+          p.write_text(s)
+
+          p = Path('src/parsing/pdf_front_matter.rs')
+          s = p.read_text()
+          start = s.index('pub(super) fn split_reliable_abstract_from_preamble(')
+          end = s.index('\nfn split_abstract_line(', start)
+          replacement = r'''pub(super) fn split_reliable_abstract_from_preamble(
+    sections: &mut Vec<Section>,
+    bindings: &mut Vec<OriginalSourceBinding>,
+    evidence: &[PdfTextFragmentEvidence],
+    first_section_page: u32,
+    first_section_title: &str,
+) -> bool {
+    let Some(candidate) = infer_abstract_heading(evidence, first_section_page, first_section_title)
+    else {
+        return false;
+    };
+
+    let Some(preamble_index) = sections
+        .iter()
+        .position(|section| section.id.0 == "section://preamble")
+    else {
+        return false;
+    };
+    let preamble_content = sections[preamble_index].content.clone();
+    let Some(split) = split_abstract_line_ranges(&preamble_content) else {
+        return false;
+    };
+    if split.after.is_empty() {
+        return false;
+    }
+
+    let preamble_id = SectionId("section://preamble".into());
+    let abstract_id = SectionId("section://abstract".into());
+    let old_bindings = bindings
+        .iter()
+        .filter(|binding| binding.owner_section_id == preamble_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if old_bindings.is_empty() {
+        return false;
+    }
+
+    let before_bindings = project_bindings(
+        &old_bindings,
+        &preamble_id,
+        split.before_range,
+        0,
+    );
+    let abstract_bindings = project_bindings(
+        &old_bindings,
+        &abstract_id,
+        split.after_range,
+        split.after_range.start(),
+    );
+    if abstract_bindings.is_empty()
+        || !abstract_bindings.iter().all(|binding| {
+            matches!(
+                binding.target,
+                OriginalSourceTarget::Page { page_number } if page_number == candidate.page
+            )
+        })
+    {
+        return false;
+    }
+
+    bindings.retain(|binding| binding.owner_section_id != preamble_id);
+    bindings.extend(before_bindings);
+    bindings.extend(abstract_bindings);
+
+    if split.before.is_empty() {
+        sections.remove(preamble_index);
+    } else {
+        sections[preamble_index].content = split.before.clone();
+        let start_page = old_bindings
+            .first()
+            .and_then(binding_page)
+            .unwrap_or(candidate.page);
+        let end_page = old_bindings
+            .iter()
+            .filter(|binding| binding.normalized_range.end() <= split.before_range.end())
+            .filter_map(binding_page)
+            .last()
+            .unwrap_or(start_page);
+        sections[preamble_index].location.native_location = Some(if end_page > start_page {
+            format!("pdf:pages:{start_page}-{end_page}")
+        } else {
+            format!("pdf:page:{start_page}")
+        });
+    }
+
+    let insert_index = if split.before.is_empty() {
+        preamble_index
+    } else {
+        preamble_index + 1
+    };
+    sections.insert(
+        insert_index,
+        Section {
+            id: abstract_id,
+            parent_id: None,
+            title: "Abstract".into(),
+            level: 1,
+            content: split.after,
+            location: Location {
+                page: Some(candidate.page),
+                section_path: vec!["Abstract".into()],
+                native_location: Some(format!("pdf:page:{}", candidate.page)),
+                ..Location::default()
+            },
+            children: Vec::new(),
+        },
+    );
+    true
+}
+
+#[derive(Debug)]
+struct AbstractSplit {
+    before: String,
+    after: String,
+    before_range: NormalizedTextRange,
+    after_range: NormalizedTextRange,
+}
+
+fn split_abstract_line_ranges(content: &str) -> Option<AbstractSplit> {
+    let mut scalar_offset = 0_usize;
+    let mut match_range = None;
+    for segment in content.split_inclusive('\n') {
+        let segment_len = segment.chars().count();
+        if segment.trim().eq_ignore_ascii_case("Abstract") {
+            if match_range.is_some() {
+                return None;
+            }
+            match_range = Some((scalar_offset, scalar_offset + segment_len));
+        }
+        scalar_offset += segment_len;
+    }
+    if scalar_offset < content.chars().count() {
+        return None;
+    }
+
+    let (heading_start, heading_end) = match_range?;
+    let before_raw = NormalizedTextRange::new(0, heading_start).ok()?;
+    let after_raw = NormalizedTextRange::new(heading_end, content.chars().count()).ok()?;
+    let before_text = before_raw.slice(content).ok()?;
+    let after_text = after_raw.slice(content).ok()?;
+
+    let before_trimmed = before_text.trim_end();
+    let after_trimmed = after_text.trim_start();
+    let before_end = before_trimmed.chars().count();
+    let after_leading = after_text.chars().count() - after_text.trim_start_matches(char::is_whitespace).chars().count();
+    let after_start = heading_end + after_leading;
+
+    Some(AbstractSplit {
+        before: before_trimmed.to_string(),
+        after: after_trimmed.to_string(),
+        before_range: NormalizedTextRange::new(0, before_end).ok()?,
+        after_range: NormalizedTextRange::new(after_start, content.chars().count()).ok()?,
+    })
+}
+
+fn project_bindings(
+    source: &[OriginalSourceBinding],
+    new_owner: &SectionId,
+    selected: NormalizedTextRange,
+    shift: usize,
+) -> Vec<OriginalSourceBinding> {
+    source
+        .iter()
+        .filter_map(|binding| {
+            let start = binding.normalized_range.start().max(selected.start());
+            let end = binding.normalized_range.end().min(selected.end());
+            (start < end).then(|| OriginalSourceBinding {
+                owner_section_id: new_owner.clone(),
+                normalized_range: NormalizedTextRange::new(start - shift, end - shift)
+                    .expect("projected binding must remain ordered"),
+                target: binding.target.clone(),
+            })
+        })
+        .collect()
+}
+
+fn binding_page(binding: &OriginalSourceBinding) -> Option<u32> {
+    match binding.target {
+        OriginalSourceTarget::Page { page_number } => Some(page_number),
+    }
+}
+'''
+          s = s[:start] + replacement + s[end:]
+          s = s.replace('fn split_abstract_line(content: &str) -> Option<(String, String)> {', 'fn split_abstract_line(content: &str) -> Option<(String, String)> {')
+          # Keep legacy helper tests compiling; delegate to the range-aware splitter.
+          legacy_start = s.index('fn split_abstract_line(content: &str) -> Option<(String, String)> {')
+          legacy_end = s.index('\nfn page_binding(', legacy_start)
+          legacy = '''fn split_abstract_line(content: &str) -> Option<(String, String)> {\n    let split = split_abstract_line_ranges(content)?;\n    Some((split.before, split.after))\n}\n'''
+          s = s[:legacy_start] + legacy + s[legacy_end:]
+          # page_binding is no longer needed.
+          page_start = s.index('fn page_binding(')
+          test_start = s.index('\n#[cfg(test)]', page_start)
+          s = s[:page_start] + s[test_start:]
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          rm .github/workflows/issue80-multipage-preamble-fix-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/parsing/pdf_layout.rs src/parsing/pdf_front_matter.rs .github/workflows/issue80-multipage-preamble-fix-once.yml
+          git commit -m 'fix(pdf): preserve multi-page preamble bindings when splitting Abstract'
+          git push origin HEAD:feat/issue80-abstract-front-matter

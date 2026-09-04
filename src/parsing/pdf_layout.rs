@@ -439,7 +439,9 @@ fn decode_text_object(
 
 #[cfg(test)]
 mod tests {
-    use super::{PdfTextFragmentEvidence, abstract_heading_inference_status, infer_abstract_heading};
+    use super::{
+        PdfTextFragmentEvidence, abstract_heading_inference_status, infer_abstract_heading,
+    };
 
     fn fragment(
         sequence_index: usize,

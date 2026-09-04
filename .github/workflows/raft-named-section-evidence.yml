@@ -66,4 +66,4 @@ jobs:
         env:
           READING_MCP_RAFT_EVIDENCE_PDF: ${{ runner.temp }}/atc14-paper-ongaro.pdf
           READING_MCP_KAFKA_EVIDENCE_PDF: ${{ runner.temp }}/kafka-2011-paper.pdf
-        run: cargo test --locked --test raft_named_section_evidence -- --nocapture
+        run: cargo test --locked --test raft_named_section_evidence -- --ignored --nocapture

@@ -28,6 +28,7 @@ const KAFKA_CONTENT_HASH: &str =
     "sha256:4abdeba2503eb20a5d7ed84aa8e7680bcbe3088541712626315deae0b07c2821";
 
 #[tokio::test]
+#[ignore = "requires canonical Raft 2014 PDF evidence"]
 async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() {
     let path = std::env::var("READING_MCP_RAFT_EVIDENCE_PDF")
         .expect("dedicated Raft evidence workflow must provide the downloaded PDF path");
@@ -167,6 +168,7 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
 }
 
 #[tokio::test]
+#[ignore = "requires canonical Kafka 2011 PDF evidence"]
 async fn real_kafka_pdf_regression_preserves_raw_identity_and_structure_navigation() {
     let path = std::env::var("READING_MCP_KAFKA_EVIDENCE_PDF")
         .expect("dedicated Kafka regression workflow must provide the downloaded PDF path");

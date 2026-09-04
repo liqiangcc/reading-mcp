@@ -203,21 +203,15 @@ pub(super) fn infer_abstract_heading<'a>(
     first_section_title: &str,
 ) -> Option<&'a PdfTextFragmentEvidence> {
     let first_page = evidence.iter().map(|item| item.page).min()?;
+    if first_section_page != first_page {
+        return None;
+    }
     let section_label = strip_number_prefix(first_section_title);
     let boundary_index = evidence.iter().position(|item| {
         item.page == first_section_page
             && (same_heading_text(&item.text, first_section_title)
                 || same_heading_text(&item.text, section_label))
-    });
-
-    let boundary_index = match boundary_index {
-        Some(index) => index,
-        None if first_section_page > first_page => evidence
-            .iter()
-            .position(|item| item.page >= first_section_page)
-            .unwrap_or(evidence.len()),
-        None => return None,
-    };
+    })?;
 
     let candidates = evidence[..boundary_index]
         .iter()

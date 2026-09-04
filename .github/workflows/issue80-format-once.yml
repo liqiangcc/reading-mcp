@@ -1,0 +1,32 @@
+name: Issue80 format once
+
+on:
+  push:
+    branches:
+      - feat/issue80-abstract-front-matter
+    paths:
+      - .github/workflows/issue80-format-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue80-abstract-front-matter
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format and self-delete
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          rm .github/workflows/issue80-format-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "style: apply final rustfmt for issue80"
+          git push origin HEAD:feat/issue80-abstract-front-matter

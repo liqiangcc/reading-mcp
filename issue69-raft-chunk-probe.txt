@@ -7,6 +7,7 @@ CHUNK_SHAPE page=2 chunk=1 chars=44 words=1 lines=1 first_len=44 digit_prefix_le
 CHUNK_SHAPE page=2 chunk=2 chars=47 words=2 lines=1 first_len=28 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=2 chunk=3 chars=8 words=1 lines=1 first_len=8 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=2 chunk=5 chars=13 words=1 lines=1 first_len=13 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=2 chunk=5 context=1Introduction
 CHUNK_SHAPE page=2 chunk=7 chars=19 words=2 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=2 chunk=9 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=2 chunk=10 chars=13 words=1 lines=1 first_len=13 digit_prefix_len=0 first_starts_alpha=true short_structural=true
@@ -18,6 +19,7 @@ CHUNK_SHAPE page=2 chunk=16 chars=18 words=1 lines=1 first_len=18 digit_prefix_l
 CHUNK_SHAPE page=2 chunk=17 chars=62 words=2 lines=1 first_len=26 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=2 chunk=18 chars=16 words=2 lines=1 first_len=12 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=2 chunk=20 chars=25 words=2 lines=1 first_len=11 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=2 chunk=20 context=2Replicated statemachines
 CHUNK_SHAPE page=2 chunk=21 chars=48 words=2 lines=1 first_len=35 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=2 chunk=22 chars=23 words=1 lines=1 first_len=23 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=3 chunk=0 chars=64 words=8 lines=1 first_len=3 digit_prefix_len=3 first_starts_alpha=false short_structural=true
@@ -35,13 +37,16 @@ CHUNK_SHAPE page=3 chunk=12 chars=132 words=5 lines=1 first_len=45 digit_prefix_
 CHUNK_SHAPE page=3 chunk=13 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=3 chunk=14 chars=179 words=6 lines=2 first_len=41 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=3 chunk=15 chars=22 words=1 lines=1 first_len=22 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=3 chunk=15 context=3What’swrongwithPaxos?
 CHUNK_SHAPE page=3 chunk=17 chars=18 words=1 lines=1 first_len=18 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=3 chunk=18 chars=92 words=3 lines=1 first_len=37 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=3 chunk=19 chars=11 words=1 lines=1 first_len=11 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=4 chunk=0 chars=65 words=8 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=4 chunk=2 chars=30 words=1 lines=1 first_len=30 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=4 chunk=2 context=4Designingforunderstandability
 CHUNK_SHAPE page=4 chunk=4 chars=18 words=1 lines=1 first_len=18 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=4 chunk=6 chars=26 words=1 lines=1 first_len=26 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=4 chunk=6 context=5TheRaftconsensusalgorithm
 CHUNK_SHAPE page=4 chunk=8 chars=6 words=1 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=4 chunk=10 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=4 chunk=11 chars=15 words=1 lines=1 first_len=15 digit_prefix_len=0 first_starts_alpha=true short_structural=true
@@ -71,6 +76,7 @@ CHUNK_SHAPE page=5 chunk=14 chars=11 words=1 lines=1 first_len=11 digit_prefix_l
 CHUNK_SHAPE page=5 chunk=15 chars=32 words=3 lines=1 first_len=9 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=5 chunk=16 chars=23 words=1 lines=1 first_len=23 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=5 chunk=17 chars=165 words=24 lines=1 first_len=7 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=5 chunk=17 context=1.Reply false if term < currentTerm (§5.1) 2.If votedFor is
 CHUNK_SHAPE page=5 chunk=18 chars=14 words=1 lines=1 first_len=14 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=5 chunk=19 chars=78 words=10 lines=1 first_len=7 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=5 chunk=20 chars=10 words=1 lines=1 first_len=10 digit_prefix_len=0 first_starts_alpha=true short_structural=true
@@ -93,6 +99,7 @@ CHUNK_SHAPE page=5 chunk=36 chars=7 words=1 lines=1 first_len=7 digit_prefix_len
 CHUNK_SHAPE page=5 chunk=37 chars=68 words=7 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=5 chunk=38 chars=23 words=1 lines=1 first_len=23 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=5 chunk=39 chars=413 words=58 lines=2 first_len=7 digit_prefix_len=1 first_starts_alpha=false short_structural=false
+CHUNK_CANDIDATE page=5 chunk=39 context=1.Reply false if term < currentTerm (§5.1) 2.Reply false if
 CHUNK_SHAPE page=5 chunk=40 chars=46 words=2 lines=2 first_len=16 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=5 chunk=41 chars=51 words=6 lines=1 first_len=8 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=5 chunk=42 chars=11 words=1 lines=1 first_len=11 digit_prefix_len=0 first_starts_alpha=true short_structural=true
@@ -185,6 +192,7 @@ CHUNK_SHAPE page=6 chunk=20 chars=5 words=1 lines=1 first_len=5 digit_prefix_len
 CHUNK_CANDIDATE page=6 chunk=20 context=5.4.3
 CHUNK_SHAPE page=6 chunk=21 chars=8 words=1 lines=1 first_len=8 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=6 chunk=23 chars=13 words=1 lines=1 first_len=13 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=6 chunk=23 context=5.1Raftbasics
 CHUNK_SHAPE page=6 chunk=24 chars=146 words=5 lines=1 first_len=35 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=6 chunk=25 chars=6 words=1 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=6 chunk=26 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
@@ -198,6 +206,7 @@ CHUNK_SHAPE page=6 chunk=35 chars=8 words=1 lines=1 first_len=8 digit_prefix_len
 CHUNK_SHAPE page=6 chunk=37 chars=8 words=1 lines=1 first_len=8 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=6 chunk=39 chars=12 words=2 lines=1 first_len=7 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=6 chunk=41 chars=17 words=1 lines=1 first_len=17 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=6 chunk=41 context=5.2Leaderelection
 CHUNK_SHAPE page=6 chunk=43 chars=15 words=1 lines=1 first_len=15 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=6 chunk=44 chars=176 words=7 lines=1 first_len=26 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=7 chunk=0 chars=64 words=8 lines=1 first_len=3 digit_prefix_len=3 first_starts_alpha=false short_structural=true
@@ -206,6 +215,7 @@ CHUNK_SHAPE page=7 chunk=2 chars=8 words=1 lines=1 first_len=8 digit_prefix_len=
 CHUNK_SHAPE page=7 chunk=3 chars=174 words=9 lines=1 first_len=4 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=7 chunk=4 chars=9 words=1 lines=1 first_len=9 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=7 chunk=6 chars=17 words=1 lines=1 first_len=17 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=7 chunk=6 context=5.3Logreplication
 CHUNK_SHAPE page=7 chunk=8 chars=11 words=2 lines=1 first_len=7 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=8 chunk=0 chars=65 words=8 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=8 chunk=2 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
@@ -217,16 +227,22 @@ CHUNK_SHAPE page=9 chunk=0 chars=64 words=8 lines=1 first_len=3 digit_prefix_len
 CHUNK_CANDIDATE page=9 chunk=0 context=312 2014 USENIX Annual Technical Conference USENIX Association
 CHUNK_SHAPE page=9 chunk=1 chars=165 words=9 lines=1 first_len=48 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=9 chunk=2 chars=9 words=1 lines=1 first_len=9 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=9 chunk=2 context=5.4Safety
 CHUNK_SHAPE page=9 chunk=4 chars=25 words=2 lines=1 first_len=13 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=9 chunk=4 context=5.4.1Election restriction
 CHUNK_SHAPE page=9 chunk=6 chars=8 words=1 lines=1 first_len=8 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=9 chunk=8 chars=40 words=2 lines=1 first_len=26 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=9 chunk=8 context=5.4.2Committingentriesfrom previousterms
 CHUNK_SHAPE page=10 chunk=0 chars=65 words=8 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=10 chunk=1 chars=8 words=1 lines=1 first_len=8 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=10 chunk=3 chars=19 words=1 lines=1 first_len=19 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=10 chunk=3 context=5.4.3Safetyargument
 CHUNK_SHAPE page=10 chunk=5 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=10 chunk=7 chars=6 words=1 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=10 chunk=9 chars=31 words=2 lines=1 first_len=14 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=10 chunk=9 context=5.5Followerand candidatecrashes
 CHUNK_SHAPE page=10 chunk=11 chars=25 words=2 lines=1 first_len=12 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=10 chunk=11 context=5.6Timingand availability
 CHUNK_SHAPE page=10 chunk=13 chars=17 words=1 lines=1 first_len=17 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=10 chunk=14 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=10 chunk=15 chars=13 words=1 lines=1 first_len=13 digit_prefix_len=0 first_starts_alpha=true short_structural=true
@@ -244,6 +260,7 @@ CHUNK_SHAPE page=10 chunk=26 chars=45 words=5 lines=1 first_len=5 digit_prefix_l
 CHUNK_SHAPE page=11 chunk=0 chars=64 words=8 lines=1 first_len=3 digit_prefix_len=3 first_starts_alpha=false short_structural=true
 CHUNK_CANDIDATE page=11 chunk=0 context=314 2014 USENIX Annual Technical Conference USENIX Association
 CHUNK_SHAPE page=11 chunk=2 chars=26 words=2 lines=1 first_len=18 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=11 chunk=2 context=6Clustermembership changes
 CHUNK_SHAPE page=11 chunk=3 chars=38 words=2 lines=1 first_len=27 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=11 chunk=4 chars=14 words=2 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=11 chunk=6 chars=15 words=2 lines=1 first_len=5 digit_prefix_len=0 first_starts_alpha=true short_structural=true
@@ -322,8 +339,11 @@ CHUNK_SHAPE page=12 chunk=31 chars=1 words=1 lines=1 first_len=1 digit_prefix_le
 CHUNK_SHAPE page=12 chunk=32 chars=69 words=4 lines=1 first_len=3 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=12 chunk=33 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=12 chunk=35 chars=25 words=2 lines=1 first_len=11 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=12 chunk=35 context=7Clientsand logcompaction
 CHUNK_SHAPE page=12 chunk=37 chars=29 words=2 lines=1 first_len=18 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=12 chunk=37 context=8Implementationand evaluation
 CHUNK_SHAPE page=12 chunk=39 chars=20 words=1 lines=1 first_len=20 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=12 chunk=39 context=8.1Understandability
 CHUNK_SHAPE page=13 chunk=0 chars=64 words=8 lines=1 first_len=3 digit_prefix_len=3 first_starts_alpha=false short_structural=true
 CHUNK_CANDIDATE page=13 chunk=0 context=316 2014 USENIX Annual Technical Conference USENIX Association
 CHUNK_SHAPE page=13 chunk=1 chars=105 words=22 lines=16 first_len=1 digit_prefix_len=1 first_starts_alpha=false short_structural=true
@@ -334,14 +354,18 @@ CHUNK_SHAPE page=13 chunk=6 chars=149 words=23 lines=12 first_len=1 digit_prefix
 CHUNK_CANDIDATE page=13 chunk=6 context=0 5 10 15 20 implementexplain number of participants Paxos
 CHUNK_SHAPE page=13 chunk=7 chars=9 words=1 lines=1 first_len=9 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=13 chunk=9 chars=14 words=1 lines=1 first_len=14 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=13 chunk=9 context=8.2Correctness
 CHUNK_SHAPE page=13 chunk=11 chars=14 words=1 lines=1 first_len=14 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=13 chunk=11 context=8.3Performance
 CHUNK_SHAPE page=13 chunk=13 chars=59 words=4 lines=1 first_len=7 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=13 chunk=15 chars=7 words=1 lines=1 first_len=7 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=13 chunk=16 chars=103 words=3 lines=1 first_len=51 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=14 chunk=0 chars=65 words=8 lines=1 first_len=6 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=14 chunk=1 chars=271 words=39 lines=34 first_len=2 digit_prefix_len=1 first_starts_alpha=false short_structural=false
+CHUNK_CANDIDATE page=14 chunk=1 context=0% 20% 40% 60% 80% 100% 100 1000 10000 100000
 CHUNK_SHAPE page=14 chunk=2 chars=9 words=1 lines=1 first_len=9 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=14 chunk=4 chars=12 words=1 lines=1 first_len=12 digit_prefix_len=1 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=14 chunk=4 context=9Relatedwork
 CHUNK_SHAPE page=14 chunk=5 chars=115 words=4 lines=2 first_len=46 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=14 chunk=6 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=14 chunk=7 chars=87 words=3 lines=1 first_len=46 digit_prefix_len=0 first_starts_alpha=true short_structural=true
@@ -357,7 +381,9 @@ CHUNK_SHAPE page=15 chunk=2 chars=1 words=1 lines=1 first_len=1 digit_prefix_len
 CHUNK_SHAPE page=15 chunk=4 chars=1 words=1 lines=1 first_len=1 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=15 chunk=5 chars=100 words=3 lines=1 first_len=15 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=15 chunk=6 chars=12 words=1 lines=1 first_len=12 digit_prefix_len=2 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=15 chunk=6 context=10Conclusion
 CHUNK_SHAPE page=15 chunk=8 chars=17 words=1 lines=1 first_len=17 digit_prefix_len=2 first_starts_alpha=false short_structural=true
+CHUNK_CANDIDATE page=15 chunk=8 context=11Acknowledgments
 CHUNK_SHAPE page=15 chunk=10 chars=10 words=1 lines=1 first_len=10 digit_prefix_len=0 first_starts_alpha=true short_structural=true
 CHUNK_SHAPE page=15 chunk=11 chars=145 words=15 lines=1 first_len=4 digit_prefix_len=0 first_starts_alpha=false short_structural=true
 CHUNK_SHAPE page=15 chunk=12 chars=71 words=2 lines=1 first_len=40 digit_prefix_len=0 first_starts_alpha=true short_structural=true

@@ -59,7 +59,7 @@ jobs:
             --retry 3 \
             --retry-delay 2 \
             --max-time 60 \
-            "https://raw.githubusercontent.com/liqiangcc/classic-papers-system-design/9469b1f0e83bfd3d5c59d15c6bfe42074139320e/sources/kafka/kafka-2011-distributed-messaging/paper.pdf" \
+            "https://www.microsoft.com/en-us/research/wp-content/uploads/2017/09/Kafka.pdf" \
             --output "$RUNNER_TEMP/kafka-2011-paper.pdf"
 
       - name: Verify structure-only scope gate and real-source regression

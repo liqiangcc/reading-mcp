@@ -114,6 +114,14 @@ if [[ -f LICENSE ]]; then
   install -m 0644 LICENSE "$stage/LICENSE"
 fi
 
+install -d -m 0755 "$stage/pdf-layout"
+install -m 0755 scripts/pdf-layout/setup-pdf-layout.sh "$stage/pdf-layout/setup-pdf-layout.sh"
+install -m 0644 scripts/pdf-layout/smoke.py "$stage/pdf-layout/smoke.py"
+install -m 0755 scripts/deploy-production.sh "$stage/deploy-production.sh"
+install -m 0644 scripts/pdf-layout/requirements.txt "$stage/pdf-layout/requirements.txt"
+install -m 0644 docs/pdf-layout-deployment.md "$stage/PDF-LAYOUT-DEPLOYMENT.md"
+install -m 0644 docs/issue89-review.md "$stage/ISSUE89-REVIEW.md"
+
 binary_sha256=$(sha256sum "$stage/reading-mcp" | awk '{print $1}')
 cargo_lock_sha256=$(sha256sum Cargo.lock | awk '{print $1}')
 

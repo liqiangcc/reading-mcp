@@ -278,3 +278,40 @@ async fn spawn_http_fixture() -> (SocketAddr, tokio::task::JoinHandle<()>) {
 
     (address, handle)
 }
+
+#[tokio::test]
+async fn optional_pdf_backend_namespace_isolated_without_changing_text_cache() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let inner: Arc<dyn Parser> = Arc::new(AnyMediaCountingParser(calls.clone()));
+    let cache = Arc::new(InMemoryParsedDocumentCache::default());
+    let legacy = CachingParser::new(inner.clone(), cache.clone());
+    let layout = CachingParser::new(inner, cache).with_pdf_namespace("layout/test-v1");
+    let source = DocumentSource("memory:identity".into());
+    let mut resource = RetrievedResource {
+        source: source.clone(),
+        final_source: source,
+        media_type: MediaType("application/pdf; test=1".into()),
+        bytes: b"Same bytes.".to_vec(),
+        etag: None,
+        last_modified: None,
+        metadata: Default::default(),
+    };
+    legacy.parse(resource.clone()).await.unwrap();
+    layout.parse(resource.clone()).await.unwrap();
+    layout.parse(resource.clone()).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    resource.final_source = DocumentSource("memory:text-identity".into());
+    resource.media_type = MediaType("text/plain".into());
+    legacy.parse(resource.clone()).await.unwrap();
+    layout.parse(resource).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+struct AnyMediaCountingParser(Arc<AtomicUsize>);
+#[async_trait]
+impl Parser for AnyMediaCountingParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        reading_mcp::parsing::TextParser.parse(resource).await
+    }
+}

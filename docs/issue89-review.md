@@ -112,7 +112,7 @@ is assumed for the other papers. EPUB regression fixtures are self-authored.
 Results are recorded after the final code and package checks; candidate quality
 limitations above remain applicable regardless of test counts.
 
-The development regression run enumerated and exact-read **2,103 units** across
+The development regression run enumerated and exact-read **2,104 units** across
 five original PDFs and the self-authored EPUB, with zero exact-read mismatches.
 The 43 annotated sentences have 36 internal gold boundaries; boundary precision,
 recall and typography-normalized individually returned scalar coverage are 100%

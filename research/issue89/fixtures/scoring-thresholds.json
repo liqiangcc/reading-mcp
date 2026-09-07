@@ -1,0 +1,23 @@
+{
+  "schema": "reading-mcp-issue89-scoring-thresholds/v1",
+  "status_at_freeze": "frozen-before-scored-evaluation",
+  "calibration_policy": "Raw outputs are harness-debugging material only. Formal scored evaluation has not started at freeze time; thresholds are not tuned from scored results.",
+  "thresholds": {
+    "overall_boundary_precision": {"operator": ">=", "value": 0.99},
+    "overall_boundary_recall": {"operator": ">=", "value": 0.99},
+    "issue87_high_confidence_wrong_merge": {"operator": "=", "value": 0},
+    "issue87_high_confidence_wrong_split": {"operator": "=", "value": 0},
+    "metadata_contamination": {"operator": "=", "value": 0},
+    "omission": {"operator": "=", "value": 0},
+    "duplication": {"operator": "=", "value": 0},
+    "exact_normalized_read_equality": {"operator": "=", "value": 1.0},
+    "determinism_exact_hash_runs": {"operator": "=", "value": 3},
+    "supported_prose_sentence_readable_coverage": {"operator": ">=", "value": 0.95},
+    "unmapped_or_nonexact_region": {"operator": "=", "value": 0}
+  },
+  "scoring_notes": [
+    "Equal sentence counts never substitute for boundary, content, or range correspondence.",
+    "Every non-exact or unsupported region must carry an explicit degradation marker.",
+    "The #87 projection coordinate system is not the native/canonical source coordinate system."
+  ]
+}

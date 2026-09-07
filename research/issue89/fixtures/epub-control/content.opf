@@ -1,0 +1,1 @@
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="content" href="content.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="content"/></spine></package>

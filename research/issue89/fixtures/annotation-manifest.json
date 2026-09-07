@@ -1,0 +1,53 @@
+{
+  "schema": "reading-mcp-issue89-annotation/v1",
+  "baseline": {
+    "deployed_version": "0.3.0",
+    "source_sha": "1cfbc4ca032a8bab7b59134a9b03c2526a34b7f4",
+    "normalization_version": "reading-mcp-normalization/v8"
+  },
+  "external_cases": [
+    {
+      "id": "issue87-jackson-icse95",
+      "class": "external_pdf",
+      "url": "https://users.ece.utexas.edu/~perry/education/SE-Intro/jackson-icse95.pdf",
+      "raw_sha256": "48c6ab4b1e17360ab32be09d0042b43630d3afcd8da7d453c17042a959ab6061",
+      "document_id": "doc:sha256:d1b359dc396e813fffd18ab8cefa7c8f16ec00fe30c85a1facfd5ab532e334e8",
+      "normalized_document_hash": "sha256:dac6b3251a3c216783400399a35ce821ce03f554f30f5b9da85d8fc7e9284b40",
+      "annotation": {
+        "front_matter": "title_author",
+        "abstract": "body_sentence_boundaries",
+        "source": "issue87_report_and_manual_boundary_review",
+        "projection_chars": 821,
+        "projection_sha256": "3fc5d020d5c014b3601cbb2d554ecf2e3b73cfa7618c18d15a87dc43475a4d67",
+        "projection_coordinate_system": "experimental pdf-extract+soft-wrap/dehyphen projection; not native/canonical source coordinates",
+        "sentence_ranges_and_hashes": [
+          {"index": 1, "start": 0, "end": 72, "sha256": "6bc3fd073877e93c1be4d8bd6f40772ced787360dc521bb96f6ed5318e5cab63"},
+          {"index": 2, "start": 73, "end": 185, "sha256": "251b5a99b699f931018773010d4b1ed702580975e3a200948a6b14c0671adc32"},
+          {"index": 3, "start": 186, "end": 277, "sha256": "f76a722e81405a679ddbcfda1e716b489455a05f50831917a32e31def695f91a"},
+          {"index": 4, "start": 278, "end": 317, "sha256": "0eccff1060e0bb17444c6a3614e13b947bb8c4c2ff549a31440db47a6a06151f"},
+          {"index": 5, "start": 318, "end": 434, "sha256": "cd1c825f72c209d60344689201fd0f27243c67c464869c89bf0f3c1f00762e06"},
+          {"index": 6, "start": 435, "end": 612, "sha256": "450f463d45cf880a41e89c00c746e4e2010a651597dea1720db17a8921fec5f7"},
+          {"index": 7, "start": 613, "end": 821, "sha256": "913d0177c59efb88f998fcd6f6dce88343d1fcbce6e83987dd8e45fbe6828c21"}
+        ],
+        "syntok": {
+          "repository_head": "371e6ca0d4e307271eaf439f912fad94efdaa8e9",
+          "runs": 3,
+          "projected_sentence_count": 7,
+          "projected_output_sha256": "51a4348f12c89a821db6f097857bb928dd0d23bc9a5961d2c99905cce2bb80f6",
+          "raw_physical_line_segment_count": 21
+        }
+      },
+      "distribution": "URL/hash/annotation metadata only; no paper body committed; source/license remains external and is not redistributed"
+    }
+  ],
+  "synthetic_cases": [
+    {"id":"single-column","class":"pdf_single_column","gold_sentences":2,"tags":["normal"]},
+    {"id":"double-column","class":"pdf_double_column","gold_sentences":4,"tags":["reading_order"]},
+    {"id":"cross-page","class":"pdf_cross_page","gold_sentences":2,"tags":["cross_line","cross_page"]},
+    {"id":"hyphenated","class":"pdf_hyphenation","gold_sentences":2,"tags":["broken_word"]},
+    {"id":"space-loss","class":"pdf_space_loss","gold_sentences":1,"tags":["missing_space"]},
+    {"id":"punctuation-identifiers","class":"pdf_punctuation","gold_sentences":2,"tags":["abbreviation","decimal","citation","technical_identifier"]},
+    {"id":"epub-control","class":"epub_regression","gold_sentences":2,"tags":["native_paragraph","control"]}
+  ],
+  "validation_subset": ["issue87-jackson-icse95", "double-column", "cross-page", "punctuation-identifiers", "epub-control"]
+}

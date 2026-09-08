@@ -12,6 +12,124 @@ use reading_mcp::domain::{
 use reading_mcp::infrastructure::InMemoryDocumentRepository;
 
 #[tokio::test]
+async fn boundary_anchor_reports_empty_directional_eos_for_both_kinds_and_policies() {
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let document = fixture("One. Two.\n\nThree. Four.\n\nFive. Six.");
+    repository.save(document.clone()).await.expect("save");
+    let use_case = GetTextUnitsUseCase::new(repository);
+
+    for kind in [
+        RequestedTextUnitKind::Sentence,
+        RequestedTextUnitKind::Paragraph,
+    ] {
+        for policy in [
+            TextUnitCoveragePolicy::PreserveSource,
+            TextUnitCoveragePolicy::EligibleOnly,
+        ] {
+            for direction in [TextUnitDirection::Forward, TextUnitDirection::Backward] {
+                let mut full_command = command(&document, 10);
+                full_command.requested_kind = kind;
+                full_command.coverage_policy = policy;
+                full_command.direction = direction;
+                let full = use_case.execute(full_command).await.expect("full stream");
+                assert!(full.items.len() > 1);
+                assert!(full.complete);
+                assert_eq!(
+                    full.section_complete,
+                    policy == TextUnitCoveragePolicy::PreserveSource
+                );
+                let (anchor, boundary) = match direction {
+                    TextUnitDirection::Forward => (
+                        full.items.last().unwrap().locator.clone(),
+                        full.stream.total_items,
+                    ),
+                    TextUnitDirection::Backward => (full.items[0].locator.clone(), 0),
+                };
+                // The same last/first anchor must deterministically confirm the boundary on retry.
+                for _ in 0..2 {
+                    let mut request = command(&document, 1);
+                    request.requested_kind = kind;
+                    request.coverage_policy = policy;
+                    request.direction = direction;
+                    let eos = use_case
+                        .execute_from_anchor(request, anchor.clone())
+                        .await
+                        .expect("empty EOS");
+                    assert!(eos.items.is_empty());
+                    assert!(eos.complete);
+                    assert!(!eos.section_complete);
+                    assert!(eos.next_cursor.is_none());
+                    assert_eq!(eos.start_anchor_locator.as_ref(), Some(&anchor));
+                    assert_eq!(
+                        (eos.stream.start_index, eos.stream.end_index),
+                        (boundary, boundary)
+                    );
+                    assert_eq!(eos.stream.total_items, full.stream.total_items);
+                    assert_eq!(eos.coverage, full.coverage);
+                    assert_eq!(
+                        eos.coverage.source_complete,
+                        policy == TextUnitCoveragePolicy::PreserveSource
+                    );
+                    assert_eq!(eos.coverage.unsupported_gaps, 0);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn anchored_cursor_reaches_boundary_without_claiming_full_section_for_both_kinds() {
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let document = fixture("One.\n\nTwo.\n\nThree.\n\nFour.");
+    repository.save(document.clone()).await.expect("save");
+    let use_case = GetTextUnitsUseCase::new(repository);
+    for kind in [
+        RequestedTextUnitKind::Sentence,
+        RequestedTextUnitKind::Paragraph,
+    ] {
+        for direction in [TextUnitDirection::Forward, TextUnitDirection::Backward] {
+            let mut request = command(&document, 10);
+            request.requested_kind = kind;
+            let full = use_case.execute(request).await.expect("full stream");
+            let anchor_index = match direction {
+                TextUnitDirection::Forward => 0,
+                TextUnitDirection::Backward => full.items.len() - 1,
+            };
+            let anchor = full.items[anchor_index].locator.clone();
+            let mut request = command(&document, 1);
+            request.requested_kind = kind;
+            request.direction = direction;
+            let mut page = use_case
+                .execute_from_anchor(request, anchor.clone())
+                .await
+                .expect("anchor");
+            assert!(!page.complete);
+            let mut count = page.items.len();
+            while let Some(cursor) = page.next_cursor {
+                let mut request = command(&document, 1);
+                request.requested_kind = kind;
+                request.direction = direction;
+                request.cursor = Some(cursor);
+                page = use_case.execute(request).await.expect("cursor page");
+                count += page.items.len();
+                assert_eq!(page.start_anchor_locator.as_ref(), Some(&anchor));
+                assert!(!page.section_complete);
+            }
+            assert_eq!(count, full.items.len() - 1);
+            assert_eq!(page.items.len(), 1, "terminal page still needs processing");
+            assert!(page.complete);
+            assert!(page.coverage.source_complete);
+            match direction {
+                TextUnitDirection::Forward => {
+                    assert_eq!(page.stream.end_index, page.stream.total_items)
+                }
+                TextUnitDirection::Backward => assert_eq!(page.stream.start_index, 0),
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn forward_anchor_is_exclusive_and_cursor_preserves_anchored_origin() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One. Two. Three. Four.");

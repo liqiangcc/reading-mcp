@@ -351,7 +351,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Enumerate bounded Paragraph or Sentence-first reading items in one section from the section boundary or exclusively after/before a precise anchor, with deterministic cursor continuation"
+        description = "Enumerate bounded Paragraph or Sentence-first reading items in one section from the section boundary or exclusively after/before a precise anchor, with deterministic cursor continuation. complete=true confirms the requested directional section boundary, including empty anchor results; process any returned items first. section_complete is always false for anchor-origin traversal, even at the boundary. coverage describes the whole declared stream, not prior reading. For source-preserving forward EOS require complete, no next_cursor, end_index=total_items, source_complete and zero unsupported_gaps; separately verify prior reading and scope authorization before crossing sections. No next-section body probe is needed."
     )]
     async fn get_text_units(
         &self,

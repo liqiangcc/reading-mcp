@@ -275,6 +275,37 @@ The latter is intentional: an exclusive anchor traversal did not enumerate the a
 
 `start_anchor_locator` in the response is populated for every anchored page, including cursor continuation pages, so the origin remains auditable.
 
+### Strict boundary detection (including exclusive anchors)
+
+`complete` is the machine-readable directional boundary signal. It applies to both
+Paragraph and Sentence streams and does not require reading the next Section.
+An anchor at the last item followed forward returns an empty terminal page with
+`start_index == end_index == total_items`, `next_cursor=null`, `complete=true`,
+and `section_complete=false`. At the first item followed backward, both indexes
+are zero with the same completion flags. Retrying cannot change these semantics.
+
+For a strict source-preserving forward consumer, check the bound document identity,
+Section, kind and policy, then require:
+
+```text
+complete == true
+next_cursor == null
+stream.direction == forward
+stream.end_index == stream.total_items
+coverage.source_complete == true
+coverage.unsupported_gaps == 0
+```
+
+For backward traversal use `stream.direction == backward` and
+`stream.start_index == 0`; this confirms the Section start, not its forward end.
+`eligible_only` can exhaust its filtered stream without proving all-source coverage.
+
+A terminal page may contain items: finish processing those items before advancing.
+Boundary evidence alone does not prove the client read the anchor or earlier items;
+full-Section reading requires the client's continuous reading history under the same
+identity. Crossing Sections also requires scope authorization. Neither an empty
+page alone nor `coverage.source_complete` alone proves reading completion.
+
 ## 11. Pagination
 
 The stream indexes remain indexes in the complete declared Section stream.

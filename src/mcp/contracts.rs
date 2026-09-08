@@ -417,10 +417,18 @@ pub struct GetTextUnitsResponse {
     pub direction: TextUnitDirectionDto,
     pub coverage_policy: TextUnitCoveragePolicyDto,
     pub items: Vec<TextUnitItemDto>,
+    /// The requested traversal reached its directional Section boundary, including anchor-origin
+    /// traversal: forward end_index == total_items; backward start_index == 0. next_cursor is null.
+    /// The terminal page may contain items; process them before advancing. This is not proof of
+    /// prior reading or all-source coverage (eligible_only can also complete).
     pub complete: bool,
+    /// A boundary-origin traversal completed with all-source coverage. Always false for an
+    /// anchor-origin traversal, including its cursor pages: use complete to detect its boundary.
+    /// An exclusive anchor traversal does not enumerate the anchor or the opposite side.
     pub section_complete: bool,
     #[serde(default)]
     pub next_cursor: Option<String>,
+    /// Coverage of the whole declared Section stream, not this page or the client's reading history.
     pub coverage: TextUnitCoverageDto,
     pub stream: TextUnitStreamSegmentDto,
 }
@@ -451,6 +459,8 @@ pub struct TextUnitCoverageDto {
     pub coarse_structural_items: usize,
     pub intentionally_skipped: usize,
     pub unsupported_gaps: usize,
+    /// The declared stream preserves all source regions. Always false for eligible_only.
+    /// Does not prove that this traversal or client has read all represented items.
     pub source_complete: bool,
 }
 

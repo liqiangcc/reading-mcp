@@ -11,9 +11,12 @@ use tokio::process::Command;
 async fn stdio_get_text_units_continues_exclusively_after_locator_anchor() {
     let directory = tempfile::tempdir().expect("temporary document directory");
     let document_path = directory.path().join("anchor.md");
-    tokio::fs::write(&document_path, "# Root\n\nOne. Two. Three. Four.\n")
-        .await
-        .expect("fixture write");
+    tokio::fs::write(
+        &document_path,
+        "# Root\n\nOne. Two. Three. Four.\n\n# Next\n\nDo not enumerate this section.\n",
+    )
+    .await
+    .expect("fixture write");
 
     let local_roots = std::env::join_paths([directory.path()]).expect("local roots");
     let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
@@ -23,6 +26,32 @@ async fn stdio_get_text_units_continues_exclusively_after_locator_anchor() {
         .env("READING_MCP_TELEMETRY", "false");
     let transport = TokioChildProcess::new(command).expect("server process");
     let client = ().serve(transport).await.expect("MCP initialization");
+
+    let tools = client.list_all_tools().await.expect("tools/list");
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "get_text_units")
+        .expect("get_text_units tool");
+    assert!(
+        tool.description
+            .as_deref()
+            .unwrap()
+            .contains("complete=true")
+    );
+    let schema = serde_json::to_value(tool.output_schema.as_ref().expect("output schema"))
+        .expect("schema JSON");
+    assert!(
+        schema["properties"]["complete"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("directional Section boundary")
+    );
+    assert!(
+        schema["properties"]["section_complete"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Always false")
+    );
 
     let opened = client
         .call_tool(
@@ -112,6 +141,59 @@ async fn stdio_get_text_units_continues_exclusively_after_locator_anchor() {
     assert!(continued.complete);
     assert!(!continued.section_complete);
     assert!(continued.next_cursor.is_none());
+
+    // No call targets the next Section: the last anchor alone proves directional EOS.
+    for kind in ["sentence", "paragraph"] {
+        let last_anchor = if kind == "sentence" {
+            continued.items[0].locator.clone()
+        } else {
+            client
+                .call_tool(
+                    CallToolRequestParams::new("get_text_units").with_arguments(arguments(json!({
+                        "document_id": initial.document_id,
+                        "section_id": section_id,
+                        "requested_kind": kind,
+                        "direction": "backward",
+                        "coverage_policy": "preserve_source",
+                        "max_items": 1
+                    }))),
+                )
+                .await
+                .expect("last paragraph")
+                .into_typed::<GetTextUnitsResponse>()
+                .expect("paragraph response")
+                .items[0]
+                .locator
+                .clone()
+        };
+        for _ in 0..2 {
+            let eos = client
+                .call_tool(
+                    CallToolRequestParams::new("get_text_units").with_arguments(arguments(json!({
+                        "document_id": initial.document_id,
+                        "section_id": section_id,
+                        "anchor_locator": last_anchor,
+                        "requested_kind": kind,
+                        "direction": "forward",
+                        "coverage_policy": "preserve_source",
+                        "max_items": 1
+                    }))),
+                )
+                .await
+                .expect("terminal anchor")
+                .into_typed::<GetTextUnitsResponse>()
+                .expect("EOS response");
+            assert!(eos.items.is_empty());
+            assert!(eos.next_cursor.is_none());
+            assert!(eos.complete);
+            assert!(!eos.section_complete);
+            assert!(eos.coverage.source_complete);
+            assert_eq!(eos.coverage.unsupported_gaps, 0);
+            assert_eq!(eos.stream.start_index, eos.stream.total_items);
+            assert_eq!(eos.stream.end_index, eos.stream.total_items);
+            assert_eq!(eos.start_anchor_locator.as_ref(), Some(&last_anchor));
+        }
+    }
 
     client.cancel().await.expect("client shutdown");
 }

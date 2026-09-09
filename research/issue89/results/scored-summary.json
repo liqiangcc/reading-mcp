@@ -1,0 +1,151 @@
+{
+  "schema": "reading-mcp-issue89-scored-results/v1",
+  "evaluation": "formal-scored-evaluation",
+  "thresholds": {
+    "file": "fixtures/scoring-thresholds.json",
+    "status": "frozen-before-scored-evaluation",
+    "boundary_precision_min": 0.99,
+    "boundary_recall_min": 0.99,
+    "issue87_high_confidence_wrong_merge": 0,
+    "issue87_high_confidence_wrong_split": 0,
+    "metadata_contamination": 0,
+    "omission": 0,
+    "duplication": 0,
+    "exact_normalized_read_equality": 1.0,
+    "determinism_exact_hash_runs": 3,
+    "supported_prose_sentence_readable_coverage_min": 0.95,
+    "unmapped_or_nonexact_region": 0
+  },
+  "baseline": {
+    "deployed_version": "0.3.0",
+    "source_sha": "1cfbc4ca032a8bab7b59134a9b03c2526a34b7f4",
+    "normalization": "reading-mcp-normalization/v8",
+    "raw_sha256": "48c6ab4b1e17360ab32be09d0042b43630d3afcd8da7d453c17042a959ab6061",
+    "normalized_document_sha256": "dac6b3251a3c216783400399a35ce821ce03f554f30f5b9da85d8fc7e9284b40"
+  },
+  "methods": [
+    {
+      "id": "v8-baseline",
+      "scope": "issue87",
+      "status": "FAIL",
+      "metrics": {
+        "boundary_precision": 0.0,
+        "boundary_recall": 0.0,
+        "wrong_merge": 1,
+        "wrong_split": 0,
+        "metadata_contamination": 1,
+        "omission": 1,
+        "duplication": 0,
+        "sentence_readable_body_coverage": 0.0,
+        "exact_normalized_read_equality": 1.0,
+        "determinism_exact_hash_runs": 3,
+        "unmapped_or_nonexact_region": 1
+      },
+      "evidence": "MCP transport faithfully returned the deployed v8 result: 10 structural sections, 4 sentence items, first item [0,513), degradation=null, and exact read equality=true. The first sentence still absorbs front matter and does not reveal the Abstract sentence boundaries."
+    },
+    {
+      "id": "lopdf-layout-candidate-v1",
+      "scope": "issue87",
+      "status": "FAIL",
+      "metrics": {
+        "boundary_precision": 0.0,
+        "boundary_recall": 0.0,
+        "wrong_merge": 1,
+        "wrong_split": 1,
+        "metadata_contamination": 1,
+        "omission": 0,
+        "duplication": 1,
+        "sentence_readable_body_coverage": 0.0,
+        "exact_normalized_read_equality": 0.0,
+        "determinism_exact_hash_runs": 3,
+        "unmapped_or_nonexact_region": 1
+      },
+      "observed": {
+        "abstract_body_chars": 1789,
+        "gold_projection_chars": 821,
+        "current_v2_abstract_sentence_count": 16,
+        "prior_debug_snapshot_sentence_count": 7,
+        "gold_projection_sha256": "3fc5d020d5c014b3601cbb2d554ecf2e3b73cfa7618c18d15a87dc43475a4d67"
+      },
+      "evidence": "The prior seven-sentence count was a coincidence and was not scored as success. Current v2 also fails: the candidate coordinate/text space is 1789 chars rather than the annotated 821-char projection, and its range hashes do not correspond to the seven gold ranges."
+    },
+    {
+      "id": "pdf-extract-0.12.0-raw-plus-syntok",
+      "scope": "issue87",
+      "status": "FAIL",
+      "metrics": {
+        "boundary_precision": 0.3333333333,
+        "boundary_recall": 1.0,
+        "wrong_merge": 0,
+        "wrong_split": 14,
+        "metadata_contamination": 0,
+        "omission": 0,
+        "duplication": 0,
+        "sentence_readable_body_coverage": 0.0,
+        "exact_normalized_read_equality": 0.0,
+        "determinism_exact_hash_runs": 3,
+        "unmapped_or_nonexact_region": 1
+      },
+      "observed": {
+        "raw_segments": 21,
+        "gold_segments": 7,
+        "raw_output_chars": 49963,
+        "raw_output_sha256": "4624c5978fa10017bd229dcbdb18f674cc5dfb9e2c9e96fb7c40163019a9f24f"
+      },
+      "evidence": "Three repeated raw extraction runs were identical; physical-line double breaks caused syntok to expose 21 pseudo-segments. A splitter cannot repair paragraph reconstruction."
+    },
+    {
+      "id": "pdf-extract-0.12.0-plus-projection-plus-syntok",
+      "scope": "issue87",
+      "status": "PARTIAL_PROOF_FULL_ACCEPTANCE_FAIL",
+      "metrics": {
+        "boundary_precision": 1.0,
+        "boundary_recall": 1.0,
+        "wrong_merge": 0,
+        "wrong_split": 0,
+        "metadata_contamination": 0,
+        "omission": 0,
+        "duplication": 0,
+        "sentence_readable_body_coverage": 1.0,
+        "exact_normalized_read_equality": 1.0,
+        "determinism_exact_hash_runs": 3,
+        "unmapped_or_nonexact_region": 1
+      },
+      "observed": {
+        "projection_chars": 821,
+        "projection_sha256": "3fc5d020d5c014b3601cbb2d554ecf2e3b73cfa7618c18d15a87dc43475a4d67",
+        "gold_sentence_count": 7,
+        "syntok_output_sha256": "51a4348f12c89a821db6f097857bb928dd0d23bc9a5961d2c99905cce2bb80f6",
+        "syntok_repository_head": "371e6ca0d4e307271eaf439f912fad94efdaa8e9"
+      },
+      "evidence": "Three isolated syntok runs agree on the seven projected sentence result. The result is in experimental projection coordinates only; native-fragment to normalized-range source mapping is not implemented, so the exact native locator gate fails closed."
+    }
+  ],
+  "synthetic_layout_results": [
+    {"id":"single-column","class":"pdf_single_column","pages":1,"gold_abstract_sentences":2,"observed_abstract_sentences":2,"boundary_precision":1.0,"boundary_recall":1.0,"wrong_merge":0,"wrong_split":0,"metadata_contamination":0,"status":"PASS"},
+    {"id":"double-column","class":"pdf_double_column","pages":1,"gold_abstract_sentences":4,"observed_abstract_sentences":4,"boundary_precision":1.0,"boundary_recall":1.0,"wrong_merge":0,"wrong_split":0,"metadata_contamination":0,"status":"PASS"},
+    {"id":"cross-page","class":"pdf_cross_page","pages":2,"gold_abstract_sentences":2,"observed_abstract_sentences":2,"boundary_precision":1.0,"boundary_recall":1.0,"wrong_merge":0,"wrong_split":0,"metadata_contamination":0,"status":"PASS"},
+    {"id":"hyphenated","class":"pdf_hyphenation","pages":1,"gold_abstract_sentences":2,"observed_abstract_sentences":2,"boundary_precision":1.0,"boundary_recall":1.0,"wrong_merge":0,"wrong_split":0,"metadata_contamination":0,"status":"PASS_WITH_SCOPE_LIMIT"},
+    {"id":"space-loss","class":"pdf_space_loss","pages":1,"gold_abstract_sentences":1,"observed_abstract_sentences":1,"boundary_precision":1.0,"boundary_recall":1.0,"wrong_merge":0,"wrong_split":0,"metadata_contamination":0,"status":"PASS_WITH_SCOPE_LIMIT"},
+    {"id":"punctuation-identifiers","class":"pdf_punctuation","pages":1,"gold_abstract_sentences":2,"observed_abstract_sentences":2,"boundary_precision":1.0,"boundary_recall":1.0,"wrong_merge":0,"wrong_split":0,"metadata_contamination":0,"status":"PASS_WITH_SCOPE_LIMIT"}
+  ],
+  "transport_and_cache": {
+    "transport": "stdio MCP",
+    "server": "reading-mcp",
+    "tool_count": 9,
+    "section_count": 10,
+    "first_item_chars": 513,
+    "first_item_sha256": "5a46342c3004db5a557a0a1c0c7ef6e58f475ec0f24c582863d8ab39a2afe2cf",
+    "exact_read_equals_item": true,
+    "root_cause_layer": "extraction/layout/paragraph reconstruction and provenance gating; MCP transport is faithful"
+  },
+  "external_candidates": {
+    "pdf_extract": {"status":"MEASURED","role":"mature external text extractor","cost":"low/offline Rust dependency","deterministic":"yes in repeated run"},
+    "syntok": {"status":"MEASURED_ISOLATED","role":"mature deterministic sentence splitter","cost":"low/offline Python source + regex","deterministic":"yes, 3 projected runs"},
+    "grobid": {"status":"NOT_RUN","role":"layout/structure candidate","risk":"service/container and model identity add operational variance; no static result treated as measurement"},
+    "poppler": {"status":"NOT_RUN","role":"CLI text/layout comparator","risk":"platform/package version variance; retained as follow-up comparator"},
+    "model_assisted": {"status":"REJECTED_FOR_PRODUCTION_CANDIDATE","role":"possible boundary adjudicator","risk":"non-determinism, offline availability, model identity/cache invalidation, unverifiable edits"}
+  },
+  "overall_decision": "FAIL_FULL_ACCEPTANCE",
+  "recommendation": "Use a source-preserving structural projection (layout/line/paragraph with explicit native-fragment map) followed by an offline deterministic sentence splitter. Do not ship until the native source map, exact locator equality, and fail-closed degradation gates are implemented and re-run against #87 and the validation subset."
+}

@@ -25,7 +25,7 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
         if let Some(version) = document.metadata.get("pdf_layout_version") {
             let invalid =
                 || ApplicationError::ParseFailed("invalid persisted PDF layout evidence".into());
-            if version != "pdf-layout/v1"
+            if version != "pdf-layout/v2"
                 || document
                     .media_type
                     .0
@@ -55,7 +55,34 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
                 .get("pdf_layout_pages_without_text")
                 .and_then(|v| v.parse::<usize>().ok())
                 .ok_or_else(invalid)?;
-            let mut codes = vec!["pdf_layout_inferred".into(), "pdf_ocr_disabled".into()];
+            let ocr_pages = document
+                .metadata
+                .get("pdf_ocr_pages")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or_else(invalid)?;
+            let ocr_uncertain_regions = document
+                .metadata
+                .get("pdf_ocr_uncertain_regions")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or_else(invalid)?;
+            let ocr_promoted_chars = document
+                .metadata
+                .get("pdf_ocr_promoted_chars")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or_else(invalid)?;
+            let mut codes = vec!["pdf_layout_inferred".into()];
+            if ocr_pages > 0 {
+                codes.push("pdf_external_ocr_projection".into());
+                codes.push("pdf_ocr_accuracy_unverified".into());
+            } else {
+                codes.push("pdf_external_ocr_not_detected".into());
+            }
+            if ocr_promoted_chars == 0 && ocr_pages > 0 {
+                return Err(invalid());
+            }
+            if ocr_uncertain_regions > 0 {
+                codes.push("pdf_ocr_uncertain_regions_retained_coarse".into());
+            }
             if count > 0 {
                 codes.push("pdf_ambiguous_hyphens_preserved".into());
             }
@@ -67,7 +94,11 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
                 kind: "pdf_layout_projection".into(),
                 schema_version: Some(version.clone()),
                 integrity: ReliabilityIntegrity::Valid,
-                degradation_count: 2usize.saturating_add(count).saturating_add(missing),
+                degradation_count: 2usize
+                    .saturating_add(count)
+                    .saturating_add(missing)
+                    .saturating_add(if ocr_pages > 0 { 1 } else { 0 })
+                    .saturating_add(ocr_uncertain_regions),
                 degradation_codes: codes,
             }];
             return Ok(summary);

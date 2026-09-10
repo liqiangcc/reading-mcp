@@ -1,8 +1,9 @@
 # PDF layout candidate deployment
 
 Version: **0.4.0-rc.1**. This is an opt-in candidate release for staged validation of
-Issue #89, not a claim that all PDF layouts are solved. The original PDF backend
-remains the default. No production service was changed by preparing this release.
+Issue #89 and the external OCR text-layer adapter in #95, not a claim that all PDF
+layouts or OCR are solved. The original PDF backend remains the default. No
+production service was changed by preparing this release.
 
 ## Package and dependencies
 
@@ -62,16 +63,18 @@ script is included in the package, but it **does not configure the Python
 interpreter**. Record the old service environment together with the old binary
 and state backup before switching. Deployment/restart is the operator's step.
 
-Normalization moves from **v8 to v9**; segmentation moves to **v3**. Existing stored
-documents must be explicitly reopened, and clients must discard old locators and
-cursors. The parser cache includes the optional PDF backend namespace, so toggling
-backends cannot reuse an incompatible parsed PDF. Original PDF bytes/source still
-define document identity; normalized hashes bind the resulting text and blocks.
-EPUB continues through its native parser, but the global normalization upgrade
-also requires reopening stored EPUBs.
+Normalization moves to **v10**; segmentation remains **v3**. The v10 change includes
+the external OCR projection protocol and can change canonical text/block boundaries.
+Existing stored documents must be explicitly reopened, and clients must discard old
+locators and cursors; no old locator is silently rebound. The parser cache includes
+the optional PDF backend namespace, now `pdf-layout/v2:...:external-ocr-adapter/v1`,
+so v1 parsed output cannot be reused. Original PDF bytes/source still define source
+identity; normalized hashes bind the resulting text and blocks. EPUB continues
+through its native parser, but the global normalization upgrade also requires
+reopening stored EPUBs.
 
 Rollback restores the recorded old binary, **its prior service environment**, and
-the matching state backup. A v8 binary must not reinterpret v9 stored documents.
+the matching state backup. A v9 binary must not reinterpret v10 stored documents.
 Removing the optional Python environment is not necessary for rollback.
 
 ## Known limits and licensing
@@ -86,8 +89,14 @@ Removing the optional Python environment is not necessary for rollback.
   classification can still be wrong; inspect `pdf_layout_projection` reliability
   evidence. `integrity=valid` means internally valid mapping, not proven sentence
   accuracy. Do not count coarse units as successful sentence coverage.
-- OCR is disabled. Image-only documents without prose fail explicitly. Mixed
-  documents can have textless pages; `pdf_pages_without_text` flags this gap.
+- Internal OCR generation remains disabled. If an input already contains an
+  external invisible OCR text layer, only full-page, regular body-like lines pass
+  the conservative projection gate. Chart/photo labels, low-confidence/unknown
+  regions and non-prose text remain coarse or visual region evidence. The profile
+  records `pdf_external_ocr_projection` and `pdf_ocr_accuracy_unverified`; parser
+  success is not an OCR quality or reading-order claim. Inputs without a qualifying
+  prose projection still fail explicitly. Mixed documents can have textless pages;
+  `pdf_pages_without_text` flags this gap.
 - Original figure/table regions and page evidence are retained; `source_view` uses the pinned PyMuPDF renderer when the optional backend is configured. It renders original PDF pages. This release does not transcribe chart
   values or expose lossless cropped figure exports. Cross-page ranges cannot be
   represented by one page target and fail explicitly for that source-view request.

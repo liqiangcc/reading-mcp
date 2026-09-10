@@ -57,9 +57,13 @@ character deletion. Flat inferred owners and conservative cross-column/page join
 are bounded implementation choices, not a complete reconstruction of the PDF's
 semantic hierarchy. The optional engine does not address #88 in full.
 
-Normalization v9 invalidates stored v8 canonical documents; clients explicitly
+Normalization v10 invalidates stored v9 canonical documents; clients explicitly
 reopen sources and acquire new locators/cursors. The optional backend has a
-separate parsed-cache namespace. Segmentation v3 permits sentence-final `etc.` before a capitalized next sentence, while preserving interior uses and other protected abbreviations. Exact-read contracts remain.
+separate parsed-cache namespace. The external OCR adapter only projects a
+conservative subset of an existing invisible text layer; it does not generate OCR
+or claim transcription/reading-order quality. Segmentation v3 permits sentence-final
+`etc.` before a capitalized next sentence, while preserving interior uses and other
+protected abbreviations. Exact-read contracts remain.
 A sentence's exact read must equal its enumerated text and preserve its resolved
 target locator. The returned locator is a character-range locator by contract;
 it need not retain sentence-only ordinal fields.

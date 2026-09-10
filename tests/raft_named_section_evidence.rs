@@ -50,7 +50,7 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
 
     assert_eq!(document.id.0, BASELINE_DOCUMENT_ID);
     assert_eq!(document.content_hash.0, BASELINE_CONTENT_HASH);
-    assert_eq!(NORMALIZATION_VERSION, "reading-mcp-normalization/v9");
+    assert_eq!(NORMALIZATION_VERSION, "reading-mcp-normalization/v10");
     assert_eq!(
         document
             .metadata

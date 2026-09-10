@@ -17,7 +17,8 @@ use crate::domain::{
 };
 use crate::infrastructure::ResourceBudget;
 
-pub const PDF_LAYOUT_CACHE_NAMESPACE: &str = "pdf-layout/v1:pymupdf4llm-layout/1.28.2";
+pub const PDF_LAYOUT_CACHE_NAMESPACE: &str =
+    "pdf-layout/v2:pymupdf4llm-layout/1.28.2:external-ocr-adapter/v1";
 const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -124,6 +125,9 @@ struct LayoutResult {
     sections: Vec<LayoutSection>,
     regions: serde_json::Value,
     preserved_ambiguous_hyphens: usize,
+    ocr_pages: Vec<u32>,
+    ocr_uncertain_regions: usize,
+    ocr_promoted_chars: usize,
 }
 #[derive(Deserialize)]
 struct LayoutSection {
@@ -148,7 +152,7 @@ fn project(
     layout: LayoutResult,
     budget: &ResourceBudget,
 ) -> Result<Document, ApplicationError> {
-    if layout.schema_version != "pdf-layout/v1" || layout.engine != "pymupdf4llm-layout/1.28.2" {
+    if layout.schema_version != "pdf-layout/v2" || layout.engine != "pymupdf4llm-layout/1.28.2" {
         return Err(failed("unsupported worker protocol or engine version"));
     }
     if layout.page_count == 0
@@ -296,6 +300,17 @@ fn project(
         layout.pages_without_text.to_string(),
     );
     document
+        .metadata
+        .insert("pdf_ocr_pages".into(), layout.ocr_pages.len().to_string());
+    document.metadata.insert(
+        "pdf_ocr_uncertain_regions".into(),
+        layout.ocr_uncertain_regions.to_string(),
+    );
+    document.metadata.insert(
+        "pdf_ocr_promoted_chars".into(),
+        layout.ocr_promoted_chars.to_string(),
+    );
+    document
         .set_normalized_block_map(NormalizedBlockMap::new(blocks))
         .map_err(failed)?;
     document
@@ -342,7 +357,7 @@ mod tests {
         }
     }
     fn payload() -> serde_json::Value {
-        json!({"schema_version":"pdf-layout/v1", "engine":"pymupdf4llm-layout/1.28.2", "page_count":2, "pages_without_text":0, "regions":[], "preserved_ambiguous_hyphens":0,
+        json!({"schema_version":"pdf-layout/v2", "engine":"pymupdf4llm-layout/1.28.2", "page_count":2, "pages_without_text":0, "regions":[], "preserved_ambiguous_hyphens":0, "ocr_pages":[], "ocr_uncertain_regions":0, "ocr_promoted_chars":0,
         "sections":[{"title":"Abstract", "blocks":[
           {"text":"甲😀 sentence.", "kind":"paragraph", "parts":[{"start":0,"end":12,"page":1}]},
           {"text":"Next page.", "kind":"paragraph", "parts":[{"start":0,"end":10,"page":2}]}
@@ -411,6 +426,49 @@ mod tests {
                 &ResourceBudget::default()
             )
             .is_err()
+        );
+
+        let mut data = payload();
+        data["schema_version"] = json!("pdf-layout/v1");
+        assert!(
+            project(
+                resource(),
+                serde_json::from_value(data).unwrap(),
+                &ResourceBudget::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn projection_records_external_ocr_degradation_metadata() {
+        let mut data = payload();
+        data["ocr_pages"] = json!([1, 2]);
+        data["ocr_uncertain_regions"] = json!(3);
+        data["ocr_promoted_chars"] = json!(42);
+        let document = project(
+            resource(),
+            serde_json::from_value(data).unwrap(),
+            &ResourceBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            document.metadata.get("pdf_ocr_pages").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            document
+                .metadata
+                .get("pdf_ocr_uncertain_regions")
+                .map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            document
+                .metadata
+                .get("pdf_ocr_promoted_chars")
+                .map(String::as_str),
+            Some("42")
         );
     }
     #[tokio::test]

@@ -71,11 +71,15 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: PDF layout projection fixtures
+        run: python3 -m unittest discover -s tests/pdf_layout -v
+
       - name: Shell deployment syntax
         shell: bash
         run: |
           set -euo pipefail
           bash -n \
+            scripts/pdf-layout/setup-pdf-layout.sh \
             scripts/package-release.sh \
             scripts/install-production.sh \
             scripts/deploy-production.sh \
@@ -114,3 +118,13 @@ jobs:
           OUTPUT_DIR="$RUNNER_TEMP/package-smoke" \
           PACKAGING_COMMIT_SHA="$release_sha" \
           bash scripts/package-release.sh
+
+      - name: Upload verified candidate package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-package
+          path: |
+            ${{ runner.temp }}/package-smoke/*.tar.gz
+            ${{ runner.temp }}/package-smoke/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

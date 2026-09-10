@@ -5,7 +5,7 @@ use super::{
     NormalizedBlockMapError, NormalizedDocumentHash, NormalizedTextRange, Section, SectionId,
 };
 
-pub const TEXT_SEGMENTATION_VERSION: &str = "text-segmentation/v2";
+pub const TEXT_SEGMENTATION_VERSION: &str = "text-segmentation/v3";
 pub const TEXT_UNIT_ID_VERSION: &str = "text-unit-id/v1";
 
 const TEXT_UNIT_ID_DOMAIN: &[u8] = b"reading-mcp/text-unit-id/v1\0";
@@ -644,7 +644,15 @@ fn ascii_period_is_terminal(chars: &[char], index: usize) -> bool {
 
     let token = preceding_period_token(chars, index).to_ascii_lowercase();
     if !token.is_empty() && is_protected_abbreviation(&token) && index + 1 < chars.len() {
-        return false;
+        // A list-ending abbreviation can also end a sentence. Preserve interior
+        // uses ("etc., including" / "etc. and") and title/example abbreviations.
+        let terminal_etc = token == "etc"
+            && ascii_terminal_is_terminal(chars, index)
+            && next_non_whitespace(chars, extend_terminal_cluster(chars, index))
+                .is_some_and(|ch| ch.is_uppercase());
+        if !terminal_etc {
+            return false;
+        }
     }
 
     if token.chars().count() == 1

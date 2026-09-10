@@ -79,7 +79,7 @@ async fn stdio_open_returns_reading_profile_without_expanding_tool_surface() {
             .capabilities
             .paragraph_enumeration
             .segmentation_version,
-        "text-segmentation/v2"
+        "text-segmentation/v3"
     );
     assert_eq!(
         opened

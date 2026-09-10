@@ -7,6 +7,7 @@ use crate::retrieval::HttpRetrieverConfig;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
+    pub pdf_layout_python: Option<PathBuf>,
     pub local_roots: Vec<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
@@ -24,6 +25,7 @@ impl Default for RuntimeConfig {
             ..HttpRetrieverConfig::default()
         };
         Self {
+            pdf_layout_python: None,
             local_roots: vec![],
             state_dir: default_state_dir(),
             allow_http: false,
@@ -52,6 +54,15 @@ impl RuntimeConfig {
             } else {
                 Some(PathBuf::from(value.as_ref()))
             };
+        }
+
+        config.pdf_layout_python = std::env::var_os("READING_MCP_PDF_LAYOUT_PYTHON")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        if let Some(path) = &config.pdf_layout_python
+            && !path.is_absolute()
+        {
+            return Err("READING_MCP_PDF_LAYOUT_PYTHON must be an absolute path".into());
         }
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;

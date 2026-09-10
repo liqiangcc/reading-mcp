@@ -322,3 +322,24 @@ fn document_with_content(content: &str) -> Document {
         }],
     }
 }
+
+#[test]
+fn list_ending_abbreviation_can_end_a_sentence_without_splitting_interior_uses() {
+    let document = document_with_content(
+        "Collect logs, metrics, etc. Most jobs finish. Include logs etc., and metrics etc. as needed. Dr. Smith uses e.g. Python 3.12. Done.",
+    );
+    let set = document.sentence_text_units();
+    assert_eq!(
+        set.units
+            .iter()
+            .map(|u| u.text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Collect logs, metrics, etc.",
+            "Most jobs finish.",
+            "Include logs etc., and metrics etc. as needed.",
+            "Dr. Smith uses e.g. Python 3.12.",
+            "Done.",
+        ]
+    );
+}

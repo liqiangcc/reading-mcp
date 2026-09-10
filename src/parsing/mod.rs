@@ -6,6 +6,7 @@ mod epub_navigation;
 mod epub_structure;
 mod epub_validator;
 mod html;
+mod layout_pdf;
 mod limited_pdf;
 mod markdown;
 mod openapi;
@@ -30,6 +31,7 @@ pub use epub_validator::{
     validate_epub_document,
 };
 pub use html::HtmlParser;
+pub use layout_pdf::{LayoutPdfParser, PDF_LAYOUT_CACHE_NAMESPACE};
 pub use limited_pdf::LimitedPdfParser;
 pub use markdown::MarkdownParser;
 pub use openapi::OpenApiParser;

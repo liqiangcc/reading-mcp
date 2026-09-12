@@ -94,7 +94,7 @@ impl OcrDerivation {
         identity: &OcrRuntimeIdentity,
         original_sha256: &str,
     ) -> Result<(), String> {
-        if self.schema != "ocr-evidence/v1" || self.original_sha256 != original_sha256 {
+        if self.schema != "ocr-derivation/v1" || self.original_sha256 != original_sha256 {
             return Err("OCR derivation source/schema mismatch".into());
         }
         if self.engine_sha256
@@ -107,21 +107,26 @@ impl OcrDerivation {
         {
             return Err("OCR engine identity mismatch".into());
         }
-        let mut actual = self
-            .model_sha256
-            .iter()
-            .chain(self.library_sha256.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        actual.sort();
-        let mut expected = identity
+        let mut actual_models = self.model_sha256.clone();
+        actual_models.sort();
+        let mut expected_models = identity
             .dependencies
             .iter()
-            .filter(|d| d.name.starts_with("model:") || d.name.starts_with("library:"))
+            .filter(|d| d.name.starts_with("model:"))
             .map(|d| d.sha256.clone())
             .collect::<Vec<_>>();
-        expected.sort();
-        if actual != expected
+        expected_models.sort();
+        let mut actual_libs = self.library_sha256.clone();
+        actual_libs.sort();
+        let mut expected_libs = identity
+            .dependencies
+            .iter()
+            .filter(|d| d.name.starts_with("library:"))
+            .map(|d| d.sha256.clone())
+            .collect::<Vec<_>>();
+        expected_libs.sort();
+        if actual_models != expected_models
+            || actual_libs != expected_libs
             || self.languages != identity.config.languages
             || self.dpi != identity.config.dpi
             || self.oem != identity.config.oem
@@ -133,6 +138,68 @@ impl OcrDerivation {
             return Err("OCR derivation configuration/dependency mismatch".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn identity() -> OcrRuntimeIdentity {
+        OcrRuntimeIdentity {
+            config: OcrConfig {
+                enabled: true,
+                engine_path: "/e".into(),
+                tessdata_path: "/t".into(),
+                languages: vec!["eng".into()],
+                operator_revision: "1".into(),
+                dpi: 300,
+                oem: 1,
+                psm: 3,
+                detector_version: "pdf-layout/v1".into(),
+                protocol_version: "pdf-layout/v1".into(),
+            },
+            dependencies: vec![
+                DependencyFingerprint {
+                    name: "engine".into(),
+                    sha256: "e".repeat(64),
+                },
+                DependencyFingerprint {
+                    name: "model:eng".into(),
+                    sha256: "m".repeat(64),
+                },
+                DependencyFingerprint {
+                    name: "library:/lib".into(),
+                    sha256: "l".repeat(64),
+                },
+            ],
+            sha256: "x".into(),
+        }
+    }
+    #[test]
+    fn derivation_schema_and_classed_digests_are_strict() {
+        let i = identity();
+        let mut d = OcrDerivation {
+            schema: "ocr-derivation/v1".into(),
+            original_sha256: "raw".into(),
+            engine_sha256: "e".repeat(64),
+            model_sha256: vec!["m".repeat(64)],
+            library_sha256: vec!["l".repeat(64)],
+            languages: vec!["eng".into()],
+            dpi: 300,
+            oem: 1,
+            psm: 3,
+            detector_version: "pdf-layout/v1".into(),
+            protocol_version: "pdf-layout/v1".into(),
+            operator_revision: "1".into(),
+            pages: vec![],
+        };
+        assert!(d.validate_against(&i, "raw").is_ok());
+        d.schema = "ocr-evidence/v1".into();
+        assert!(d.validate_against(&i, "raw").is_err());
+        d.schema = "ocr-derivation/v1".into();
+        d.model_sha256[0] = "l".repeat(64);
+        d.library_sha256[0] = "m".repeat(64);
+        assert!(d.validate_against(&i, "raw").is_err());
     }
 }
 

@@ -140,3 +140,64 @@ impl Parser for CachingParser {
         Ok(document)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{ContentHash, DocumentId, DocumentSource, MediaType};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeParser {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Parser for FakeParser {
+        async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Document {
+                id: DocumentId("fake".into()),
+                source: resource.final_source,
+                title: "fake".into(),
+                media_type: resource.media_type,
+                content_hash: ContentHash("raw".into()),
+                metadata: Default::default(),
+                root_sections: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn ocr_fingerprint_changes_parsed_cache_identity() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cache: Arc<dyn ParsedDocumentCache> = Arc::new(InMemoryParsedDocumentCache::default());
+        let source = DocumentSource("file:///fixture.pdf".into());
+        let resource = RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: MediaType("application/pdf".into()),
+            bytes: b"same".to_vec(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        };
+        let parser_a = CachingParser::new(
+            Arc::new(FakeParser {
+                calls: calls.clone(),
+            }),
+            cache.clone(),
+        )
+        .with_ocr_fingerprint("A");
+        parser_a.parse(resource.clone()).await.unwrap();
+        parser_a.parse(resource.clone()).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let parser_b = CachingParser::new(
+            Arc::new(FakeParser {
+                calls: calls.clone(),
+            }),
+            cache,
+        )
+        .with_ocr_fingerprint("B");
+        parser_b.parse(resource).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+}

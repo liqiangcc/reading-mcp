@@ -11,6 +11,9 @@ on:
       - 'scripts/ocr/regional_retry_probe.py'
       - 'tests/ocr/test_regional_retry_probe.py'
       - 'tests/ocr_real_engine.rs'
+      - 'tests/ocr_sandbox_runtime.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_worker_process.rs'
       - 'tests/ocr_mcp_stdio.rs'
       - 'tests/ocr_mcp_http.rs'
       - 'tests/ocr_boundary_engine.rs'
@@ -36,6 +39,9 @@ on:
       - 'scripts/ocr/first_engine_probe.py'
       - 'scripts/ocr/worker_identity_probe.py'
       - 'tests/ocr_real_engine.rs'
+      - 'tests/ocr_sandbox_runtime.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_worker_process.rs'
       - 'tests/ocr_mcp_stdio.rs'
       - 'tests/ocr_mcp_http.rs'
       - 'tests/ocr_boundary_engine.rs'
@@ -92,6 +98,16 @@ jobs:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
           READING_MCP_OCR_BOUNDARY_REPORT: ${{ runner.temp }}/ocr-first-probe/rust-canonical-boundaries.json
         run: cargo test --locked --test ocr_real_engine --test ocr_mcp_stdio --test ocr_mcp_http --test ocr_boundary_engine -- --ignored --nocapture
+      - name: Rust OCR systemd launch and cancellation integration (hosted root only)
+        env:
+          READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          sandbox_test=$(cargo test --locked --test ocr_sandbox_runtime --no-run --message-format=json | jq -sr '[.[] | select(.reason == "compiler-artifact" and .target.name == "ocr_sandbox_runtime" and .profile.test) | .executable][0]')
+          test -x "$sandbox_test"
+          sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" "$sandbox_test" --ignored --nocapture
+          sandbox_unit_test=$(cargo test --locked --lib --no-run --message-format=json | jq -sr '[.[] | select(.reason == "compiler-artifact" and .target.kind == ["lib"] and .profile.test) | .executable][0]')
+          test -x "$sandbox_unit_test"
+          sudo "$sandbox_unit_test" parsing::ocr_systemd::tests::systemd_cancellation_reaps_descendant_and_retains_admission --ignored --nocapture
       - name: Real Rust canonical boundary gates
         run: python scripts/ocr/boundary_quality.py --input "$RUNNER_TEMP/ocr-first-probe/rust-canonical-boundaries.json" --output "$RUNNER_TEMP/ocr-first-probe/boundary-quality.json"
       - name: Canonical OCR quality gates (hosted only)

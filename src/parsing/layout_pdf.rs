@@ -9,6 +9,7 @@ use tokio::{
 };
 
 use super::common::{content_hash, document_id, title_from_metadata};
+use super::ocr_systemd::SystemdOcrUnit;
 use super::ocr_worker_process::WorkerProcess;
 use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, RetrievedResource};
 use crate::domain::{
@@ -32,6 +33,7 @@ pub struct LayoutPdfParser {
     evidence_store: Option<Arc<dyn OcrEvidenceStore>>,
     ocr_config: Option<OcrConfig>,
     ocr_identity: Option<OcrRuntimeIdentity>,
+    systemd_ocr_sandbox: bool,
 }
 
 impl LayoutPdfParser {
@@ -43,6 +45,7 @@ impl LayoutPdfParser {
             evidence_store: None,
             ocr_config: None,
             ocr_identity: None,
+            systemd_ocr_sandbox: false,
         }
     }
 
@@ -56,6 +59,12 @@ impl LayoutPdfParser {
     }
     pub fn with_ocr_identity(mut self, identity: OcrRuntimeIdentity) -> Self {
         self.ocr_identity = Some(identity);
+        self
+    }
+
+    /// Explicit integration entrypoint; never changes native-only layout launch.
+    pub fn with_systemd_ocr_sandbox(mut self) -> Self {
+        self.systemd_ocr_sandbox = true;
         self
     }
 }
@@ -154,7 +163,12 @@ impl Parser for LayoutPdfParser {
                 "PDF byte limit exceeded".into(),
             ));
         }
-        let mut command = Command::new(&self.python);
+        let (mut command, unit) = if ocr_enabled && self.systemd_ocr_sandbox {
+            let (command, unit) = SystemdOcrUnit::command(&self.python).map_err(failed)?;
+            (command, Some(unit))
+        } else {
+            (Command::new(&self.python), None)
+        };
         configure_worker_environment(&mut command, ocr_enabled);
         #[cfg(unix)]
         command.process_group(0);
@@ -185,7 +199,7 @@ impl Parser for LayoutPdfParser {
                     "cannot start configured Python: {error}; run setup-pdf-layout.sh"
                 ))
             })?;
-        let mut process = WorkerProcess::new(child, permit);
+        let mut process = WorkerProcess::new(child, permit).with_systemd_unit(unit);
         let child = process.child_mut();
         let mut stdin = child.stdin.take().ok_or_else(|| failed("missing stdin"))?;
         let stdout = child

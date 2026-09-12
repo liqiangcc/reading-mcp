@@ -1,6 +1,8 @@
 //! Cancellation ownership for the local layout/OCR process group.
-//! This is not a memory/network sandbox and does not reap adopted descendants.
+//! The legacy PGID path is not a sandbox. An explicitly attached transient unit
+//! owns the additional cgroup/network/temp boundary.
 
+use super::ocr_systemd::SystemdOcrUnit;
 use std::{io, process::ExitStatus, time::Duration};
 use tokio::{process::Child, sync::OwnedSemaphorePermit};
 
@@ -8,6 +10,7 @@ pub(super) struct WorkerProcess {
     child: Option<Child>,
     permit: Option<OwnedSemaphorePermit>,
     group: Option<u32>,
+    unit: Option<SystemdOcrUnit>,
 }
 
 impl WorkerProcess {
@@ -18,7 +21,13 @@ impl WorkerProcess {
             child: Some(child),
             permit: Some(permit),
             group,
+            unit: None,
         }
+    }
+
+    pub(super) fn with_systemd_unit(mut self, unit: Option<SystemdOcrUnit>) -> Self {
+        self.unit = unit;
+        self
     }
 
     pub(super) fn child_mut(&mut self) -> &mut Child {
@@ -63,6 +72,11 @@ impl WorkerProcess {
         }
         let status = self.child_mut().wait().await?;
         self.group = None;
+        // --wait returns after the unit has terminated; --collect removes the
+        // completed unit and its private mounts, including on worker failure.
+        if status.success() {
+            self.unit = None;
+        }
         Ok(status)
     }
 }
@@ -95,10 +109,42 @@ impl Drop for WorkerProcess {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        let Some(group) = self.group.take() else {
+        let group = self.group.take();
+        let permit = self.permit.take();
+        let unit = self.unit.take();
+        if let Some(unit) = unit {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    // Stop the service before its systemd-run client. Killing
+                    // only the client process group would orphan the OCR tree.
+                    let stopped = unit.stop().await.is_ok();
+                    if let Some(group) = group {
+                        signal_group(group, libc::SIGKILL);
+                    }
+                    let _ = child.start_kill();
+                    let _ = tokio::time::timeout(Duration::from_millis(400), child.wait()).await;
+                    if !stopped && let Some(permit) = permit {
+                        // Fail closed: unconfirmed cleanup cannot admit another
+                        // worker. RuntimeMaxSec remains a separate safety bound.
+                        permit.forget();
+                    }
+                });
+            } else {
+                // No async cleanup is possible during runtime destruction.
+                // Refuse to claim the slot is safe for reuse.
+                if let Some(permit) = permit {
+                    permit.forget();
+                }
+                if let Some(group) = group {
+                    signal_group(group, libc::SIGKILL);
+                }
+                let _ = child.start_kill();
+            }
+            return;
+        }
+        let Some(group) = group else {
             return;
         };
-        let permit = self.permit.take();
         signal_group(group, libc::SIGTERM);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             // Created before spawning: shutdown/cancellation of the cleanup

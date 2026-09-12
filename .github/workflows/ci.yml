@@ -71,11 +71,26 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Install Python for real PDF layout and original-page tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned local PDF dependencies on hosted runner
+        run: |
+          PDF_LAYOUT_VENV="$RUNNER_TEMP/pdf-layout" bash scripts/pdf-layout/setup-pdf-layout.sh
+
+      - name: PDF layout and original-page tests (real engine enabled)
+        run: |
+          READING_MCP_TEST_PYMUPDF_PYTHON="$RUNNER_TEMP/pdf-layout/bin/python" \
+            python3 -m unittest discover -s tests/pdf_layout -v
+
       - name: Shell deployment syntax
         shell: bash
         run: |
           set -euo pipefail
           bash -n \
+            scripts/pdf-layout/setup-pdf-layout.sh \
             scripts/package-release.sh \
             scripts/install-production.sh \
             scripts/deploy-production.sh \
@@ -114,3 +129,13 @@ jobs:
           OUTPUT_DIR="$RUNNER_TEMP/package-smoke" \
           PACKAGING_COMMIT_SHA="$release_sha" \
           bash scripts/package-release.sh
+
+      - name: Upload verified candidate package (not a deployment)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-package
+          path: |
+            ${{ runner.temp }}/package-smoke/*.tar.gz
+            ${{ runner.temp }}/package-smoke/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

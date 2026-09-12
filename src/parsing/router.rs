@@ -96,6 +96,11 @@ impl ParserRouter {
         )
     }
 
+    pub fn with_pdf_parser(mut self, pdf: Arc<dyn Parser>) -> Self {
+        self.pdf = Some(pdf);
+        self
+    }
+
     pub fn release(max_pdf_pages: usize, archive_limits: ArchiveLimits) -> Self {
         Self {
             markdown: Arc::new(MarkdownParser),

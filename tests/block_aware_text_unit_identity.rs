@@ -31,7 +31,7 @@ async fn native_block_v1_evidence_drives_v2_paragraph_and_sentence_policy() {
     let paragraphs = document
         .try_paragraph_text_units()
         .expect("valid native block evidence");
-    assert_eq!(TEXT_SEGMENTATION_VERSION, "text-segmentation/v2");
+    assert_eq!(TEXT_SEGMENTATION_VERSION, "text-segmentation/v3");
     assert_eq!(paragraphs.units.len(), 5);
     assert_eq!(
         paragraphs

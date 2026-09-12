@@ -85,11 +85,20 @@ impl Retriever for CachingRetriever {
 pub struct CachingParser {
     inner: Arc<dyn Parser>,
     cache: Arc<dyn ParsedDocumentCache>,
+    pdf_namespace: Option<String>,
 }
 
 impl CachingParser {
     pub fn new(inner: Arc<dyn Parser>, cache: Arc<dyn ParsedDocumentCache>) -> Self {
-        Self { inner, cache }
+        Self {
+            inner,
+            cache,
+            pdf_namespace: None,
+        }
+    }
+    pub fn with_pdf_namespace(mut self, namespace: &str) -> Self {
+        self.pdf_namespace = Some(namespace.into());
+        self
     }
 }
 
@@ -99,7 +108,20 @@ impl Parser for CachingParser {
         let key = ParsedCacheKey {
             final_source: resource.final_source.clone(),
             raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
-            normalization_version: NORMALIZATION_VERSION.into(),
+            normalization_version: if resource
+                .media_type
+                .0
+                .split(';')
+                .next()
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"))
+            {
+                self.pdf_namespace
+                    .as_ref()
+                    .map(|ns| format!("{NORMALIZATION_VERSION}:{ns}"))
+                    .unwrap_or_else(|| NORMALIZATION_VERSION.into())
+            } else {
+                NORMALIZATION_VERSION.into()
+            },
         };
 
         if let Some(document) = self.cache.get(&key).await? {

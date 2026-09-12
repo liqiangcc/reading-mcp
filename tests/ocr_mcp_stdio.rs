@@ -11,6 +11,22 @@ fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
 }
 
+fn published_documents(state: &std::path::Path) -> Vec<String> {
+    let connection = rusqlite::Connection::open_with_flags(
+        state.join("reading-mcp.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut statement = connection
+        .prepare("SELECT document_json FROM documents ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
 async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
@@ -19,6 +35,8 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
         let path = directory.path().join("public-F07.pdf");
         let raw = std::fs::read("tests/fixtures/scanned_pdf/pdf/F07.pdf").unwrap();
         std::fs::write(&path, &raw).unwrap();
+        let blank_path = directory.path().join("public-F09.pdf");
+        std::fs::copy("tests/fixtures/scanned_pdf/pdf/F09.pdf", &blank_path).unwrap();
         let raw_hash = format!("sha256:{:x}", sha2::Sha256::digest(&raw));
         let state = directory.path().join("state");
         let mut saved: Option<(String, TextUnitItemDto)> = None;
@@ -88,6 +106,23 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                 ));
             }
             let (hash, item) = saved.as_ref().unwrap();
+            let before_failure = published_documents(&state);
+            assert_eq!(before_failure.len(), 1);
+            let blank_error = client
+                .call_tool(
+                    CallToolRequestParams::new("open_document")
+                        .with_arguments(arguments(json!({"source":blank_path}))),
+                )
+                .await
+                .expect_err("a blank PDF must not publish fabricated supported prose");
+            // Preserve the actual error as public synthetic evidence, without
+            // treating the current generic error taxonomy as final acceptance.
+            println!("F09 MCP failure: {blank_error}");
+            assert_eq!(
+                published_documents(&state),
+                before_failure,
+                "failed blank ingestion must leave canonical documents byte-identical"
+            );
             let read = client
                 .call_tool(
                     CallToolRequestParams::new("read_document")

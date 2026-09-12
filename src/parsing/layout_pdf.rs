@@ -148,6 +148,16 @@ impl Parser for LayoutPdfParser {
         let mut document = project(resource, payload, &self.budget)?;
         if !evidence.is_empty() {
             let derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
+            let identity = self
+                .ocr_identity
+                .as_ref()
+                .ok_or_else(|| failed("OCR expected identity missing"))?;
+            derivation
+                .validate_against(
+                    identity,
+                    document.content_hash.0.trim_start_matches("sha256:"),
+                )
+                .map_err(failed)?;
             if derivation.original_sha256 != document.content_hash.0.trim_start_matches("sha256:")
                 || derivation.engine_sha256.len() != 64
                 || derivation.model_sha256.is_empty()

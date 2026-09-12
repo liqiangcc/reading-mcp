@@ -88,6 +88,54 @@ pub struct OcrDerivation {
     pub pages: Vec<OcrPageBinding>,
 }
 
+impl OcrDerivation {
+    pub fn validate_against(
+        &self,
+        identity: &OcrRuntimeIdentity,
+        original_sha256: &str,
+    ) -> Result<(), String> {
+        if self.schema != "ocr-evidence/v1" || self.original_sha256 != original_sha256 {
+            return Err("OCR derivation source/schema mismatch".into());
+        }
+        if self.engine_sha256
+            != identity
+                .dependencies
+                .iter()
+                .find(|d| d.name == "engine")
+                .map(|d| d.sha256.as_str())
+                .unwrap_or("")
+        {
+            return Err("OCR engine identity mismatch".into());
+        }
+        let mut actual = self
+            .model_sha256
+            .iter()
+            .chain(self.library_sha256.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        actual.sort();
+        let mut expected = identity
+            .dependencies
+            .iter()
+            .filter(|d| d.name.starts_with("model:") || d.name.starts_with("library:"))
+            .map(|d| d.sha256.clone())
+            .collect::<Vec<_>>();
+        expected.sort();
+        if actual != expected
+            || self.languages != identity.config.languages
+            || self.dpi != identity.config.dpi
+            || self.oem != identity.config.oem
+            || self.psm != identity.config.psm
+            || self.detector_version != identity.config.detector_version
+            || self.protocol_version != identity.config.protocol_version
+            || self.operator_revision != identity.config.operator_revision
+        {
+            return Err("OCR derivation configuration/dependency mismatch".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OcrPageBinding {
     pub page: u32,

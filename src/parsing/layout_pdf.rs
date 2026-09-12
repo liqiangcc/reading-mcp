@@ -542,7 +542,7 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect();
-        let expected = crate::infrastructure::OCR_PROCESS_ENV
+        let expected: std::collections::BTreeSet<_> = crate::infrastructure::OCR_PROCESS_ENV
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
             .collect();

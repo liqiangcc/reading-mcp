@@ -34,7 +34,7 @@ def main():
             record = {'module': module, 'error': 'timeout',
                       'stderr': (error.stderr or b'').decode(errors='replace')[-8192:]}
         probes.append(record)
-        print(json.dumps({'private_runtime_import_probe': record}), flush=True)
+        print(json.dumps({'private_runtime_import_probe': record}), file=sys.stderr, flush=True)
     try:
         result = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', str(source), '1000', str(64 * 1024 * 1024),
         str(4 * 1024 * 1024), json.dumps(config), json.dumps(identity)], input=raw,
@@ -60,6 +60,7 @@ def main():
     assert payload['ocr_attempts'][0]['complete']
     print(json.dumps({'schema': 'ocr-private-runtime-smoke/v1',
         'scope': 'candidate rooted Python and OCR chain only; not full Rust publication or release acceptance',
+        'imports': probes,
         'python_version': sys.version, 'python_cache_tag': sys.implementation.cache_tag,
         'python_executable_sha256': hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
         'worker_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),

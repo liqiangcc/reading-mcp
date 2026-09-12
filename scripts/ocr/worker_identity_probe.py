@@ -1,10 +1,26 @@
-import json, os, subprocess, sys, tempfile
+import hashlib, json, os, subprocess, sys, tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).parents[2]
 worker = ROOT / "src/parsing/pdf_layout_worker.py"
 config = {"enabled": True, "engine_path": "/usr/bin/tesseract", "tessdata_path": "/usr/share/tesseract-ocr/5/tessdata", "languages": ["chi_sim"], "operator_revision": "1", "dpi": 300, "oem": 1, "psm": 3, "detector_version": "pdf-layout/v1", "protocol_version": "pdf-layout/v1"}
 ns = {}; exec(worker.read_text(), ns)
+with tempfile.TemporaryDirectory(prefix="public-identity-io-") as directory:
+    path = Path(directory) / "dependency"
+    data = b"x" * (3 * 1024 * 1024 + 7)
+    path.write_bytes(data)
+    assert ns["dependency_sha256"](path) == hashlib.sha256(data).hexdigest()
+    link = Path(directory) / "library.so"
+    link.symlink_to(path)
+    assert ns["dependency_sha256"](link) == ns["dependency_sha256"](path)
+    fifo = Path(directory) / "fifo"
+    os.mkfifo(fifo, 0o600)
+    # A subprocess timeout bounds the regression even if nonblocking open is lost.
+    reject = subprocess.run([sys.executable, "-I", "-c",
+        'import sys; ns={"__name__":"identity_test"}; exec(sys.argv[1], ns); ns["dependency_sha256"](sys.argv[2])',
+        worker.read_text(), str(fifo)],
+        capture_output=True, timeout=5)
+    assert reject.returncode != 0 and b"OCR dependency must be a regular file" in reject.stderr
 identity = ns["runtime_identity"](config, ns["fingerprint_dependencies"](config))
 pdf = ROOT / "tests/fixtures/scanned_pdf/pdf/F07.pdf"
 cmd = [sys.executable, "-I", "-c", worker.read_text(), "2000", "134217728", "16000000", json.dumps(config), json.dumps(identity)]

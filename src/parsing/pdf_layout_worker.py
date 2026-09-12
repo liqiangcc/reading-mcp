@@ -15,6 +15,7 @@ import sys
 import unicodedata
 import hashlib
 import statistics
+import stat
 import time
 
 OCR_PROCESS_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"}
@@ -80,12 +81,18 @@ def runtime_identity(config, dependencies):
             "inspection_policy": INSPECTION_POLICY,
             "dependencies": dependencies, "sha256": "sha256:" + hashlib.sha256(encoded).hexdigest()}
 
-def fingerprint_dependencies(config):
-    def sha(path):
+def dependency_sha256(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("OCR dependency must be a regular file")
         digest = hashlib.sha256()
-        with open(path, "rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
+        for chunk in iter(lambda: stream.read(64 * 1024), b""):
+            digest.update(chunk)
         return digest.hexdigest()
+
+def fingerprint_dependencies(config):
+    sha = dependency_sha256
     paths = [("engine", config["engine_path"])] + [(f"model:{lang}", os.path.join(config["tessdata_path"], lang + ".traineddata")) for lang in config["languages"]]
     output = subprocess.run(["ldd", config["engine_path"]], text=True, capture_output=True, env=OCR_PROCESS_ENV)
     if output.returncode != 0 or "not found" in output.stdout or "not found" in output.stderr: raise RuntimeError("OCR dependency ldd failure")

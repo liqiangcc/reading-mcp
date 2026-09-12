@@ -1,5 +1,6 @@
 use crate::domain::{DependencyFingerprint, OcrConfig, OcrRuntimeIdentity};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
@@ -57,13 +58,70 @@ pub fn build_ocr_runtime_identity(config: OcrConfig) -> Result<OcrRuntimeIdentit
 }
 
 fn hash_file(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("missing {}: {e}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Do not block opening a FIFO before checking the owned descriptor.
+        // Symlinks to regular packaged libraries remain supported.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).map_err(|e| e.to_string())?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("OCR dependency must be a regular file".into());
+    }
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_hash_streams_all_bytes_and_tracks_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model");
+        let mut bytes = vec![42_u8; 3 * 1024 * 1024 + 7];
+        std::fs::write(&path, &bytes).unwrap();
+        let before = hash_file(&path).unwrap();
+        assert_eq!(before, format!("{:x}", Sha256::digest(&bytes)));
+        *bytes.last_mut().unwrap() = 43;
+        std::fs::write(&path, &bytes).unwrap();
+        assert_ne!(before, hash_file(&path).unwrap());
+        assert!(hash_file(directory.path()).is_err());
+        assert!(hash_file(&directory.path().join("missing")).is_err());
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("library.so");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert_eq!(hash_file(&path).unwrap(), hash_file(&link).unwrap());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_fifo_is_rejected_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model-fifo");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: owned NUL-terminated path in the test's unique directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            hash_file(&path).unwrap_err(),
+            "OCR dependency must be a regular file"
+        );
+    }
 
     fn missing_files_config() -> OcrConfig {
         OcrConfig {

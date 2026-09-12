@@ -175,8 +175,9 @@ class RegionalGeometryTests(unittest.TestCase):
         worker, _ = self.deadline_worker()
         native = {"boxclass": "page-footer", "x0": 0, "y0": 0, "x1": 20, "y1": 10,
                   "textlines": [{"spans": [{"text": "Original footer", "bbox": [0,0,20,10]}]}]}
-        regions = worker["native_text_regions"]({"boxes": [native]})
+        regions = worker["native_text_regions"]({"boxes": [{"boxclass":"picture","textlines":None}, native]})
         self.assertEqual(regions[0]["bbox"], [0,0,20,10])
+        self.assertEqual(regions[0]["source_box"], 1)
         primary = [self.box([2,2,8,8], "Different OCR spelling", 1),
                    self.box([30,30,40,40], "body", 2)]
         original = copy.deepcopy(primary)

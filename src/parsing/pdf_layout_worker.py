@@ -239,7 +239,7 @@ def _regional_evidence(page, bounds, primary, retry, selected, components):
 def native_text_regions(page_layout):
     regions = []
     for index, box in enumerate(page_layout["boxes"]):
-        text = "\n".join(line_text(line) for line in box.get("textlines", []))
+        text = "\n".join(line_text(line) for line in (box.get("textlines") or []))
         if text.strip():
             regions.append({"source_box": index, "source_class": box["boxclass"],
                             "bbox": [box[k] for k in ("x0", "y0", "x1", "y1")], "text": text})

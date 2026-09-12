@@ -104,7 +104,17 @@ OpenDocument/缓存/仓库发布和加载路径拒绝坏 derivation 或 binding 
 读取上限，并不再向 MCP 返回原始 OCR stderr；native layout 的原有输出额度和
 错误诊断保持不变。对应边界/隐私测试需由同提交 hosted CI 验证。
 
-仍未闭合：共享 60 秒 inspection→cache→parse→publication / 90 秒 whole-open，
-全后代回收、私有临时目录清理、aggregate memory/temp/PID 限制及网络隔离。
-当前普通 BudgetedParser 的 30 秒包裹尚未完成 OCR 专用接线，不得宣称 60 秒已生效。
+`23fcd1db62b0ccbc2dbcf3e12c234c6b37a2e645` 接入 OpenDocument 的 60 秒
+cache→parse→publication 共享截止时间、包含取源的 90 秒 whole-open 上限，
+并移除 OCR-enabled PDF 外层普通 30 秒截断；普通 PDF/非 PDF 仍保持原解析额度。
+[hosted CI](https://github.com/liqiangcc/reading-mcp/actions/runs/34691737173) 的
+Format/Clippy/Test 已通过（记录时打包仍在运行）；新增真实 OpenDocument 调用路径
+的虚拟时间测试，覆盖跨阶段累计超时、超时 save 不提交、取源消耗总时间及原额度回归。
+[真实 OCR / canonical gate](https://github.com/liqiangcc/reading-mcp/actions/runs/34691737170)
+全部通过。这里证明的是异步截止时间和发布前检查，不证明同步 SQLite/CPU 工作可被硬抢占。
+
+仍未闭合：硬资源执行边界、全后代回收、私有临时目录清理、aggregate memory/temp/PID
+限制及网络隔离。后续 page_selection_probe 采集公开冻结 F01/F03/F04/F05/F09–F13
+的原始 layout、glyph visibility/geometry、image/drawing bounds 与真实 worker 输出，
+两个管道结束后才读取 gold；该诊断不取代正式质量门槛，也不将 worker failure 算通过。
 混合页/已有层/blank/visual 分类、完整 MCP 门槛、离线包及最终生产验收仍按设计待办。

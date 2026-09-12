@@ -5,6 +5,7 @@ on:
       - 'scripts/ocr/first_engine_probe.py'
       - 'scripts/ocr/worker_identity_probe.py'
       - 'scripts/ocr/canonical_quality.py'
+      - 'scripts/ocr/page_selection_probe.py'
       - 'scripts/ocr/language_order_probe.py'
       - 'scripts/ocr/regional_retry_probe.py'
       - 'tests/ocr/test_regional_retry_probe.py'
@@ -18,6 +19,7 @@ on:
   pull_request:
     paths:
       - 'scripts/ocr/canonical_quality.py'
+      - 'scripts/ocr/page_selection_probe.py'
       - 'scripts/ocr/language_order_probe.py'
       - 'scripts/ocr/regional_retry_probe.py'
       - 'tests/ocr/test_regional_retry_probe.py'
@@ -68,6 +70,9 @@ jobs:
         run: cargo test --locked --test ocr_real_engine -- --ignored --nocapture
       - name: Canonical OCR quality gates (hosted only)
         run: python scripts/ocr/canonical_quality.py --output "$RUNNER_TEMP/ocr-first-probe/canonical-quality.json"
+      - name: Mixed, existing-layer and visual page diagnostics (public frozen fixtures)
+        if: ${{ !cancelled() }}
+        run: python scripts/ocr/page_selection_probe.py --output "$RUNNER_TEMP/ocr-first-probe/page-selection-probe.json"
       - name: Upload public synthetic evidence, including failed cases
         if: always()
         uses: actions/upload-artifact@v4

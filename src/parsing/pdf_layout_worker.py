@@ -149,7 +149,14 @@ def _regional_ocr(page, excluded_regions=()):
         for component in components:
             for i,box in enumerate(primary):
                 if i not in component and any(_adjacent(primary[j],box,gap) for j in component): component.add(i); changed=True
-    components=_merge_components([(a,b) for n,a in enumerate(components) for b in list(components)[n+1:] if a & b])
+    changed=True
+    while changed:
+        changed=False
+        for i in range(len(components)):
+            for j in range(i+1,len(components)):
+                if components[i] & components[j]:
+                    components[i].update(components.pop(j)); changed=True; break
+            if changed: break
     if not components: return primary,{"primary_boxes":primary,"retry_boxes":[],"components":[]}
     original=list(primary); retry_config=dict(OCR_CONFIG); retry_config["psm"]=6
     saved=OCR_CONFIG; OCR_CONFIG=retry_config

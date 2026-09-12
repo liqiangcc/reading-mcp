@@ -2,8 +2,8 @@
 import json, re, subprocess, sys, unicodedata
 from pathlib import Path
 
-CASES = {"F07": [["chi_sim"], ["eng", "chi_sim"], ["chi_sim", "eng"]],
-         "F08": [["chi_sim"], ["eng", "chi_sim"], ["chi_sim", "eng"]]}
+CASES = {"F07": [(["chi_sim"], 3), (["eng", "chi_sim"], 3), (["chi_sim", "eng"], 3), (["chi_sim"], 6)],
+         "F08": [(["chi_sim"], 3), (["eng", "chi_sim"], 3), (["chi_sim", "eng"], 3), (["eng", "chi_sim"], 6)]}
 
 def norm(s): return " ".join(unicodedata.normalize("NFC", s).split())
 def distance(a, b):
@@ -27,11 +27,10 @@ def main():
             "detector_version": "pdf-layout/v1", "protocol_version": "pdf-layout/v1"}
     report = {"schema": "ocr-language-order-probe/v1", "cases": {}}
     for case, variants in CASES.items():
-        gold = json.loads((p / "gold" / f"{case}.json").read_text())
         report["cases"][case] = []
-        for languages in variants:
-            config = {**base, "languages": languages}
-            item = {"languages": languages}
+        for languages, psm in variants:
+            config = {**base, "languages": languages, "psm": psm}
+            item = {"languages": languages, "psm": psm}
             try:
                 deps = ns["fingerprint_dependencies"](config)
                 identity = {"config": config, "dependencies": deps, "sha256": "language-order-probe"}
@@ -41,13 +40,17 @@ def main():
                 result = json.loads(proc.stdout)
                 blocks = [b for section in result["sections"] for b in section["blocks"] if b["kind"] == "paragraph"]
                 text = "\n\n".join(b["text"] for b in blocks)
+                # Gold is loaded only after the complete worker recognition.
+                gold = json.loads((p / "gold" / f"{case}.json").read_text())
                 if case == "F08":
                     expected = "\n\n".join(x["text"] for x in gold["paragraphs"] if x["font"] == "goldeng")
                     actual = "\n\n".join(x["text"] for x in blocks if re.search(r"[A-Za-z]", x["text"]) and not re.search(r"[\u3400-\u9fff]", x["text"]))
                     wer = metric(expected, actual, True)
                 else: wer = None
+                ambiguous = [b["text"] for b in blocks if re.search(r"[A-Za-z]", b["text"]) and re.search(r"[\u3400-\u9fff]", b["text"])]
                 item.update({"cer": metric(gold["text"], text), "english_wer": wer, "paragraph_count": len(blocks),
                              "words": result.get("ocr_evidence", []), "dependencies": deps,
+                             "ambiguous_mixed_paragraphs": ambiguous,
                              "canonical_paragraphs": [{"text": b["text"], "region": b.get("region")} for b in blocks]})
             except Exception as error:
                 stderr = getattr(error, "stderr", b"") or b""

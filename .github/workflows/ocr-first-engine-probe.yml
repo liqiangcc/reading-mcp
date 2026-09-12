@@ -11,6 +11,7 @@ on:
       - 'scripts/ocr/regional_retry_probe.py'
       - 'tests/ocr/test_regional_retry_probe.py'
       - 'tests/ocr_real_engine.rs'
+      - 'tests/ocr_mcp_stdio.rs'
       - 'src/domain/ocr.rs'
       - 'src/domain/ocr_observations.rs'
       - 'src/infrastructure/ocr_evidence.rs'
@@ -30,6 +31,7 @@ on:
       - 'scripts/ocr/first_engine_probe.py'
       - 'scripts/ocr/worker_identity_probe.py'
       - 'tests/ocr_real_engine.rs'
+      - 'tests/ocr_mcp_stdio.rs'
       - 'src/domain/ocr.rs'
       - 'src/domain/ocr_observations.rs'
       - 'src/infrastructure/ocr_evidence.rs'
@@ -76,7 +78,7 @@ jobs:
       - name: Rust real OCR integration (hosted only)
         env:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
-        run: cargo test --locked --test ocr_real_engine -- --ignored --nocapture
+        run: cargo test --locked --test ocr_real_engine --test ocr_mcp_stdio -- --ignored --nocapture
       - name: Canonical OCR quality gates (hosted only)
         run: python scripts/ocr/canonical_quality.py --output "$RUNNER_TEMP/ocr-first-probe/canonical-quality.json"
       - name: Upload public synthetic evidence, including failed cases

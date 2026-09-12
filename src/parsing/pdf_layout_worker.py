@@ -254,9 +254,11 @@ def main():
         EXPECTED_IDENTITY = json.loads(sys.argv[5])
         if EXPECTED_IDENTITY.get("config") != OCR_CONFIG:
             raise ValueError("OCR config does not match expected identity")
+    actual_dependencies = None
     if OCR_CONFIG.get("enabled"):
         if EXPECTED_IDENTITY is None: raise ValueError("OCR expected identity is required")
-        if EXPECTED_IDENTITY.get("dependencies") != fingerprint_dependencies(OCR_CONFIG): raise ValueError("OCR dependency identity mismatch")
+        actual_dependencies = fingerprint_dependencies(OCR_CONFIG)
+        if EXPECTED_IDENTITY.get("dependencies") != actual_dependencies: raise ValueError("OCR dependency identity mismatch")
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):
         if importlib.metadata.version(package) != "1.28.2":
             raise ValueError(f"{package} must be version 1.28.2; run setup-pdf-layout.sh")
@@ -299,8 +301,8 @@ def main():
                 return digest.hexdigest()
             language = "+".join(OCR_CONFIG["languages"])
             result["ocr_derivation"] = {"schema": "ocr-derivation/v1", "original_sha256": hashlib.sha256(raw).hexdigest(),
-                "engine_sha256": next(d["sha256"] for d in fingerprint_dependencies(OCR_CONFIG) if d["name"] == "engine"), "model_sha256": [d["sha256"] for d in fingerprint_dependencies(OCR_CONFIG) if d["name"].startswith("model:")],
-                "library_sha256": [d["sha256"] for d in fingerprint_dependencies(OCR_CONFIG) if d["name"].startswith("library:")], "languages": OCR_CONFIG["languages"], "dpi": OCR_CONFIG["dpi"], "oem": OCR_CONFIG["oem"], "psm": OCR_CONFIG["psm"],
+                "engine_sha256": next(d["sha256"] for d in actual_dependencies if d["name"] == "engine"), "model_sha256": [d["sha256"] for d in actual_dependencies if d["name"].startswith("model:")],
+                "library_sha256": [d["sha256"] for d in actual_dependencies if d["name"].startswith("library:")], "languages": OCR_CONFIG["languages"], "dpi": OCR_CONFIG["dpi"], "oem": OCR_CONFIG["oem"], "psm": OCR_CONFIG["psm"],
                 "detector_version": OCR_CONFIG["detector_version"], "protocol_version": OCR_CONFIG["protocol_version"],
                 "operator_revision": OCR_CONFIG["operator_revision"], "pages": []}
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):

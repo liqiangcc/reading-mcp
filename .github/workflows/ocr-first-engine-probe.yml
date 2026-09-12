@@ -32,10 +32,7 @@ jobs:
         run: |
           python scripts/ocr/first_engine_probe.py --fixtures tests/fixtures/scanned_pdf --output "$RUNNER_TEMP/ocr-first-probe"
       - name: Canonical projection preserves engine paragraphs (hosted real engine)
-        run: |
-          python -I -c "$(cat src/parsing/pdf_layout_worker.py)" 2000 134217728 16000000 \
-            '{"enabled":true,"engine_path":"/usr/bin/tesseract","tessdata_path":"/usr/share/tesseract-ocr/5/tessdata","languages":["chi_sim"],"operator_revision":"1","dpi":300,"oem":1,"psm":3,"detector_version":"pdf-layout/v1","protocol_version":"pdf-layout/v1"}' \
-            < tests/fixtures/scanned_pdf/pdf/F07.pdf > "$RUNNER_TEMP/f07-layout.json"
+        run: python scripts/ocr/worker_identity_probe.py
           python - <<'PY'
           import json, os
           payload = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'f07-layout.json')))

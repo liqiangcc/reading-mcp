@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import sys
 import unicodedata
+import hashlib
 
 VERSION = "pdf-layout/v1"
 ENGINE = "pymupdf4llm-layout/1.28.2"
@@ -259,6 +260,24 @@ def main():
                         if box is not None:
                             page_layout["boxes"].extend(box)
         result = project(layout)
+        if os.environ.get("READING_MCP_OCR_ENABLED") == "1":
+            engine = os.environ.get("READING_MCP_OCR_ENGINE", "/usr/bin/tesseract")
+            tessdata = os.environ.get("READING_MCP_OCR_TESSDATA", "/usr/share/tesseract-ocr/5/tessdata")
+            def sha(path):
+                digest = hashlib.sha256()
+                with open(path, "rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
+                return digest.hexdigest()
+            language = os.environ.get("READING_MCP_OCR_LANG", "eng+chi_sim")
+            models = [os.path.join(tessdata, f"{name}.traineddata") for name in language.split("+")]
+            libraries = []
+            for token in subprocess.check_output(["ldd", engine], text=True).split():
+                if token.startswith("/") and os.path.isfile(token): libraries.append(sha(token))
+            result["ocr_derivation"] = {"schema": "ocr-derivation/v1", "original_sha256": hashlib.sha256(raw).hexdigest(),
+                "engine_sha256": sha(engine), "model_sha256": [sha(path) for path in models],
+                "library_sha256": sorted(set(libraries)), "languages": language.split("+"), "dpi": 300, "oem": 1, "psm": 3,
+                "detector_version": "pdf-layout/v1", "protocol_version": VERSION,
+                "operator_revision": os.environ.get("READING_MCP_OCR_REVISION", "1"), "pages": []}
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")
         if sum(len(b["text"]) for s in result["sections"] for b in s["blocks"]) > max_chars:

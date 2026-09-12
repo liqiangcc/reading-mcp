@@ -12,8 +12,8 @@ use super::common::{content_hash, document_id, title_from_metadata};
 use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, RetrievedResource};
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
-    NormalizedBlockProvenance, NormalizedTextRange, OcrEvidenceRecord, OriginalSourceBinding,
-    OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
+    NormalizedBlockProvenance, NormalizedTextRange, OcrDerivation, OcrEvidenceRecord,
+    OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
 use crate::infrastructure::ResourceBudget;
 
@@ -119,8 +119,22 @@ impl Parser for LayoutPdfParser {
         write_result.map_err(failed)?;
         let payload: LayoutResult = serde_json::from_slice(&output).map_err(failed)?;
         let evidence = payload.ocr_evidence.clone();
+        let derivation = payload.ocr_derivation.clone();
         let mut document = project(resource, payload, &self.budget)?;
         if !evidence.is_empty() {
+            let derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
+            if derivation.original_sha256 != document.content_hash.0.trim_start_matches("sha256:")
+                || derivation.engine_sha256.len() != 64
+                || derivation.model_sha256.is_empty()
+                || derivation.library_sha256.is_empty()
+                || derivation
+                    .model_sha256
+                    .iter()
+                    .chain(derivation.library_sha256.iter())
+                    .any(|v| v.len() != 64)
+            {
+                return Err(failed("invalid OCR derivation fingerprint"));
+            }
             validate_ocr_evidence(
                 &evidence,
                 document
@@ -146,6 +160,10 @@ impl Parser for LayoutPdfParser {
             document.metadata.insert(
                 "original_binding_map_digest".into(),
                 format!("sha256:{:x}", Sha256::digest(map_bytes)),
+            );
+            document.metadata.insert(
+                "ocr_derivation".into(),
+                serde_json::to_string(&derivation).map_err(failed)?,
             );
         }
         Ok(document)
@@ -195,6 +213,8 @@ struct LayoutResult {
     preserved_ambiguous_hyphens: usize,
     #[serde(default)]
     ocr_evidence: Vec<OcrEvidenceRecord>,
+    #[serde(default)]
+    ocr_derivation: Option<OcrDerivation>,
 }
 #[derive(Deserialize)]
 struct LayoutSection {

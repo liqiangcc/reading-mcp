@@ -110,7 +110,11 @@ pub fn build_server(
     if let Some(python) = &config.pdf_layout_python {
         let parser =
             crate::parsing::LayoutPdfParser::new(python.clone(), config.resource_budget.clone());
-        let parser = parser.with_ocr_config(config.ocr_config());
+        let identity = crate::infrastructure::build_ocr_runtime_identity(config.ocr_config())
+            .map_err(crate::application::ports::ApplicationError::ParseFailed)?;
+        let parser = parser
+            .with_ocr_config(config.ocr_config())
+            .with_ocr_identity(identity);
         let parser = if let Some(state) = &config.state_dir {
             let store = Arc::new(crate::infrastructure::FileOcrEvidenceStore::new(
                 state.join("ocr-evidence"),

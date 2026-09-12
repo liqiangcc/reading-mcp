@@ -13,7 +13,8 @@ use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, Retr
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
     NormalizedBlockProvenance, NormalizedTextRange, OcrConfig, OcrDerivation, OcrEvidenceRecord,
-    OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
+    OcrRuntimeIdentity, OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget,
+    Section, SectionId,
 };
 use crate::infrastructure::ResourceBudget;
 
@@ -28,6 +29,7 @@ pub struct LayoutPdfParser {
     permit: Semaphore,
     evidence_store: Option<Arc<dyn OcrEvidenceStore>>,
     ocr_config: Option<OcrConfig>,
+    ocr_identity: Option<OcrRuntimeIdentity>,
 }
 
 impl LayoutPdfParser {
@@ -38,6 +40,7 @@ impl LayoutPdfParser {
             permit: Semaphore::new(1),
             evidence_store: None,
             ocr_config: None,
+            ocr_identity: None,
         }
     }
 
@@ -47,6 +50,10 @@ impl LayoutPdfParser {
     }
     pub fn with_ocr_config(mut self, config: OcrConfig) -> Self {
         self.ocr_config = Some(config);
+        self
+    }
+    pub fn with_ocr_identity(mut self, identity: OcrRuntimeIdentity) -> Self {
+        self.ocr_identity = Some(identity);
         self
     }
 }
@@ -91,6 +98,12 @@ impl Parser for LayoutPdfParser {
                 self.ocr_config
                     .as_ref()
                     .and_then(|c| serde_json::to_string(c).ok())
+                    .unwrap_or_default(),
+            )
+            .arg(
+                self.ocr_identity
+                    .as_ref()
+                    .and_then(|i| serde_json::to_string(i).ok())
                     .unwrap_or_default(),
             )
             .stdin(Stdio::piped())

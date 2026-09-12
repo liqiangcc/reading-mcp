@@ -8,6 +8,7 @@ mod memory_text_unit_index;
 mod noop_index;
 mod observability;
 mod ocr_evidence;
+mod ocr_identity;
 mod sqlite;
 mod sqlite_search_index;
 
@@ -25,6 +26,7 @@ pub use observability::{
     ObservedSearchIndex,
 };
 pub use ocr_evidence::FileOcrEvidenceStore;
+pub use ocr_identity::build_ocr_runtime_identity;
 #[doc(hidden)]
 pub use sqlite::SqliteSearchIndex as LegacySqliteSearchIndex;
 pub use sqlite::{SqliteDocumentRepository, SqliteTextUnitIndex};

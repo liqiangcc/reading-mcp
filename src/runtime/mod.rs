@@ -122,7 +122,7 @@ pub fn build_server(
         router = router.with_pdf_parser(Arc::new(parser));
     }
     let fingerprint = if config.ocr_enabled {
-        crate::domain::OcrRuntimeIdentity::build(config.ocr_config())
+        crate::infrastructure::build_ocr_runtime_identity(config.ocr_config())
             .map_err(crate::application::ports::ApplicationError::ParseFailed)?
             .sha256
     } else {

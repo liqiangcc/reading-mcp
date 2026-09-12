@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OcrConfig {
@@ -29,7 +28,10 @@ pub struct OcrRuntimeIdentity {
 }
 
 impl OcrRuntimeIdentity {
-    pub fn build(config: OcrConfig) -> Result<Self, String> {
+    pub fn build(
+        config: OcrConfig,
+        mut dependencies: Vec<DependencyFingerprint>,
+    ) -> Result<Self, String> {
         if !config.engine_path.starts_with('/') || !config.tessdata_path.starts_with('/') {
             return Err("OCR paths must be absolute".into());
         }
@@ -54,17 +56,8 @@ impl OcrRuntimeIdentity {
         {
             return Err("invalid OCR languages".into());
         }
-        let mut dependencies = vec![DependencyFingerprint {
-            name: "engine".into(),
-            sha256: sha(&Path::new(&config.engine_path))?,
-        }];
-        for language in &config.languages {
-            dependencies.push(DependencyFingerprint {
-                name: format!("model:{language}"),
-                sha256: sha(
-                    &Path::new(&config.tessdata_path).join(format!("{language}.traineddata"))
-                )?,
-            });
+        if dependencies.is_empty() {
+            return Err("missing OCR dependencies".into());
         }
         dependencies.sort_by(|a, b| a.name.cmp(&b.name));
         let bytes = serde_json::to_vec(&(config.clone(), dependencies.clone()))
@@ -76,12 +69,6 @@ impl OcrRuntimeIdentity {
             sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
         })
     }
-}
-
-fn sha(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    use sha2::{Digest, Sha256};
-    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

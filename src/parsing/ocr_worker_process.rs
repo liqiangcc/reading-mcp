@@ -113,6 +113,9 @@ impl Drop for WorkerProcess {
         let permit = self.permit.take();
         let unit = self.unit.take();
         if let Some(mut unit) = unit {
+            // Initiate independent reaping now, not when Tokio next polls the
+            // cleanup future. This also closes the pre-start cancellation race.
+            unit.close_owner();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
                     // Stop the service before its systemd-run client. Killing

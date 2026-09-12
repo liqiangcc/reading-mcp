@@ -154,10 +154,14 @@ impl SystemdOcrUnit {
 
     /// Stop only our unique unit, including descendants outside the client PGID.
     /// The caller retains admission and the client until this completes.
+    pub(super) fn close_owner(&mut self) {
+        self.writer = None;
+    }
+
     pub(super) async fn stop(&mut self) -> io::Result<()> {
         // EOF independently stops the service even if this future is cancelled,
         // the runtime is destroyed, or systemctl itself cannot be started.
-        self.writer = None;
+        self.close_owner();
         tokio::time::timeout(Duration::from_millis(1500), async {
             let status = Command::new("/usr/bin/systemctl")
                 .args(["stop", &self.name])
@@ -385,7 +389,7 @@ while True: time.sleep(1)
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires hosted root and systemd cgroup v2"]
     async fn systemd_cancellation_reaps_descendant_and_retains_admission() {
         let (mut command, unit) = SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
@@ -421,6 +425,15 @@ while True: time.sleep(1)
         let start = tokio::time::Instant::now();
         drop(process);
         assert!(permits.try_acquire().is_err());
+        // Do not poll the spawned cleanup future. The synchronous owner close
+        // must still make the independent service reap the whole descendant tree.
+        std::thread::sleep(Duration::from_millis(1400));
+        for pid in &pids {
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "cleanup depended on polling Tokio"
+            );
+        }
         let _permit = tokio::time::timeout(Duration::from_secs(2), permits.acquire())
             .await
             .unwrap()

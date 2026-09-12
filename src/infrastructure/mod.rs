@@ -24,7 +24,7 @@ pub use observability::{
     ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
     ObservedSearchIndex,
 };
-pub use ocr_evidence::{FileOcrEvidenceStore, OcrEvidenceStore};
+pub use ocr_evidence::FileOcrEvidenceStore;
 #[doc(hidden)]
 pub use sqlite::SqliteSearchIndex as LegacySqliteSearchIndex;
 pub use sqlite::{SqliteDocumentRepository, SqliteTextUnitIndex};

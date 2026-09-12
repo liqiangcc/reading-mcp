@@ -1,14 +1,8 @@
-use crate::application::ports::ApplicationError;
+use crate::application::ports::{ApplicationError, OcrEvidenceStore};
 use async_trait::async_trait;
 use std::path::PathBuf;
 
 #[async_trait]
-pub trait OcrEvidenceStore: Send + Sync {
-    async fn put_immutable(&self, identity: &str, bytes: &[u8])
-    -> Result<String, ApplicationError>;
-    async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError>;
-}
-
 pub struct FileOcrEvidenceStore {
     root: PathBuf,
 }
@@ -40,18 +34,44 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
             .await
             .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
         if tokio::fs::try_exists(&target).await.unwrap_or(false) {
+            let existing = tokio::fs::read(&target)
+                .await
+                .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+            if existing != bytes {
+                return Err(ApplicationError::CacheFailed("evidence collision".into()));
+            }
             return Ok(digest);
         }
         let tmp = self.root.join(format!(
-            ".{}.tmp-{}",
+            ".{}.tmp-{}-{}",
             digest.replace(':', "-"),
-            std::process::id()
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
-        tokio::fs::write(&tmp, bytes)
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
             .await
             .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
-        tokio::fs::rename(&tmp, &target)
+        file.write_all(bytes)
             .await
+            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+        file.sync_all()
+            .await
+            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+        drop(file);
+        if let Err(e) = tokio::fs::rename(&tmp, &target).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(ApplicationError::CacheFailed(e.to_string()));
+        }
+        std::fs::File::open(&self.root)
+            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?
+            .sync_all()
             .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
         Ok(digest)
     }

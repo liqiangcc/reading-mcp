@@ -29,6 +29,13 @@ pub struct RetrievedResource {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[async_trait]
+pub trait OcrEvidenceStore: Send + Sync {
+    async fn put_immutable(&self, identity: &str, bytes: &[u8])
+    -> Result<String, ApplicationError>;
+    async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceViewRenderOptions {
     pub dpi: u32,

@@ -9,13 +9,12 @@ use tokio::{
 };
 
 use super::common::{content_hash, document_id, title_from_metadata};
-use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
+use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, RetrievedResource};
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
     NormalizedBlockProvenance, NormalizedTextRange, OriginalSourceBinding,
     OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
-use crate::infrastructure::OcrEvidenceStore;
 use crate::infrastructure::ResourceBudget;
 
 pub const PDF_LAYOUT_CACHE_NAMESPACE: &str = "pdf-layout/v1:pymupdf4llm-layout/1.28.2";

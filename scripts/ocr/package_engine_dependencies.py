@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
+from verify_engine_component import apply_runtime_assembly
 
 
 ROOTS = ["tesseract-ocr=5.3.4-1build5", "libtesseract5=5.3.4-1build5",
@@ -29,7 +30,7 @@ def main():
         # Resolve once at build time, then use exact versions for download and
         # record every package/hash in the immutable candidate manifest. This is
         # not a mutable runtime dependency lookup or production apt operation.
-        for package in ('python3.12-minimal', 'python3.12-venv', 'bash', 'coreutils', 'libc-bin', 'sed', 'grep'):
+        for package in ('python3.12-minimal', 'python3.12-venv', 'bash', 'dash', 'coreutils', 'libc-bin', 'sed', 'grep'):
             policy = run(['apt-cache', 'policy', package], text=True, capture_output=True,
                          env={**os.environ, 'LC_ALL': 'C'}).stdout
             candidates = re.findall(r'^\s*Candidate:\s+(\S+)\s*$', policy, re.M)
@@ -81,6 +82,8 @@ def main():
         if not notice.is_file():
             raise ValueError("distribution copyright absent: " + record["package"])
         record["copyright_sha256"] = hashlib.sha256(notice.read_bytes()).hexdigest()
+    assembly = {"posix_shell": {"path": "usr/bin/sh", "target": "dash"}} if args.python_runtime else {}
+    apply_runtime_assembly(rootfs, assembly)
     files = []
     symlinks = []
     for path in sorted(rootfs.rglob("*")):
@@ -94,6 +97,7 @@ def main():
                 "sources_sha256": hashlib.sha256(sources.encode()).hexdigest(),
                 "packages": records, "files": files, "symlinks": symlinks,
                 "ubuntu_usr_merge_aliases": aliases,
+                "private_runtime_assembly": assembly,
                 "deb_bytes": sum(r["bytes"] for r in records),
                 "extracted_regular_file_bytes": sum(f["bytes"] for f in files)}
     encoded = json.dumps(manifest, indent=2) + "\n"

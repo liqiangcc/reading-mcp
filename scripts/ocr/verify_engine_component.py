@@ -21,6 +21,26 @@ def safe_name(name):
     return str(path)
 
 
+def apply_runtime_assembly(root, assembly):
+    # .deb extraction intentionally does not run maintainer scripts. The
+    # optional private Python runtime needs the distribution's POSIX shell link
+    # explicitly, not a dependency on the host's /bin/sh.
+    if not assembly:
+        return
+    if assembly != {"posix_shell": {"path": "usr/bin/sh", "target": "dash"}}:
+        raise ValueError("unsupported private runtime assembly")
+    if not (root / 'usr/bin/dash').is_file():
+        raise ValueError("private POSIX shell executable missing")
+    link = root / 'usr/bin/sh'
+    if link.is_symlink():
+        if str(link.readlink()) != 'dash':
+            raise ValueError("private POSIX shell link mismatch")
+    elif link.exists():
+        raise ValueError("refuse to replace an existing POSIX shell file")
+    else:
+        link.symlink_to('dash')
+
+
 def verify_archive(raw, expected_sha256):
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256) or digest(raw) != expected_sha256:
         raise ValueError("archive digest mismatch")
@@ -83,6 +103,7 @@ def main():
             deb = Path(directory) / f"{index}.deb"
             deb.write_bytes(contents[record["file"]])
             subprocess.run(["dpkg-deb", "--extract", str(deb), str(args.output)], check=True, timeout=30)
+    apply_runtime_assembly(args.output, manifest.get('private_runtime_assembly', {}))
     files, links = [], []
     for path in sorted(args.output.rglob("*")):
         name = str(path.relative_to(args.output))

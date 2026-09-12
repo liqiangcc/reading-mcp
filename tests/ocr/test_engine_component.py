@@ -3,6 +3,7 @@ import io
 import json
 from pathlib import Path
 import tarfile
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location("component", Path(__file__).resolve().parents[2] / "scripts/ocr/verify_engine_component.py")
@@ -11,6 +12,26 @@ spec.loader.exec_module(component)
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_private_runtime_shell_assembly_is_explicit_and_non_overwriting(self):
+        assembly = {"posix_shell": {"path": "usr/bin/sh", "target": "dash"}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'usr/bin').mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, 'executable missing'):
+                component.apply_runtime_assembly(root, assembly)
+            (root / 'usr/bin/dash').write_bytes(b'fixed shell payload')
+            component.apply_runtime_assembly(root, assembly)
+            component.apply_runtime_assembly(root, assembly)
+            self.assertEqual(str((root / 'usr/bin/sh').readlink()), 'dash')
+            self.assertEqual((root / 'usr/bin/sh').read_bytes(), b'fixed shell payload')
+            (root / 'usr/bin/sh').unlink()
+            (root / 'usr/bin/sh').write_bytes(b'preserve this file')
+            with self.assertRaisesRegex(ValueError, 'refuse to replace'):
+                component.apply_runtime_assembly(root, assembly)
+            self.assertEqual((root / 'usr/bin/sh').read_bytes(), b'preserve this file')
+            with self.assertRaisesRegex(ValueError, 'unsupported'):
+                component.apply_runtime_assembly(root, {'posix_shell': {'path': '../escape', 'target': 'dash'}})
+
     def archive(self, payload=b"deb", extra=None):
         manifest = {"schema": "ocr-engine-component/v1", "sources_sha256": component.digest(b"sources"),
                     "packages": [{"package": "engine", "file": "debs/engine.deb", "bytes": 3,

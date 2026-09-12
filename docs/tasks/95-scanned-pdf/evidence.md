@@ -109,9 +109,13 @@ change config, install packages, run OCR/tests, or touch canonical state.
 The executable identity matches the historical #92 candidate, not main. This
 phase verified the installed file and service metadata, not a fresh connector
 health/accuracy test. No actual connector timeout measurement is available.
-Resource admission in design currently fails. Disk/memory remediation and a
-consistent migration rollback snapshot are deployment blockers, not permission
-to delete any existing task/canonical data.
+The host does not meet the initial candidate conservative reservations; actual
+workload insufficiency is **not proven**. Hosted peak/unpacked-size measurements,
+minimal staging and deployment snapshot/workspace/artifact calculations with
+explicit safety margins must determine admission. A consistent rollback snapshot
+remains mandatory. Do not block development on a speculative expansion request
+or delete old task/private/canonical data; report any measured shortfall and
+minimum additional capacity to Coordinator.
 
 ## Prior paper evidence: context only
 
@@ -132,8 +136,8 @@ independently reviewed gold are required. No private text is included here.
 | Stage | Status |
 | --- | --- |
 | A live discovery / old-task checks / full normative reads | Done as recorded above |
-| B design/prompt/evidence | Proposed in this docs-only PR; Coordinator review pending |
-| Fixture byte/font/gold SHA freeze | Not done; fixture-only reviewed PR required before OCR implementation/tuning |
+| B design/prompt/evidence | e037ca10 reviewed; bounded revisions per 5643741913, new-head final approval pending |
+| Fixture byte/font/gold SHA freeze | Not done; first independent fixture-only implementation-branch commit may be reviewed/frozen by exact SHA before later OCR commits; no separate PR required |
 | Dependency complete hash lock | Not done; approved implementation/package gate |
 | Connector deadline / cold four-page performance | Unmeasured; synchronous hypothesis only |
 | Layout/OCR implementation / integration | Not started by this executor |
@@ -145,3 +149,24 @@ Design changes are restricted to these three Markdown files. Check `git diff
 --check`, inspect staged paths, commit/push this isolated branch, create a design
 PR against main, and report its exact head. Those publication identifiers belong
 in the PR/terminal handoff, not a fabricated self-referential commit hash here.
+
+## Coordinator 裁决后的有界修订
+
+实际读取 [评论 5643741913](https://github.com/liqiangcc/reading-mcp/pull/97#issuecomment-5643741913)
+全文，审查对象为 `e037ca10c3210a9ecece362f6ac9000b02d4522c`。
+本次只改 design/prompt/evidence，未重新执行线上探测，以上宿主数字仍为阶段 A
+快照；未实现、测试、安装、部署或派发其他会话。
+
+- 核对 `src/infrastructure/sqlite.rs`：完整 `document_json` 通过单条
+  `INSERT ... ON CONFLICT ... DO UPDATE` 原子保存；既有 TextUnit/搜索索引
+  已保存 normalized hash。原先“repository/index 分开写”的观察不构成新增
+  全局 generation 存储体系的理由。修订复用 upsert，以 hash-v3 作 generation，
+  先持久化 immutable evidence，后保存完整 Document；保留 crash/并发验证。
+- 删除独立持久化 lease 的预设；监督和索引一致性优先复用既有机制。宿主 cgroup/
+  network isolation 可行性尚未实测，不宣称已经可用；扩大架构先给出具体原因。
+- 资源改为 hosted 实测与部署前计算；1 GiB/4 GiB 不再作为宿主无法完成的证据。
+  仅允许清理本任务已识别的可再生成产物，不擅自清理旧任务/私有资料。
+- fixture 可在实现分支首个独立 commit 按 SHA 冻结，不强制单独 PR。
+  质量阈值不变，synthetic 与真实论文统计分开；真实论文先证实一个自然句子
+  的边界及原页，再遍历受支持范围，缺口不被 `source_complete` 掩盖。
+- 已接受的业务决策不再问用户；新 head 等待 Coordinator 最终批准。

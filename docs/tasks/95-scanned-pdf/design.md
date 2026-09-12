@@ -15,6 +15,32 @@ integration risks, resource limits and fixed acceptance gates. This is a bounded
 #95 supplement to the Coordinator baseline, not a new global design.
 Also read and incorporate [Coordinator static review 5643665196](https://github.com/liqiangcc/reading-mcp/issues/95#issuecomment-5643665196).
 
+## 中文决策与验收摘要
+
+依据 [Coordinator 对 e037ca10 的裁决](https://github.com/liqiangcc/reading-mcp/pull/97#issuecomment-5643741913)
+作本次有界修订；业务方向已认可，新 head 仍待最终设计批准，不提前实现。
+
+- 已接受本地 Tesseract fast（`eng`/`chi_sim`/`eng+chi_sim`），保留既有
+  layout/render 依赖与许可说明；不购买商业授权、不新增云 OCR、不上传私有正文。
+- 已接受 60s ingestion / 90s whole-open 的待实测方案。四页冷启动必须符合
+  实际 connector 时限并留余量；不符合时由 Coordinator 裁决架构，不重复问用户。
+- 已接受 v11/hash-v3、明确的 PDF/EPUB reopen、operator revision 与
+  `force_refresh` 分离。保留旧数据，不静默重绑。layout 先合主线，保留 #92，
+  最终版本才部署。
+- 存储复用原子 Document upsert，以 normalized hash v3 作 generation；先原子
+  持久化 immutable OCR evidence blobs，再一次提交完整 Document 的引用/绑定/
+  derivation。索引按 identity 校验、重建或显式拒绝，不建全局 generation 系统。
+- 资源先在 hosted CI 实测峰值和解包大小，再最小化 staging，部署前计算空间、
+  内存需求及明确安全余量。现状只是不满足候选保守门槛，尚不能证明无法完成。
+- fixture 可放在实现分支首个独立、只含 fixture 的 commit，按精确 SHA 审查冻结；
+  后续 commit 才加 OCR 实现。不强制另开 PR，不重复跑同一 head 的全库测试。
+- clean synthetic 门槛保留：英文 CER ≤1%/WER ≤3%，中文及双语 CER ≤2%，
+  支持正文覆盖 ≥99%、边界 F1 ≥0.95、顺序 1.0；原页绑定与精确读取 100%。
+  详见第 7 节逐 fixture 规则，不把这些指标外推成真实论文准确率。
+- 真实论文先在本机隔离状态证明一个自然句子的边界及原始页，再完成受支持范围
+  遍历统计并回到实际 connector。缺口不能被 `source_complete` 掩盖；不替代
+  paper-reading-lab 人工消费/READY 验收。
+
 ## 1. Goal, scope, and truth boundary
 
 An authorized caller opens the **original** scanned PDF with `open_document`.
@@ -64,8 +90,10 @@ After design approval, use short-lived branches from refreshed main:
    and the deployed candidate. Keep #96 untouched until Coordinator accepts its
    replacement/disposition; this design does not close it.
 
-Every implementation head needs hosted Format + Clippy + full Test, real-engine
-OCR tests, and Coordinator/independent diff review. Old #96 CI does not approve a
+Every merge-candidate implementation head needs hosted Format + Clippy + full
+Test, real-engine OCR tests, and Coordinator/independent diff review. Reuse the
+same exact-head evidence; fixture review alone does not require repeated full
+suite runs. Old #96 CI does not approve a
 new head. No feature branch may be the formal deployed source.
 
 ## 3. Local engine and dependency delivery
@@ -92,7 +120,8 @@ PyMuPDF/PyMuPDF4LLM/Layout 1.28.2 remain required for layout/rendering, with the
 AGPL/commercial terms; repository MIT does not relicense them. See
 [existing upstream notices](https://pymupdf.readthedocs.io/en/latest/about.html).
 This is dependency disclosure, not a legal compliance determination. Coordinator
-must accept the existing dependency licensing boundary before release.
+has accepted retaining these existing dependencies and notices; this does not
+purchase a commercial license or require the user to reconfirm existing paths.
 
 Build dependency artifacts on GitHub-hosted `ubuntu-24.04`, never production or
 self-hosted runners. Resolve the complete .deb dependency closure, Python wheels,
@@ -210,36 +239,50 @@ OCR key are unchanged. Explicit re-recognition is a deployer change to bounded
 `READING_MCP_OCR_REVISION` (default `1`), followed by reopen. It intentionally
 invalidates the deployment's OCR namespace; new revision produces a different
 normalized identity even for byte-identical text. It is not a secret cache purge.
-This operator-scoped choice requires Coordinator approval; per-document caller
+Coordinator has accepted this operator-scoped choice; per-document caller
 forcing would need an additive `open_document` contract design, not overloading
 `force_refresh` or adding a tenth tool.
 
 Persist immutable successful engine outputs across process restart. Single-flight
 the full OCR key; concurrent opens await one result within their own deadlines.
-No SQLite write transaction during detection/OCR. One configured runtime process
-owns the production state; a short persistent lease/CAS guards same-key work if
-another process opens that store. Stale leases expire after the hard deadline;
-publication verifies the lease token so a late worker cannot overwrite a successor.
+No SQLite write transaction during detection/OCR. Reuse in-process supervision
+and bounded per-source publication serialization for this single-runtime v1;
+different OCR keys for the same Document must not race index replacement. Do not
+introduce a distributed lease service or global task system. If concurrent
+writers outside this runtime require stronger coordination, first demonstrate
+the invariant the existing mechanism cannot preserve and return the concrete
+case to Coordinator for a minimal change, rather than claiming distributed safety.
 Cancellation of one waiter does not cancel work still needed by another; no
 remaining waiters or global deadline cancels and reaps the worker. Failed jobs
 never enter the successful OCR cache. Completed page outputs may be reused by a
 retry, but never exposed as a partial canonical success. No background jobs API.
 
-Canonical publication is a short repository transaction after validating the
-entire projection, profile and units. Add a generation-scoped commit abstraction;
-do not pretend today's separate repository.save/index calls are atomic. Publish
-canonical document, typed OCR references, binding map and generation together.
-Readers only observe the committed generation. TextUnit/FTS caches are rebuildable
-and tagged with that generation; missing/mismatched generations rebuild or return
-an explicit index error, never stale search hits. Crash before commit exposes old
-generation; crash after commit reconstructs indexes from new canonical facts.
-Successful `open_document` is returned only after required derived readiness.
+Canonical publication reuses the existing single-statement SQLite `document_json`
+upsert in `DocumentRepository::save`; the complete Document is already atomic.
+After validating projection, profile and units, atomically persist immutable,
+content-addressed OCR evidence blobs (temporary file -> durable atomic publish).
+Only then save references, bindings and derivation together in that complete
+Document. A committed reference must never point to an unfinished/missing blob;
+crash-before-upsert may leave an unreferenced blob but not a partial Document.
+Use **normalized hash v3 itself as generation**, not a new global generation
+schema or commit subsystem. TextUnit/FTS state remains derived and must match the
+current canonical identity; reuse existing index fingerprints/validation and
+rebuild or explicitly reject missing/mismatched state. Do not return stale hits
+during a concurrent publication. Serialize publication/index replacement within
+the bounded use case and revalidate canonical identity at read/handoff boundaries.
+Crash after upsert reconstructs derived state from the committed Document.
+Successful `open_document` requires derived readiness for that same identity.
+Preserve crash-before/after and concurrent-read/write tests. Only proven inability
+of existing Ports to maintain these invariants justifies a minimal new Port after
+Coordinator review; separate repository/index calls alone do not justify a
+repository-wide storage refactor.
 
 Upgrade is explicit reopen, not in-place reinterpretation. Persisted v8/v9/v10
 documents and all old raw bytes are retained. Old locators/cursors fail closed
 under the new normalization guard and require caller reacquisition; no ordinal,
 snippet or fuzzy rebinding. **Global v11/hash-v3 means EPUB also needs explicit
-reopen**; this cost is intentional and must be approved. Unchanged source/config
+reopen**; Coordinator has accepted this declared cost; provide upgrade guidance.
+Unchanged source/config
 in the new version keeps identity and restart/resume stable. Never delete
 canonical data or parsed/raw caches to hide migration bugs.
 
@@ -271,13 +314,18 @@ Host resources and original byte/section/character budgets still apply; whicheve
 limit is stricter wins. Hard limits must bound worker allocations, not just output
 after an oversized allocation has happened.
 
-Linux worker supervision uses a dedicated process group plus a delegated cgroup
-with aggregate memory/PID limits; no shell invocation or inherited credentials.
-Constrain CPU threads, file descriptors and file size, strip networking/proxy
-environment, and deny worker network access. PID/process-group and cgroup cleanup
-is required for every descendant, not only the Python parent. If required Linux
-isolation is unavailable, enabled OCR fails preflight rather than running
-unbounded. Private 0700 temporary directories, bounded creation and cleanup on
+Reuse existing subprocess supervision, extending only the required descendant
+termination/reaping behavior. Inspect and record host-available process-group,
+cgroup and network-isolation mechanisms before choosing their concrete wiring;
+do not assume delegated cgroups exist or create a new supervision architecture.
+Constrain aggregate memory/PIDs, CPU threads, file descriptors and file size with
+available host mechanisms; no shell invocation or inherited credentials. Strip
+networking/proxy environment and enforce worker network denial with a verified
+available mechanism (environment stripping alone is not network isolation).
+Prove cleanup of every descendant, not only the Python parent. If existing
+capabilities cannot enforce the required bounds/isolation, report the concrete
+gap to Coordinator before any larger architecture change; never run unbounded.
+Private 0700 temporary directories, bounded creation and cleanup on
 success/error/cancellation/startup-orphan recovery. Remove only owned temp paths;
 never delete canonical/OCR evidence when cleaning a failed job.
 
@@ -304,11 +352,23 @@ to fit the connector limit. If not, stop synchronous v1 and return a design chan
 for recoverable asynchronous ingestion; do not silently increase client timeout,
 retry until cached, or count a warm call as cold acceptance.
 
-Deployment admission: at least 1 GiB MemAvailable, no sustained swap-in/out during
-the probe, and free disk >= max(4 GiB, two uncompressed state snapshots + dependency
-staging size + 1 GiB reserve). Current host fails the memory/disk gates. Do not
-delete other sessions' files or canonical state to obtain headroom; Coordinator
-must arrange capacity/explicitly scoped housekeeping or another approved host.
+Resource admission must follow measured demand, not arbitrary absolute thresholds.
+The earlier 1 GiB available-memory / 4 GiB disk values were candidate conservative
+reservations: the host currently does not meet those proposed thresholds, which
+does **not** prove the workload cannot complete. First measure actual process-tree
+peak memory, temporary storage and unpacked artifact sizes in hosted CI. Process
+pages serially and release unused layout/OCR workers instead of retaining both.
+Before deployment, calculate peak simultaneously resident artifacts + consistent
+snapshot/migration copy + workspace + explicitly recorded safety margin, accounting
+for existing rollback artifacts without double counting. Compute memory from the
+measured worker/server overlap, live host baseline and explicit safety margin;
+confirm with an isolated local probe, including swap behavior and real deadlines.
+Document inputs, byte/MiB totals and margin rationale in Deployment evidence.
+Minimize staging and clean only this task's identified regenerable outputs;
+never remove canonical data, private material or old tasks' files. Do not block
+remaining authorized development on an expansion request. If final measured
+requirements still exceed capacity, give Coordinator the measurements and minimum
+additional disk/memory for a decision. Do not ask the user again by default.
 
 ## 7. Frozen acceptance specification (not accuracy already achieved)
 
@@ -316,8 +376,11 @@ Freeze these thresholds and the logical source/geometry specifications at the
 Coordinator-approved design SHA **before any runtime tuning**. Fixture generator,
 fonts/render dependency hashes, byte-identical PDFs/rasters, full gold character
 spans, paragraph/sentence boundaries, region/page/order annotations, and manifest
-SHA256 must subsequently be reviewed in a fixture-only PR before OCR implementation
-or benchmark-driven tuning. That second freeze is mandatory: this documents-only
+SHA256 may be reviewed as the **first independent fixture-only commit on the
+implementation branch**, with Coordinator freezing its exact SHA before later
+commits introduce OCR implementation or benchmark-driven tuning. No separate
+fixture PR is required and the same fixture/head does not need repeated full-suite
+runs solely for this review. That byte freeze is mandatory: this documents-only
 PR does not pretend fixture bytes already exist. No historical private pilot or
 AI-visual transcription is approved gold. Corpus changes require a reviewed design
 amendment; do not drop a failing case or lower a threshold to pass.
@@ -419,9 +482,13 @@ Mandatory thresholds, **each fixture**, no averaging away failures:
   restart/resume suites stay green. Tool count remains nine; no progress state.
 
 Private four-page paper: authorized **local-only** original naturebp.pdf, hash in
-evidence. Run cold original scan -> ingestion -> full supported unit traversal ->
-exact reads -> original-page views with the same packaged runtime, then actual
-production connector. Publish hashes, timing/resource counts, page/unit/coverage
+evidence. Run cold original scan -> ingestion -> first prove one natural sentence's
+reliable boundary, exact read and original-page binding -> then traverse the full
+supported scope and report page/unit/coverage statistics, with the same packaged
+runtime in isolated local state, then through the actual production connector.
+Report unsupported gaps independently; `source_complete` must never mask them.
+Clean synthetic CER/WER thresholds are not measured real-paper accuracy. Publish
+hashes, timing/resource counts, page/unit/coverage
 statistics and pass/fail only, never text/raster/hOCR. No private fixture in CI or
 artifact logs. Coordinator privately annotates/reviews target prose scope before
 quantitative accuracy claims; page 1 may contain another article, so document
@@ -461,17 +528,14 @@ verify service/tunnel and old documents, retain new state/evidence. Never fix li
 uncommitted code. Cannot close #95 until Coordinator approves complete engine,
 quality, CI, main, release/package/deploy and real-connector acceptance evidence.
 
-## 9. Coordinator decisions requested at this design head
+## 9. 已裁决事项与后续证据边界
 
-1. Accept Tesseract fast/English+simplified-Chinese, the disclosed local PDF
-   dependency licensing boundary, and the fixed quality/fixture specification?
-2. Accept synchronous 60-second ingestion / 90-second open as a **hypothesis**
-   gated by actual connector deadline and four-page cold performance; require
-   redesign if it fails rather than claiming asynchronous support now?
-3. Accept global v11/hash-v3 reopen migration (including EPUB) and operator OCR
-   revision forcing rather than a new caller-facing parameter?
-4. Accept separate layout mainline prerequisite, fixture-byte review before OCR
-   tuning, and final-only production rollout; decide host capacity remediation.
+本地引擎、既有依赖、同步待测方案、v11/hash-v3 与 EPUB reopen、operator
+revision、layout prerequisite 已获 Coordinator 方向认可，不再重复询问用户。
+本次按裁决收窄存储/监督范围，改为实测资源准入，并简化 fixture SHA 冻结流程。
+返回新 head 后等待 Coordinator 最终设计批准；本轮仍只修订三份文档。
 
-Approval of this design is not approval of unmeasured performance, unresolved
-artifact hashes, a future implementation head, or production acceptance.
+尚待执行阶段取得的证据：fixture/gold 精确 SHA、实际依赖 hash、hosted 峰值/
+解包测量、宿主隔离机制可行性、connector 时限与真实论文验证。资源不足或需要
+扩大架构时附具体测量/不变量缺口交 Coordinator 裁决，不预先要求扩容。
+设计批准不等于未来实现 head、性能、产物或生产验收通过。

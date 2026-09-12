@@ -1,5 +1,6 @@
 use reading_mcp::mcp::contracts::{
-    GetTextUnitsResponse, OpenDocumentResponse, ReadDocumentResponse, TextUnitItemDto,
+    GetContextResponse, GetTextUnitsResponse, OpenDocumentResponse, ReadDocumentResponse,
+    SearchCandidateKindDto, SearchDocumentResponse, TextUnitItemDto,
 };
 use reading_mcp::mcp::source_view_contracts::GetSourceViewResponse;
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
@@ -116,6 +117,36 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                 ));
             }
             let (hash, item) = saved.as_ref().unwrap();
+            let search = client.call_tool(
+                CallToolRequestParams::new("search_document").with_arguments(arguments(json!({
+                    "document_id":opened.document_id, "query":"观测站", "limit":10
+                })))
+            ).await.unwrap().into_typed::<SearchDocumentResponse>().unwrap();
+            let hit = search.hits.iter().find(|hit|
+                hit.candidate_kind == SearchCandidateKindDto::Sentence
+                    && hit.text_locator == item.locator
+            ).expect("real OCR CJK search must return the saved canonical sentence locator");
+            assert_eq!(&hit.text_locator.normalized_document_hash, hash);
+            let hit_read = client.call_tool(
+                CallToolRequestParams::new("read_document").with_arguments(arguments(json!({
+                    "document_id":opened.document_id, "target_locator":hit.text_locator, "max_chars":8192
+                })))
+            ).await.unwrap().into_typed::<ReadDocumentResponse>().unwrap();
+            assert!(hit_read.complete);
+            assert_eq!(hit_read.content, item.text);
+            assert_eq!(hit_read.resolved_target_locator, hit.text_locator);
+            let context = client.call_tool(
+                CallToolRequestParams::new("get_context").with_arguments(arguments(json!({
+                    "document_id":opened.document_id, "target_locator":hit.text_locator,
+                    "relation":{"type":"neighbor", "unit":"sentence", "before":0, "after":1},
+                    "max_chars":8192
+                })))
+            ).await.unwrap().into_typed::<GetContextResponse>().unwrap();
+            assert!(context.complete);
+            assert_eq!(context.anchor_locator, item.locator);
+            assert_eq!(context.items.len(), 2);
+            assert_eq!(context.items[0].content.as_deref(), Some(item.text.as_str()));
+            assert!(context.items[1].content.as_deref().is_some_and(|text| !text.is_empty()));
             let before_failure = published_documents(&state);
             assert_eq!(before_failure.len(), 1);
             let blank_error = client

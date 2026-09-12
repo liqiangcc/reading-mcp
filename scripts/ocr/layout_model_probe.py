@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.error
 
 REVISION = "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2"
 FILES = {
@@ -80,9 +81,22 @@ def main():
     if args.prepare:
         args.model.mkdir(parents=True, exist_ok=False)
         for name, (size, _) in FILES.items():
-            url = f"https://huggingface.co/PaddlePaddle/PP-DocLayout-S/resolve/{REVISION}/{name}"
-            with urllib.request.urlopen(url, timeout=60) as response:
-                raw = response.read(size + 1)
+            endpoint = "resolve" if name == "inference.pdiparams" else "raw"
+            url = f"https://huggingface.co/PaddlePaddle/PP-DocLayout-S/{endpoint}/{REVISION}/{name}"
+            for attempt in range(3):
+                print(f"Downloading pinned {name}, attempt {attempt + 1}/3", flush=True)
+                try:
+                    with urllib.request.urlopen(url, timeout=60) as response:
+                        raw = response.read(size + 1)
+                    break
+                except urllib.error.HTTPError as error:
+                    if error.code not in (429, 502, 503, 504) or attempt == 2:
+                        raise
+                    retry_after = error.headers.get("Retry-After", "15")
+                    delay = int(retry_after) if retry_after.isdigit() else 15
+                    if delay > 60:
+                        raise RuntimeError("model host requested a longer retry delay; stop bounded attempt") from error
+                    time.sleep(max(1, delay))
             (args.model / name).write_bytes(raw)
         manifest = {"repository": "PaddlePaddle/PP-DocLayout-S", "revision": REVISION,
                     "license_declaration": "Apache-2.0 in pinned model card; candidate only",

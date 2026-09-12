@@ -46,13 +46,17 @@ impl OcrRuntimeIdentity {
                 .languages
                 .iter()
                 .any(|l| l != "eng" && l != "chi_sim")
-            || config.languages.windows(2).any(|w| w[0] == w[1])
+            || {
+                let mut s = config.languages.clone();
+                s.sort();
+                s.windows(2).any(|w| w[0] == w[1])
+            }
         {
             return Err("invalid OCR languages".into());
         }
         let mut dependencies = vec![DependencyFingerprint {
             name: "engine".into(),
-            sha256: sha(Path::new(&config.engine_path))?,
+            sha256: sha(&Path::new(&config.engine_path))?,
         }];
         for language in &config.languages {
             dependencies.push(DependencyFingerprint {
@@ -75,10 +79,9 @@ impl OcrRuntimeIdentity {
 }
 
 fn sha(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("missing OCR dependency {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     use sha2::{Digest, Sha256};
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

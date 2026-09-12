@@ -24,6 +24,17 @@ pub struct OcrPageBinding {
     pub bbox_digest: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct OcrEvidenceRecord {
+    pub page: u32,
+    pub block: u32,
+    pub paragraph: u32,
+    pub line: u32,
+    pub text: String,
+    pub bbox: [f64; 4],
+    pub confidence: Option<f64>,
+}
+
 impl OcrDerivation {
     pub fn from_metadata(
         metadata: &std::collections::BTreeMap<String, String>,

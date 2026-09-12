@@ -12,7 +12,7 @@ use super::common::{content_hash, document_id, title_from_metadata};
 use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, RetrievedResource};
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
-    NormalizedBlockProvenance, NormalizedTextRange, OriginalSourceBinding,
+    NormalizedBlockProvenance, NormalizedTextRange, OcrEvidenceRecord, OriginalSourceBinding,
     OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
 use crate::infrastructure::ResourceBudget;
@@ -121,7 +121,14 @@ impl Parser for LayoutPdfParser {
         let evidence = payload.ocr_evidence.clone();
         let mut document = project(resource, payload, &self.budget)?;
         if !evidence.is_empty() {
-            validate_ocr_evidence(&evidence)?;
+            validate_ocr_evidence(
+                &evidence,
+                document
+                    .metadata
+                    .get("pdf_pages")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(u32::MAX),
+            )?;
             let bytes = serde_json::to_vec(&evidence).map_err(failed)?;
             let store = self
                 .evidence_store
@@ -145,35 +152,31 @@ impl Parser for LayoutPdfParser {
     }
 }
 
-fn validate_ocr_evidence(values: &[serde_json::Value]) -> Result<(), ApplicationError> {
+fn validate_ocr_evidence(
+    values: &[OcrEvidenceRecord],
+    max_page: u32,
+) -> Result<(), ApplicationError> {
     for value in values {
-        let object = value
-            .as_object()
-            .ok_or_else(|| failed("invalid OCR evidence record"))?;
-        for key in [
-            "page",
-            "block",
-            "paragraph",
-            "line",
-            "text",
-            "bbox",
-            "confidence",
-        ] {
-            if !object.contains_key(key) {
-                return Err(failed(format!("OCR evidence missing {key}")));
-            }
+        if value.page == 0
+            || value.page > max_page
+            || value.block == 0
+            || value.paragraph == 0
+            || value.line == 0
+            || value.text.trim().is_empty()
+        {
+            return Err(failed("invalid OCR evidence identity"));
         }
-        let page = object["page"]
-            .as_u64()
-            .ok_or_else(|| failed("invalid OCR evidence page"))?;
-        let bbox = object["bbox"]
-            .as_array()
-            .ok_or_else(|| failed("invalid OCR evidence bbox"))?;
-        if page == 0 || bbox.len() != 4 || bbox.iter().any(|v| !v.is_number()) {
+        let [x0, y0, x1, y1] = value.bbox;
+        if ![x0, y0, x1, y1].iter().all(|v| v.is_finite())
+            || x0 < 0.0
+            || y0 < 0.0
+            || x1 <= x0
+            || y1 <= y0
+        {
             return Err(failed("invalid OCR evidence coordinates"));
         }
-        if let Some(conf) = object["confidence"].as_f64() {
-            if !(0.0..=100.0).contains(&conf) {
+        if let Some(conf) = value.confidence {
+            if !conf.is_finite() || !(0.0..=100.0).contains(&conf) {
                 return Err(failed("invalid OCR confidence"));
             }
         }
@@ -191,7 +194,7 @@ struct LayoutResult {
     regions: serde_json::Value,
     preserved_ambiguous_hyphens: usize,
     #[serde(default)]
-    ocr_evidence: Vec<serde_json::Value>,
+    ocr_evidence: Vec<OcrEvidenceRecord>,
 }
 #[derive(Deserialize)]
 struct LayoutSection {

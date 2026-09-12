@@ -74,23 +74,43 @@ impl Retriever for BudgetedRetriever {
 pub struct BudgetedParser {
     inner: Arc<dyn Parser>,
     budget: ResourceBudget,
+    ocr_enabled: bool,
 }
 
 impl BudgetedParser {
     pub fn new(inner: Arc<dyn Parser>, budget: ResourceBudget) -> Self {
-        Self { inner, budget }
+        Self {
+            inner,
+            budget,
+            ocr_enabled: false,
+        }
+    }
+    pub fn with_ocr_budget(mut self, enabled: bool) -> Self {
+        self.ocr_enabled = enabled;
+        self
     }
 }
 
 #[async_trait]
 impl Parser for BudgetedParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let document = timeout(self.budget.parse_timeout, self.inner.parse(resource))
+        let is_pdf = resource
+            .media_type
+            .0
+            .split(';')
+            .next()
+            .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"));
+        let parse_timeout = if self.ocr_enabled && is_pdf {
+            Duration::from_secs(60)
+        } else {
+            self.budget.parse_timeout
+        };
+        let document = timeout(parse_timeout, self.inner.parse(resource))
             .await
             .map_err(|_| {
                 ApplicationError::ResourceLimitExceeded(format!(
                     "parser exceeded {:?} timeout",
-                    self.budget.parse_timeout
+                    parse_timeout
                 ))
             })??;
 

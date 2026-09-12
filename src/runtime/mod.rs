@@ -151,8 +151,10 @@ pub fn build_server(
         cached = cached.with_pdf_namespace(crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE);
     }
     let parser: Arc<dyn Parser> = Arc::new(cached);
-    let parser: Arc<dyn Parser> =
-        Arc::new(BudgetedParser::new(parser, config.resource_budget.clone()));
+    let parser: Arc<dyn Parser> = Arc::new(
+        BudgetedParser::new(parser, config.resource_budget.clone())
+            .with_ocr_budget(config.ocr_enabled),
+    );
     let parser: Arc<dyn Parser> = if config.telemetry {
         Arc::new(ObservedParser::new(parser))
     } else {
@@ -183,7 +185,8 @@ pub fn build_server(
             text_unit_index,
             search_index.clone(),
         )
-        .with_reliability_inspector(Arc::new(PersistedDocumentReliabilityInspector)),
+        .with_reliability_inspector(Arc::new(PersistedDocumentReliabilityInspector))
+        .with_ocr_budget(config.ocr_enabled),
     );
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
     let list_directory = Arc::new(ListDirectoryUseCase::new(config.local_roots.clone()));

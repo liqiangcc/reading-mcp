@@ -44,4 +44,4 @@ rmcp = { version = "2.2", features = [
     "transport-streamable-http-client-reqwest",
 ] }
 tempfile = "3"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time", "test-util"] }

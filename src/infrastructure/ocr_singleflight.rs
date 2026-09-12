@@ -71,9 +71,10 @@ impl OcrSingleFlight {
                 let (sender, receiver) = watch::channel(None);
                 let active = self.active.clone();
                 let task_key = key.clone();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
                 let task = tokio::spawn(async move {
                     let _capacity = capacity;
-                    let outcome = async {
+                    let operation = async {
                         let _active =
                             tokio::time::timeout(Duration::from_secs(2), active.acquire_owned())
                                 .await
@@ -99,8 +100,14 @@ impl OcrSingleFlight {
                             .map_err(ApplicationError::CacheFailed)?;
                         cache.put(task_key, document.clone()).await?;
                         Ok(document)
-                    }
-                    .await;
+                    };
+                    let outcome = tokio::time::timeout_at(deadline, operation)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(ApplicationError::ResourceLimitExceeded(
+                                "OCR shared parse exceeded 60 second deadline".into(),
+                            ))
+                        });
                     let _ = sender.send(Some(outcome));
                 });
                 let token = Arc::new(());

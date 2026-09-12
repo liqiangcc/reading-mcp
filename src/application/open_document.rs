@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::{Instant, timeout_at};
 
 use crate::application::ports::{
     ApplicationError, DocumentReliabilityInspector, DocumentRepository, Parser, RetrievalOptions,
-    Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
+    RetrievedResource, Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
 };
 use crate::application::reading_profile::{
     ReadingProfile, ReliabilitySummary, build_reading_profile,
@@ -41,6 +43,7 @@ pub struct OpenDocumentUseCase {
     text_unit_index: Option<Arc<dyn TextUnitIndex>>,
     search_index: Arc<dyn SearchIndex>,
     reliability_inspector: Option<Arc<dyn DocumentReliabilityInspector>>,
+    ocr_enabled: bool,
 }
 
 impl OpenDocumentUseCase {
@@ -59,6 +62,7 @@ impl OpenDocumentUseCase {
             text_unit_index: None,
             search_index,
             reliability_inspector: None,
+            ocr_enabled: false,
         }
     }
 
@@ -78,6 +82,7 @@ impl OpenDocumentUseCase {
             text_unit_index: Some(text_unit_index),
             search_index,
             reliability_inspector: None,
+            ocr_enabled: false,
         }
     }
 
@@ -93,12 +98,68 @@ impl OpenDocumentUseCase {
         &self,
         command: OpenDocumentCommand,
     ) -> Result<OpenDocumentResult, ApplicationError> {
+        if self.ocr_enabled {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            timeout_at(deadline, self.execute_inner(command, Some(deadline)))
+                .await
+                .map_err(|_| {
+                    ApplicationError::ResourceLimitExceeded(
+                        "OCR whole-open exceeded 90 second deadline".into(),
+                    )
+                })?
+        } else {
+            self.execute_inner(command, None).await
+        }
+    }
+
+    pub fn with_ocr_budget(mut self, enabled: bool) -> Self {
+        self.ocr_enabled = enabled;
+        self
+    }
+
+    async fn execute_inner(
+        &self,
+        command: OpenDocumentCommand,
+        whole_deadline: Option<Instant>,
+    ) -> Result<OpenDocumentResult, ApplicationError> {
         self.source_policy.validate(&command.source).await?;
 
         let resource = self
             .retriever
             .retrieve(&command.source, &command.options)
             .await?;
+
+        let is_pdf = resource
+            .media_type
+            .0
+            .split(';')
+            .next()
+            .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"));
+        if self.ocr_enabled && is_pdf {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = whole_deadline.map_or(deadline, |whole| whole.min(deadline));
+            timeout_at(deadline, self.ingest(resource, Some(deadline)))
+                .await
+                .map_err(|_| {
+                    ApplicationError::ResourceLimitExceeded(
+                        "OCR ingestion exceeded shared 60 second deadline".into(),
+                    )
+                })?
+        } else {
+            self.ingest(resource, None).await
+        }
+    }
+
+    async fn ingest(
+        &self,
+        resource: RetrievedResource,
+        deadline: Option<Instant>,
+    ) -> Result<OpenDocumentResult, ApplicationError> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(ApplicationError::ResourceLimitExceeded(
+                "OCR ingestion deadline exhausted before parsing".into(),
+            ));
+        }
 
         let document = self.parser.parse(resource).await?;
         document
@@ -139,6 +200,13 @@ impl OpenDocumentUseCase {
             reading_profile,
         };
 
+        // CPU-only projection/profile work may not yield to the timeout. Never
+        // start publication after its deadline even in that case.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(ApplicationError::ResourceLimitExceeded(
+                "OCR ingestion deadline exhausted before publication".into(),
+            ));
+        }
         self.repository.save(document.clone()).await?;
         if let Some(index) = &self.text_unit_index {
             index

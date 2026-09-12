@@ -122,24 +122,9 @@ pub fn build_server(
         router = router.with_pdf_parser(Arc::new(parser));
     }
     let fingerprint = if config.ocr_enabled {
-        let mut h = sha2::Sha256::new();
-        use sha2::Digest;
-        h.update(config.ocr_language.as_bytes());
-        h.update(config.ocr_revision.as_bytes());
-        for path in [
-            config.ocr_engine.clone(),
-            config.ocr_tessdata.join("eng.traineddata"),
-            config.ocr_tessdata.join("chi_sim.traineddata"),
-        ] {
-            let bytes = std::fs::read(&path).map_err(|e| {
-                crate::application::ports::ApplicationError::ParseFailed(format!(
-                    "OCR dependency missing {}: {e}",
-                    path.display()
-                ))
-            })?;
-            h.update(sha2::Sha256::digest(bytes));
-        }
-        format!("ocr-fingerprint-v1:{:x}", h.finalize())
+        crate::domain::OcrRuntimeIdentity::build(config.ocr_config())
+            .map_err(crate::application::ports::ApplicationError::ParseFailed)?
+            .sha256
     } else {
         "ocr-disabled/v1".into()
     };

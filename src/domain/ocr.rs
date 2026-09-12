@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OcrConfig {
@@ -12,6 +13,72 @@ pub struct OcrConfig {
     pub psm: u8,
     pub detector_version: String,
     pub protocol_version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DependencyFingerprint {
+    pub name: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OcrRuntimeIdentity {
+    pub config: OcrConfig,
+    pub dependencies: Vec<DependencyFingerprint>,
+    pub sha256: String,
+}
+
+impl OcrRuntimeIdentity {
+    pub fn build(config: OcrConfig) -> Result<Self, String> {
+        if !config.engine_path.starts_with('/') || !config.tessdata_path.starts_with('/') {
+            return Err("OCR paths must be absolute".into());
+        }
+        if config.dpi != 300
+            || config.oem != 1
+            || config.psm != 3
+            || config.protocol_version != "pdf-layout/v1"
+            || config.detector_version != "pdf-layout/v1"
+        {
+            return Err("unsupported OCR configuration".into());
+        }
+        if config.languages.is_empty()
+            || config
+                .languages
+                .iter()
+                .any(|l| l != "eng" && l != "chi_sim")
+            || config.languages.windows(2).any(|w| w[0] == w[1])
+        {
+            return Err("invalid OCR languages".into());
+        }
+        let mut dependencies = vec![DependencyFingerprint {
+            name: "engine".into(),
+            sha256: sha(Path::new(&config.engine_path))?,
+        }];
+        for language in &config.languages {
+            dependencies.push(DependencyFingerprint {
+                name: format!("model:{language}"),
+                sha256: sha(
+                    &Path::new(&config.tessdata_path).join(format!("{language}.traineddata"))
+                )?,
+            });
+        }
+        dependencies.sort_by(|a, b| a.name.cmp(&b.name));
+        let bytes = serde_json::to_vec(&(config.clone(), dependencies.clone()))
+            .map_err(|e| e.to_string())?;
+        use sha2::{Digest, Sha256};
+        Ok(Self {
+            config,
+            dependencies,
+            sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+        })
+    }
+}
+
+fn sha(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("missing OCR dependency {}: {e}", path.display()))?;
+    use sha2::{Digest, Sha256};
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

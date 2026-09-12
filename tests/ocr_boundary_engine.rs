@@ -1,7 +1,10 @@
-use reading_mcp::application::ports::{Parser, RetrievedResource};
-use reading_mcp::domain::{DocumentSource, MediaType, OcrConfig, SentenceEligibility};
+use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievedResource};
+use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};
+use reading_mcp::domain::{
+    DocumentSource, MediaType, OcrConfig, OriginalSourceTarget, SentenceEligibility, TextLocator,
+};
 use reading_mcp::infrastructure::{
-    FileOcrEvidenceStore, ResourceBudget, build_ocr_runtime_identity,
+    FileOcrEvidenceStore, ResourceBudget, SqliteDocumentRepository, build_ocr_runtime_identity,
 };
 use reading_mcp::parsing::LayoutPdfParser;
 use serde_json::json;
@@ -65,6 +68,73 @@ async fn export_real_canonical_boundaries_without_gold_input() {
             };
         let paragraphs = document.try_paragraph_text_units().unwrap();
         let sentences = document.try_sentence_text_units().unwrap();
+        assert!(!paragraphs.units.is_empty());
+        assert!(!sentences.units.is_empty());
+        let database = directory.path().join(format!("{case}.sqlite"));
+        {
+            let repository = SqliteDocumentRepository::open(&database).unwrap();
+            repository.save(document.clone()).await.unwrap();
+        }
+        let repository = Arc::new(SqliteDocumentRepository::open(&database).unwrap());
+        let restored = repository.get(&document.id).await.unwrap().unwrap();
+        assert_eq!(restored.try_paragraph_text_units().unwrap(), paragraphs);
+        assert_eq!(restored.try_sentence_text_units().unwrap(), sentences);
+        let reader = ReadDocumentUseCase::new(repository);
+        let mut exact_reads = 0;
+        for (index, paragraph) in paragraphs.units.iter().enumerate() {
+            // Frozen F05 has two paragraphs on each of pages 1, 2 and 3;
+            // page 4 is blank. Every other fixture here has one original page.
+            // This is an acceptance expectation, never an input to OCR.
+            let expected_page = if case == "F05" {
+                (index / 2 + 1) as u32
+            } else {
+                1
+            };
+            let section = document.find_section(&paragraph.owner_section_id).unwrap();
+            let mut targets = vec![(
+                TextLocator::for_paragraph(&document, section, paragraph),
+                paragraph.text.as_str(),
+            )];
+            targets.extend(
+                sentences
+                    .units
+                    .iter()
+                    .filter(|sentence| sentence.parent_paragraph_id == paragraph.id)
+                    .map(|sentence| {
+                        (
+                            TextLocator::for_sentence(&document, section, sentence),
+                            sentence.text.as_str(),
+                        )
+                    }),
+            );
+            for (locator, text) in targets {
+                assert_eq!(
+                    restored
+                        .original_source_target_for_range(
+                            &locator.owner_section_id,
+                            locator.normalized_range.unwrap()
+                        )
+                        .unwrap(),
+                    Some(OriginalSourceTarget::Page {
+                        page_number: expected_page
+                    }),
+                    "{case}"
+                );
+                let result = reader
+                    .read_exact(ReadExactTargetCommand {
+                        document_id: document.id.clone(),
+                        target_locator: locator.clone(),
+                        max_chars: Some(8192),
+                    })
+                    .await
+                    .unwrap();
+                assert!(result.complete, "{case}");
+                assert_eq!(result.content, text, "{case}");
+                assert_eq!(result.resolved_target_locator, locator, "{case}");
+                exact_reads += 1;
+            }
+        }
+        assert_eq!(exact_reads, paragraphs.units.len() + sentences.units.len());
         let units: Vec<_> = paragraphs
             .units
             .iter()
@@ -92,7 +162,8 @@ async fn export_real_canonical_boundaries_without_gold_input() {
         report.insert(
             case.into(),
             json!({"content_hash":document.content_hash.0,
-            "normalized_hash":document.normalized_document_hash().0, "paragraphs":units}),
+            "normalized_hash":document.normalized_document_hash().0, "paragraphs":units,
+            "sqlite_reopen_exact_reads":exact_reads, "original_page_binding_checks":exact_reads}),
         );
     }
     let output = PathBuf::from(std::env::var("READING_MCP_OCR_BOUNDARY_REPORT").unwrap());

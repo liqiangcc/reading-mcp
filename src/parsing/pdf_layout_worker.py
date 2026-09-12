@@ -462,6 +462,7 @@ def project(layout):
 
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET
+    protocol_stdout = sys.stdout
     max_pages, max_bytes, max_chars = map(int, sys.argv[1:4])
     if len(sys.argv) > 4 and sys.argv[4]:
         OCR_CONFIG = json.loads(sys.argv[4])
@@ -514,7 +515,7 @@ def main():
                         if "ocr_retry_diagnostic" in p]
         if any(not observation["complete"] for observation in observations):
             json.dump({"schema_version": VERSION, "ocr_attempts": observations,
-                       "error": "OCR_NO_SUPPORTED_PROJECTION"}, sys.stdout, ensure_ascii=False)
+                       "error": "OCR_NO_SUPPORTED_PROJECTION"}, protocol_stdout, ensure_ascii=False)
             raise ValueError("OCR geometric conflict remains unresolved")
         result = project(layout)
         result["ocr_attempts"] = observations
@@ -537,7 +538,7 @@ def main():
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):
             if OCR_CONFIG.get("enabled", False):
                 json.dump({"schema_version": VERSION, "error": "OCR_NO_SUPPORTED_PROJECTION",
-                           "ocr_attempts": observations}, sys.stdout, ensure_ascii=False)
+                           "ocr_attempts": observations}, protocol_stdout, ensure_ascii=False)
                 raise ValueError("no supported prose text in inspected original pages")
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")
         if sum(len(b["text"]) for s in result["sections"] for b in s["blocks"]) > max_chars:

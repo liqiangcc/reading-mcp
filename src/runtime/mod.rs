@@ -130,8 +130,11 @@ pub fn build_server(
             "/usr/share/tesseract-ocr/5/tessdata/eng.traineddata",
             "/usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata",
         ] {
-            let bytes =
-                std::fs::read(path).map_err(|e| format!("OCR dependency missing {path}: {e}"))?;
+            let bytes = std::fs::read(path).map_err(|e| {
+                crate::application::ports::ApplicationError::ParseFailed(format!(
+                    "OCR dependency missing {path}: {e}"
+                ))
+            })?;
             h.update(sha2::Sha256::digest(bytes));
         }
         format!("ocr-fingerprint-v1:{:x}", h.finalize())

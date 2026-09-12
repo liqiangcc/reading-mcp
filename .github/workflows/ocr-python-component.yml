@@ -5,6 +5,7 @@ on:
       - 'scripts/ocr/package_python_dependencies.py'
       - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/ocr/verify_engine_component.py'
+      - 'scripts/ocr/offline_runtime_smoke.py'
       - 'tests/ocr/test_engine_component.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
@@ -13,12 +14,52 @@ on:
       - 'scripts/ocr/package_python_dependencies.py'
       - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/ocr/verify_engine_component.py'
+      - 'scripts/ocr/offline_runtime_smoke.py'
       - 'tests/ocr/test_engine_component.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
 permissions:
   contents: read
 jobs:
+  offline-private-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve private interpreter and engine without host package installation
+        run: |
+          sudo apt-get update -qq
+          python scripts/ocr/package_engine_dependencies.py --python-runtime --output "$RUNNER_TEMP/ocr-private-runtime"
+          python scripts/ocr/package_python_dependencies.py --output "$RUNNER_TEMP/ocr-private-wheels"
+      - name: Install hash-locked wheels using only the extracted interpreter offline
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          mkdir -p "$runtime_root/opt/ocr-bootstrap" "$runtime_root/opt/ocr-smoke" "$runtime_root/tmp"
+          cp -R "$RUNNER_TEMP/ocr-private-wheels/." "$runtime_root/opt/ocr-bootstrap/"
+          cp src/parsing/pdf_layout_worker.py scripts/ocr/offline_runtime_smoke.py tests/fixtures/scanned_pdf/pdf/F07.pdf "$runtime_root/opt/ocr-smoke/"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/python3.12 -m venv /opt/ocr-python
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /opt/ocr-python/bin/python -m pip install --no-index --no-cache-dir --require-hashes --find-links /opt/ocr-bootstrap/wheels -r /opt/ocr-bootstrap/requirements.lock
+      - name: Actual frozen OCR with private interpreter libraries and network isolation
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
+          du -sb "$runtime_root" "$runtime_root/opt/ocr-python" "$runtime_root/opt/ocr-bootstrap"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-private-runtime-candidate-evidence
+          path: |
+            ${{ runner.temp }}/ocr-private-runtime/manifest.json
+            ${{ runner.temp }}/ocr-private-runtime/apt-source-uris.txt
+            ${{ runner.temp }}/ocr-private-wheels/manifest.json
+            ${{ runner.temp }}/ocr-private-wheels/requirements.lock
+            ${{ runner.temp }}/ocr-private-runtime-smoke.json
+          retention-days: 14
   offline-engine:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

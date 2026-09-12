@@ -2,6 +2,8 @@
 import argparse
 import hashlib
 import json
+import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -19,7 +21,21 @@ def run(args, **kwargs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--python-runtime", action="store_true",
+                        help="Resolve a candidate private interpreter/CLI closure as well; never install on host")
     args = parser.parse_args()
+    roots = list(ROOTS)
+    if args.python_runtime:
+        # Resolve once at build time, then use exact versions for download and
+        # record every package/hash in the immutable candidate manifest. This is
+        # not a mutable runtime dependency lookup or production apt operation.
+        for package in ('python3.12-minimal', 'python3.12-venv', 'bash', 'coreutils', 'libc-bin', 'sed', 'grep'):
+            policy = run(['apt-cache', 'policy', package], text=True, capture_output=True,
+                         env={**os.environ, 'LC_ALL': 'C'}).stdout
+            candidates = re.findall(r'^\s*Candidate:\s+(\S+)\s*$', policy, re.M)
+            if len(candidates) != 1 or candidates[0] == '(none)':
+                raise ValueError('missing unambiguous runtime candidate: ' + package)
+            roots.append(package + '=' + candidates[0])
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     debs = output / "debs"
@@ -39,10 +55,10 @@ def main():
         command = ["apt-get", "-o", "Debug::NoLocking=1", "-o", f"Dir::State::status={status}",
                    "-o", f"Dir::Cache::archives={debs}", "--assume-yes",
                    "--no-install-recommends", "--download-only"]
-        sources = run(command + ["--print-uris", "install", *ROOTS],
+        sources = run(command + ["--print-uris", "install", *roots],
                       text=True, capture_output=True).stdout
         (output / "apt-source-uris.txt").write_text(sources)
-        run(command + ["install", *ROOTS])
+        run(command + ["install", *roots])
     records = []
     for deb in sorted(debs.glob("*.deb")):
         fields = run(["dpkg-deb", "--show", "--showformat=${Package}\n${Version}\n${Architecture}\n", str(deb)],
@@ -55,7 +71,7 @@ def main():
                         "sha256": hashlib.sha256(deb.read_bytes()).hexdigest()})
         run(["dpkg-deb", "--extract", str(deb), str(rootfs)])
     versions = {r["package"]: r["version"] for r in records}
-    for root in ROOTS:
+    for root in roots:
         package, version = root.split("=", 1)
         if versions.get(package) != version:
             raise ValueError("missing or changed pinned root package: " + package)
@@ -74,7 +90,7 @@ def main():
             files.append({"path": str(path.relative_to(rootfs)), "bytes": path.stat().st_size,
                           "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {"schema": "ocr-engine-component/v1", "status": "candidate component, not deployment",
-                "roots": ROOTS, "resolver": "apt empty dpkg status, no recommends",
+                "roots": roots, "resolver": "apt empty dpkg status, no recommends",
                 "sources_sha256": hashlib.sha256(sources.encode()).hexdigest(),
                 "packages": records, "files": files, "symlinks": symlinks,
                 "ubuntu_usr_merge_aliases": aliases,

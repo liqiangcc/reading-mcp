@@ -49,6 +49,19 @@ jobs:
           runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
           du -sb "$runtime_root" "$runtime_root/opt/ocr-python" "$runtime_root/opt/ocr-bootstrap"
+      - name: Capture native import backtrace in the same private root on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          test -x "$runtime_root/opt/ocr-python/bin/python"
+          command -v gdb
+          debug_unit="reading-mcp-ocr-import-debug-${GITHUB_RUN_ID}.service"
+          trap 'sudo systemctl stop "$debug_unit" >/dev/null 2>&1 || true; sudo systemctl reset-failed "$debug_unit" >/dev/null 2>&1 || true' EXIT
+          sudo systemd-run --quiet --unit="$debug_unit" --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=LimitCORE=0 --property=RuntimeMaxSec=30 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -c 'import time; time.sleep(5); import onnxruntime'
+          debug_pid=$(sudo systemctl show "$debug_unit" --property=MainPID --value)
+          test "$debug_pid" -gt 1
+          sudo timeout 20 gdb --quiet --nx --batch -ex "set sysroot $runtime_root" -ex 'set pagination off' -ex continue -ex 'bt 30' -p "$debug_pid" | tee "$RUNNER_TEMP/ocr-private-runtime-native-backtrace.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -59,6 +72,7 @@ jobs:
             ${{ runner.temp }}/ocr-private-wheels/manifest.json
             ${{ runner.temp }}/ocr-private-wheels/requirements.lock
             ${{ runner.temp }}/ocr-private-runtime-smoke.json
+            ${{ runner.temp }}/ocr-private-runtime-native-backtrace.txt
           retention-days: 14
   offline-engine:
     runs-on: ubuntu-24.04

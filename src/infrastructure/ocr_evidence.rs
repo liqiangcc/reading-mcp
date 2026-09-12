@@ -24,18 +24,16 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
         identity: &str,
         bytes: &[u8],
     ) -> Result<String, ApplicationError> {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(identity.as_bytes());
-        h.update([0]);
-        h.update(bytes);
-        let digest = format!("sha256:{:x}", h.finalize());
         let identity_bytes = identity.as_bytes();
+        let identity_len = u32::try_from(identity_bytes.len())
+            .map_err(|_| ApplicationError::CacheFailed("evidence identity is too large".into()))?;
         let mut envelope = Vec::with_capacity(MAGIC.len() + 4 + identity_bytes.len() + bytes.len());
         envelope.extend_from_slice(MAGIC);
-        envelope.extend_from_slice(&(identity_bytes.len() as u32).to_be_bytes());
+        envelope.extend_from_slice(&identity_len.to_be_bytes());
         envelope.extend_from_slice(identity_bytes);
         envelope.extend_from_slice(bytes);
+        use sha2::{Digest, Sha256};
+        let digest = format!("sha256:{:x}", Sha256::digest(&envelope));
         let target = self.path(&digest);
         tokio::fs::create_dir_all(&self.root)
             .await
@@ -115,14 +113,9 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
                         "truncated evidence blob".into(),
                     ));
                 }
-                let identity = &blob[header..payload_start];
                 let payload = &blob[payload_start..];
                 use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(identity);
-                hasher.update([0]);
-                hasher.update(payload);
-                if format!("sha256:{:x}", hasher.finalize()) != digest {
+                if format!("sha256:{:x}", Sha256::digest(&blob)) != digest {
                     return Err(ApplicationError::CacheFailed(
                         "evidence digest mismatch".into(),
                     ));
@@ -172,10 +165,22 @@ mod tests {
             .put_immutable("identity-v1", b"payload")
             .await
             .unwrap();
-        tokio::fs::write(store.path(&digest), b"tampered")
-            .await
-            .unwrap();
+        let path = store.path(&digest);
+        let mut blob = tokio::fs::read(&path).await.unwrap();
+        *blob.last_mut().unwrap() ^= 1;
+        tokio::fs::write(path, blob).await.unwrap();
         let error = store.get(&digest).await.unwrap_err();
-        assert!(error.to_string().contains("evidence"));
+        assert!(error.to_string().contains("digest mismatch"));
+    }
+
+    #[tokio::test]
+    async fn identity_and_payload_separator_are_unambiguous() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = FileOcrEvidenceStore::new(directory.path());
+        let first = store.put_immutable("a", b"\0b").await.unwrap();
+        let second = store.put_immutable("a\0", b"b").await.unwrap();
+        assert_ne!(first, second);
+        assert_eq!(store.get(&first).await.unwrap(), Some(b"\0b".to_vec()));
+        assert_eq!(store.get(&second).await.unwrap(), Some(b"b".to_vec()));
     }
 }

@@ -9,6 +9,7 @@ mod html;
 mod layout_pdf;
 mod limited_pdf;
 mod markdown;
+mod ocr_worker_process;
 mod openapi;
 mod pdf;
 mod pdf_front_matter;

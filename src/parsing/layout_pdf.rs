@@ -9,6 +9,7 @@ use tokio::{
 };
 
 use super::common::{content_hash, document_id, title_from_metadata};
+use super::ocr_worker_process::WorkerProcess;
 use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, RetrievedResource};
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
@@ -26,7 +27,7 @@ const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 pub struct LayoutPdfParser {
     python: PathBuf,
     budget: ResourceBudget,
-    permit: Semaphore,
+    permit: Arc<Semaphore>,
     evidence_store: Option<Arc<dyn OcrEvidenceStore>>,
     ocr_config: Option<OcrConfig>,
     ocr_identity: Option<OcrRuntimeIdentity>,
@@ -37,7 +38,7 @@ impl LayoutPdfParser {
         Self {
             python,
             budget,
-            permit: Semaphore::new(1),
+            permit: Arc::new(Semaphore::new(1)),
             evidence_store: None,
             ocr_config: None,
             ocr_identity: None,
@@ -83,13 +84,16 @@ async fn read_bounded(
 #[async_trait]
 impl Parser for LayoutPdfParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let _permit = self.permit.acquire().await.map_err(failed)?;
+        let permit = self.permit.clone().acquire_owned().await.map_err(failed)?;
         if resource.bytes.len() > self.budget.max_document_bytes {
             return Err(ApplicationError::ResourceLimitExceeded(
                 "PDF byte limit exceeded".into(),
             ));
         }
-        let mut child = Command::new(&self.python)
+        let mut command = Command::new(&self.python);
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .args(["-I", "-c", WORKER])
             .arg(self.budget.max_pdf_pages.to_string())
             .arg(self.budget.max_document_bytes.to_string())
@@ -116,6 +120,8 @@ impl Parser for LayoutPdfParser {
                     "cannot start configured Python: {error}; run setup-pdf-layout.sh"
                 ))
             })?;
+        let mut process = WorkerProcess::new(child, permit);
+        let child = process.child_mut();
         let mut stdin = child.stdin.take().ok_or_else(|| failed("missing stdin"))?;
         let stdout = child
             .stdout
@@ -136,7 +142,7 @@ impl Parser for LayoutPdfParser {
             write,
             read_bounded(stdout, MAX_OUTPUT_BYTES),
             read_bounded(stderr, 64 * 1024),
-            async { child.wait().await.map_err(failed) },
+            async { process.wait().await.map_err(failed) },
         )?;
         if !status.success() {
             return Err(failed(String::from_utf8_lossy(&errors)));

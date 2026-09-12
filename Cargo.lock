@@ -2442,6 +2442,7 @@ dependencies = [
  "axum",
  "base64",
  "image",
+ "libc",
  "lopdf",
  "markup5ever",
  "pdf-render",

@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Document, Section, OcrDerivation};
+use super::{Document, OcrDerivation, Section};
 
 pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v11";
 pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v3";

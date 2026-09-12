@@ -1,36 +1,66 @@
-use std::path::{Path, PathBuf};
-use async_trait::async_trait;
 use crate::application::ports::ApplicationError;
+use async_trait::async_trait;
+use std::path::{Path, PathBuf};
 
 #[async_trait]
 pub trait OcrEvidenceStore: Send + Sync {
-    async fn put_immutable(&self, identity: &str, bytes: &[u8]) -> Result<String, ApplicationError>;
+    async fn put_immutable(&self, identity: &str, bytes: &[u8])
+    -> Result<String, ApplicationError>;
     async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError>;
 }
 
-pub struct FileOcrEvidenceStore { root: PathBuf }
+pub struct FileOcrEvidenceStore {
+    root: PathBuf,
+}
 
 impl FileOcrEvidenceStore {
-    pub fn new(root: impl Into<PathBuf>) -> Self { Self { root: root.into() } }
-    fn path(&self, digest: &str) -> PathBuf { self.root.join(digest) }
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+    fn path(&self, digest: &str) -> PathBuf {
+        self.root.join(digest)
+    }
 }
 
 #[async_trait]
 impl OcrEvidenceStore for FileOcrEvidenceStore {
-    async fn put_immutable(&self, identity: &str, bytes: &[u8]) -> Result<String, ApplicationError> {
+    async fn put_immutable(
+        &self,
+        identity: &str,
+        bytes: &[u8],
+    ) -> Result<String, ApplicationError> {
         use sha2::{Digest, Sha256};
-        let mut h = Sha256::new(); h.update(identity.as_bytes()); h.update([0]); h.update(bytes);
+        let mut h = Sha256::new();
+        h.update(identity.as_bytes());
+        h.update([0]);
+        h.update(bytes);
         let digest = format!("sha256:{:x}", h.finalize());
         let target = self.path(&digest);
-        tokio::fs::create_dir_all(&self.root).await.map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
-        if tokio::fs::try_exists(&target).await.unwrap_or(false) { return Ok(digest); }
-        let tmp = self.root.join(format!(".{}.tmp-{}", digest.replace(':', "-"), std::process::id()));
-        tokio::fs::write(&tmp, bytes).await.map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
-        tokio::fs::rename(&tmp, &target).await.map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+        tokio::fs::create_dir_all(&self.root)
+            .await
+            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+        if tokio::fs::try_exists(&target).await.unwrap_or(false) {
+            return Ok(digest);
+        }
+        let tmp = self.root.join(format!(
+            ".{}.tmp-{}",
+            digest.replace(':', "-"),
+            std::process::id()
+        ));
+        tokio::fs::write(&tmp, bytes)
+            .await
+            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+        tokio::fs::rename(&tmp, &target)
+            .await
+            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
         Ok(digest)
     }
     async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
         let path = self.path(digest);
-        match tokio::fs::read(path).await { Ok(bytes) => Ok(Some(bytes)), Err(e) if e.kind()==std::io::ErrorKind::NotFound => Ok(None), Err(e)=>Err(ApplicationError::CacheFailed(e.to_string())) }
+        match tokio::fs::read(path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(ApplicationError::CacheFailed(e.to_string())),
+        }
     }
 }

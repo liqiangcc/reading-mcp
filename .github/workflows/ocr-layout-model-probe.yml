@@ -18,7 +18,7 @@ jobs:
       - name: Install pinned candidate inference packages (hosted only)
         run: |
           mkdir -p "$RUNNER_TEMP/layout-model-probe"
-          python -m pip install --only-binary=:all: --report "$RUNNER_TEMP/layout-model-probe/pip-report.json" paddlepaddle==3.0.0 paddleocr==3.1.0 paddlex==3.1.0 PyMuPDF==1.28.2
+          python -m pip install --only-binary=:all: --report "$RUNNER_TEMP/layout-model-probe/pip-report.json" paddlepaddle==3.0.0 'paddlex[ocr]==3.1.0' PyMuPDF==1.28.2
           python -m pip freeze > "$RUNNER_TEMP/layout-model-probe/pip-freeze.txt"
       - name: Download and verify fixed public model revision
         run: python scripts/ocr/layout_model_probe.py --prepare --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"

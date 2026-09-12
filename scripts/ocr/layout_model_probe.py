@@ -42,9 +42,11 @@ def child(model, case, output):
     verify(model)
     started = time.monotonic()
     import pymupdf
-    from paddleocr import LayoutDetection
-    detector = LayoutDetection(model_name="PP-DocLayout-S", model_dir=str(model),
-                               device="cpu", cpu_threads=1, enable_mkldnn=False)
+    from paddlex import create_predictor
+    from paddlex.inference.utils.pp_option import PaddlePredictorOption
+    options = PaddlePredictorOption("PP-DocLayout-S", run_mode="paddle", cpu_threads=1)
+    detector = create_predictor(model_name="PP-DocLayout-S", model_dir=str(model),
+                                device="cpu", pp_option=options)
     loaded = time.monotonic()
     raw = Path(f"tests/fixtures/scanned_pdf/pdf/{case}.pdf").read_bytes()
     pages = []
@@ -54,7 +56,7 @@ def child(model, case, output):
             image = output / f"{case}-{page.number + 1}.png"
             raster.save(image)
             begin = time.monotonic()
-            result = detector.predict(str(image), batch_size=1, layout_nms=True)
+            result = list(detector.predict(str(image), batch_size=1, layout_nms=True))
             pages.append({"page": page.number + 1, "original_rect": list(page.rect),
                           "raster_size": [raster.width, raster.height], "dpi": 300,
                           "raster_sha256": hashlib.sha256(raster.samples).hexdigest(),

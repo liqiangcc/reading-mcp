@@ -7,6 +7,21 @@ use sha2::Digest;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+fn chinese_config() -> OcrConfig {
+    OcrConfig {
+        enabled: true,
+        engine_path: "/usr/bin/tesseract".into(),
+        tessdata_path: "/usr/share/tesseract-ocr/5/tessdata".into(),
+        languages: vec!["chi_sim".into()],
+        operator_revision: "1".into(),
+        dpi: 300,
+        oem: 1,
+        psm: 3,
+        detector_version: "pdf-layout/v1".into(),
+        protocol_version: "pdf-layout/v1".into(),
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
 async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
@@ -21,18 +36,7 @@ async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
         last_modified: None,
         metadata: Default::default(),
     };
-    let config = OcrConfig {
-        enabled: true,
-        engine_path: "/usr/bin/tesseract".into(),
-        tessdata_path: "/usr/share/tesseract-ocr/5/tessdata".into(),
-        languages: vec!["chi_sim".into()],
-        operator_revision: "1".into(),
-        dpi: 300,
-        oem: 1,
-        psm: 3,
-        detector_version: "pdf-layout/v1".into(),
-        protocol_version: "pdf-layout/v1".into(),
-    };
+    let config = chinese_config();
     let identity = build_ocr_runtime_identity(config.clone()).unwrap();
     let python = std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap();
     let directory = tempdir().unwrap();
@@ -116,4 +120,182 @@ async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
     let mut changed = document.clone();
     changed.metadata.insert("ocr_derivation".into(), "{".into());
     assert!(changed.validate_ocr_publication().is_err());
+}
+
+mod publication_failure {
+    use super::*;
+    use async_trait::async_trait;
+    use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
+    use reading_mcp::application::ports::{
+        ApplicationError, DocumentRepository, RetrievalOptions, Retriever, SearchHit, SearchIndex,
+        SourcePolicy, TextUnitIndex,
+    };
+    use reading_mcp::domain::{Document, DocumentId, OcrEvidenceBlob, TextUnit};
+    use reading_mcp::infrastructure::{ResourceBudget, SqliteDocumentRepository};
+    use reading_mcp::parsing::ParserRouter;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fixture(RetrievedResource);
+    #[async_trait]
+    impl SourcePolicy for Fixture {
+        async fn validate(&self, source: &DocumentSource) -> Result<(), ApplicationError> {
+            assert_eq!(source, &self.0.source);
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl Retriever for Fixture {
+        async fn retrieve(
+            &self,
+            source: &DocumentSource,
+            _: &RetrievalOptions,
+        ) -> Result<RetrievedResource, ApplicationError> {
+            assert_eq!(source, &self.0.source);
+            Ok(self.0.clone())
+        }
+    }
+    #[derive(Default)]
+    struct FailingEvidence(AtomicUsize);
+    #[async_trait]
+    impl OcrEvidenceStore for FailingEvidence {
+        async fn put_immutable(&self, _: &str, bytes: &[u8]) -> Result<String, ApplicationError> {
+            let blob: OcrEvidenceBlob = serde_json::from_slice(bytes).unwrap();
+            blob.validate(1).unwrap();
+            assert_eq!(blob.pages[0].attempts.len(), 2);
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ApplicationError::CacheFailed(
+                "injected evidence write failure".into(),
+            ))
+        }
+        async fn get(&self, _: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
+            panic!("unexpected evidence read");
+        }
+    }
+    struct RecordingRepository {
+        inner: Arc<SqliteDocumentRepository>,
+        saves: AtomicUsize,
+    }
+    #[async_trait]
+    impl DocumentRepository for RecordingRepository {
+        async fn save(&self, document: Document) -> Result<(), ApplicationError> {
+            self.saves.fetch_add(1, Ordering::SeqCst);
+            self.inner.save(document).await
+        }
+        async fn get(&self, id: &DocumentId) -> Result<Option<Document>, ApplicationError> {
+            self.inner.get(id).await
+        }
+    }
+    #[derive(Default)]
+    struct RecordingIndexes {
+        search: AtomicUsize,
+        units: AtomicUsize,
+    }
+    #[async_trait]
+    impl SearchIndex for RecordingIndexes {
+        async fn index(&self, _: &Document) -> Result<(), ApplicationError> {
+            self.search.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn search(
+            &self,
+            _: &DocumentId,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<SearchHit>, ApplicationError> {
+            Ok(vec![])
+        }
+    }
+    #[async_trait]
+    impl TextUnitIndex for RecordingIndexes {
+        async fn replace_document(
+            &self,
+            _: &DocumentId,
+            _: &[TextUnit],
+        ) -> Result<(), ApplicationError> {
+            self.units.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn list_document(&self, _: &DocumentId) -> Result<Vec<TextUnit>, ApplicationError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pinned hosted OCR dependencies"]
+    async fn real_ocr_evidence_failure_retains_sqlite_document_without_save_or_index() {
+        let directory = tempdir().unwrap();
+        let source = DocumentSource("file:///frozen/F07.pdf".into());
+        let resource = RetrievedResource {
+            source: source.clone(),
+            final_source: source.clone(),
+            media_type: MediaType("application/pdf".into()),
+            bytes: std::fs::read("tests/fixtures/scanned_pdf/pdf/F07.pdf").unwrap(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        };
+        let old = ParserRouter::phase4()
+            .parse(RetrievedResource {
+                bytes: b"# Previous source\n\nPrevious canonical document remains available."
+                    .to_vec(),
+                media_type: MediaType("text/markdown".into()),
+                ..resource.clone()
+            })
+            .await
+            .unwrap();
+        let sqlite = Arc::new(
+            SqliteDocumentRepository::open(directory.path().join("documents.sqlite")).unwrap(),
+        );
+        sqlite.save(old.clone()).await.unwrap();
+        let repository = Arc::new(RecordingRepository {
+            inner: sqlite.clone(),
+            saves: AtomicUsize::new(0),
+        });
+        let config = chinese_config();
+        let identity = build_ocr_runtime_identity(config.clone()).unwrap();
+        let evidence = Arc::new(FailingEvidence::default());
+        let parser = Arc::new(
+            LayoutPdfParser::new(
+                std::env::var("READING_MCP_PDF_LAYOUT_PYTHON")
+                    .unwrap()
+                    .into(),
+                ResourceBudget::default(),
+            )
+            .with_ocr_config(config)
+            .with_ocr_identity(identity)
+            .with_evidence_store(evidence.clone()),
+        );
+        let fixture = Arc::new(Fixture(resource));
+        let indexes = Arc::new(RecordingIndexes::default());
+        let usecase = OpenDocumentUseCase::with_text_unit_index(
+            fixture.clone(),
+            fixture,
+            parser,
+            repository.clone(),
+            indexes.clone(),
+            indexes.clone(),
+        );
+        let error = usecase
+            .execute(OpenDocumentCommand {
+                source,
+                options: RetrievalOptions::default(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ApplicationError::CacheFailed("injected evidence write failure".into())
+        );
+        assert_eq!(evidence.0.load(Ordering::SeqCst), 1);
+        assert_eq!(repository.saves.load(Ordering::SeqCst), 0);
+        assert_eq!(indexes.search.load(Ordering::SeqCst), 0);
+        assert_eq!(indexes.units.load(Ordering::SeqCst), 0);
+        let retained = sqlite.get(&old.id).await.unwrap().unwrap();
+        assert_eq!(retained.content_hash, old.content_hash);
+        assert_eq!(
+            retained.normalized_document_hash(),
+            old.normalized_document_hash()
+        );
+        assert_eq!(retained.root_sections, old.root_sections);
+    }
 }

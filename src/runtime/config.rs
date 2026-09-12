@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::application::source_view::SourceViewLimits;
+use crate::domain::OcrConfig;
 use crate::infrastructure::ResourceBudget;
 use crate::retrieval::HttpRetrieverConfig;
 
@@ -48,6 +49,20 @@ impl Default for RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    pub fn ocr_config(&self) -> OcrConfig {
+        OcrConfig {
+            enabled: self.ocr_enabled,
+            engine_path: self.ocr_engine.to_string_lossy().into(),
+            tessdata_path: self.ocr_tessdata.to_string_lossy().into(),
+            languages: self.ocr_language.split('+').map(str::to_owned).collect(),
+            operator_revision: self.ocr_revision.clone(),
+            dpi: 300,
+            oem: 1,
+            psm: 3,
+            detector_version: "pdf-layout/v1".into(),
+            protocol_version: "pdf-layout/v1".into(),
+        }
+    }
     pub fn from_env() -> Result<Self, String> {
         let local_roots = std::env::var_os("READING_MCP_LOCAL_ROOTS")
             .map(|value| std::env::split_paths(&value).collect())

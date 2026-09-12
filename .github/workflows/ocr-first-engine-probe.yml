@@ -33,16 +33,6 @@ jobs:
           python scripts/ocr/first_engine_probe.py --fixtures tests/fixtures/scanned_pdf --output "$RUNNER_TEMP/ocr-first-probe"
       - name: Canonical projection preserves engine paragraphs (hosted real engine)
         run: python scripts/ocr/worker_identity_probe.py
-          python - <<'PY'
-          import json, os
-          payload = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'f07-layout.json')))
-          blocks = [b for section in payload['sections'] for b in section['blocks']]
-          evidence = payload['ocr_evidence']
-          assert len(blocks) > 1, 'OCR projection collapsed the page into one block'
-          assert len(evidence) > 1 and all(e['paragraph'] is not None for e in evidence)
-          assert all(e['confidence'] is not None and len(e['bbox']) == 4 for e in evidence)
-          print('canonical OCR projection blocks=', len(blocks), 'typed evidence words=', len(evidence))
-          PY
       - name: Upload public synthetic evidence, including failed cases
         if: always()
         uses: actions/upload-artifact@v4

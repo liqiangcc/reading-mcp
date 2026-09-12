@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -33,6 +34,10 @@ jobs:
           python scripts/ocr/first_engine_probe.py --fixtures tests/fixtures/scanned_pdf --output "$RUNNER_TEMP/ocr-first-probe"
       - name: Canonical projection preserves engine paragraphs (hosted real engine)
         run: python scripts/ocr/worker_identity_probe.py
+      - name: Rust real OCR integration (hosted only)
+        env:
+          READING_MCP_PDF_LAYOUT_PYTHON: /opt/hostedtoolcache/Python/3.12.14/x64/bin/python
+        run: cargo test --locked --test ocr_real_engine -- --ignored --nocapture
       - name: Upload public synthetic evidence, including failed cases
         if: always()
         uses: actions/upload-artifact@v4

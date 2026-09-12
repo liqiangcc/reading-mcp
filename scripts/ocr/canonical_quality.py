@@ -32,7 +32,7 @@ def main():
                 actual="\n\n".join(p for p in paragraphs if re.search(r"[A-Za-z]",p) and not re.search(r"[\u3400-\u9fff]",p)); wer=metric(expected,actual,True)
             else: wer = None if case == "F07" else metric(gold["text"],text,True)
             out[case]={"canonical_text":text,"cer":metric(gold["text"],text),"english_wer":wer,"ambiguous_mixed_paragraphs":ambiguous,"thresholds":{"cer":0.02 if case in ("F07","F08") else 0.01,"wer":None if case=="F07" else 0.03}}
-            if out[case]["cer"]["rate"] is None or out[case]["cer"]["rate"] > out[case]["thresholds"]["cer"] or (case == "F08" and (ambiguous or (wer is not None and wer["rate"] > out[case]["thresholds"]["wer"]))): failures.append(case)
+            if out[case]["cer"]["rate"] is None or out[case]["cer"]["rate"] > out[case]["thresholds"]["cer"] or (case == "F08" and ambiguous) or (wer is not None and wer["rate"] > out[case]["thresholds"]["wer"]): failures.append(case)
         except Exception as error:
             stderr = getattr(error, "stderr", b"") or b""
             out[case]={"error":str(error),"stderr":stderr.decode(errors="replace")[-4096:]}; failures.append(case)

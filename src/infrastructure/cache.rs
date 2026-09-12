@@ -122,6 +122,8 @@ impl Parser for CachingParser {
             } else {
                 NORMALIZATION_VERSION.into()
             },
+            ocr_fingerprint: std::env::var("READING_MCP_OCR_FINGERPRINT")
+                .unwrap_or_else(|_| "ocr-disabled/v1".into()),
         };
 
         if let Some(document) = self.cache.get(&key).await? {

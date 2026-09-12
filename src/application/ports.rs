@@ -94,6 +94,7 @@ pub struct ParsedCacheKey {
     pub final_source: DocumentSource,
     pub raw_sha256: String,
     pub normalization_version: String,
+    pub ocr_fingerprint: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

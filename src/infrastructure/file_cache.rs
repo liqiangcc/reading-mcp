@@ -314,11 +314,7 @@ fn parsed_key(key: &ParsedCacheKey) -> String {
     input.push(0);
     input.extend_from_slice(key.normalization_version.as_bytes());
     input.push(0);
-    input.extend_from_slice(
-        std::env::var("READING_MCP_OCR_FINGERPRINT")
-            .unwrap_or_else(|_| "ocr-disabled/v1".into())
-            .as_bytes(),
-    );
+    input.extend_from_slice(key.ocr_fingerprint.as_bytes());
     digest_key(&input)
 }
 

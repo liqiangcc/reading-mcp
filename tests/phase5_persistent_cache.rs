@@ -45,6 +45,7 @@ async fn persistent_raw_and_parsed_caches_survive_adapter_recreation() {
         final_source: resource.final_source.clone(),
         raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
         normalization_version: NORMALIZATION_VERSION.into(),
+        ocr_fingerprint: "ocr-disabled/v1".into(),
     };
 
     let parsed_cache = FileParsedDocumentCache::new(directory.path());

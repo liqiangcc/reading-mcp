@@ -124,12 +124,16 @@ impl Document {
         // inputs. Bind an explicit absent marker for native/non-derived docs.
         hasher.update(b"typed-ocr-derivation\0");
         match OcrDerivation::from_metadata(&self.metadata) {
-            Some(value) => {
+            Ok(Some(value)) => {
                 hasher.update([1]);
                 let encoded = serde_json::to_vec(&value).expect("typed OCR derivation serializes");
                 hash_bytes(&mut hasher, &encoded);
             }
-            None => hasher.update([0]),
+            Ok(None) => hasher.update([0]),
+            Err(error) => {
+                hasher.update([2]);
+                hash_text(&mut hasher, &error);
+            }
         }
         NormalizedDocumentHash(format!("sha256:{:x}", hasher.finalize()))
     }

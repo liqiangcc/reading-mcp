@@ -25,7 +25,14 @@ pub struct OcrPageBinding {
 }
 
 impl OcrDerivation {
-    pub fn from_metadata(metadata: &std::collections::BTreeMap<String, String>) -> Option<Self> {
-        serde_json::from_str(metadata.get("ocr_derivation")?).ok()
+    pub fn from_metadata(
+        metadata: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Option<Self>, String> {
+        let Some(raw) = metadata.get("ocr_derivation") else {
+            return Ok(None);
+        };
+        serde_json::from_str(raw)
+            .map(Some)
+            .map_err(|e| format!("invalid OCR derivation: {e}"))
     }
 }

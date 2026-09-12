@@ -17,14 +17,19 @@ import hashlib
 
 VERSION = "pdf-layout/v1"
 ENGINE = "pymupdf4llm-layout/1.28.2"
+OCR_CONFIG = {"enabled": False}
 
 def cjk(value):
     return value and ("\u3400" <= value <= "\u9fff" or "\uf900" <= value <= "\ufaff")
 
 
-def ocr_page(page, language, excluded_regions=()):
+def ocr_page(page, language=None, excluded_regions=()):
     """Run the deployer-selected local Tesseract and retain engine grouping."""
     import pymupdf
+    config = OCR_CONFIG
+    if not config.get("enabled", False):
+        return None
+    language = "+".join(config["languages"])
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
         image = os.path.join(directory, "page.png")
         output = os.path.join(directory, "words")
@@ -32,9 +37,9 @@ def ocr_page(page, language, excluded_regions=()):
         scale_x = pixmap.width / page.rect.width
         scale_y = pixmap.height / page.rect.height
         pixmap.save(image)
-        command = [os.environ.get("READING_MCP_OCR_ENGINE", "/usr/bin/tesseract"), image, output,
-                   "--tessdata-dir", os.environ.get("READING_MCP_OCR_TESSDATA", "/usr/share/tesseract-ocr/5/tessdata"),
-                   "-l", language, "--oem", "1", "--psm", "3", "--dpi", "300", "tsv"]
+        command = [config["engine_path"], image, output,
+                   "--tessdata-dir", config["tessdata_path"],
+                   "-l", language, "--oem", str(config["oem"]), "--psm", str(config["psm"]), "--dpi", str(config["dpi"]), "tsv"]
         try:
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
                            stderr=subprocess.PIPE, timeout=15, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"})
@@ -227,7 +232,10 @@ def project(layout):
 
 
 def main():
+    global OCR_CONFIG
     max_pages, max_bytes, max_chars = map(int, sys.argv[1:4])
+    if len(sys.argv) > 4 and sys.argv[4]:
+        OCR_CONFIG = json.loads(sys.argv[4])
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):
         if importlib.metadata.version(package) != "1.28.2":
             raise ValueError(f"{package} must be version 1.28.2; run setup-pdf-layout.sh")
@@ -261,14 +269,14 @@ def main():
                             page_layout["boxes"].extend(box)
         result = project(layout)
         if os.environ.get("READING_MCP_OCR_ENABLED") == "1":
-            engine = os.environ.get("READING_MCP_OCR_ENGINE", "/usr/bin/tesseract")
-            tessdata = os.environ.get("READING_MCP_OCR_TESSDATA", "/usr/share/tesseract-ocr/5/tessdata")
+            engine = OCR_CONFIG["engine_path"]
+            tessdata = OCR_CONFIG["tessdata_path"]
             def sha(path):
                 digest = hashlib.sha256()
                 with open(path, "rb") as stream:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
                 return digest.hexdigest()
-            language = os.environ.get("READING_MCP_OCR_LANG", "eng+chi_sim")
+            language = "+".join(OCR_CONFIG["languages"])
             models = [os.path.join(tessdata, f"{name}.traineddata") for name in language.split("+")]
             libraries = []
             for token in subprocess.check_output(["ldd", engine], text=True).split():
@@ -277,7 +285,7 @@ def main():
                 "engine_sha256": sha(engine), "model_sha256": [sha(path) for path in models],
                 "library_sha256": sorted(set(libraries)), "languages": language.split("+"), "dpi": 300, "oem": 1, "psm": 3,
                 "detector_version": "pdf-layout/v1", "protocol_version": VERSION,
-                "operator_revision": os.environ.get("READING_MCP_OCR_REVISION", "1"), "pages": []}
+                "operator_revision": OCR_CONFIG["operator_revision"], "pages": []}
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")
         if sum(len(b["text"]) for s in result["sections"] for b in s["blocks"]) > max_chars:

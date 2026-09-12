@@ -200,3 +200,31 @@ geometry tests 和正式 canonical quality gates 均 success。此证据不代�
 配置、所选模型、库摘要先重新验证；不从 gold 提取区域，不改变正式 worker/身份/
 门槛，不把原生 API 存在当作分类有效的证明。结果随 page-selection-probe JSON
 及公开日志保留；调用失败明确使诊断失败，而不是空区域成功。
+
+### 原生 C API 分类诊断结论与部署能力复核
+
+精确 head `21e0315918c21b2dac3f4096e39dd82c13462797` 的
+[hosted run 34694150489](https://github.com/liqiangcc/reading-mcp/actions/runs/34694150489)
+已完成 success，包括真实 Rust 集成与正式 canonical gate。实际下载的
+`page-selection-probe.json` SHA256 为
+`8f2a03e0a45a4b8562f69d2d31b21124014e4a2f824cd5e891c84d03134ba1f5`。
+F11 原生 AnalyseLayout 返回 8 个 block，全部 type_id=1 / flowing_text；
+F12 为 7 个、F13 为 1 个，也全部 flowing_text。因此原生 BlockType 与此前的
+原页 layout/hOCR 一样，不能提供通过 F11 所需的图表/公式分类证据。成功执行诊断
+不等于分类通过；不得把这些类型直接作为生产非正文过滤规则。
+
+2026-09-12 再次只读核对实际 `reading-mcp-tunnel.service`：MainPID 987247，
+ControlGroup `/system.slice/reading-mcp-tunnel.service`，Delegate=no，
+MemoryMax=infinity，TasksMax=2261，PrivateNetwork=no，NoNewPrivileges=no。
+宿主 cgroup v2 提供 memory/pids/cpu 等控制器，但当前服务没有声明委派；
+root 用户会话的 user@0.service Delegate=yes 不证明生产子进程具备相同委派。
+`unshare --user --map-root-user --net --fork /usr/bin/true` 实际退出 0，证明当前
+执行身份可创建该 namespace，不证明生产 wiring 或完整网络拒绝验收已完成。
+未更改线上 unit、未创建生产 cgroup、未重启或部署。
+
+同次快照：根文件系统约 682 MiB 可用，内存 available 702 MiB、swap 使用
+3521 MiB。快照不是硬容量门槛，需按离线包实际解压尺寸、回滚快照和负载峰值
+计算余量；不能宣称足够，也不能删除 canonical/其他会话数据获取空间。
+执行隔离仍需落实子进程树内存/temp/PID 限制、网络拒绝和完整回收测试。
+真实 OCR workflow 补充 typed observation/store 文件的触发路径，避免只改
+这些发布契约时遗漏真实集成 gate。

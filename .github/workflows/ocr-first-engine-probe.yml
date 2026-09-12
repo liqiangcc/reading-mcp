@@ -1,0 +1,40 @@
+name: First frozen real OCR engine probe
+on:
+  push:
+    paths:
+      - 'scripts/ocr/first_engine_probe.py'
+      - '.github/workflows/ocr-first-engine-probe.yml'
+  pull_request:
+    paths:
+      - 'scripts/ocr/first_engine_probe.py'
+      - '.github/workflows/ocr-first-engine-probe.yml'
+jobs:
+  real-engine-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install fixed real engine and fixture renderer (hosted only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr=5.3.4-1build5 libtesseract5=5.3.4-1build5 \
+            liblept5=1.82.0-3build4 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-chi-sim=1:4.1.0-2 time
+          python -m pip install --only-binary=:all: PyMuPDF==1.28.2
+      - name: Preserve Coordinator frozen assets
+        run: |
+          cd tests/fixtures/scanned_pdf
+          sha256sum -c SHA256SUMS
+      - name: First raw recognition and performance evidence (not final acceptance)
+        run: |
+          python scripts/ocr/first_engine_probe.py --fixtures tests/fixtures/scanned_pdf --output "$RUNNER_TEMP/ocr-first-probe"
+      - name: Upload public synthetic evidence, including failed cases
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-first-engine-probe
+          path: ${{ runner.temp }}/ocr-first-probe
+          if-no-files-found: warn
+          retention-days: 14

@@ -123,6 +123,13 @@ def main():
                                      json.dumps(config), json.dumps(identity)], raw)
             if case in ("F11", "F12", "F13"):
                 item["hocr_diagnostic"] = hocr_observations(raw, config, namespace)
+                # Native C API is isolated by a bounded subprocess. Its output
+                # is diagnostic only and is never fed into the worker/gold.
+                item["native_layout_diagnostic"] = invoke(
+                    [sys.executable, "-I", str(root / "scripts/ocr/native_layout_probe.py"),
+                     json.dumps(config), json.dumps(identity)], raw)
+                if item["native_layout_diagnostic"].get("returncode") != 0 or "payload_error" in item["native_layout_diagnostic"]:
+                    raise RuntimeError("native layout diagnostic failed; inspect bounded subprocess evidence")
             # Gold is an observation after both pipelines, never an input to
             # classification, region selection, ordering or recognition.
             item["frozen_gold"] = json.loads((fixtures / "gold" / f"{case}.json").read_text())

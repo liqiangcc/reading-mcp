@@ -184,3 +184,19 @@ Rust 从原始词坐标重算被排除集合、剩余顺序与词引用，不接
 normalization v11/hash v3 不改。F12 真实 Rust 测试验证原生页脚保留、OCR 六段选择、
 被排除观察仍可读、删除排除引用后验证失败。通用几何测试不使用任何 fixture 字符过滤。
 这不宣称任意混合页阅读顺序或 partial-overlap 已支持，F11 visual 分类仍未解决。
+
+### Hosted 验证结果：原生区域排除
+
+精确 head `da657a9b3384e0d7e5b26c1b0ad90b4a1d2b1b5f` 的
+[真实引擎 run 34693864668](https://github.com/liqiangcc/reading-mcp/actions/runs/34693864668)
+已完成 success。job `103553841971` 的 Rust real OCR integration 明确记录：
+F12 原生页脚/排除观察、F07 派生与原页绑定、证据失败保留 SQLite 旧文档、F05
+blank 无引擎 attempt 四项均通过（4 passed / 0 failed，8.67s）。同一 run 的
+geometry tests 和正式 canonical quality gates 均 success。此证据不代表 F11
+图表/公式分类或全部发布验收通过。
+
+下一诊断仅使用已 fingerprint 的 libtesseract 原生 AnalyseLayout / BlockType，
+在独立、有超时的 hosted 子进程记录 F11/F12/F13 所有原生 block 类型与像素 bbox。
+配置、所选模型、库摘要先重新验证；不从 gold 提取区域，不改变正式 worker/身份/
+门槛，不把原生 API 存在当作分类有效的证明。结果随 page-selection-probe JSON
+及公开日志保留；调用失败明确使诊断失败，而不是空区域成功。

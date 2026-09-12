@@ -3,11 +3,24 @@ on:
   push:
     paths:
       - 'scripts/ocr/first_engine_probe.py'
+      - 'scripts/ocr/worker_identity_probe.py'
+      - 'tests/ocr_real_engine.rs'
+      - 'src/domain/ocr.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/infrastructure/ocr_identity.rs'
+      - 'src/runtime/**'
       - 'src/parsing/pdf_layout_worker.py'
       - '.github/workflows/ocr-first-engine-probe.yml'
   pull_request:
     paths:
       - 'scripts/ocr/first_engine_probe.py'
+      - 'scripts/ocr/worker_identity_probe.py'
+      - 'tests/ocr_real_engine.rs'
+      - 'src/domain/ocr.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/infrastructure/ocr_identity.rs'
+      - 'src/runtime/**'
+      - 'src/parsing/pdf_layout_worker.py'
       - '.github/workflows/ocr-first-engine-probe.yml'
 jobs:
   real-engine-probe:
@@ -16,7 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - id: python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install fixed real engine and fixture renderer (hosted only)
@@ -36,7 +50,7 @@ jobs:
         run: python scripts/ocr/worker_identity_probe.py
       - name: Rust real OCR integration (hosted only)
         env:
-          READING_MCP_PDF_LAYOUT_PYTHON: /opt/hostedtoolcache/Python/3.12.14/x64/bin/python
+          READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo test --locked --test ocr_real_engine -- --ignored --nocapture
       - name: Upload public synthetic evidence, including failed cases
         if: always()

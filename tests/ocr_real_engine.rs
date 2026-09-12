@@ -35,9 +35,8 @@ async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
     };
     let identity = build_ocr_runtime_identity(config.clone()).unwrap();
     let python = std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap();
-    let store = Arc::new(FileOcrEvidenceStore::new(
-        tempdir().unwrap().path().join("evidence"),
-    ));
+    let directory = tempdir().unwrap();
+    let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
     let parser = LayoutPdfParser::new(
         python.into(),
         reading_mcp::infrastructure::ResourceBudget::default(),
@@ -46,15 +45,8 @@ async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
     .with_ocr_identity(identity.clone())
     .with_evidence_store(store.clone());
     let document = parser.parse(resource).await.unwrap();
-    assert!(
-        document
-            .root_sections
-            .iter()
-            .flat_map(|s| s.children.iter().chain(std::iter::once(s)))
-            .flat_map(|s| s.content.split("\n\n"))
-            .count()
-            > 1
-    );
+    let units = document.try_paragraph_text_units().unwrap();
+    assert!(units.len() > 1);
     assert_eq!(
         document.content_hash.0,
         format!("sha256:{:x}", sha2::Sha256::digest(&bytes))
@@ -74,6 +66,7 @@ async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
         .unwrap();
     assert!(!blob.is_empty());
     let map = document.original_source_binding_map().unwrap().unwrap();
+    assert!(!map.bindings.is_empty());
     assert!(map.bindings.iter().all(|b| matches!(
         b.target,
         reading_mcp::domain::OriginalSourceTarget::Page { page_number: 1 }

@@ -193,10 +193,10 @@ fn validate_ocr_evidence(
         {
             return Err(failed("invalid OCR evidence coordinates"));
         }
-        if let Some(conf) = value.confidence {
-            if !conf.is_finite() || !(0.0..=100.0).contains(&conf) {
-                return Err(failed("invalid OCR confidence"));
-            }
+        if let Some(conf) = value.confidence
+            && (!conf.is_finite() || !(0.0..=100.0).contains(&conf))
+        {
+            return Err(failed("invalid OCR confidence"));
         }
     }
     Ok(())

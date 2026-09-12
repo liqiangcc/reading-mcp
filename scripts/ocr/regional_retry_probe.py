@@ -1,5 +1,5 @@
 """Diagnostic regional PSM6 retry; never used by production runtime."""
-import hashlib, json, re, sys, unicodedata
+import json, re, sys, unicodedata, statistics
 from pathlib import Path
 
 def norm(s): return " ".join(unicodedata.normalize("NFC", s).split())
@@ -16,6 +16,14 @@ def area(b): return max(0,b[2]-b[0])*max(0,b[3]-b[1])
 def overlap(a,b):
     x=max(0,min(a[2],b[2])-max(a[0],b[0])); y=max(0,min(a[3],b[3])-max(a[1],b[1])); return x*y
 def inside(b,r): return b[0]>=r[0] and b[1]>=r[1] and b[2]<=r[2] and b[3]<=r[3]
+def line_boxes(box): return [line["bbox"] for line in box.get("textlines", [])]
+def adjacent(a,b,gap):
+    for x in line_boxes(a):
+        for y in line_boxes(b):
+            vertical=max(0,min(x[3],y[3])-max(x[1],y[1]))
+            horizontal=max(0,max(x[0],y[0])-min(x[2],y[2]))
+            if vertical >= min(x[3]-x[1], y[3]-y[1])*.5 and horizontal <= gap: return True
+    return False
 
 def main():
     import pymupdf, pymupdf4llm
@@ -38,6 +46,15 @@ def main():
                     merged=next((c for c in components if i in c or j in c),None)
                     if merged is None: components.append({i,j})
                     else: merged.update((i,j))
+                heights=[line["bbox"][3]-line["bbox"][1] for box in boxes for line in box.get("textlines", []) if line["bbox"][3]>line["bbox"][1]]
+                median_height=statistics.median(heights) if heights else 0
+                expanded=True
+                while expanded:
+                    expanded=False
+                    for component in components:
+                        for index, box in enumerate(boxes):
+                            if index not in component and any(adjacent(boxes[member], box, median_height) for member in component):
+                                component.add(index); expanded=True
                 page_diag={"psm3_boxes":boxes,"conflicts":conflicts,"components":[],"psm6_boxes":[]}
                 if components:
                     config6={**config,"psm":6}; ns["OCR_CONFIG"]=config6; psm6=ns["ocr_page"](page) or []; ns["OCR_CONFIG"]=config

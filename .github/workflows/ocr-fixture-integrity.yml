@@ -20,7 +20,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Fixture rendering dependency only (no OCR engine)
-        run: python -m pip install --only-binary=:all: PyMuPDF==1.28.2
+        run: |
+          python -m pip install --only-binary=:all: PyMuPDF==1.28.2
       - name: Frozen byte and authored gold integrity
         run: |
           (cd tests/fixtures/scanned_pdf && sha256sum -c SHA256SUMS)

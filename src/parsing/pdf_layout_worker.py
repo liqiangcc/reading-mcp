@@ -21,7 +21,7 @@ def cjk(value):
     return value and ("\u3400" <= value <= "\u9fff" or "\uf900" <= value <= "\ufaff")
 
 
-def ocr_page(page, language):
+def ocr_page(page, language, excluded_regions=()):
     """Run the deployer-selected local Tesseract and retain engine grouping."""
     import pymupdf
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
@@ -46,6 +46,14 @@ def ocr_page(page, language):
             for row in csv.DictReader(stream, delimiter="\t"):
                 if row.get("level") == "5" and row.get("text", "").strip():
                     rows.append(row)
+        if excluded_regions:
+            kept = []
+            for row in rows:
+                cx = (int(row["left"]) + int(row["width"]) / 2) / scale_x
+                cy = (int(row["top"]) + int(row["height"]) / 2) / scale_y
+                if not any(x0 <= cx <= x1 and y0 <= cy <= y1 for x0, y0, x1, y1 in excluded_regions):
+                    kept.append(row)
+            rows = kept
         lines = {}
         for row in rows:
             key = (int(row["block_num"]), int(row["par_num"]), int(row["line_num"]))
@@ -241,10 +249,13 @@ def main():
                 for page, page_layout in zip(doc, layout["pages"]):
                     has_body_text = any((box.get("textlines") or []) and box.get("boxclass") not in ("page-footer", "page-header")
                                         for box in page_layout["boxes"])
-                    has_image_region = any(box.get("boxclass") in ("image", "figure", "table")
+                    has_image_region = any(box.get("boxclass") in ("image", "picture", "figure", "table")
                                            for box in page_layout["boxes"])
                     if not has_body_text or has_image_region:
-                        box = ocr_page(page, language)
+                        excluded = [tuple(box.get("bbox", [])[i] for i in range(4))
+                                    for box in page_layout["boxes"]
+                                    if box.get("textlines") and len(box.get("bbox", [])) == 4]
+                        box = ocr_page(page, language, excluded)
                         if box is not None:
                             page_layout["boxes"].extend(box)
         result = project(layout)

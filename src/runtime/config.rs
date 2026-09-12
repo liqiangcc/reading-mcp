@@ -8,6 +8,9 @@ use crate::retrieval::HttpRetrieverConfig;
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub pdf_layout_python: Option<PathBuf>,
+    pub ocr_enabled: bool,
+    pub ocr_language: String,
+    pub ocr_revision: String,
     pub local_roots: Vec<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
@@ -26,6 +29,9 @@ impl Default for RuntimeConfig {
         };
         Self {
             pdf_layout_python: None,
+            ocr_enabled: false,
+            ocr_language: "eng+chi_sim".into(),
+            ocr_revision: "1".into(),
             local_roots: vec![],
             state_dir: default_state_dir(),
             allow_http: false,
@@ -63,6 +69,13 @@ impl RuntimeConfig {
             && !path.is_absolute()
         {
             return Err("READING_MCP_PDF_LAYOUT_PYTHON must be an absolute path".into());
+        }
+        config.ocr_enabled = env_bool("READING_MCP_OCR_ENABLED", false)?;
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_LANG") {
+            config.ocr_language = value.to_string_lossy().into_owned();
+        }
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_REVISION") {
+            config.ocr_revision = value.to_string_lossy().into_owned();
         }
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;
@@ -159,6 +172,9 @@ impl RuntimeConfig {
 fn validate(config: &RuntimeConfig) -> Result<(), String> {
     if config.resource_budget.max_document_bytes == 0 {
         return Err("READING_MCP_MAX_DOCUMENT_BYTES must be greater than zero".into());
+    }
+    if config.ocr_language.trim().is_empty() || config.ocr_revision.trim().is_empty() {
+        return Err("OCR language and revision must not be empty".into());
     }
     if config.resource_budget.max_pdf_pages == 0 {
         return Err("READING_MCP_MAX_PDF_PAGES must be greater than zero".into());

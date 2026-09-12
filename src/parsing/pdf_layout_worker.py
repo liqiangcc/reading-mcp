@@ -18,6 +18,7 @@ import hashlib
 VERSION = "pdf-layout/v1"
 ENGINE = "pymupdf4llm-layout/1.28.2"
 OCR_CONFIG = {"enabled": False}
+EXPECTED_IDENTITY = None
 
 def cjk(value):
     return value and ("\u3400" <= value <= "\u9fff" or "\uf900" <= value <= "\ufaff")
@@ -232,10 +233,14 @@ def project(layout):
 
 
 def main():
-    global OCR_CONFIG
+    global OCR_CONFIG, EXPECTED_IDENTITY
     max_pages, max_bytes, max_chars = map(int, sys.argv[1:4])
     if len(sys.argv) > 4 and sys.argv[4]:
         OCR_CONFIG = json.loads(sys.argv[4])
+    if len(sys.argv) > 5 and sys.argv[5]:
+        EXPECTED_IDENTITY = json.loads(sys.argv[5])
+        if EXPECTED_IDENTITY.get("config") != OCR_CONFIG:
+            raise ValueError("OCR config does not match expected identity")
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):
         if importlib.metadata.version(package) != "1.28.2":
             raise ValueError(f"{package} must be version 1.28.2; run setup-pdf-layout.sh")

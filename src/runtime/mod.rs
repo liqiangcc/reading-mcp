@@ -106,15 +106,30 @@ pub fn build_server(
         max_entry_bytes: config.resource_budget.max_archive_entry_bytes,
         max_total_bytes: config.resource_budget.max_archive_total_bytes,
     };
+    if config.ocr_enabled && config.pdf_layout_python.is_none() {
+        return Err(crate::application::ports::ApplicationError::ParseFailed(
+            "OCR requires PDF layout backend".into(),
+        ));
+    }
+    let identity = if config.ocr_enabled {
+        Some(
+            crate::infrastructure::build_ocr_runtime_identity(config.ocr_config())
+                .map_err(crate::application::ports::ApplicationError::ParseFailed)?,
+        )
+    } else {
+        None
+    };
     let mut router = ParserRouter::release(config.resource_budget.max_pdf_pages, archive_limits);
     if let Some(python) = &config.pdf_layout_python {
         let parser =
             crate::parsing::LayoutPdfParser::new(python.clone(), config.resource_budget.clone());
-        let identity = crate::infrastructure::build_ocr_runtime_identity(config.ocr_config())
-            .map_err(crate::application::ports::ApplicationError::ParseFailed)?;
-        let parser = parser
-            .with_ocr_config(config.ocr_config())
-            .with_ocr_identity(identity);
+        let parser = if let Some(identity) = &identity {
+            parser
+                .with_ocr_config(config.ocr_config())
+                .with_ocr_identity(identity.clone())
+        } else {
+            parser
+        };
         let parser = if let Some(state) = &config.state_dir {
             let store = Arc::new(crate::infrastructure::FileOcrEvidenceStore::new(
                 state.join("ocr-evidence"),
@@ -125,13 +140,10 @@ pub fn build_server(
         };
         router = router.with_pdf_parser(Arc::new(parser));
     }
-    let fingerprint = if config.ocr_enabled {
-        crate::infrastructure::build_ocr_runtime_identity(config.ocr_config())
-            .map_err(crate::application::ports::ApplicationError::ParseFailed)?
-            .sha256
-    } else {
-        "ocr-disabled/v1".into()
-    };
+    let fingerprint = identity
+        .as_ref()
+        .map(|i| i.sha256.clone())
+        .unwrap_or_else(|| "ocr-disabled/v1".into());
     let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache)
         .with_ocr_fingerprint(fingerprint);
     if config.pdf_layout_python.is_some() {

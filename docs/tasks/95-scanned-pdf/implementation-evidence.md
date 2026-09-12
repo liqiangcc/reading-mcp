@@ -169,3 +169,18 @@ SHA256，attempts/selection/components 均为空。Rust 重算同尺寸全白像
 为 v3。旧未部署候选 OCR 文档需显式 reopen；旧 blob 不删除、不覆盖。全局
 normalization v11/hash v3 及原始 content hash 语义不变。仍需完成 blank 事实向
 完整 MCP coverage/reliability 的映射，以及 F11/F12 分类/去重和执行隔离验收。
+
+## 原生区域排除接线（待本提交 hosted 验证）
+
+修复真实 layout 的 x0/y0/x1/y1 读取。原生区域记录原 box index、class、bbox、
+原生文本；Rust 要求它匹配 worker 返回的原页 layout region。OCR 单次入口不再
+丢弃重叠词；全部 primary/retry raw observations 保留。只在选择完成后，按所有
+词中心是否被原生区域覆盖排除整个 OCR box，并记录 excluded_sources 稳定引用。
+Rust 从原始词坐标重算被排除集合、剩余顺序与词引用，不接受任意删词/删段。
+一个 box 仅部分词重叠时明确 unresolved，整次发布失败，不猜测切分正文。
+
+对应 policy 更新为 `ocr-original-region-inspection/v2` 并进入 runtime/cache/derivation
+身份，page observations 为 v3；旧候选需要 reopen。原始 PDF、冻结 gold、全局
+normalization v11/hash v3 不改。F12 真实 Rust 测试验证原生页脚保留、OCR 六段选择、
+被排除观察仍可读、删除排除引用后验证失败。通用几何测试不使用任何 fixture 字符过滤。
+这不宣称任意混合页阅读顺序或 partial-overlap 已支持，F11 visual 分类仍未解决。

@@ -174,6 +174,21 @@ impl Parser for LayoutPdfParser {
         let evidence = payload.ocr_evidence.clone();
         let derivation = payload.ocr_derivation.clone();
         let attempts = payload.ocr_attempts.clone();
+        for page in &attempts {
+            for native in &page.native_regions {
+                let expected = serde_json::json!({"page":page.page,"box":native.source_box,
+                    "bbox":native.bbox,"class":native.source_class});
+                if !payload
+                    .regions
+                    .as_array()
+                    .is_some_and(|regions| regions.contains(&expected))
+                {
+                    return Err(failed(
+                        "native exclusion has no matching original layout region",
+                    ));
+                }
+            }
+        }
         let page_count = payload.page_count;
         let mut document = project(resource, payload, &self.budget)?;
         if !evidence.is_empty() || !attempts.is_empty() {

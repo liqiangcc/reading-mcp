@@ -136,6 +136,21 @@ pub struct OcrPageObservations {
     pub components: Vec<OcrRetryComponent>,
     #[serde(default)]
     pub blank_raster: Option<BlankRasterEvidence>,
+    #[serde(default)]
+    pub native_regions: Vec<NativeTextRegion>,
+    #[serde(default)]
+    pub excluded_sources: Vec<OcrObservationReference>,
+    #[serde(default)]
+    pub projection_failure: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTextRegion {
+    pub source_box: usize,
+    pub source_class: String,
+    pub bbox: [f64; 4],
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -171,15 +186,26 @@ impl OcrPageObservations {
     }
 
     pub fn validate(&self, max_page: u32) -> Result<Vec<OcrEvidenceRecord>, String> {
-        if self.schema != "ocr-regional-observations/v2"
+        if self.schema != "ocr-regional-observations/v3"
             || self.page == 0
             || self.page > max_page
             || !self.complete
+            || self.projection_failure.is_some()
             || self.page_bounds[0] != 0.0
             || self.page_bounds[1] != 0.0
             || !within(self.page_bounds, self.page_bounds)
         {
             return Err("invalid/incomplete OCR page observations".into());
+        }
+        let mut native_ids = BTreeSet::new();
+        for native in &self.native_regions {
+            if !within(native.bbox, self.page_bounds)
+                || native.text.trim().is_empty()
+                || native.source_class.is_empty()
+                || !native_ids.insert(native.source_box)
+            {
+                return Err("invalid native exclusion region".into());
+            }
         }
         if let Some(blank) = &self.blank_raster {
             blank.validate()?;
@@ -191,6 +217,8 @@ impl OcrPageObservations {
             if !self.attempts.is_empty()
                 || !self.selection.is_empty()
                 || !self.components.is_empty()
+                || !self.native_regions.is_empty()
+                || !self.excluded_sources.is_empty()
             {
                 return Err("blank raster must not claim OCR attempts or selected text".into());
             }
@@ -302,13 +330,41 @@ impl OcrPageObservations {
                 expected_sources.push(reference);
             }
         }
-        if self.selection.len() != expected_sources.len() {
+        let mut retained = Vec::new();
+        let mut excluded = Vec::new();
+        for source in expected_sources {
+            let words: Vec<_> = self
+                .box_at(&source)?
+                .textlines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .collect();
+            let covered = words
+                .iter()
+                .filter(|w| {
+                    let x = (w.bbox[0] + w.bbox[2]) / 2.0;
+                    let y = (w.bbox[1] + w.bbox[3]) / 2.0;
+                    self.native_regions.iter().any(|r| {
+                        r.bbox[0] <= x && x <= r.bbox[2] && r.bbox[1] <= y && y <= r.bbox[3]
+                    })
+                })
+                .count();
+            if covered == words.len() {
+                excluded.push(source);
+            } else if covered == 0 {
+                retained.push(source);
+            } else {
+                return Err("unresolved partial native overlap".into());
+            }
+        }
+        if excluded != self.excluded_sources {
+            return Err("native exclusion references mismatch".into());
+        }
+        if self.selection.len() != retained.len() {
             return Err("incomplete OCR selection".into());
         }
         let mut selected_words = Vec::new();
-        for (index, (selection, expected)) in
-            self.selection.iter().zip(expected_sources).enumerate()
-        {
+        for (index, (selection, expected)) in self.selection.iter().zip(retained).enumerate() {
             if selection.selected_box != index || selection.source != expected {
                 return Err("OCR selection order mismatch".into());
             }
@@ -375,7 +431,7 @@ mod blank_tests {
     #[test]
     fn blank_pixels_require_exact_white_digest_and_no_claimed_recognition() {
         let mut observation: OcrPageObservations = serde_json::from_value(serde_json::json!({
-            "schema":"ocr-regional-observations/v2", "page":1, "page_bounds":[0,0,0.24,0.24],
+            "schema":"ocr-regional-observations/v3", "page":1, "page_bounds":[0,0,0.24,0.24],
             "complete":true,"attempts":[],"selection":[],"components":[],
             "blank_raster":{"width":1,"height":1,"channels":3,"white_samples":3,"glyph_spans":0,
                 "samples_sha256":format!("{:x}", Sha256::digest([255_u8;3]))}

@@ -171,6 +171,37 @@ class RegionalGeometryTests(unittest.TestCase):
         self.assertEqual(len(evidence["attempts"]), 1)
         self.assertTrue(evidence["complete"])
 
+    def test_native_exclusion_uses_layout_coordinates_and_preserves_raw_words(self):
+        worker, _ = self.deadline_worker()
+        native = {"boxclass": "page-footer", "x0": 0, "y0": 0, "x1": 20, "y1": 10,
+                  "textlines": [{"spans": [{"text": "Original footer", "bbox": [0,0,20,10]}]}]}
+        regions = worker["native_text_regions"]({"boxes": [native]})
+        self.assertEqual(regions[0]["bbox"], [0,0,20,10])
+        primary = [self.box([2,2,8,8], "Different OCR spelling", 1),
+                   self.box([30,30,40,40], "body", 2)]
+        original = copy.deepcopy(primary)
+        evidence = worker["_regional_evidence"](1, [0,0,100,100], primary, None, primary, [])
+        selected, evidence = worker["exclude_native_boxes"](primary, evidence, regions)
+        self.assertEqual(primary, original)
+        self.assertEqual(selected, [primary[1]])
+        self.assertEqual(evidence["attempts"][0]["boxes"], original)
+        self.assertEqual(evidence["excluded_sources"], [{"page":1,"attempt":"primary","box":0}])
+        self.assertEqual(evidence["selection"][0]["selected_box"], 0)
+        self.assertEqual(evidence["selection"][0]["source"]["box"], 1)
+
+    def test_partial_native_overlap_is_explicitly_unresolved(self):
+        worker, _ = self.deadline_worker()
+        box = self.box([1,1,30,9], "first", 1)
+        box["textlines"][0]["spans"] = [{"text":"first","bbox":[2,2,8,8]}, {"text":"second","bbox":[22,2,28,8]}]
+        original = copy.deepcopy(box)
+        evidence = worker["_regional_evidence"](1, [0,0,100,100], [box], None, [box], [])
+        selected, evidence = worker["exclude_native_boxes"]([box], evidence,
+            [{"source_box":0,"source_class":"text","text":"native","bbox":[0,0,10,10]}])
+        self.assertFalse(evidence["complete"])
+        self.assertEqual(evidence["projection_failure"], "partial_native_overlap")
+        self.assertEqual(selected, [original])
+        self.assertEqual(evidence["attempts"][0]["boxes"], [original])
+
     def test_bridge_pairs_form_one_component(self):
         self.assertEqual(probe.merge_components([(0, 2), (2, 4)]), [{0, 2, 4}])
 

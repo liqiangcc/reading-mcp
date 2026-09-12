@@ -24,6 +24,77 @@ fn chinese_config() -> OcrConfig {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn real_f12_keeps_native_footer_and_excluded_ocr_observation() {
+    let directory = tempdir().unwrap();
+    let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
+    let mut config = chinese_config();
+    config.languages = vec!["eng".into()];
+    let identity = build_ocr_runtime_identity(config.clone()).unwrap();
+    let parser = LayoutPdfParser::new(
+        std::env::var("READING_MCP_PDF_LAYOUT_PYTHON")
+            .unwrap()
+            .into(),
+        reading_mcp::infrastructure::ResourceBudget::default(),
+    )
+    .with_ocr_config(config)
+    .with_ocr_identity(identity)
+    .with_evidence_store(store.clone());
+    let source = DocumentSource("file:///frozen/F12.pdf".into());
+    let document = parser
+        .parse(RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: MediaType("application/pdf".into()),
+            bytes: std::fs::read("tests/fixtures/scanned_pdf/pdf/F12.pdf").unwrap(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    document.validate_ocr_publication().unwrap();
+    let blob = store
+        .get(document.metadata.get("ocr_evidence_blob").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut persisted: reading_mcp::domain::OcrEvidenceBlob =
+        serde_json::from_slice(&blob).unwrap();
+    persisted.validate(1).unwrap();
+    let page = &persisted.pages[0];
+    assert_eq!(page.native_regions.len(), 1);
+    assert_eq!(page.native_regions[0].source_class, "page-footer");
+    assert_eq!(page.native_regions[0].text, "Page 1");
+    assert_eq!(page.excluded_sources.len(), 1);
+    assert_eq!(page.selection.len(), 6);
+    let reference = &page.excluded_sources[0];
+    let excluded = &page
+        .attempts
+        .iter()
+        .find(|a| a.id == reference.attempt)
+        .unwrap()
+        .boxes[reference.r#box];
+    assert!(
+        !excluded.textlines.is_empty(),
+        "excluded observation must remain immutable"
+    );
+    assert!(
+        document
+            .root_sections
+            .iter()
+            .any(|s| s.content.contains("Page 1"))
+    );
+    persisted.pages[0].excluded_sources.clear();
+    assert!(
+        persisted
+            .validate(1)
+            .unwrap_err()
+            .contains("exclusion references")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn real_f05_blank_page_is_persisted_without_an_engine_attempt() {
     let directory = tempdir().unwrap();
     let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));

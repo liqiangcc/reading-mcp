@@ -25,7 +25,7 @@ EXPECTED_IDENTITY = None
 PAGE_DEADLINE = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
-INSPECTION_POLICY = "ocr-white-raster-inspection/v1"
+INSPECTION_POLICY = "ocr-original-region-inspection/v2"
 
 class OcrRasterBudget:
     """Allocation accounting is separate from the count of required OCR pages."""
@@ -114,6 +114,8 @@ def blank_raster_evidence(page, pixmap):
 def ocr_page(page, language=None, excluded_regions=()):
     """Run the deployer-selected local Tesseract and retain engine grouping."""
     config = OCR_CONFIG
+    if excluded_regions:
+        raise ValueError("native exclusions require the observation-preserving wrapper")
     if not config.get("enabled", False):
         return None
     language = "+".join(config["languages"])
@@ -142,14 +144,6 @@ def ocr_page(page, language=None, excluded_regions=()):
             for row in csv.DictReader(stream, delimiter="\t"):
                 if row.get("level") == "5" and row.get("text", "").strip():
                     rows.append(row)
-        if excluded_regions:
-            kept = []
-            for row in rows:
-                cx = (int(row["left"]) + int(row["width"]) / 2) / scale_x
-                cy = (int(row["top"]) + int(row["height"]) / 2) / scale_y
-                if not any(x0 <= cx <= x1 and y0 <= cy <= y1 for x0, y0, x1, y1 in excluded_regions):
-                    kept.append(row)
-            rows = kept
         lines = {}
         for row in rows:
             key = (int(row["block_num"]), int(row["par_num"]), int(row["line_num"]))
@@ -238,9 +232,38 @@ def _regional_evidence(page, bounds, primary, retry, selected, components):
                       for line_index, line in enumerate(box.get("textlines", []))
                       for word_index, _ in enumerate(line.get("spans", []))],
         })
-    return {"schema": "ocr-regional-observations/v2", "page": page, "page_bounds": bounds,
+    return {"schema": "ocr-regional-observations/v3", "page": page, "page_bounds": bounds,
             "complete": all(component["resolved"] for component in components),
             "attempts": attempts, "selection": selection, "components": components}
+
+def native_text_regions(page_layout):
+    regions = []
+    for index, box in enumerate(page_layout["boxes"]):
+        text = "\n".join(line_text(line) for line in box.get("textlines", []))
+        if text.strip():
+            regions.append({"source_box": index, "source_class": box["boxclass"],
+                            "bbox": [box[k] for k in ("x0", "y0", "x1", "y1")], "text": text})
+    return regions
+
+def exclude_native_boxes(selected, evidence, regions):
+    evidence["native_regions"] = regions
+    evidence["excluded_sources"] = []
+    retained, selection = [], []
+    for box, chosen in zip(selected, evidence["selection"]):
+        centers = [((w["bbox"][0] + w["bbox"][2]) / 2, (w["bbox"][1] + w["bbox"][3]) / 2)
+                   for line in box["textlines"] for w in line["spans"]]
+        covered = [any(r["bbox"][0] <= x <= r["bbox"][2] and r["bbox"][1] <= y <= r["bbox"][3]
+                       for r in regions) for x, y in centers]
+        if covered and all(covered):
+            evidence["excluded_sources"].append(chosen["source"])
+        else:
+            if any(covered):
+                evidence["complete"] = False
+                evidence["projection_failure"] = "partial_native_overlap"
+            retained.append(box)
+            selection.append(dict(chosen, selected_box=len(selection)))
+    evidence["selection"] = selection
+    return retained, evidence
 
 def _regional_ocr(page, excluded_regions=()):
     global PAGE_DEADLINE, PAGE_RASTER
@@ -253,11 +276,12 @@ def _regional_ocr(page, excluded_regions=()):
         blank = blank_raster_evidence(page, PAGE_RASTER)
         if blank is not None:
             page_time_remaining()
-            return [], {"schema": "ocr-regional-observations/v2", "page": page.number + 1,
+            return [], {"schema": "ocr-regional-observations/v3", "page": page.number + 1,
                         "page_bounds": [0, 0, page.rect.width, page.rect.height],
                         "complete": True, "attempts": [], "selection": [], "components": [],
                         "blank_raster": blank}
-        result = _regional_ocr_attempts(page, excluded_regions)
+        selected, evidence = _regional_ocr_attempts(page)
+        result = exclude_native_boxes(selected, evidence, list(excluded_regions))
         page_time_remaining()
         return result
     finally:
@@ -504,9 +528,7 @@ def main():
                     has_image_region = any(box.get("boxclass") in ("image", "picture", "figure", "table")
                                            for box in page_layout["boxes"])
                     if not has_body_text or has_image_region:
-                        excluded = [tuple(box.get("bbox", [])[i] for i in range(4))
-                                    for box in page_layout["boxes"]
-                                    if box.get("textlines") and len(box.get("bbox", [])) == 4]
+                        excluded = native_text_regions(page_layout)
                         selected, retry_diagnostic = _regional_ocr(page, excluded)
                         if selected:
                             page_layout["boxes"].extend(selected)

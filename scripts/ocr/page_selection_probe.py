@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from html.parser import HTMLParser
+from canonical_quality import metric
 
 INSPECT = r'''
 import contextlib, json, sys
@@ -133,6 +134,27 @@ def main():
             # Gold is an observation after both pipelines, never an input to
             # classification, region selection, ordering or recognition.
             item["frozen_gold"] = json.loads((fixtures / "gold" / f"{case}.json").read_text())
+            if case == "F10":
+                result = item["worker"]
+                if result.get("returncode") == 0 and "payload" in result:
+                    paragraphs = [block["text"] for section in result["payload"]["sections"]
+                                  for block in section["blocks"] if block["kind"] == "paragraph"]
+                    text = "\n\n".join(paragraphs)
+                    cer = metric(item["frozen_gold"]["text"], text)
+                    wer = metric(item["frozen_gold"]["text"], text, words=True)
+                    meets_text_thresholds = (cer["rate"] is not None and cer["rate"] <= .01
+                                             and wer["rate"] is not None and wer["rate"] <= .03)
+                    item["low_quality_measurement"] = {
+                        "canonical_paragraphs": paragraphs, "canonical_text": text,
+                        "cer": cer, "english_wer": wer,
+                        "meets_clean_text_thresholds": meets_text_thresholds,
+                        "acceptance": "diagnostic only; runtime degradation and full reading acceptance not proven",
+                    }
+                else:
+                    item["low_quality_measurement"] = {
+                        "acceptance": "worker failed; no successful reading claim",
+                        "failure": result,
+                    }
             observed = item["worker"].get("payload", {}).get("ocr_attempts", [])
             item["actual_engine_attempts"] = [{"page": p["page"], "psms": [a["psm"] for a in p["attempts"]]}
                                                for p in observed if p["attempts"]]

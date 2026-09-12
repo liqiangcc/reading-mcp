@@ -11,6 +11,8 @@ pub struct RuntimeConfig {
     pub ocr_enabled: bool,
     pub ocr_language: String,
     pub ocr_revision: String,
+    pub ocr_engine: PathBuf,
+    pub ocr_tessdata: PathBuf,
     pub local_roots: Vec<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
@@ -32,6 +34,8 @@ impl Default for RuntimeConfig {
             ocr_enabled: false,
             ocr_language: "eng+chi_sim".into(),
             ocr_revision: "1".into(),
+            ocr_engine: PathBuf::from("/usr/bin/tesseract"),
+            ocr_tessdata: PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"),
             local_roots: vec![],
             state_dir: default_state_dir(),
             allow_http: false,
@@ -76,6 +80,12 @@ impl RuntimeConfig {
         }
         if let Some(value) = std::env::var_os("READING_MCP_OCR_REVISION") {
             config.ocr_revision = value.to_string_lossy().into_owned();
+        }
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_ENGINE") {
+            config.ocr_engine = PathBuf::from(value);
+        }
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_TESSDATA") {
+            config.ocr_tessdata = PathBuf::from(value);
         }
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;

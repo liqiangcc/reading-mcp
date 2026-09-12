@@ -126,13 +126,14 @@ pub fn build_server(
         h.update(config.ocr_language.as_bytes());
         h.update(config.ocr_revision.as_bytes());
         for path in [
-            "/usr/bin/tesseract",
-            "/usr/share/tesseract-ocr/5/tessdata/eng.traineddata",
-            "/usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata",
+            config.ocr_engine.clone(),
+            config.ocr_tessdata.join("eng.traineddata"),
+            config.ocr_tessdata.join("chi_sim.traineddata"),
         ] {
-            let bytes = std::fs::read(path).map_err(|e| {
+            let bytes = std::fs::read(&path).map_err(|e| {
                 crate::application::ports::ApplicationError::ParseFailed(format!(
-                    "OCR dependency missing {path}: {e}"
+                    "OCR dependency missing {}: {e}",
+                    path.display()
                 ))
             })?;
             h.update(sha2::Sha256::digest(bytes));

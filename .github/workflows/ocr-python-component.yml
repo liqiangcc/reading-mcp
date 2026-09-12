@@ -1,0 +1,52 @@
+name: OCR offline Python dependency component
+on:
+  push:
+    paths:
+      - 'scripts/ocr/package_python_dependencies.py'
+      - 'scripts/pdf-layout/requirements.txt'
+      - '.github/workflows/ocr-python-component.yml'
+  pull_request:
+    paths:
+      - 'scripts/ocr/package_python_dependencies.py'
+      - 'scripts/pdf-layout/requirements.txt'
+      - '.github/workflows/ocr-python-component.yml'
+permissions:
+  contents: read
+jobs:
+  offline-python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download and hash every pinned wheel, retain notices
+        run: python scripts/ocr/package_python_dependencies.py --output "$RUNNER_TEMP/ocr-python-component"
+      - name: Install in fresh environment with network namespace disabled
+        env:
+          HOST_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          python -m venv --without-pip "$RUNNER_TEMP/offline-ocr-python"
+          sudo unshare --net -- "$HOST_PYTHON" -m pip --python "$RUNNER_TEMP/offline-ocr-python/bin/python" install \
+            --no-index --no-cache-dir --require-hashes \
+            --find-links "$RUNNER_TEMP/ocr-python-component/wheels" \
+            -r "$RUNNER_TEMP/ocr-python-component/requirements.lock"
+          sudo unshare --net -- "$RUNNER_TEMP/offline-ocr-python/bin/python" -I -c \
+            'import pymupdf, pymupdf4llm, onnxruntime; pymupdf4llm.use_layout(True); print("offline pinned layout imports: ok")'
+          du -sb "$RUNNER_TEMP/offline-ocr-python" "$RUNNER_TEMP/ocr-python-component"
+      - name: Archive candidate component (not a release or deployment)
+        run: |
+          tar -czf "$RUNNER_TEMP/ocr-python-component.tar.gz" -C "$RUNNER_TEMP" ocr-python-component
+          sha256sum "$RUNNER_TEMP/ocr-python-component.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-python-component-candidate
+          path: |
+            ${{ runner.temp }}/ocr-python-component/manifest.json
+            ${{ runner.temp }}/ocr-python-component.tar.gz
+          if-no-files-found: warn
+          retention-days: 14

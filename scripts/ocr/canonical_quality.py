@@ -25,13 +25,14 @@ def main():
             identity={"config":config,"dependencies":ns["fingerprint_dependencies"](config),"sha256":"quality"}
             cmd=[sys.executable,"-I","-c",a.worker.read_text(),"2000","134217728","16000000",json.dumps(config),json.dumps(identity)]
             raw=(a.fixtures/"pdf"/(case+".pdf")).read_bytes(); proc=subprocess.run(cmd,input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90,check=True); result=json.loads(proc.stdout)
-            paragraphs=[b["text"] for s in result["sections"] for b in s["blocks"] if b["kind"]=="paragraph"]; text="\n\n".join(paragraphs); gold=json.loads((a.fixtures/"gold"/(case+".json")).read_text())
+            canonical_blocks=[b for s in result["sections"] for b in s["blocks"] if b["kind"]=="paragraph"]
+            paragraphs=[b["text"] for b in canonical_blocks]; text="\n\n".join(paragraphs); gold=json.loads((a.fixtures/"gold"/(case+".json")).read_text())
             ambiguous=[p for p in paragraphs if re.search(r"[A-Za-z]",p) and re.search(r"[\u3400-\u9fff]",p)]
             if case == "F08":
                 expected="\n\n".join(p["text"] for p in gold["paragraphs"] if p["font"]=="goldeng")
                 actual="\n\n".join(p for p in paragraphs if re.search(r"[A-Za-z]",p) and not re.search(r"[\u3400-\u9fff]",p)); wer=metric(expected,actual,True)
             else: wer = None if case == "F07" else metric(gold["text"],text,True)
-            out[case]={"canonical_text":text,"cer":metric(gold["text"],text),"english_wer":wer,"ambiguous_mixed_paragraphs":ambiguous,"thresholds":{"cer":0.02 if case in ("F07","F08") else 0.01,"wer":None if case=="F07" else 0.03}}
+            out[case]={"canonical_text":text,"canonical_paragraphs":[{"text":b["text"],"region":b.get("region")} for b in canonical_blocks],"ocr_evidence":result.get("ocr_evidence",[]),"cer":metric(gold["text"],text),"english_wer":wer,"ambiguous_mixed_paragraphs":ambiguous,"thresholds":{"cer":0.02 if case in ("F07","F08") else 0.01,"wer":None if case=="F07" else 0.03}}
             if out[case]["cer"]["rate"] is None or out[case]["cer"]["rate"] > out[case]["thresholds"]["cer"] or (case == "F08" and ambiguous) or (wer is not None and wer["rate"] > out[case]["thresholds"]["wer"]): failures.append(case)
         except Exception as error:
             stderr = getattr(error, "stderr", b"") or b""

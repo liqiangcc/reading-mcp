@@ -118,7 +118,9 @@ def line_text(line):
     result = ""
     previous = None
     for span in line["spans"]:
-        text = unicodedata.normalize("NFKC", span["text"])
+        # Preserve the engine's actual characters.  Compatibility folding (NFKC)
+        # would silently turn full-width/CJK punctuation into different output.
+        text = unicodedata.normalize("NFC", span["text"])
         if previous and result and text and not result[-1].isspace() and not text[0].isspace():
             gap = span["bbox"][0] - previous["bbox"][2]
             # Style changes and superscripts do not introduce word boundaries.
@@ -126,11 +128,17 @@ def line_text(line):
                 separates = gap > min(span["size"], previous["size"]) * 0.12
             else:
                 separates = gap > 2.0
-            if separates and not (cjk(result[-1]) and cjk(text[0])):
+            left, right = result[-1], text[0]
+            left_punct = unicodedata.category(left).startswith("P")
+            right_punct = unicodedata.category(right).startswith("P")
+            no_boundary = ((cjk(left) and cjk(right))
+                           or (right_punct and (cjk(left) or left_punct))
+                           or (left_punct and (cjk(right) or right_punct)))
+            if separates and not no_boundary:
                 result += " "
         result += text
         previous = span
-    return " ".join(result.split())
+    return result.strip()
 
 
 def join_lines(lines, vocabulary):

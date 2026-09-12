@@ -1,0 +1,98 @@
+{
+  "F02": {
+    "canonical_text": "The observatory opens before sunrise. Each camera records one image every minute.\n\nMira checks the northern lens. Leon writes the exposure time in the field notebook.\n\nA clear label connects each sample to its original page. The label does not measure recognition accuracy.\n\nThe first column ends beside the diagram. Reading continues at the top of the second column.\n\nThe measured change was -8.8 units, not +8.8 units. Trial 12 used 0.25 grams at 07:30.\n\nQuestions do not advance the saved reading position. An explicit request moves to the next item.",
+    "cer": {
+      "errors": 0,
+      "denominator": 548,
+      "rate": 0.0
+    },
+    "english_wer": {
+      "errors": 0,
+      "denominator": 91,
+      "rate": 0.0
+    },
+    "ambiguous_mixed_paragraphs": [],
+    "thresholds": {
+      "cer": 0.01,
+      "wer": 0.03
+    }
+  },
+  "F06": {
+    "canonical_text": "The observatory opens before sunrise. Each camera records one image every minute.\n\nMira checks the northern lens. Leon writes the exposure time in the field notebook.\n\nA clear label connects each sample to its original page. The label does not measure recognition accuracy.\n\nThe first column ends beside the diagram. Reading continues at the top of the second column.\n\nThe measured change was -8.8 units, not +8.8 units. Trial 12 used 0.25 grams at 07:30.\n\nQuestions do not advance the saved reading position. An explicit request moves to the next item.",
+    "cer": {
+      "errors": 0,
+      "denominator": 548,
+      "rate": 0.0
+    },
+    "english_wer": {
+      "errors": 0,
+      "denominator": 91,
+      "rate": 0.0
+    },
+    "ambiguous_mixed_paragraphs": [],
+    "thresholds": {
+      "cer": 0.01,
+      "wer": 0.03
+    }
+  },
+  "F07": {
+    "canonical_text": "[\n\n清晨,研究员打开观测站。相机每分钟记录一张图像 。\n\n每个样本都有原始页码。页码不能证明文字识别完全准确。\n\n左栏结束后,阅读从右栏顶部继续。不能把两栏的文字交错连接。\n\n提问不会改变阅读位置 。只有了明确要求继续时,才读取下一项。",
+    "cer": {
+      "errors": 8,
+      "denominator": 110,
+      "rate": 0.07272727272727272
+    },
+    "english_wer": null,
+    "ambiguous_mixed_paragraphs": [],
+    "thresholds": {
+      "cer": 0.02,
+      "wer": null
+    }
+  },
+  "F08": {
+    "canonical_text": "The observatory opens before sunrise. Each camera records one image every minute.\n\n0\n\n1S /月 ?\n\n研究员打开观测站。相机每分钟记录一张图像 。\n\nMira checks the northern lens. Leon writes the exposure time in the field notebook.\n\n每个样本都有原始页码。页码不能证明文字识别完全准确。",
+    "cer": {
+      "errors": 11,
+      "denominator": 217,
+      "rate": 0.05069124423963134
+    },
+    "english_wer": {
+      "errors": 0,
+      "denominator": 26,
+      "rate": 0.0
+    },
+    "ambiguous_mixed_paragraphs": [
+      "1S /月 ?"
+    ],
+    "thresholds": {
+      "cer": 0.02,
+      "wer": 0.03
+    }
+  },
+  "F14": {
+    "canonical_text": "sample 1 remains bound to original page 1, sample 2 remains bound to original page 1, sample 3 remains bound to original page 1, sample 4 remains bound to Original page 1, sample 5 remains bound to original page 1, sample 6 remains bound to original page 1, sample 7 remains bound to original page 1, sample 8 remains bound to original page 1, sample 9 remains bound to original page 1, sample 10 remains bound to original page 1, sample 11 remains bound to original page 1, sample 12 remains bound to original page 1, sample 13 remains bound to original page 1, sample 14 remains bound to original page 1, sample 15 remains bound to original page 1, sample 16 remains bound to original page 1, sample 17 remains bound to original page 1, sample 18 remains bound to original page 1, sample 19 remains bound to original page 1, sample 20 remains bound to original page 1, sample 21 remains bound to original page 1, sample 22 remains bound to original page 1, sample 23 remains bound to original page 1, sample 24 remains bound to original page 1, sample 25 remains bound to original page 1, sample 26 remains bound to original page 1, sample 27 remains bound to original page 1, sample 28 remains bound to original page 1, sample 29 remains bound to original page 1, sample 30 remains bound to original page 1, sample 31 remains bound to original page 1, sample 32 remains bound to original page 1, sample 33 remains bound to original page 1, sample 34 remains bound to original page 1, sample 35 remains bound to original page 1, sample 36 remains bound to original page 1, sample 37 remains bound to original page 1, sample 38 remains bound to original page 1, sample 39 remains bound to original page 1, sample 40 remains bound to original page 1, sample 41 remains bound to original page 1, sample 42 remains bound to original page 1, sample 43 remains bound to original page 1, sample 44 remains bound to original page 1, sample 45 remains bound to original page 1, sample 46 remains bound to original page 1, sample 47 remains bound to original page 1, sample 48 remains bound to original page 1.",
+    "cer": {
+      "errors": 1,
+      "denominator": 2102,
+      "rate": 0.0004757373929590866
+    },
+    "english_wer": {
+      "errors": 1,
+      "denominator": 384,
+      "rate": 0.0026041666666666665
+    },
+    "ambiguous_mixed_paragraphs": [],
+    "thresholds": {
+      "cer": 0.01,
+      "wer": 0.03
+    }
+  },
+  "status": {
+    "failures": [
+      "F07",
+      "F08"
+    ],
+    "f07_english_wer": "not_applicable"
+  }
+}
+

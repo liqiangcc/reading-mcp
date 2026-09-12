@@ -23,6 +23,7 @@ def cjk(value):
 
 def ocr_page(page, language):
     """Run the deployer-selected local Tesseract and retain engine grouping."""
+    import pymupdf
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
         image = os.path.join(directory, "page.png")
         output = os.path.join(directory, "words")
@@ -50,7 +51,7 @@ def ocr_page(page, language):
             key = (int(row["block_num"]), int(row["par_num"]), int(row["line_num"]))
             lines.setdefault(key, []).append(row)
         textlines = []
-        for words in lines.values():
+        for key, words in lines.items():
             words.sort(key=lambda item: int(item["left"]))
             text = ""
             for item in words:
@@ -77,9 +78,10 @@ def ocr_page(page, language):
             first = line["spans"][0]
             by_block.setdefault((first["ocr_block"], first["ocr_paragraph"]), []).append(line)
         for (block, paragraph), block_lines in by_block.items():
-            boxes.append({"boxclass": "text", "bbox": [min(l["bbox"][0] for l in block_lines),
-                        min(l["bbox"][1] for l in block_lines), max(l["bbox"][2] for l in block_lines),
-                        max(l["bbox"][3] for l in block_lines)], "textlines": block_lines,
+            x0, y0 = min(l["bbox"][0] for l in block_lines), min(l["bbox"][1] for l in block_lines)
+            x1, y1 = max(l["bbox"][2] for l in block_lines), max(l["bbox"][3] for l in block_lines)
+            boxes.append({"boxclass": "text", "bbox": [x0, y0, x1, y1], "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+                         "textlines": block_lines,
                          "ocr_block": block, "ocr_paragraph": paragraph})
         return boxes
 
@@ -92,7 +94,11 @@ def line_text(line):
         if previous and result and text and not result[-1].isspace() and not text[0].isspace():
             gap = span["bbox"][0] - previous["bbox"][2]
             # Style changes and superscripts do not introduce word boundaries.
-            if gap > 2.0 and not (cjk(result[-1]) and cjk(text[0])):
+            if span.get("size") is not None and previous.get("size") is not None:
+                separates = gap > min(span["size"], previous["size"]) * 0.12
+            else:
+                separates = gap > 2.0
+            if separates and not (cjk(result[-1]) and cjk(text[0])):
                 result += " "
         result += text
         previous = span
@@ -136,6 +142,7 @@ def project(layout):
     sections = [{"title": "Front matter", "blocks": []}]
     auxiliary = []
     regions = []
+    ocr_evidence = []
     uncertain = 0
     abstract_headings = {"abstract", "摘要", "概要"}
     has_abstract = any(" ".join(line_text(l) for l in (b.get("textlines") or [])).strip().casefold() in abstract_headings
@@ -154,6 +161,13 @@ def project(layout):
             bbox = [box[k] for k in ("x0", "y0", "x1", "y1")]
             region = {"page": page_no, "box": index, "bbox": bbox, "class": cls}
             regions.append(region)
+            if box.get("ocr_block") is not None:
+                for line in box.get("textlines") or []:
+                    for span in line.get("spans") or []:
+                        ocr_evidence.append({"page": page_no, "block": span.get("ocr_block"),
+                            "paragraph": span.get("ocr_paragraph"), "line": span.get("ocr_line"),
+                            "text": span["text"], "bbox": span["bbox"],
+                            "confidence": span.get("confidence")})
             if cls == "section-header" and text and (body_started or not has_abstract or text.casefold() in abstract_headings):
                 body_started = True
                 sections.append({"title": text, "blocks": []})
@@ -200,7 +214,7 @@ def project(layout):
             blocks.append(block)
     if auxiliary:
         sections.append({"title": "Page notes and captions", "blocks": auxiliary})
-    return {"schema_version": VERSION, "engine": ENGINE, "page_count": layout["page_count"], "pages_without_text": sum(not any((b.get("textlines") or []) for b in p["boxes"]) for p in layout["pages"]), "sections": sections, "regions": regions, "preserved_ambiguous_hyphens": uncertain}
+    return {"schema_version": VERSION, "engine": ENGINE, "page_count": layout["page_count"], "pages_without_text": sum(not any((b.get("textlines") or []) for b in p["boxes"]) for p in layout["pages"]), "sections": sections, "regions": regions, "ocr_evidence": ocr_evidence, "preserved_ambiguous_hyphens": uncertain}
 
 
 def main():
@@ -225,8 +239,11 @@ def main():
             if os.environ.get("READING_MCP_OCR_ENABLED") == "1":
                 language = os.environ.get("READING_MCP_OCR_LANG", "eng+chi_sim")
                 for page, page_layout in zip(doc, layout["pages"]):
-                    has_text = any((box.get("textlines") or []) for box in page_layout["boxes"])
-                    if not has_text:
+                    has_body_text = any((box.get("textlines") or []) and box.get("boxclass") not in ("page-footer", "page-header")
+                                        for box in page_layout["boxes"])
+                    has_image_region = any(box.get("boxclass") in ("image", "figure", "table")
+                                           for box in page_layout["boxes"])
+                    if not has_body_text or has_image_region:
                         box = ocr_page(page, language)
                         if box is not None:
                             page_layout["boxes"].extend(box)

@@ -41,13 +41,12 @@ jobs:
           python - <<'PY'
           import json, os
           payload = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'f07-layout.json')))
-          boxes = [b for p in payload['pages'] for b in p['boxes'] if b.get('ocr_block')]
-          assert len(boxes) > 1, 'OCR projection collapsed the page into one box'
-          assert all('ocr_paragraph' in b for b in boxes)
-          spans = [s for b in boxes for l in b['textlines'] for s in l['spans']]
-          assert spans and all('size' not in s and 'origin' not in s for s in spans)
-          assert all('confidence' in s and 'ocr_line' in s for s in spans)
-          print('canonical OCR projection boxes=', len(boxes), 'spans=', len(spans))
+          blocks = [b for section in payload['sections'] for b in section['blocks']]
+          evidence = payload['ocr_evidence']
+          assert len(blocks) > 1, 'OCR projection collapsed the page into one block'
+          assert len(evidence) > 1 and all(e['paragraph'] is not None for e in evidence)
+          assert all(e['confidence'] is not None and len(e['bbox']) == 4 for e in evidence)
+          print('canonical OCR projection blocks=', len(blocks), 'typed evidence words=', len(evidence))
           PY
       - name: Upload public synthetic evidence, including failed cases
         if: always()

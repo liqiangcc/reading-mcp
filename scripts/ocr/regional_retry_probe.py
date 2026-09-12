@@ -36,6 +36,11 @@ def merge_components(pairs):
     for i in parent: groups.setdefault(find(i),set()).add(i)
     return list(groups.values())
 def rebuild_boxes(original, replacements):
+    seen = set()
+    for first, members, _ in replacements:
+        if first != min(members): raise ValueError("replacement must be inserted at component minimum")
+        if seen & members: raise ValueError("overlapping replacement components")
+        seen.update(members)
     by_index={first:(members,candidates) for first,members,candidates in replacements}
     members=set().union(*(m for _,m,_ in replacements)) if replacements else set()
     out=[]
@@ -43,6 +48,16 @@ def rebuild_boxes(original, replacements):
         if i in by_index: out.extend(by_index[i][1])
         if i not in members: out.append(box)
     return out
+def close_components(components):
+    groups=[set(c) for c in components]
+    changed=True
+    while changed:
+        changed=False
+        for i in range(len(groups)):
+            for j in range(i+1,len(groups)):
+                if groups[i] & groups[j]: groups[i].update(groups.pop(j)); changed=True; break
+            if changed: break
+    return groups
 
 def main():
     import pymupdf, pymupdf4llm
@@ -70,6 +85,7 @@ def main():
                         for index, box in enumerate(boxes):
                             if index not in component and any(adjacent(boxes[member], box, median_height) for member in component):
                                 component.add(index); expanded=True
+                components=close_components(components)
                 page_diag={"psm3_boxes":copy.deepcopy(original_boxes),"conflicts":conflicts,"components":[],"psm6_boxes":[]}
                 if components:
                     config6={**config,"psm":6}; ns["OCR_CONFIG"]=config6; psm6=ns["ocr_page"](page) or []; ns["OCR_CONFIG"]=config

@@ -64,6 +64,7 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
             if existing != envelope {
                 return Err(ApplicationError::CacheFailed("evidence collision".into()));
             }
+            sync_directories(&self.root)?;
             return Ok(digest);
         }
         let tmp = self.root.join(format!(
@@ -75,14 +76,14 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
                 .unwrap()
                 .as_nanos()
         ));
-        let mut temp_guard = TempFileGuard::new(tmp.clone());
         use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::OpenOptions::new()
+        let std_file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp)
-            .await
             .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+        let mut temp_guard = TempFileGuard::new(tmp.clone());
+        let mut file = tokio::fs::File::from_std(std_file);
         file.write_all(&envelope)
             .await
             .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
@@ -112,11 +113,7 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
             Err(e) => return Err(ApplicationError::CacheFailed(e.to_string())),
         }
         sync_directory(&self.root)?;
-        if let Some(parent) = self.root.parent() {
-            if parent != self.root {
-                sync_directory(parent)?;
-            }
-        }
+        sync_directories(&self.root)?;
         Ok(digest)
     }
     async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
@@ -172,6 +169,16 @@ fn sync_directory(path: &std::path::Path) -> Result<(), ApplicationError> {
         .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?
         .sync_all()
         .map_err(|e| ApplicationError::CacheFailed(e.to_string()))
+}
+
+fn sync_directories(path: &std::path::Path) -> Result<(), ApplicationError> {
+    sync_directory(path)?;
+    if let Some(parent) = path.parent()
+        && parent != path
+    {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -234,10 +241,12 @@ mod tests {
     async fn concurrent_put_has_one_final_blob_and_no_temporary_files() {
         let directory = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(FileOcrEvidenceStore::new(directory.path()));
-        let tasks = (0..8).map(|_| {
-            let store = store.clone();
-            tokio::spawn(async move { store.put_immutable("same", b"payload").await.unwrap() })
-        });
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                tokio::spawn(async move { store.put_immutable("same", b"payload").await.unwrap() })
+            })
+            .collect();
         let digests = futures_join(tasks).await;
         assert!(digests.iter().all(|digest| digest == &digests[0]));
         let mut entries = tokio::fs::read_dir(directory.path()).await.unwrap();

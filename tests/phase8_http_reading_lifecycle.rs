@@ -121,7 +121,7 @@ Beta sentence one. Beta sentence two.
             .capabilities
             .sentence_first_enumeration
             .segmentation_version,
-        "text-segmentation/v2"
+        "text-segmentation/v3"
     );
 
     let first_structure = client

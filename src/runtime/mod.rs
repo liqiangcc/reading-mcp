@@ -106,13 +106,18 @@ pub fn build_server(
         max_entry_bytes: config.resource_budget.max_archive_entry_bytes,
         max_total_bytes: config.resource_budget.max_archive_total_bytes,
     };
-    let parser: Arc<dyn Parser> = Arc::new(CachingParser::new(
-        Arc::new(ParserRouter::release(
-            config.resource_budget.max_pdf_pages,
-            archive_limits,
-        )),
-        components.parsed_cache,
-    ));
+    let mut router = ParserRouter::release(config.resource_budget.max_pdf_pages, archive_limits);
+    if let Some(python) = &config.pdf_layout_python {
+        router = router.with_pdf_parser(Arc::new(crate::parsing::LayoutPdfParser::new(
+            python.clone(),
+            config.resource_budget.clone(),
+        )));
+    }
+    let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache);
+    if config.pdf_layout_python.is_some() {
+        cached = cached.with_pdf_namespace(crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE);
+    }
+    let parser: Arc<dyn Parser> = Arc::new(cached);
     let parser: Arc<dyn Parser> =
         Arc::new(BudgetedParser::new(parser, config.resource_budget.clone()));
     let parser: Arc<dyn Parser> = if config.telemetry {
@@ -124,9 +129,12 @@ pub fn build_server(
     let repository = components.repository;
     let text_unit_index = components.text_unit_index;
     let search_index = components.search_index;
-    let source_view_renderer = Arc::new(
-        FileProcessIsolatedPdfSourceViewRenderer::current_executable(config.source_view.timeout)?,
-    );
+    let mut source_view_renderer =
+        FileProcessIsolatedPdfSourceViewRenderer::current_executable(config.source_view.timeout)?;
+    if let Some(python) = &config.pdf_layout_python {
+        source_view_renderer = source_view_renderer.with_pymupdf(python.clone());
+    }
+    let source_view_renderer = Arc::new(source_view_renderer);
     let source_view = Arc::new(SourceViewUseCase::new(
         repository.clone(),
         retriever.clone(),

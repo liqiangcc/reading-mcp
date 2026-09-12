@@ -38,6 +38,7 @@ impl NormalizedBlockKind {
 #[serde(rename_all = "snake_case")]
 pub enum NormalizedBlockProvenance {
     XhtmlNativeBlock,
+    PdfLayout,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

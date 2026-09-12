@@ -32,7 +32,7 @@ serde-saphyr = "0.0.29"
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 url = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 

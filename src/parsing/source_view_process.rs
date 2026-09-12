@@ -24,6 +24,7 @@ static WORKER_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct FileProcessIsolatedPdfSourceViewRenderer {
     executable: PathBuf,
     timeout: Duration,
+    pymupdf_python: Option<PathBuf>,
 }
 
 impl FileProcessIsolatedPdfSourceViewRenderer {
@@ -36,6 +37,7 @@ impl FileProcessIsolatedPdfSourceViewRenderer {
         Ok(Self {
             executable,
             timeout,
+            pymupdf_python: None,
         })
     }
 
@@ -43,7 +45,12 @@ impl FileProcessIsolatedPdfSourceViewRenderer {
         Self {
             executable,
             timeout,
+            pymupdf_python: None,
         }
+    }
+    pub fn with_pymupdf(mut self, python: PathBuf) -> Self {
+        self.pymupdf_python = Some(python);
+        self
     }
 }
 
@@ -84,7 +91,14 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
         })?;
 
         let started = Instant::now();
-        let mut child = Command::new(&self.executable)
+        let mut command = if let Some(python) = &self.pymupdf_python {
+            let mut command = Command::new(python);
+            command.args(["-I", "-c", include_str!("pdf_source_view_worker.py")]);
+            command
+        } else {
+            Command::new(&self.executable)
+        };
+        let mut child = command
             .arg(FILE_SOURCE_VIEW_WORKER_FLAG)
             .arg(&input_path)
             .arg(&output_path)

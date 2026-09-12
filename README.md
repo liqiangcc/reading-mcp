@@ -50,6 +50,15 @@ MkDocs / Docusaurus / GitBook   → HTML
 
 不会因为站点品牌不同而创建重复 Parser；只有新的文档格式才产生新的解析职责。
 
+## 可选 PDF 版面解析
+
+通过 `READING_MCP_PDF_LAYOUT_PYTHON` 显式启用本地结构化版面解析及原页渲染，
+依赖 Python 3.12+ 与 PyMuPDF/PyMuPDF4LLM/Layout 1.28.2。未配置时保留默认 PDF
+路径；内部 OCR 仍未启用。layout 是推断结果，不保证所有论文准确或完整。
+本次主线整合保持线上 normalization v9 / segmentation v3；从 v8 升级须显式
+reopen 并重新取得 locator/cursor，保留已有数据。详见
+[依赖、身份与回滚边界](docs/pdf-layout-deployment.md)。#95 OCR 将在后续独立实现。
+
 ## 核心阅读流程
 
 ```text

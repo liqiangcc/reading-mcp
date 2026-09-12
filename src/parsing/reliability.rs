@@ -22,6 +22,56 @@ pub struct PersistedDocumentReliabilityInspector;
 
 impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
     fn inspect(&self, document: &Document) -> Result<ReliabilitySummary, ApplicationError> {
+        if let Some(version) = document.metadata.get("pdf_layout_version") {
+            let invalid =
+                || ApplicationError::ParseFailed("invalid persisted PDF layout evidence".into());
+            if version != "pdf-layout/v1"
+                || document
+                    .media_type
+                    .0
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    != "application/pdf"
+            {
+                return Err(invalid());
+            }
+            document
+                .normalized_block_map()
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+            document
+                .original_source_binding_map()
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+            let count = document
+                .metadata
+                .get("pdf_layout_preserved_ambiguous_hyphens")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or_else(invalid)?;
+            let missing = document
+                .metadata
+                .get("pdf_layout_pages_without_text")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or_else(invalid)?;
+            let mut codes = vec!["pdf_layout_inferred".into(), "pdf_ocr_disabled".into()];
+            if count > 0 {
+                codes.push("pdf_ambiguous_hyphens_preserved".into());
+            }
+            if missing > 0 {
+                codes.push("pdf_pages_without_text".into());
+            }
+            let mut summary = ReliabilitySummary::not_applicable();
+            summary.evidence = vec![ReliabilityEvidence {
+                kind: "pdf_layout_projection".into(),
+                schema_version: Some(version.clone()),
+                integrity: ReliabilityIntegrity::Valid,
+                degradation_count: 2usize.saturating_add(count).saturating_add(missing),
+                degradation_codes: codes,
+            }];
+            return Ok(summary);
+        }
         if document.media_type.0 != EPUB_MEDIA_TYPE {
             return Ok(ReliabilitySummary::not_applicable());
         }

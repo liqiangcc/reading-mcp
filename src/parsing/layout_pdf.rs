@@ -22,6 +22,7 @@ use crate::infrastructure::ResourceBudget;
 pub const PDF_LAYOUT_CACHE_NAMESPACE: &str = "pdf-layout/v1:pymupdf4llm-layout/1.28.2";
 const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_OCR_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Optional layout engine, isolated from the server and bounded by the outer parse timeout.
 pub struct LayoutPdfParser {
@@ -63,6 +64,16 @@ fn failed(message: impl std::fmt::Display) -> ApplicationError {
     ApplicationError::ParseFailed(format!("PDF layout: {message}"))
 }
 
+fn worker_failure(ocr_enabled: bool, stderr: &[u8]) -> ApplicationError {
+    if ocr_enabled {
+        // OCR errors can contain input text or local paths. Keep bounded stderr
+        // only inside this parse operation, never expose it via MCP/telemetry.
+        failed("local OCR worker failed; no parsed document was published")
+    } else {
+        failed(String::from_utf8_lossy(stderr))
+    }
+}
+
 async fn read_bounded(
     reader: impl AsyncRead + Unpin,
     limit: u64,
@@ -84,6 +95,10 @@ async fn read_bounded(
 #[async_trait]
 impl Parser for LayoutPdfParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let ocr_enabled = self
+            .ocr_config
+            .as_ref()
+            .is_some_and(|config| config.enabled);
         let permit = self.permit.clone().acquire_owned().await.map_err(failed)?;
         if resource.bytes.len() > self.budget.max_document_bytes {
             return Err(ApplicationError::ResourceLimitExceeded(
@@ -140,12 +155,19 @@ impl Parser for LayoutPdfParser {
         };
         let (write_result, output, errors, status) = tokio::try_join!(
             write,
-            read_bounded(stdout, MAX_OUTPUT_BYTES),
+            read_bounded(
+                stdout,
+                if ocr_enabled {
+                    MAX_OCR_OUTPUT_BYTES
+                } else {
+                    MAX_OUTPUT_BYTES
+                }
+            ),
             read_bounded(stderr, 64 * 1024),
             async { process.wait().await.map_err(failed) },
         )?;
         if !status.success() {
-            return Err(failed(String::from_utf8_lossy(&errors)));
+            return Err(worker_failure(ocr_enabled, &errors));
         }
         write_result.map_err(failed)?;
         let payload: LayoutResult = serde_json::from_slice(&output).map_err(failed)?;
@@ -477,6 +499,30 @@ mod tests {
     use super::*;
     use crate::domain::{DocumentSource, MediaType};
     use serde_json::json;
+
+    #[test]
+    fn ocr_stderr_is_not_exposed_but_native_diagnostics_remain_compatible() {
+        let diagnostic = b"private document passage at /private/source.pdf";
+        let error = worker_failure(true, diagnostic).to_string();
+        assert!(error.contains("local OCR worker failed"));
+        assert!(!error.contains("private"));
+        assert!(
+            worker_failure(false, diagnostic)
+                .to_string()
+                .contains("private document passage")
+        );
+        assert_eq!(MAX_OCR_OUTPUT_BYTES, 32 * 1024 * 1024);
+        assert_eq!(MAX_OUTPUT_BYTES, 128 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn worker_output_rejects_the_first_byte_over_limit() {
+        assert_eq!(read_bounded(&b"abc"[..], 3).await.unwrap(), b"abc");
+        assert!(matches!(
+            read_bounded(&b"abcd"[..], 3).await,
+            Err(ApplicationError::ResourceLimitExceeded(_))
+        ));
+    }
 
     fn resource() -> RetrievedResource {
         let source = DocumentSource("https://example.org/paper.pdf".into());

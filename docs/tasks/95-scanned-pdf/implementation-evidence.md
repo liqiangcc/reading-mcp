@@ -78,3 +78,33 @@ OpenDocument/缓存/仓库发布和加载路径拒绝坏 derivation 或 binding 
 本节新增代码须由当前 head Actions 验证。仍未完成：所有冻结 fixture 的完整 MCP
 质量/边界/locator 验收、混合页与 visual 分类闭环、共享预算/进程树隔离与取消、
 离线依赖包、生产资源和 connector 时限实测、最终主控审查及 release/package/deploy。
+
+## 执行边界增量（2026-09-12，未部署）
+
+- `e8f219d707d918e00141ff917ccab9fa9fb42dd2` 的
+  [hosted real-engine run](https://github.com/liqiangcc/reading-mcp/actions/runs/34690947189)
+  全部通过，包含共享 15 秒页预算与光栅预检测试、真实 Rust OCR 和原 canonical 门槛。
+  PSM3 与最多一次 PSM6 共用页截止时间；最多 8 个需 OCR 页、1600 万像素/次、
+  累计 6400 万像素。重试的第二次实际渲染也消耗累计像素额度。
+- `27dd7a4dc68ae5eaf59d9f273dc9f0642a682c42` 的
+  [Rust CI](https://github.com/liqiangcc/reading-mcp/actions/runs/34691144363) 与
+  [real-engine run](https://github.com/liqiangcc/reading-mcp/actions/runs/34691144309)
+  全部通过。layout worker 使用独立进程组；取消后 TERM、1 秒 grace、KILL，并保留
+  admission permit 至父进程清理结束。Linux WNOWAIT 在发信号前保留父 PID 身份。
+  测试验证忽略 TERM 的后代停止、父进程回收及取消清理期间许可不释放。
+  **这不证明 orphan 后代已全部 reaped，也不证明内存/网络隔离。**
+- `9ac02c6042fe384c295e5f7742f7d77694997781` 加入仅 OCR-enabled PDF 使用的
+  同完整 ParsedCacheKey single-flight：1 个 active、最多 2 个 waiting key、排队
+  最多 2 秒。最后一个 waiter 取消才 abort 共享解析；单个取消不影响其他 waiter。
+  新增同 key 缓存重用、取消不发布缓存、队列满和等待超时测试；本节记录时该 head
+  [CI](https://github.com/liqiangcc/reading-mcp/actions/runs/34691450539) 仍在执行，
+  不据源码宣称通过。
+
+后续输出边界代码把 OCR structured stdout 收紧至 32 MiB，保留 64 KiB stderr
+读取上限，并不再向 MCP 返回原始 OCR stderr；native layout 的原有输出额度和
+错误诊断保持不变。对应边界/隐私测试需由同提交 hosted CI 验证。
+
+仍未闭合：共享 60 秒 inspection→cache→parse→publication / 90 秒 whole-open，
+全后代回收、私有临时目录清理、aggregate memory/temp/PID 限制及网络隔离。
+当前普通 BudgetedParser 的 30 秒包裹尚未完成 OCR 专用接线，不得宣称 60 秒已生效。
+混合页/已有层/blank/visual 分类、完整 MCP 门槛、离线包及最终生产验收仍按设计待办。

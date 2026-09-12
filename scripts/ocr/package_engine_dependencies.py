@@ -26,6 +26,13 @@ def main():
     debs.mkdir()
     rootfs = output / "rootfs"
     rootfs.mkdir()
+    # Ubuntu 24.04 packages assume the usr-merged base filesystem. Extracting
+    # .deb data does not execute base-files maintainer scripts; preserve these
+    # explicit assembly inputs rather than resolving ELF paths on the host.
+    aliases = {"bin": "usr/bin", "sbin": "usr/sbin", "lib": "usr/lib", "lib64": "usr/lib64"}
+    for name, target in aliases.items():
+        (rootfs / target).mkdir(parents=True, exist_ok=True)
+        (rootfs / name).symlink_to(target, target_is_directory=True)
     with tempfile.TemporaryDirectory(prefix="ocr-apt-empty-state-") as directory:
         status = Path(directory) / "status"
         status.write_text("")
@@ -59,14 +66,18 @@ def main():
             raise ValueError("distribution copyright absent: " + record["package"])
         record["copyright_sha256"] = hashlib.sha256(notice.read_bytes()).hexdigest()
     files = []
+    symlinks = []
     for path in sorted(rootfs.rglob("*")):
-        if path.is_file() and not path.is_symlink():
+        if path.is_symlink():
+            symlinks.append({"path": str(path.relative_to(rootfs)), "target": str(path.readlink())})
+        elif path.is_file():
             files.append({"path": str(path.relative_to(rootfs)), "bytes": path.stat().st_size,
                           "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {"schema": "ocr-engine-component/v1", "status": "candidate component, not deployment",
                 "roots": ROOTS, "resolver": "apt empty dpkg status, no recommends",
                 "sources_sha256": hashlib.sha256(sources.encode()).hexdigest(),
-                "packages": records, "files": files,
+                "packages": records, "files": files, "symlinks": symlinks,
+                "ubuntu_usr_merge_aliases": aliases,
                 "deb_bytes": sum(r["bytes"] for r in records),
                 "extracted_regular_file_bytes": sum(f["bytes"] for f in files)}
     encoded = json.dumps(manifest, indent=2) + "\n"

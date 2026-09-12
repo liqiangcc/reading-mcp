@@ -22,7 +22,10 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
         let raw_hash = format!("sha256:{:x}", sha2::Sha256::digest(&raw));
         let state = directory.path().join("state");
         let mut saved: Option<(String, TextUnitItemDto)> = None;
-        for _ in 0..2 {
+        // The 300-DPI RGB fixture decodes to about 26.1 MB. Preserve the
+        // default 16-MiB rejection, then test an explicit development profile.
+        // This does not change defaults or approve a production budget change.
+        for stream_limit in [16 * 1024 * 1024_u64, 32 * 1024 * 1024, 32 * 1024 * 1024] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
             command
                 .env(
@@ -34,6 +37,10 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                 // Existing #92 deployment profile; retain the production and
                 // default guards rather than bypassing embedded-image checks.
                 .env("READING_MCP_SOURCE_VIEW_MAX_PIXELS", "16000000")
+                .env(
+                    "READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES",
+                    stream_limit.to_string(),
+                )
                 .env(
                     "READING_MCP_PDF_LAYOUT_PYTHON",
                     std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
@@ -100,8 +107,18 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                         .with_arguments(arguments(json!({"document_id":opened.document_id,
                     "target_locator":item.locator, "representation":"original", "dpi":72}))),
                 )
-                .await
-                .unwrap();
+                .await;
+            if stream_limit == 16 * 1024 * 1024 {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("decoded PDF stream exceeds configured limit")
+                );
+                client.cancel().await.unwrap();
+                continue;
+            }
+            let result = result.unwrap();
             let wire = serde_json::to_value(&result).unwrap();
             assert!(
                 wire["content"]

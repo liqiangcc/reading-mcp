@@ -112,7 +112,6 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
             }
             Err(e) => return Err(ApplicationError::CacheFailed(e.to_string())),
         }
-        sync_directory(&self.root)?;
         sync_directories(&self.root)?;
         Ok(digest)
     }
@@ -130,6 +129,12 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
         let path = self.path(digest);
         match tokio::fs::read(path).await {
             Ok(blob) => {
+                use sha2::{Digest, Sha256};
+                if format!("sha256:{:x}", Sha256::digest(&blob)) != digest {
+                    return Err(ApplicationError::CacheFailed(
+                        "evidence digest mismatch".into(),
+                    ));
+                }
                 let header = MAGIC.len() + 4;
                 if blob.len() < header || !blob.starts_with(MAGIC) {
                     return Err(ApplicationError::CacheFailed(
@@ -150,12 +155,6 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
                     ));
                 }
                 let payload = &blob[payload_start..];
-                use sha2::{Digest, Sha256};
-                if format!("sha256:{:x}", Sha256::digest(&blob)) != digest {
-                    return Err(ApplicationError::CacheFailed(
-                        "evidence digest mismatch".into(),
-                    ));
-                }
                 Ok(Some(payload.to_vec()))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -235,6 +234,35 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(store.get(&first).await.unwrap(), Some(b"\0b".to_vec()));
         assert_eq!(store.get(&second).await.unwrap(), Some(b"b".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn envelope_digest_is_checked_before_header_interpretation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = FileOcrEvidenceStore::new(directory.path());
+        let digest = store.put_immutable("identity", b"payload").await.unwrap();
+        let path = store.path(&digest);
+        let mut blob = tokio::fs::read(&path).await.unwrap();
+        blob[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        tokio::fs::write(path, blob).await.unwrap();
+        assert_eq!(
+            store.get(&digest).await.unwrap_err(),
+            ApplicationError::CacheFailed("evidence digest mismatch".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_digest_does_not_bypass_schema_validation() {
+        use sha2::{Digest, Sha256};
+        let directory = tempfile::tempdir().unwrap();
+        let store = FileOcrEvidenceStore::new(directory.path());
+        let blob = b"unsupported evidence envelope";
+        let digest = format!("sha256:{:x}", Sha256::digest(blob));
+        tokio::fs::write(store.path(&digest), blob).await.unwrap();
+        assert_eq!(
+            store.get(&digest).await.unwrap_err(),
+            ApplicationError::CacheFailed("invalid evidence blob".into())
+        );
     }
 
     #[tokio::test]

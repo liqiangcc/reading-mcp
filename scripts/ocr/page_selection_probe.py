@@ -13,7 +13,12 @@ with contextlib.redirect_stdout(sys.stderr):
     pymupdf4llm.use_layout(True)
     raw = sys.stdin.buffer.read()
     with pymupdf.open(stream=raw, filetype="pdf") as doc:
-        layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
+        raw_regions = []
+        for page in doc:
+            page.get_layout(return_raw=True)
+            raw_regions.append({"page": page.number + 1,
+                                "rect": list(page.rect), "rotation": page.rotation,
+                                "regions": page.layout_information})
         pages = [{"page": page.number + 1, "rect": list(page.rect),
                   "rotation": page.rotation, "cropbox": list(page.cropbox),
                   "texttrace": page.get_texttrace(),
@@ -21,7 +26,13 @@ with contextlib.redirect_stdout(sys.stderr):
                   "drawings": [{"rect": list(path["rect"]), "type": path["type"]}
                                for path in page.get_drawings()]}
                  for page in doc]
-json.dump({"layout": layout, "original_pages": pages}, sys.stdout, ensure_ascii=False)
+        layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
+def encode_array(value):
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    raise TypeError("unsupported raw layout evidence type: " + type(value).__name__)
+json.dump({"layout": layout, "original_pages": pages,
+           "raw_layout_regions": raw_regions}, sys.stdout, ensure_ascii=False, default=encode_array)
 '''
 
 

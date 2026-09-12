@@ -64,15 +64,15 @@ jobs:
         run: python scripts/ocr/regional_retry_probe.py "$RUNNER_TEMP/ocr-first-probe/regional-retry-probe.json"
       - name: Regional retry geometry tests
         run: python -m unittest tests/ocr/test_regional_retry_probe.py
+      - name: Mixed, existing-layer and visual page diagnostics (public frozen fixtures)
+        if: ${{ !cancelled() }}
+        run: python scripts/ocr/page_selection_probe.py --output "$RUNNER_TEMP/ocr-first-probe/page-selection-probe.json"
       - name: Rust real OCR integration (hosted only)
         env:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo test --locked --test ocr_real_engine -- --ignored --nocapture
       - name: Canonical OCR quality gates (hosted only)
         run: python scripts/ocr/canonical_quality.py --output "$RUNNER_TEMP/ocr-first-probe/canonical-quality.json"
-      - name: Mixed, existing-layer and visual page diagnostics (public frozen fixtures)
-        if: ${{ !cancelled() }}
-        run: python scripts/ocr/page_selection_probe.py --output "$RUNNER_TEMP/ocr-first-probe/page-selection-probe.json"
       - name: Upload public synthetic evidence, including failed cases
         if: always()
         uses: actions/upload-artifact@v4

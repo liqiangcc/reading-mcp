@@ -1,0 +1,18 @@
+{
+  "fixture": "F09",
+  "pages": [
+    {
+      "expected_class": "blank",
+      "height_points": 842,
+      "mode": "blank",
+      "page": 1,
+      "raster_dpi": 300,
+      "regions": [],
+      "rotation": 0,
+      "width_points": 595
+    }
+  ],
+  "paragraphs": [],
+  "schema": "scanned-pdf-gold/v1",
+  "text": ""
+}

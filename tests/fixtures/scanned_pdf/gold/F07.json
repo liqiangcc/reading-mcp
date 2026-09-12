@@ -1,0 +1,191 @@
+{
+  "fixture": "F07",
+  "pages": [
+    {
+      "expected_class": "requires_ocr",
+      "height_points": 842,
+      "mode": "scan",
+      "page": 1,
+      "raster_dpi": 300,
+      "regions": [],
+      "rotation": 0,
+      "width_points": 595
+    }
+  ],
+  "paragraphs": [
+    {
+      "font": "goldcjk",
+      "id": "C1",
+      "lines": [
+        {
+          "baseline": 72,
+          "bbox": [
+            48,
+            58.08,
+            336.0,
+            75.456
+          ],
+          "paragraph_range": [
+            0,
+            24
+          ],
+          "text": "清晨，研究员打开观测站。相机每分钟记录一张图像。"
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            0,
+            12
+          ],
+          "text": "清晨，研究员打开观测站。"
+        },
+        {
+          "source_range": [
+            12,
+            24
+          ],
+          "text": "相机每分钟记录一张图像。"
+        }
+      ],
+      "source_order": 0,
+      "source_range": [
+        0,
+        24
+      ],
+      "text": "清晨，研究员打开观测站。相机每分钟记录一张图像。"
+    },
+    {
+      "font": "goldcjk",
+      "id": "C2",
+      "lines": [
+        {
+          "baseline": 108,
+          "bbox": [
+            48,
+            94.08,
+            360.0,
+            111.456
+          ],
+          "paragraph_range": [
+            0,
+            26
+          ],
+          "text": "每个样本都有原始页码。页码不能证明文字识别完全准确。"
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            26,
+            37
+          ],
+          "text": "每个样本都有原始页码。"
+        },
+        {
+          "source_range": [
+            37,
+            52
+          ],
+          "text": "页码不能证明文字识别完全准确。"
+        }
+      ],
+      "source_order": 1,
+      "source_range": [
+        26,
+        52
+      ],
+      "text": "每个样本都有原始页码。页码不能证明文字识别完全准确。"
+    },
+    {
+      "font": "goldcjk",
+      "id": "C3",
+      "lines": [
+        {
+          "baseline": 144,
+          "bbox": [
+            48,
+            130.08,
+            396.0,
+            147.456
+          ],
+          "paragraph_range": [
+            0,
+            29
+          ],
+          "text": "左栏结束后，阅读从右栏顶部继续。不能把两栏的文字交错连接。"
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            54,
+            70
+          ],
+          "text": "左栏结束后，阅读从右栏顶部继续。"
+        },
+        {
+          "source_range": [
+            70,
+            83
+          ],
+          "text": "不能把两栏的文字交错连接。"
+        }
+      ],
+      "source_order": 2,
+      "source_range": [
+        54,
+        83
+      ],
+      "text": "左栏结束后，阅读从右栏顶部继续。不能把两栏的文字交错连接。"
+    },
+    {
+      "font": "goldcjk",
+      "id": "C4",
+      "lines": [
+        {
+          "baseline": 180,
+          "bbox": [
+            48,
+            166.08,
+            384.0,
+            183.456
+          ],
+          "paragraph_range": [
+            0,
+            28
+          ],
+          "text": "提问不会改变阅读位置。只有明确要求继续时，才读取下一项。"
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            85,
+            96
+          ],
+          "text": "提问不会改变阅读位置。"
+        },
+        {
+          "source_range": [
+            96,
+            113
+          ],
+          "text": "只有明确要求继续时，才读取下一项。"
+        }
+      ],
+      "source_order": 3,
+      "source_range": [
+        85,
+        113
+      ],
+      "text": "提问不会改变阅读位置。只有明确要求继续时，才读取下一项。"
+    }
+  ],
+  "schema": "scanned-pdf-gold/v1",
+  "text": "清晨，研究员打开观测站。相机每分钟记录一张图像。\n\n每个样本都有原始页码。页码不能证明文字识别完全准确。\n\n左栏结束后，阅读从右栏顶部继续。不能把两栏的文字交错连接。\n\n提问不会改变阅读位置。只有明确要求继续时，才读取下一项。"
+}

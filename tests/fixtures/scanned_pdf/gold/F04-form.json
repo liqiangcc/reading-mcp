@@ -1,0 +1,361 @@
+{
+  "fixture": "F04-form",
+  "pages": [
+    {
+      "expected_class": "existing_ocr",
+      "height_points": 842,
+      "mode": "existing_form",
+      "page": 1,
+      "raster_dpi": 300,
+      "regions": [],
+      "rotation": 0,
+      "width_points": 595
+    }
+  ],
+  "paragraphs": [
+    {
+      "font": "goldeng",
+      "id": "E1",
+      "lines": [
+        {
+          "baseline": 72,
+          "bbox": [
+            48,
+            60.861328,
+            515.90625,
+            74.830078
+          ],
+          "paragraph_range": [
+            0,
+            73
+          ],
+          "text": "The observatory opens before sunrise. Each camera records one image every"
+        },
+        {
+          "baseline": 90,
+          "bbox": [
+            48,
+            78.861328,
+            94.136719,
+            92.830078
+          ],
+          "paragraph_range": [
+            74,
+            81
+          ],
+          "text": "minute."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            0,
+            37
+          ],
+          "text": "The observatory opens before sunrise."
+        },
+        {
+          "source_range": [
+            38,
+            81
+          ],
+          "text": "Each camera records one image every minute."
+        }
+      ],
+      "source_order": 0,
+      "source_range": [
+        0,
+        81
+      ],
+      "text": "The observatory opens before sunrise. Each camera records one image every minute."
+    },
+    {
+      "font": "goldeng",
+      "id": "E2",
+      "lines": [
+        {
+          "baseline": 126,
+          "bbox": [
+            48,
+            114.861328,
+            485.712891,
+            128.830078
+          ],
+          "paragraph_range": [
+            0,
+            73
+          ],
+          "text": "Mira checks the northern lens. Leon writes the exposure time in the field"
+        },
+        {
+          "baseline": 144,
+          "bbox": [
+            48,
+            132.861328,
+            108.099609,
+            146.830078
+          ],
+          "paragraph_range": [
+            74,
+            83
+          ],
+          "text": "notebook."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            83,
+            113
+          ],
+          "text": "Mira checks the northern lens."
+        },
+        {
+          "source_range": [
+            114,
+            166
+          ],
+          "text": "Leon writes the exposure time in the field notebook."
+        }
+      ],
+      "source_order": 1,
+      "source_range": [
+        83,
+        166
+      ],
+      "text": "Mira checks the northern lens. Leon writes the exposure time in the field notebook."
+    },
+    {
+      "font": "goldeng",
+      "id": "E3",
+      "lines": [
+        {
+          "baseline": 180,
+          "bbox": [
+            48,
+            168.861328,
+            495.638672,
+            182.830078
+          ],
+          "paragraph_range": [
+            0,
+            75
+          ],
+          "text": "A clear label connects each sample to its original page. The label does not"
+        },
+        {
+          "baseline": 198,
+          "bbox": [
+            48,
+            186.861328,
+            233.982422,
+            200.830078
+          ],
+          "paragraph_range": [
+            76,
+            105
+          ],
+          "text": "measure recognition accuracy."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            168,
+            224
+          ],
+          "text": "A clear label connects each sample to its original page."
+        },
+        {
+          "source_range": [
+            225,
+            273
+          ],
+          "text": "The label does not measure recognition accuracy."
+        }
+      ],
+      "source_order": 2,
+      "source_range": [
+        168,
+        273
+      ],
+      "text": "A clear label connects each sample to its original page. The label does not measure recognition accuracy."
+    },
+    {
+      "font": "goldeng",
+      "id": "E4",
+      "lines": [
+        {
+          "baseline": 234,
+          "bbox": [
+            48,
+            222.861328,
+            519.732422,
+            236.830078
+          ],
+          "paragraph_range": [
+            0,
+            77
+          ],
+          "text": "The first column ends beside the diagram. Reading continues at the top of the"
+        },
+        {
+          "baseline": 252,
+          "bbox": [
+            48,
+            240.861328,
+            142.599609,
+            254.830078
+          ],
+          "paragraph_range": [
+            78,
+            92
+          ],
+          "text": "second column."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            275,
+            316
+          ],
+          "text": "The first column ends beside the diagram."
+        },
+        {
+          "source_range": [
+            317,
+            367
+          ],
+          "text": "Reading continues at the top of the second column."
+        }
+      ],
+      "source_order": 3,
+      "source_range": [
+        275,
+        367
+      ],
+      "text": "The first column ends beside the diagram. Reading continues at the top of the second column."
+    },
+    {
+      "font": "goldeng",
+      "id": "E5",
+      "lines": [
+        {
+          "baseline": 288,
+          "bbox": [
+            48,
+            276.861328,
+            537.392578,
+            290.830078
+          ],
+          "paragraph_range": [
+            0,
+            79
+          ],
+          "text": "The measured change was -8.8 units, not +8.8 units. Trial 12 used 0.25 grams at"
+        },
+        {
+          "baseline": 306,
+          "bbox": [
+            48,
+            294.861328,
+            86.396484,
+            308.830078
+          ],
+          "paragraph_range": [
+            80,
+            86
+          ],
+          "text": "07:30."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            369,
+            420
+          ],
+          "text": "The measured change was -8.8 units, not +8.8 units."
+        },
+        {
+          "source_range": [
+            421,
+            455
+          ],
+          "text": "Trial 12 used 0.25 grams at 07:30."
+        }
+      ],
+      "source_order": 4,
+      "source_range": [
+        369,
+        455
+      ],
+      "text": "The measured change was -8.8 units, not +8.8 units. Trial 12 used 0.25 grams at 07:30."
+    },
+    {
+      "font": "goldeng",
+      "id": "E6",
+      "lines": [
+        {
+          "baseline": 342,
+          "bbox": [
+            48,
+            330.861328,
+            532.962891,
+            344.830078
+          ],
+          "paragraph_range": [
+            0,
+            78
+          ],
+          "text": "Questions do not advance the saved reading position. An explicit request moves"
+        },
+        {
+          "baseline": 360,
+          "bbox": [
+            48,
+            348.861328,
+            148.904297,
+            362.830078
+          ],
+          "paragraph_range": [
+            79,
+            96
+          ],
+          "text": "to the next item."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            457,
+            509
+          ],
+          "text": "Questions do not advance the saved reading position."
+        },
+        {
+          "source_range": [
+            510,
+            553
+          ],
+          "text": "An explicit request moves to the next item."
+        }
+      ],
+      "source_order": 5,
+      "source_range": [
+        457,
+        553
+      ],
+      "text": "Questions do not advance the saved reading position. An explicit request moves to the next item."
+    }
+  ],
+  "schema": "scanned-pdf-gold/v1",
+  "text": "The observatory opens before sunrise. Each camera records one image every minute.\n\nMira checks the northern lens. Leon writes the exposure time in the field notebook.\n\nA clear label connects each sample to its original page. The label does not measure recognition accuracy.\n\nThe first column ends beside the diagram. Reading continues at the top of the second column.\n\nThe measured change was -8.8 units, not +8.8 units. Trial 12 used 0.25 grams at 07:30.\n\nQuestions do not advance the saved reading position. An explicit request moves to the next item."
+}

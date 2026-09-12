@@ -1,0 +1,219 @@
+{
+  "fixture": "F08",
+  "pages": [
+    {
+      "expected_class": "requires_ocr",
+      "height_points": 842,
+      "mode": "scan",
+      "page": 1,
+      "raster_dpi": 300,
+      "regions": [],
+      "rotation": 0,
+      "width_points": 595
+    }
+  ],
+  "paragraphs": [
+    {
+      "font": "goldeng",
+      "id": "E1",
+      "lines": [
+        {
+          "baseline": 72,
+          "bbox": [
+            48,
+            60.861328,
+            515.90625,
+            74.830078
+          ],
+          "paragraph_range": [
+            0,
+            73
+          ],
+          "text": "The observatory opens before sunrise. Each camera records one image every"
+        },
+        {
+          "baseline": 90,
+          "bbox": [
+            48,
+            78.861328,
+            94.136719,
+            92.830078
+          ],
+          "paragraph_range": [
+            74,
+            81
+          ],
+          "text": "minute."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            0,
+            37
+          ],
+          "text": "The observatory opens before sunrise."
+        },
+        {
+          "source_range": [
+            38,
+            81
+          ],
+          "text": "Each camera records one image every minute."
+        }
+      ],
+      "source_order": 0,
+      "source_range": [
+        0,
+        81
+      ],
+      "text": "The observatory opens before sunrise. Each camera records one image every minute."
+    },
+    {
+      "font": "goldcjk",
+      "id": "C1",
+      "lines": [
+        {
+          "baseline": 126,
+          "bbox": [
+            48,
+            112.08,
+            336.0,
+            129.456
+          ],
+          "paragraph_range": [
+            0,
+            24
+          ],
+          "text": "清晨，研究员打开观测站。相机每分钟记录一张图像。"
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            83,
+            95
+          ],
+          "text": "清晨，研究员打开观测站。"
+        },
+        {
+          "source_range": [
+            95,
+            107
+          ],
+          "text": "相机每分钟记录一张图像。"
+        }
+      ],
+      "source_order": 1,
+      "source_range": [
+        83,
+        107
+      ],
+      "text": "清晨，研究员打开观测站。相机每分钟记录一张图像。"
+    },
+    {
+      "font": "goldeng",
+      "id": "E2",
+      "lines": [
+        {
+          "baseline": 162,
+          "bbox": [
+            48,
+            150.861328,
+            485.712891,
+            164.830078
+          ],
+          "paragraph_range": [
+            0,
+            73
+          ],
+          "text": "Mira checks the northern lens. Leon writes the exposure time in the field"
+        },
+        {
+          "baseline": 180,
+          "bbox": [
+            48,
+            168.861328,
+            108.099609,
+            182.830078
+          ],
+          "paragraph_range": [
+            74,
+            83
+          ],
+          "text": "notebook."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            109,
+            139
+          ],
+          "text": "Mira checks the northern lens."
+        },
+        {
+          "source_range": [
+            140,
+            192
+          ],
+          "text": "Leon writes the exposure time in the field notebook."
+        }
+      ],
+      "source_order": 2,
+      "source_range": [
+        109,
+        192
+      ],
+      "text": "Mira checks the northern lens. Leon writes the exposure time in the field notebook."
+    },
+    {
+      "font": "goldcjk",
+      "id": "C2",
+      "lines": [
+        {
+          "baseline": 216,
+          "bbox": [
+            48,
+            202.08,
+            360.0,
+            219.456
+          ],
+          "paragraph_range": [
+            0,
+            26
+          ],
+          "text": "每个样本都有原始页码。页码不能证明文字识别完全准确。"
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            194,
+            205
+          ],
+          "text": "每个样本都有原始页码。"
+        },
+        {
+          "source_range": [
+            205,
+            220
+          ],
+          "text": "页码不能证明文字识别完全准确。"
+        }
+      ],
+      "source_order": 3,
+      "source_range": [
+        194,
+        220
+      ],
+      "text": "每个样本都有原始页码。页码不能证明文字识别完全准确。"
+    }
+  ],
+  "schema": "scanned-pdf-gold/v1",
+  "text": "The observatory opens before sunrise. Each camera records one image every minute.\n\n清晨，研究员打开观测站。相机每分钟记录一张图像。\n\nMira checks the northern lens. Leon writes the exposure time in the field notebook.\n\n每个样本都有原始页码。页码不能证明文字识别完全准确。"
+}

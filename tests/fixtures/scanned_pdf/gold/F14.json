@@ -1,0 +1,419 @@
+{
+  "fixture": "F14",
+  "pages": [
+    {
+      "expected_class": "requires_ocr",
+      "height_points": 842,
+      "mode": "scan",
+      "page": 1,
+      "raster_dpi": 300,
+      "regions": [],
+      "rotation": 0,
+      "width_points": 595
+    }
+  ],
+  "paragraphs": [
+    {
+      "font": "goldeng",
+      "id": "L1",
+      "lines": [
+        {
+          "baseline": 72,
+          "bbox": [
+            48,
+            60.861328,
+            528.011719,
+            74.830078
+          ],
+          "paragraph_range": [
+            0,
+            77
+          ],
+          "text": "sample 1 remains bound to original page 1, sample 2 remains bound to original"
+        },
+        {
+          "baseline": 90,
+          "bbox": [
+            48,
+            78.861328,
+            528.392578,
+            92.830078
+          ],
+          "paragraph_range": [
+            78,
+            154
+          ],
+          "text": "page 1, sample 3 remains bound to original page 1, sample 4 remains bound to"
+        },
+        {
+          "baseline": 108,
+          "bbox": [
+            48,
+            96.861328,
+            519.597656,
+            110.830078
+          ],
+          "paragraph_range": [
+            155,
+            231
+          ],
+          "text": "original page 1, sample 5 remains bound to original page 1, sample 6 remains"
+        },
+        {
+          "baseline": 126,
+          "bbox": [
+            48,
+            114.861328,
+            524.695312,
+            128.830078
+          ],
+          "paragraph_range": [
+            232,
+            309
+          ],
+          "text": "bound to original page 1, sample 7 remains bound to original page 1, sample 8"
+        },
+        {
+          "baseline": 144,
+          "bbox": [
+            48,
+            132.861328,
+            518.167969,
+            146.830078
+          ],
+          "paragraph_range": [
+            310,
+            386
+          ],
+          "text": "remains bound to original page 1, sample 9 remains bound to original page 1,"
+        },
+        {
+          "baseline": 162,
+          "bbox": [
+            48,
+            150.861328,
+            543.28125,
+            164.830078
+          ],
+          "paragraph_range": [
+            387,
+            466
+          ],
+          "text": "sample 10 remains bound to original page 1, sample 11 remains bound to original"
+        },
+        {
+          "baseline": 180,
+          "bbox": [
+            48,
+            168.861328,
+            543.662109,
+            182.830078
+          ],
+          "paragraph_range": [
+            467,
+            545
+          ],
+          "text": "page 1, sample 12 remains bound to original page 1, sample 13 remains bound to"
+        },
+        {
+          "baseline": 198,
+          "bbox": [
+            48,
+            186.861328,
+            534.867188,
+            200.830078
+          ],
+          "paragraph_range": [
+            546,
+            624
+          ],
+          "text": "original page 1, sample 14 remains bound to original page 1, sample 15 remains"
+        },
+        {
+          "baseline": 216,
+          "bbox": [
+            48,
+            204.861328,
+            539.964844,
+            218.830078
+          ],
+          "paragraph_range": [
+            625,
+            704
+          ],
+          "text": "bound to original page 1, sample 16 remains bound to original page 1, sample 17"
+        },
+        {
+          "baseline": 234,
+          "bbox": [
+            48,
+            222.861328,
+            525.802734,
+            236.830078
+          ],
+          "paragraph_range": [
+            705,
+            782
+          ],
+          "text": "remains bound to original page 1, sample 18 remains bound to original page 1,"
+        },
+        {
+          "baseline": 252,
+          "bbox": [
+            48,
+            240.861328,
+            543.28125,
+            254.830078
+          ],
+          "paragraph_range": [
+            783,
+            862
+          ],
+          "text": "sample 19 remains bound to original page 1, sample 20 remains bound to original"
+        },
+        {
+          "baseline": 270,
+          "bbox": [
+            48,
+            258.861328,
+            543.662109,
+            272.830078
+          ],
+          "paragraph_range": [
+            863,
+            941
+          ],
+          "text": "page 1, sample 21 remains bound to original page 1, sample 22 remains bound to"
+        },
+        {
+          "baseline": 288,
+          "bbox": [
+            48,
+            276.861328,
+            534.867188,
+            290.830078
+          ],
+          "paragraph_range": [
+            942,
+            1020
+          ],
+          "text": "original page 1, sample 23 remains bound to original page 1, sample 24 remains"
+        },
+        {
+          "baseline": 306,
+          "bbox": [
+            48,
+            294.861328,
+            539.964844,
+            308.830078
+          ],
+          "paragraph_range": [
+            1021,
+            1100
+          ],
+          "text": "bound to original page 1, sample 25 remains bound to original page 1, sample 26"
+        },
+        {
+          "baseline": 324,
+          "bbox": [
+            48,
+            312.861328,
+            525.802734,
+            326.830078
+          ],
+          "paragraph_range": [
+            1101,
+            1178
+          ],
+          "text": "remains bound to original page 1, sample 27 remains bound to original page 1,"
+        },
+        {
+          "baseline": 342,
+          "bbox": [
+            48,
+            330.861328,
+            543.28125,
+            344.830078
+          ],
+          "paragraph_range": [
+            1179,
+            1258
+          ],
+          "text": "sample 28 remains bound to original page 1, sample 29 remains bound to original"
+        },
+        {
+          "baseline": 360,
+          "bbox": [
+            48,
+            348.861328,
+            543.662109,
+            362.830078
+          ],
+          "paragraph_range": [
+            1259,
+            1337
+          ],
+          "text": "page 1, sample 30 remains bound to original page 1, sample 31 remains bound to"
+        },
+        {
+          "baseline": 378,
+          "bbox": [
+            48,
+            366.861328,
+            534.867188,
+            380.830078
+          ],
+          "paragraph_range": [
+            1338,
+            1416
+          ],
+          "text": "original page 1, sample 32 remains bound to original page 1, sample 33 remains"
+        },
+        {
+          "baseline": 396,
+          "bbox": [
+            48,
+            384.861328,
+            539.964844,
+            398.830078
+          ],
+          "paragraph_range": [
+            1417,
+            1496
+          ],
+          "text": "bound to original page 1, sample 34 remains bound to original page 1, sample 35"
+        },
+        {
+          "baseline": 414,
+          "bbox": [
+            48,
+            402.861328,
+            525.802734,
+            416.830078
+          ],
+          "paragraph_range": [
+            1497,
+            1574
+          ],
+          "text": "remains bound to original page 1, sample 36 remains bound to original page 1,"
+        },
+        {
+          "baseline": 432,
+          "bbox": [
+            48,
+            420.861328,
+            543.28125,
+            434.830078
+          ],
+          "paragraph_range": [
+            1575,
+            1654
+          ],
+          "text": "sample 37 remains bound to original page 1, sample 38 remains bound to original"
+        },
+        {
+          "baseline": 450,
+          "bbox": [
+            48,
+            438.861328,
+            543.662109,
+            452.830078
+          ],
+          "paragraph_range": [
+            1655,
+            1733
+          ],
+          "text": "page 1, sample 39 remains bound to original page 1, sample 40 remains bound to"
+        },
+        {
+          "baseline": 468,
+          "bbox": [
+            48,
+            456.861328,
+            534.867188,
+            470.830078
+          ],
+          "paragraph_range": [
+            1734,
+            1812
+          ],
+          "text": "original page 1, sample 41 remains bound to original page 1, sample 42 remains"
+        },
+        {
+          "baseline": 486,
+          "bbox": [
+            48,
+            474.861328,
+            539.964844,
+            488.830078
+          ],
+          "paragraph_range": [
+            1813,
+            1892
+          ],
+          "text": "bound to original page 1, sample 43 remains bound to original page 1, sample 44"
+        },
+        {
+          "baseline": 504,
+          "bbox": [
+            48,
+            492.861328,
+            525.802734,
+            506.830078
+          ],
+          "paragraph_range": [
+            1893,
+            1970
+          ],
+          "text": "remains bound to original page 1, sample 45 remains bound to original page 1,"
+        },
+        {
+          "baseline": 522,
+          "bbox": [
+            48,
+            510.861328,
+            543.28125,
+            524.830078
+          ],
+          "paragraph_range": [
+            1971,
+            2050
+          ],
+          "text": "sample 46 remains bound to original page 1, sample 47 remains bound to original"
+        },
+        {
+          "baseline": 540,
+          "bbox": [
+            48,
+            528.861328,
+            367.306641,
+            542.830078
+          ],
+          "paragraph_range": [
+            2051,
+            2102
+          ],
+          "text": "page 1, sample 48 remains bound to original page 1."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            0,
+            2102
+          ],
+          "text": "sample 1 remains bound to original page 1, sample 2 remains bound to original page 1, sample 3 remains bound to original page 1, sample 4 remains bound to original page 1, sample 5 remains bound to original page 1, sample 6 remains bound to original page 1, sample 7 remains bound to original page 1, sample 8 remains bound to original page 1, sample 9 remains bound to original page 1, sample 10 remains bound to original page 1, sample 11 remains bound to original page 1, sample 12 remains bound to original page 1, sample 13 remains bound to original page 1, sample 14 remains bound to original page 1, sample 15 remains bound to original page 1, sample 16 remains bound to original page 1, sample 17 remains bound to original page 1, sample 18 remains bound to original page 1, sample 19 remains bound to original page 1, sample 20 remains bound to original page 1, sample 21 remains bound to original page 1, sample 22 remains bound to original page 1, sample 23 remains bound to original page 1, sample 24 remains bound to original page 1, sample 25 remains bound to original page 1, sample 26 remains bound to original page 1, sample 27 remains bound to original page 1, sample 28 remains bound to original page 1, sample 29 remains bound to original page 1, sample 30 remains bound to original page 1, sample 31 remains bound to original page 1, sample 32 remains bound to original page 1, sample 33 remains bound to original page 1, sample 34 remains bound to original page 1, sample 35 remains bound to original page 1, sample 36 remains bound to original page 1, sample 37 remains bound to original page 1, sample 38 remains bound to original page 1, sample 39 remains bound to original page 1, sample 40 remains bound to original page 1, sample 41 remains bound to original page 1, sample 42 remains bound to original page 1, sample 43 remains bound to original page 1, sample 44 remains bound to original page 1, sample 45 remains bound to original page 1, sample 46 remains bound to original page 1, sample 47 remains bound to original page 1, sample 48 remains bound to original page 1."
+        }
+      ],
+      "source_order": 0,
+      "source_range": [
+        0,
+        2102
+      ],
+      "text": "sample 1 remains bound to original page 1, sample 2 remains bound to original page 1, sample 3 remains bound to original page 1, sample 4 remains bound to original page 1, sample 5 remains bound to original page 1, sample 6 remains bound to original page 1, sample 7 remains bound to original page 1, sample 8 remains bound to original page 1, sample 9 remains bound to original page 1, sample 10 remains bound to original page 1, sample 11 remains bound to original page 1, sample 12 remains bound to original page 1, sample 13 remains bound to original page 1, sample 14 remains bound to original page 1, sample 15 remains bound to original page 1, sample 16 remains bound to original page 1, sample 17 remains bound to original page 1, sample 18 remains bound to original page 1, sample 19 remains bound to original page 1, sample 20 remains bound to original page 1, sample 21 remains bound to original page 1, sample 22 remains bound to original page 1, sample 23 remains bound to original page 1, sample 24 remains bound to original page 1, sample 25 remains bound to original page 1, sample 26 remains bound to original page 1, sample 27 remains bound to original page 1, sample 28 remains bound to original page 1, sample 29 remains bound to original page 1, sample 30 remains bound to original page 1, sample 31 remains bound to original page 1, sample 32 remains bound to original page 1, sample 33 remains bound to original page 1, sample 34 remains bound to original page 1, sample 35 remains bound to original page 1, sample 36 remains bound to original page 1, sample 37 remains bound to original page 1, sample 38 remains bound to original page 1, sample 39 remains bound to original page 1, sample 40 remains bound to original page 1, sample 41 remains bound to original page 1, sample 42 remains bound to original page 1, sample 43 remains bound to original page 1, sample 44 remains bound to original page 1, sample 45 remains bound to original page 1, sample 46 remains bound to original page 1, sample 47 remains bound to original page 1, sample 48 remains bound to original page 1."
+    }
+  ],
+  "schema": "scanned-pdf-gold/v1",
+  "text": "sample 1 remains bound to original page 1, sample 2 remains bound to original page 1, sample 3 remains bound to original page 1, sample 4 remains bound to original page 1, sample 5 remains bound to original page 1, sample 6 remains bound to original page 1, sample 7 remains bound to original page 1, sample 8 remains bound to original page 1, sample 9 remains bound to original page 1, sample 10 remains bound to original page 1, sample 11 remains bound to original page 1, sample 12 remains bound to original page 1, sample 13 remains bound to original page 1, sample 14 remains bound to original page 1, sample 15 remains bound to original page 1, sample 16 remains bound to original page 1, sample 17 remains bound to original page 1, sample 18 remains bound to original page 1, sample 19 remains bound to original page 1, sample 20 remains bound to original page 1, sample 21 remains bound to original page 1, sample 22 remains bound to original page 1, sample 23 remains bound to original page 1, sample 24 remains bound to original page 1, sample 25 remains bound to original page 1, sample 26 remains bound to original page 1, sample 27 remains bound to original page 1, sample 28 remains bound to original page 1, sample 29 remains bound to original page 1, sample 30 remains bound to original page 1, sample 31 remains bound to original page 1, sample 32 remains bound to original page 1, sample 33 remains bound to original page 1, sample 34 remains bound to original page 1, sample 35 remains bound to original page 1, sample 36 remains bound to original page 1, sample 37 remains bound to original page 1, sample 38 remains bound to original page 1, sample 39 remains bound to original page 1, sample 40 remains bound to original page 1, sample 41 remains bound to original page 1, sample 42 remains bound to original page 1, sample 43 remains bound to original page 1, sample 44 remains bound to original page 1, sample 45 remains bound to original page 1, sample 46 remains bound to original page 1, sample 47 remains bound to original page 1, sample 48 remains bound to original page 1."
+}

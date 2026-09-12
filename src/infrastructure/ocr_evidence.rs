@@ -8,6 +8,25 @@ pub struct FileOcrEvidenceStore {
     root: PathBuf,
 }
 
+struct TempFileGuard(Option<PathBuf>);
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 impl FileOcrEvidenceStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -56,6 +75,7 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
                 .unwrap()
                 .as_nanos()
         ));
+        let mut temp_guard = TempFileGuard::new(tmp.clone());
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -70,14 +90,33 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
             .await
             .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
         drop(file);
-        if let Err(e) = tokio::fs::rename(&tmp, &target).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(ApplicationError::CacheFailed(e.to_string()));
+        match tokio::fs::hard_link(&tmp, &target).await {
+            Ok(()) => {
+                tokio::fs::remove_file(&tmp)
+                    .await
+                    .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+                temp_guard.disarm();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = tokio::fs::read(&target)
+                    .await
+                    .map_err(|read_error| ApplicationError::CacheFailed(read_error.to_string()))?;
+                if existing != envelope {
+                    return Err(ApplicationError::CacheFailed("evidence collision".into()));
+                }
+                tokio::fs::remove_file(&tmp).await.map_err(|remove_error| {
+                    ApplicationError::CacheFailed(remove_error.to_string())
+                })?;
+                temp_guard.disarm();
+            }
+            Err(e) => return Err(ApplicationError::CacheFailed(e.to_string())),
         }
-        std::fs::File::open(&self.root)
-            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?
-            .sync_all()
-            .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?;
+        sync_directory(&self.root)?;
+        if let Some(parent) = self.root.parent() {
+            if parent != self.root {
+                sync_directory(parent)?;
+            }
+        }
         Ok(digest)
     }
     async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError> {
@@ -126,6 +165,13 @@ impl OcrEvidenceStore for FileOcrEvidenceStore {
             Err(e) => Err(ApplicationError::CacheFailed(e.to_string())),
         }
     }
+}
+
+fn sync_directory(path: &std::path::Path) -> Result<(), ApplicationError> {
+    std::fs::File::open(path)
+        .map_err(|e| ApplicationError::CacheFailed(e.to_string()))?
+        .sync_all()
+        .map_err(|e| ApplicationError::CacheFailed(e.to_string()))
 }
 
 #[cfg(test)]
@@ -182,5 +228,34 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(store.get(&first).await.unwrap(), Some(b"\0b".to_vec()));
         assert_eq!(store.get(&second).await.unwrap(), Some(b"b".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn concurrent_put_has_one_final_blob_and_no_temporary_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(FileOcrEvidenceStore::new(directory.path()));
+        let tasks = (0..8).map(|_| {
+            let store = store.clone();
+            tokio::spawn(async move { store.put_immutable("same", b"payload").await.unwrap() })
+        });
+        let digests = futures_join(tasks).await;
+        assert!(digests.iter().all(|digest| digest == &digests[0]));
+        let mut entries = tokio::fs::read_dir(directory.path()).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name());
+        }
+        assert_eq!(names.len(), 1);
+        assert!(!names[0].to_string_lossy().starts_with('.'));
+    }
+
+    async fn futures_join<T>(
+        tasks: impl IntoIterator<Item = tokio::task::JoinHandle<T>>,
+    ) -> Vec<T> {
+        let mut values = Vec::new();
+        for task in tasks {
+            values.push(task.await.unwrap());
+        }
+        values
     }
 }

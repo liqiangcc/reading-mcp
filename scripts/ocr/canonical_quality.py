@@ -22,7 +22,7 @@ def main():
     for case in ("F02","F06","F07","F08","F14"):
         config["languages"] = ["chi_sim"] if case == "F07" else (["eng","chi_sim"] if case == "F08" else ["eng"])
         try:
-            identity={"config":config,"dependencies":ns["fingerprint_dependencies"](config),"sha256":"quality"}
+            identity=ns["runtime_identity"](config,ns["fingerprint_dependencies"](config))
             cmd=[sys.executable,"-I","-c",a.worker.read_text(),"2000","134217728","16000000",json.dumps(config),json.dumps(identity)]
             raw=(a.fixtures/"pdf"/(case+".pdf")).read_bytes(); proc=subprocess.run(cmd,input=raw,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90,check=True); result=json.loads(proc.stdout)
             canonical_blocks=[b for s in result["sections"] for b in s["blocks"] if b["kind"]=="paragraph"]

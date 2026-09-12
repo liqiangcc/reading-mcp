@@ -101,6 +101,9 @@ impl OpenDocumentUseCase {
             .await?;
 
         let document = self.parser.parse(resource).await?;
+        document
+            .validate_ocr_publication()
+            .map_err(ApplicationError::ParseFailed)?;
         let paragraph_units = document.try_paragraph_text_units().map_err(|error| {
             ApplicationError::TextUnitIndexFailed(format!(
                 "cannot build current Paragraph coverage from persisted block evidence: {error}"

@@ -54,3 +54,27 @@ F08 为 9/217（4.15%），F14 为 1/2102（0.048%）。这些是原始诊断数
 既定 NFC + whitespace 规则与冻结 gold 比较。引擎段边界投影诊断如另加，必须
 单独命名、保留原 raw 指标，且不得使用 gold 指导输出边界。raw/gold-region、
 逐 gold 段指标以及 Actions green 均不能替代最终集成门禁。
+
+## 区域重试与发布身份（实现中，待当前 head hosted 验证和主控审查）
+
+`dce7ebc6241a35f97fa3f92900ac8298b022d4cd` 的
+[真实 worker / Rust integration / canonical gate](https://github.com/liqiangcc/reading-mcp/actions/runs/34689505621)
+通过：F02/F06 CER 0/548、WER 0/91；F07 CER 1/110；F08 CER 0/217、WER 0/26；
+F14 CER 1/2102、WER 1/384。这是五例已接入质量门槛，非整个第 7 节验收完成。
+
+后续代码把 `ocr-regional-retry/v1` 的固定主/重试 PSM、重试上限、几何阈值和
+像素容差纳入 runtime identity 的结构化序列化。旧的不含 policy 的 lookup key
+自然 miss；全局 normalization v11/hash v3 不复用另一含义，新增 OCR 子协议明确
+使用 `ocr-derivation/v2` 与 `ocr-evidence/v2`。历史未发布 OCR v1 Document 需要
+显式 reopen，不删除旧 blob、原始 PDF 或 canonical 数据。
+
+完整 typed blob 保存 source hash、runtime identity、按页 primary/retry attempts、
+组件 ROI、稳定 box/line/word 引用及 selected words。Rust 拒绝无效坐标/置信度、
+缺失/重叠组件、不存在的引用、未覆盖原词中心的候选，以及与 raw attempts 不一致
+的 selected evidence。先写完整 immutable blob，再将实际 blob digest 与真实
+OriginalSourceBindingMap digest 填入 typed derivation；normalized hash v3 绑定这些字段。
+OpenDocument/缓存/仓库发布和加载路径拒绝坏 derivation 或 binding mismatch。
+
+本节新增代码须由当前 head Actions 验证。仍未完成：所有冻结 fixture 的完整 MCP
+质量/边界/locator 验收、混合页与 visual 分类闭环、共享预算/进程树隔离与取消、
+离线依赖包、生产资源和 connector 时限实测、最终主控审查及 release/package/deploy。

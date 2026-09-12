@@ -5,7 +5,7 @@ ROOT = Path(__file__).parents[2]
 worker = ROOT / "src/parsing/pdf_layout_worker.py"
 config = {"enabled": True, "engine_path": "/usr/bin/tesseract", "tessdata_path": "/usr/share/tesseract-ocr/5/tessdata", "languages": ["chi_sim"], "operator_revision": "1", "dpi": 300, "oem": 1, "psm": 3, "detector_version": "pdf-layout/v1", "protocol_version": "pdf-layout/v1"}
 ns = {}; exec(worker.read_text(), ns)
-identity = {"config": config, "dependencies": ns["fingerprint_dependencies"](config), "sha256": "probe"}
+identity = ns["runtime_identity"](config, ns["fingerprint_dependencies"](config))
 pdf = ROOT / "tests/fixtures/scanned_pdf/pdf/F07.pdf"
 cmd = [sys.executable, "-I", "-c", worker.read_text(), "2000", "134217728", "16000000", json.dumps(config), json.dumps(identity)]
 ok = subprocess.run(cmd, input=pdf.read_bytes(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)

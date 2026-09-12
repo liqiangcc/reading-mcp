@@ -132,10 +132,16 @@ impl Parser for CachingParser {
         };
 
         if let Some(document) = self.cache.get(&key).await? {
+            document
+                .validate_ocr_publication()
+                .map_err(ApplicationError::CacheFailed)?;
             return Ok(document);
         }
 
         let document = self.inner.parse(resource).await?;
+        document
+            .validate_ocr_publication()
+            .map_err(ApplicationError::CacheFailed)?;
         self.cache.put(key, document.clone()).await?;
         Ok(document)
     }

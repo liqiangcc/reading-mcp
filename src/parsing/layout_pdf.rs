@@ -12,9 +12,9 @@ use super::common::{content_hash, document_id, title_from_metadata};
 use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, RetrievedResource};
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
-    NormalizedBlockProvenance, NormalizedTextRange, OcrConfig, OcrDerivation, OcrEvidenceRecord,
-    OcrRuntimeIdentity, OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget,
-    Section, SectionId,
+    NormalizedBlockProvenance, NormalizedTextRange, OcrConfig, OcrDerivation, OcrEvidenceBlob,
+    OcrEvidenceRecord, OcrPageObservations, OcrRuntimeIdentity, OriginalSourceBinding,
+    OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
 use crate::infrastructure::ResourceBudget;
 
@@ -145,9 +145,11 @@ impl Parser for LayoutPdfParser {
         let payload: LayoutResult = serde_json::from_slice(&output).map_err(failed)?;
         let evidence = payload.ocr_evidence.clone();
         let derivation = payload.ocr_derivation.clone();
+        let attempts = payload.ocr_attempts.clone();
+        let page_count = payload.page_count;
         let mut document = project(resource, payload, &self.budget)?;
-        if !evidence.is_empty() {
-            let derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
+        if !evidence.is_empty() || !attempts.is_empty() {
+            let mut derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
             let identity = self
                 .ocr_identity
                 .as_ref()
@@ -178,29 +180,42 @@ impl Parser for LayoutPdfParser {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(u32::MAX),
             )?;
-            let bytes = serde_json::to_vec(&evidence).map_err(failed)?;
+            let blob = OcrEvidenceBlob {
+                schema: "ocr-evidence/v2".into(),
+                original_sha256: derivation.original_sha256.clone(),
+                runtime_identity: identity.clone(),
+                pages: attempts,
+                selected_words: evidence,
+            };
+            blob.validate(page_count).map_err(failed)?;
+            let bytes = serde_json::to_vec(&blob).map_err(failed)?;
             let store = self
                 .evidence_store
                 .as_ref()
                 .ok_or_else(|| failed("OCR evidence store is not configured"))?;
             let identity = document.content_hash.0.clone();
             let digest = store.put_immutable(&identity, &bytes).await?;
-            document.metadata.insert("ocr_evidence_blob".into(), digest);
+            document
+                .metadata
+                .insert("ocr_evidence_blob".into(), digest.clone());
+            derivation.evidence_blob = Some(digest);
             let map = document
                 .original_source_binding_map()
                 .map_err(failed)?
                 .ok_or_else(|| failed("missing binding map"))?;
             let map_bytes = serde_json::to_vec(&map).map_err(failed)?;
             use sha2::{Digest, Sha256};
-            document.metadata.insert(
-                "original_binding_map_digest".into(),
-                format!("sha256:{:x}", Sha256::digest(map_bytes)),
-            );
+            let binding_digest = format!("sha256:{:x}", Sha256::digest(map_bytes));
+            derivation.binding_map_sha256 = Some(binding_digest.clone());
+            document
+                .metadata
+                .insert("original_binding_map_digest".into(), binding_digest);
             document.metadata.insert(
                 "ocr_derivation".into(),
                 serde_json::to_string(&derivation).map_err(failed)?,
             );
         }
+        document.validate_ocr_publication().map_err(failed)?;
         Ok(document)
     }
 }
@@ -250,6 +265,8 @@ struct LayoutResult {
     ocr_evidence: Vec<OcrEvidenceRecord>,
     #[serde(default)]
     ocr_derivation: Option<OcrDerivation>,
+    #[serde(default)]
+    ocr_attempts: Vec<OcrPageObservations>,
 }
 #[derive(Deserialize)]
 struct LayoutSection {

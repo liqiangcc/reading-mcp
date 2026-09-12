@@ -65,10 +65,55 @@ async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
         .unwrap()
         .unwrap();
     assert!(!blob.is_empty());
+    let persisted: reading_mcp::domain::OcrEvidenceBlob = serde_json::from_slice(&blob).unwrap();
+    persisted.validate(1).unwrap();
+    assert_eq!(persisted.runtime_identity, identity);
+    assert_eq!(persisted.pages.len(), 1);
+    assert_eq!(persisted.pages[0].attempts.len(), 2);
+    assert_eq!(persisted.pages[0].selection.len(), 4);
+    assert!(
+        persisted.pages[0]
+            .components
+            .iter()
+            .all(|c| !c.replaced_refs.is_empty())
+    );
+    assert_eq!(
+        derivation.evidence_blob.as_ref(),
+        document.metadata.get("ocr_evidence_blob")
+    );
+    document.validate_ocr_publication().unwrap();
+    // A changed discarded observation cannot be passed off as the same blob.
+    let mut tampered = persisted.clone();
+    tampered.pages[0].selection[0].source.r#box = usize::MAX;
+    assert!(tampered.validate(1).is_err());
+    let mut tampered = persisted.clone();
+    tampered.pages[0].complete = false;
+    assert!(tampered.validate(1).is_err());
+    let mut tampered = persisted.clone();
+    tampered.pages[0].attempts[0].boxes[0].textlines[0].spans[0].confidence = Some(101.0);
+    assert!(tampered.validate(1).is_err());
+    let mut tampered = persisted.clone();
+    tampered.selected_words[0].text.push('x');
+    assert!(tampered.validate(1).is_err());
     let map = document.original_source_binding_map().unwrap().unwrap();
     assert!(!map.bindings.is_empty());
     assert!(map.bindings.iter().all(|b| matches!(
         b.target,
         reading_mcp::domain::OriginalSourceTarget::Page { page_number: 1 }
     )));
+    let mut changed = document.clone();
+    let mut changed_map = map;
+    changed_map.bindings[0].target =
+        reading_mcp::domain::OriginalSourceTarget::Page { page_number: 2 };
+    changed
+        .set_original_source_binding_map(changed_map)
+        .unwrap();
+    assert_ne!(
+        changed.normalized_document_hash(),
+        document.normalized_document_hash()
+    );
+    assert!(changed.validate_ocr_publication().is_err());
+    let mut changed = document.clone();
+    changed.metadata.insert("ocr_derivation".into(), "{".into());
+    assert!(changed.validate_ocr_publication().is_err());
 }

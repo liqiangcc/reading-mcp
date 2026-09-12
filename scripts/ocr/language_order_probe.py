@@ -33,7 +33,7 @@ def main():
             item = {"languages": languages, "psm": psm}
             try:
                 deps = ns["fingerprint_dependencies"](config)
-                identity = {"config": config, "dependencies": deps, "sha256": "language-order-probe"}
+                identity = ns["runtime_identity"](config, deps)
                 cmd = [sys.executable, "-I", "-c", worker.read_text(), "2000", "134217728", "16000000", json.dumps(config), json.dumps(identity)]
                 proc = subprocess.run(cmd, input=(p / "pdf" / f"{case}.pdf").read_bytes(), stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, timeout=90, check=True)

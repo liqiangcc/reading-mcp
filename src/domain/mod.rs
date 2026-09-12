@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 mod normalized_block;
 mod normalized_text;
 mod ocr;
+mod ocr_observations;
 mod original_source;
 mod text_locator;
 mod text_unit;
@@ -20,8 +21,9 @@ pub use normalized_text::{
 };
 pub use ocr::{
     DependencyFingerprint, OcrConfig, OcrDerivation, OcrEvidenceRecord, OcrPageBinding,
-    OcrRuntimeIdentity,
+    OcrRetryPolicy, OcrRuntimeIdentity,
 };
+pub use ocr_observations::{OcrEvidenceBlob, OcrPageObservations};
 pub use original_source::{
     ORIGINAL_SOURCE_BINDING_COUNT_METADATA_KEY, ORIGINAL_SOURCE_BINDING_METADATA_KEY,
     ORIGINAL_SOURCE_BINDING_MODEL_VERSION, ORIGINAL_SOURCE_BINDING_VERSION_METADATA_KEY,

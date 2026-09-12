@@ -20,6 +20,20 @@ VERSION = "pdf-layout/v1"
 ENGINE = "pymupdf4llm-layout/1.28.2"
 OCR_CONFIG = {"enabled": False}
 EXPECTED_IDENTITY = None
+RETRY_POLICY = {"version": "ocr-regional-retry/v1", "primary_psm": 3,
+                "retry_psm": 6, "max_retries_per_page": 1, "overlap_percent": 90,
+                "vertical_overlap_percent": 50, "roi_padding_pixels": 2}
+
+def runtime_identity(config, dependencies):
+    # Match Rust struct field order and serde_json's compact UTF-8 encoding.
+    fields = ("enabled", "engine_path", "tessdata_path", "languages", "operator_revision",
+              "dpi", "oem", "psm", "detector_version", "protocol_version")
+    ordered_config = {key: config[key] for key in fields}
+    dependencies = sorted(dependencies, key=lambda d: d["name"])
+    encoded = json.dumps([ordered_config, RETRY_POLICY, dependencies],
+                         ensure_ascii=False, separators=(",", ":")).encode()
+    return {"config": ordered_config, "retry_policy": RETRY_POLICY,
+            "dependencies": dependencies, "sha256": "sha256:" + hashlib.sha256(encoded).hexdigest()}
 
 def fingerprint_dependencies(config):
     def sha(path):
@@ -144,7 +158,7 @@ def _attempt_reference(page, attempt, box, line=None, word=None):
         reference["word"] = word
     return reference
 
-def _regional_evidence(page, primary, retry, selected, components):
+def _regional_evidence(page, bounds, primary, retry, selected, components):
     """References address immutable observations, not projected text or gold."""
     attempts = [{"id": "primary", "psm": 3, "boxes": primary}]
     if retry is not None:
@@ -163,10 +177,9 @@ def _regional_evidence(page, primary, retry, selected, components):
                       for line_index, line in enumerate(box.get("textlines", []))
                       for word_index, _ in enumerate(line.get("spans", []))],
         })
-    return {"schema": "ocr-regional-observations/v1", "page": page,
+    return {"schema": "ocr-regional-observations/v1", "page": page, "page_bounds": bounds,
             "complete": all(component["resolved"] for component in components),
-            "attempts": attempts, "selection": selection, "components": components,
-            "primary_boxes": primary, "retry_boxes": retry or []}
+            "attempts": attempts, "selection": selection, "components": components}
 
 def _regional_ocr(page, excluded_regions=()):
     global OCR_CONFIG
@@ -192,7 +205,7 @@ def _regional_ocr(page, excluded_regions=()):
             if changed: break
     page_number = page.number + 1
     if not components:
-        return primary, _regional_evidence(page_number, primary, None, primary, [])
+        return primary, _regional_evidence(page_number, [0,0,page.rect.width,page.rect.height], primary, None, primary, [])
     original=list(primary); retry_config=dict(OCR_CONFIG); retry_config["psm"]=6
     saved=OCR_CONFIG; OCR_CONFIG=retry_config
     try: retry=ocr_page(page, excluded_regions=excluded_regions) or []
@@ -218,7 +231,7 @@ def _regional_ocr(page, excluded_regions=()):
     for i,box in enumerate(original):
         if i in by_first: selected.extend(by_first[i])
         if i not in members: selected.append(box)
-    return selected, _regional_evidence(page_number, original, retry, selected, diagnostics)
+    return selected, _regional_evidence(page_number, rect, original, retry, selected, diagnostics)
 
 
 def line_text(line):
@@ -377,6 +390,9 @@ def main():
         if EXPECTED_IDENTITY is None: raise ValueError("OCR expected identity is required")
         actual_dependencies = fingerprint_dependencies(OCR_CONFIG)
         if EXPECTED_IDENTITY.get("dependencies") != actual_dependencies: raise ValueError("OCR dependency identity mismatch")
+        actual_identity = runtime_identity(OCR_CONFIG, actual_dependencies)
+        if EXPECTED_IDENTITY != actual_identity:
+            raise ValueError("OCR policy/runtime identity mismatch")
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):
         if importlib.metadata.version(package) != "1.28.2":
             raise ValueError(f"{package} must be version 1.28.2; run setup-pdf-layout.sh")
@@ -426,7 +442,8 @@ def main():
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
                 return digest.hexdigest()
             language = "+".join(OCR_CONFIG["languages"])
-            result["ocr_derivation"] = {"schema": "ocr-derivation/v1", "original_sha256": hashlib.sha256(raw).hexdigest(),
+            result["ocr_derivation"] = {"schema": "ocr-derivation/v2", "original_sha256": hashlib.sha256(raw).hexdigest(),
+                "retry_policy": RETRY_POLICY, "runtime_identity_sha256": actual_identity["sha256"],
                 "engine_sha256": next(d["sha256"] for d in actual_dependencies if d["name"] == "engine"), "model_sha256": [d["sha256"] for d in actual_dependencies if d["name"].startswith("model:")],
                 "library_sha256": [d["sha256"] for d in actual_dependencies if d["name"].startswith("library:")], "languages": OCR_CONFIG["languages"], "dpi": OCR_CONFIG["dpi"], "oem": OCR_CONFIG["oem"], "psm": OCR_CONFIG["psm"],
                 "detector_version": OCR_CONFIG["detector_version"], "protocol_version": OCR_CONFIG["protocol_version"],

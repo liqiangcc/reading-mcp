@@ -7,11 +7,81 @@ import contextlib
 import importlib.metadata
 import json
 import re
+import csv
+import os
+import subprocess
+import tempfile
 import sys
 import unicodedata
 
 VERSION = "pdf-layout/v1"
 ENGINE = "pymupdf4llm-layout/1.28.2"
+
+def cjk(value):
+    return value and ("\u3400" <= value <= "\u9fff" or "\uf900" <= value <= "\ufaff")
+
+
+def ocr_page(page, language):
+    """Run the deployer-selected local Tesseract and retain engine grouping."""
+    with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
+        image = os.path.join(directory, "page.png")
+        output = os.path.join(directory, "words")
+        pixmap = page.get_pixmap(dpi=300, colorspace=pymupdf.csRGB, alpha=False)
+        scale_x = pixmap.width / page.rect.width
+        scale_y = pixmap.height / page.rect.height
+        pixmap.save(image)
+        command = [os.environ.get("READING_MCP_OCR_ENGINE", "/usr/bin/tesseract"), image, output,
+                   "--tessdata-dir", os.environ.get("READING_MCP_OCR_TESSDATA", "/usr/share/tesseract-ocr/5/tessdata"),
+                   "-l", language, "--oem", "1", "--psm", "3", "--dpi", "300", "tsv"]
+        try:
+            subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, timeout=15, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"})
+        except FileNotFoundError as error:
+            raise RuntimeError("local OCR engine is not installed") from error
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("local OCR page exceeded 15 second budget") from error
+        rows = []
+        with open(output + ".tsv", encoding="utf-8", newline="") as stream:
+            for row in csv.DictReader(stream, delimiter="\t"):
+                if row.get("level") == "5" and row.get("text", "").strip():
+                    rows.append(row)
+        lines = {}
+        for row in rows:
+            key = (int(row["block_num"]), int(row["par_num"]), int(row["line_num"]))
+            lines.setdefault(key, []).append(row)
+        textlines = []
+        for words in lines.values():
+            words.sort(key=lambda item: int(item["left"]))
+            text = ""
+            for item in words:
+                token = item["text"]
+                if text and not (cjk(text[-1]) and cjk(token[0])):
+                    text += " "
+                text += token
+            left = min(int(item["left"]) for item in words) / scale_x
+            top = min(int(item["top"]) for item in words) / scale_y
+            right = max(int(item["left"]) + int(item["width"]) for item in words) / scale_x
+            bottom = max(int(item["top"]) + int(item["height"]) for item in words) / scale_y
+            textlines.append({"text": text, "bbox": [left, top, right, bottom],
+                              "spans": [{"text": item["text"], "bbox": [int(item["left"]) / scale_x,
+                              int(item["top"]) / scale_y,
+                              (int(item["left"]) + int(item["width"])) / scale_x,
+                              (int(item["top"]) + int(item["height"])) / scale_y],
+                              "flags": 0, "ocr_block": key[0], "ocr_paragraph": key[1],
+                              "ocr_line": key[2], "confidence": float(item["conf"])} for item in words]})
+        if not textlines:
+            return None
+        boxes = []
+        by_block = {}
+        for line in textlines:
+            first = line["spans"][0]
+            by_block.setdefault((first["ocr_block"], first["ocr_paragraph"]), []).append(line)
+        for (block, paragraph), block_lines in by_block.items():
+            boxes.append({"boxclass": "text", "bbox": [min(l["bbox"][0] for l in block_lines),
+                        min(l["bbox"][1] for l in block_lines), max(l["bbox"][2] for l in block_lines),
+                        max(l["bbox"][3] for l in block_lines)], "textlines": block_lines,
+                         "ocr_block": block, "ocr_paragraph": paragraph})
+        return boxes
 
 
 def line_text(line):
@@ -22,7 +92,7 @@ def line_text(line):
         if previous and result and text and not result[-1].isspace() and not text[0].isspace():
             gap = span["bbox"][0] - previous["bbox"][2]
             # Style changes and superscripts do not introduce word boundaries.
-            if gap > min(span["size"], previous["size"]) * 0.12:
+            if gap > 2.0 and not (cjk(result[-1]) and cjk(text[0])):
                 result += " "
         result += text
         previous = span
@@ -152,6 +222,14 @@ def main():
             if not 0 < len(doc) <= max_pages:
                 raise ValueError("PDF exceeds page limit or has no pages")
             layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
+            if os.environ.get("READING_MCP_OCR_ENABLED") == "1":
+                language = os.environ.get("READING_MCP_OCR_LANG", "eng+chi_sim")
+                for page, page_layout in zip(doc, layout["pages"]):
+                    has_text = any((box.get("textlines") or []) for box in page_layout["boxes"])
+                    if not has_text:
+                        box = ocr_page(page, language)
+                        if box is not None:
+                            page_layout["boxes"].extend(box)
         result = project(layout)
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")

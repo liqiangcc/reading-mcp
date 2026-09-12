@@ -46,7 +46,7 @@ async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
     .with_evidence_store(store.clone());
     let document = parser.parse(resource).await.unwrap();
     let units = document.try_paragraph_text_units().unwrap();
-    assert!(units.len() > 1);
+    assert!(units.units.len() > 1);
     assert_eq!(
         document.content_hash.0,
         format!("sha256:{:x}", sha2::Sha256::digest(&bytes))

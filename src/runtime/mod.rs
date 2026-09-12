@@ -120,7 +120,26 @@ pub fn build_server(
         };
         router = router.with_pdf_parser(Arc::new(parser));
     }
-    let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache);
+    let fingerprint = if config.ocr_enabled {
+        let mut h = sha2::Sha256::new();
+        use sha2::Digest;
+        h.update(config.ocr_language.as_bytes());
+        h.update(config.ocr_revision.as_bytes());
+        for path in [
+            "/usr/bin/tesseract",
+            "/usr/share/tesseract-ocr/5/tessdata/eng.traineddata",
+            "/usr/share/tesseract-ocr/5/tessdata/chi_sim.traineddata",
+        ] {
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("OCR dependency missing {path}: {e}"))?;
+            h.update(sha2::Sha256::digest(bytes));
+        }
+        format!("ocr-fingerprint-v1:{:x}", h.finalize())
+    } else {
+        "ocr-disabled/v1".into()
+    };
+    let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache)
+        .with_ocr_fingerprint(fingerprint);
     if config.pdf_layout_python.is_some() {
         cached = cached.with_pdf_namespace(crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE);
     }

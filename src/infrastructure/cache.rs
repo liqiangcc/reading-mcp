@@ -86,6 +86,7 @@ pub struct CachingParser {
     inner: Arc<dyn Parser>,
     cache: Arc<dyn ParsedDocumentCache>,
     pdf_namespace: Option<String>,
+    ocr_fingerprint: String,
 }
 
 impl CachingParser {
@@ -94,7 +95,12 @@ impl CachingParser {
             inner,
             cache,
             pdf_namespace: None,
+            ocr_fingerprint: "ocr-disabled/v1".into(),
         }
+    }
+    pub fn with_ocr_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.ocr_fingerprint = fingerprint.into();
+        self
     }
     pub fn with_pdf_namespace(mut self, namespace: &str) -> Self {
         self.pdf_namespace = Some(namespace.into());
@@ -122,8 +128,7 @@ impl Parser for CachingParser {
             } else {
                 NORMALIZATION_VERSION.into()
             },
-            ocr_fingerprint: std::env::var("READING_MCP_OCR_FINGERPRINT")
-                .unwrap_or_else(|_| "ocr-disabled/v1".into()),
+            ocr_fingerprint: self.ocr_fingerprint.clone(),
         };
 
         if let Some(document) = self.cache.get(&key).await? {

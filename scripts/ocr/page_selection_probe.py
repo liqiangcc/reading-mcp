@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+from html.parser import HTMLParser
 
 INSPECT = r'''
 import contextlib, json, sys
@@ -52,6 +54,44 @@ def invoke(command, raw):
                 "stderr": (error.stderr or b"").decode(errors="replace")[-4096:]}
 
 
+def hocr_observations(raw, config, namespace):
+    """Inspect engine-native region classes; never turn these into gold masks."""
+    import pymupdf
+
+    class Regions(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.regions = []
+
+        def handle_starttag(self, tag, attributes):
+            attributes = dict(attributes)
+            if attributes.get("class", "").startswith("ocr"):
+                self.regions.append({"tag": tag, "attributes": attributes})
+
+    pages = []
+    with pymupdf.open(stream=raw, filetype="pdf") as document:
+        for page in document:
+            namespace["raster_pixel_count"](page, config["dpi"])
+            with tempfile.TemporaryDirectory(prefix="public-hocr-probe-") as directory:
+                image = Path(directory) / "page.png"
+                output = Path(directory) / "engine"
+                page.get_pixmap(dpi=config["dpi"], colorspace=pymupdf.csRGB, alpha=False).save(image)
+                result = subprocess.run([config["engine_path"], str(image), str(output),
+                    "--tessdata-dir", config["tessdata_path"], "-l", "+".join(config["languages"]),
+                    "--dpi", str(config["dpi"]), "--oem", str(config["oem"]),
+                    "--psm", str(config["psm"]), "tsv", "hocr"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=True,
+                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"})
+                hocr = output.with_suffix(".hocr").read_text()
+                regions = Regions()
+                regions.feed(hocr)
+                pages.append({"page": page.number + 1, "hocr": hocr,
+                              "tsv": output.with_suffix(".tsv").read_text(),
+                              "regions": regions.regions,
+                              "stderr": result.stderr.decode(errors="replace")[-4096:]})
+    return pages
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
@@ -81,6 +121,8 @@ def main():
             item["worker"] = invoke([sys.executable, "-I", "-c", worker,
                                      "2000", "134217728", "16000000",
                                      json.dumps(config), json.dumps(identity)], raw)
+            if case in ("F11", "F12", "F13"):
+                item["hocr_diagnostic"] = hocr_observations(raw, config, namespace)
             # Gold is an observation after both pipelines, never an input to
             # classification, region selection, ordering or recognition.
             item["frozen_gold"] = json.loads((fixtures / "gold" / f"{case}.json").read_text())

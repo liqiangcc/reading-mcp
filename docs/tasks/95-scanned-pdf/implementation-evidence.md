@@ -228,3 +228,62 @@ root 用户会话的 user@0.service Delegate=yes 不证明生产子进程具备�
 执行隔离仍需落实子进程树内存/temp/PID 限制、网络拒绝和完整回收测试。
 真实 OCR workflow 补充 typed observation/store 文件的触发路径，避免只改
 这些发布契约时遗漏真实集成 gate。
+
+## 2026-09-13 批准后执行：候选模型与专用隔离
+
+用户已批准继续有界本地模型评估与 OCR 专用隔离实现；此前等待该授权的
+上下文不再是阻塞。仍不部署中间版本，最终精确 SHA/发布部署审查保留。
+
+### 固定 ONNX 候选的实际结果（不是 F11 最终验收）
+
+固定 `PaddlePaddle/PP-DocLayout_plus-L_onnx` revision
+`feb74619326f634e0e883218598096a3733ad9f7`，模型文件 SHA256
+`77afb2caa74dd13240d087d2eced91d7fcd2caebd16006a0a66162fc8707ff0e`。
+模型卡声明 Apache-2.0；完整离线交付仍需许可证/文件清单审查。
+
+精确代码 `c03fb61ea544be6be6f39b6d462a01da7787053f` 的
+[hosted run 34702814921](https://github.com/liqiangcc/reading-mcp/actions/runs/34702814921)
+在 MemoryMax=768 MiB、swap=0、网络隔离下成功执行全部 8 个候选样本。
+原始输出张量保留在该 run artifact；仓库
+`evidence/layout-model-onnx-c03fb61-summary.json` 是日志派生摘要，不伪称原始
+artifact 字节相同。没有读取 gold，也没有改变 canonical。
+
+| case | 总秒数 | 进程峰值 KiB | 候选区域 |
+| --- | ---: | ---: | --- |
+| F02 | 2.9114 | 576860 | 6 text |
+| F06 | 2.8645 | 576744 | 6 text |
+| F07 | 2.8676 | 576852 | 4 text |
+| F08 | 2.8763 | 576608 | 4 text |
+| F11 | 2.8813 | 576720 | 6 text + image + formula |
+| F12 | 2.8921 | 577572 | 6 text + number |
+| F13 | 2.8827 | 576940 | 1 text |
+| F14 | 2.8967 | 576896 | 1 text |
+
+候选输出按分数排序，**不得**将其数组顺序直接作为原页阅读顺序。F11 分类
+存在不等于 100% 图表/公式原页区域保留；还需验证真实几何覆盖、typed 来源、
+正文不丢失/不重复、coarse 项不可变成 Sentence。未批准修改 gold 或阈值。
+下一诊断保持 native layout 会话、候选会话同时驻留并运行真实 primary OCR，
+记录实际加载库 hash 与整个 cgroup 的累计峰值，检验组合后的资源需求。
+
+### 实际解析器隔离接线
+
+`38fcdae777ab695762dfa474560ab35ce8704b89` 引入专用 systemd transient
+unit 的真实 LayoutPdfParser 入口：768 MiB 聚合内存、禁 swap、64 PIDs、
+512 MiB 私有 tmpfs、网络 namespace、60 秒执行上限及 1 秒 TERM 宽限。
+原有 native-only 解析启动方式不变。Rust 不调用 sudo；hosted 测试只对编译后
+的测试二进制使用 sudo，所有 Cargo 编译/测试构建仍在 GitHub-hosted runner。
+
+`987a9b918a7651ccbd2ad0243cd751abb5959f2c` 用 Rust RAII 所有的独立管道
+绑定 service main 生命周期：校验真实 pipe dev/inode 与随机 token，EOF 时
+不能启动新 worker；所有者消失后退出 service main，由 systemd 回收整个
+cgroup。它覆盖 Tokio 清理 future 无法运行的情况，不仅依赖杀 systemd-run。
+[run 34703921658](https://github.com/liqiangcc/reading-mcp/actions/runs/34703921658)
+的 `Rust OCR systemd launch and cancellation integration` step 已 success，
+包括真实 F07、抗 TERM 后代、启动前取消、没有 async cleanup/systemctl 的
+owner-pipe 回收。此记录不把当时仍在运行的整个 run 写成已完成。
+
+`f2a94a006319f66e29745a6077a49781c4f145d2` 将该入口接入实际 MCP runtime：
+OCR 配置先纯验证，缓存查找前检查专用隔离支持，OCR enabled 时没有普通
+process-group 回退。对应 stdio/HTTP 真实入口 hosted 验证尚待结果。
+生产未变更；剩余部署级故障矩阵、组合模型资源/区域验收、完整离线安装和
+精确版本最终审查仍不能省略。

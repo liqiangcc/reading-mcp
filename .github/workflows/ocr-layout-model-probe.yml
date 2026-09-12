@@ -18,7 +18,9 @@ jobs:
       - name: Install pinned candidate inference packages (hosted only)
         run: |
           mkdir -p "$RUNNER_TEMP/layout-model-probe"
-          python -m pip install --only-binary=:all: --report "$RUNNER_TEMP/layout-model-probe/pip-report.json" onnxruntime==1.29.0 numpy==2.5.3 opencv-python-headless==4.10.0.84 PyMuPDF==1.28.2 PyYAML==6.0.3
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr=5.3.4-1build5 libtesseract5=5.3.4-1build5 liblept5=1.82.0-3build4 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-chi-sim=1:4.1.0-2
+          python -m pip install --only-binary=:all: --report "$RUNNER_TEMP/layout-model-probe/pip-report.json" onnxruntime==1.29.0 numpy==2.5.3 opencv-python-headless==4.10.0.84 PyMuPDF==1.28.2 PyYAML==6.0.3 pymupdf4llm==1.28.2 pymupdf-layout==1.28.2
           python -m pip freeze > "$RUNNER_TEMP/layout-model-probe/pip-freeze.txt"
       - name: Download and verify fixed public model revision
         run: python scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --prepare --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
@@ -29,7 +31,7 @@ jobs:
         env:
           PROBE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
-          sudo systemd-run --quiet --wait --pipe --collect --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=PrivateNetwork=yes --property=RuntimeMaxSec=600 --property="WorkingDirectory=$GITHUB_WORKSPACE" --setenv=OMP_NUM_THREADS=1 --setenv=OPENBLAS_NUM_THREADS=1 --setenv=MKL_NUM_THREADS=1 "$PROBE_PYTHON" scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
+          sudo systemd-run --quiet --wait --pipe --collect --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=PrivateNetwork=yes --property=RuntimeMaxSec=600 --property="WorkingDirectory=$GITHUB_WORKSPACE" --setenv=OMP_NUM_THREADS=1 --setenv=OMP_THREAD_LIMIT=1 --setenv=OPENBLAS_NUM_THREADS=1 --setenv=MKL_NUM_THREADS=1 "$PROBE_PYTHON" scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --joint-pipeline --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

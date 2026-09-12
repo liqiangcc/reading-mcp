@@ -8,6 +8,7 @@ import resource
 import subprocess
 import sys
 import time
+import types
 import urllib.request
 import urllib.error
 
@@ -89,7 +90,24 @@ def verify(path):
     return records
 
 
-def child(model, case, output, name):
+def mapped_dependencies():
+    """Actual loaded executable/library files, not caller-supplied fingerprints."""
+    paths = {str(Path(sys.executable).resolve())}
+    for line in Path('/proc/self/maps').read_text().splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) == 6 and 'x' in fields[1] and fields[5].startswith('/'):
+            paths.add(fields[5])
+    result = []
+    for name in sorted(paths):
+        digest = hashlib.sha256()
+        with open(name, 'rb') as stream:
+            for chunk in iter(lambda: stream.read(65536), b''):
+                digest.update(chunk)
+        result.append({'name': name, 'sha256': digest.hexdigest()})
+    return result
+
+
+def child(model, case, output, name, joint_pipeline=False):
     # Public diagnostic only. The enclosing systemd cgroup also bounds RSS/PIDs
     # and denies network. Do not mistake these exploratory limits for acceptance.
     resource.setrlimit(resource.RLIMIT_CPU, (45, 45))
@@ -98,6 +116,19 @@ def child(model, case, output, name):
     verify(model)
     started = time.monotonic()
     import pymupdf
+    worker = None
+    if joint_pipeline:
+        import pymupdf4llm
+        pymupdf4llm.use_layout(True)
+        worker = types.ModuleType('joint_candidate_worker')
+        source = Path('src/parsing/pdf_layout_worker.py')
+        exec(compile(source.read_text(), str(source), 'exec'), worker.__dict__)
+        worker.OCR_CONFIG = {'enabled': True, 'engine_path': '/usr/bin/tesseract',
+            'tessdata_path': '/usr/share/tesseract-ocr/5/tessdata',
+            'languages': ['chi_sim'] if case == 'F07' else ['eng', 'chi_sim'] if case == 'F08' else ['eng'],
+            'operator_revision': '1', 'dpi': 300, 'oem': 1, 'psm': 3,
+            'detector_version': 'pdf-layout/v1', 'protocol_version': 'pdf-layout/v1'}
+        ocr_dependencies = worker.fingerprint_dependencies(worker.OCR_CONFIG)
     if name.endswith("_onnx"):
         predict = onnx_detector(model)
     else:
@@ -111,21 +142,33 @@ def child(model, case, output, name):
     raw = Path(f"tests/fixtures/scanned_pdf/pdf/{case}.pdf").read_bytes()
     pages = []
     with pymupdf.open(stream=raw, filetype="pdf") as document:
+        native = json.loads(pymupdf4llm.to_json(document, use_ocr=False)) if joint_pipeline else None
         for page in document:
             raster = page.get_pixmap(dpi=300, colorspace=pymupdf.csRGB, alpha=False)
             image = output / f"{case}-{page.number + 1}.png"
             raster.save(image)
             begin = time.monotonic()
             result = predict(image)
+            inference_seconds = time.monotonic() - begin
+            ocr_started = time.monotonic()
+            raw_ocr = worker.ocr_page(page) if worker is not None else None
             pages.append({"page": page.number + 1, "original_rect": list(page.rect),
                           "raster_size": [raster.width, raster.height], "dpi": 300,
                           "raster_sha256": hashlib.sha256(raster.samples).hexdigest(),
-                          "inference_seconds": time.monotonic() - begin,
-                          "raw_predictions": result})
+                          "inference_seconds": inference_seconds,
+                          "raw_predictions": result,
+                          "joint_primary_ocr_seconds": time.monotonic() - ocr_started if worker is not None else None,
+                          "joint_primary_ocr_boxes": raw_ocr})
             image.unlink()
+    group = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().split('::', 1)[1].strip().lstrip('/')
     report = {"case": case, "original_sha256": hashlib.sha256(raw).hexdigest(),
               "load_seconds": loaded - started, "total_seconds": time.monotonic() - started,
-              "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "pages": pages}
+              "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "pages": pages,
+              "mapped_dependencies": mapped_dependencies(),
+              "cgroup_cumulative_memory_peak_bytes": int((group / 'memory.peak').read_text()),
+              "joint_native_layout": native,
+              "joint_ocr_dependencies": ocr_dependencies if joint_pipeline else None,
+              "scope": "Concurrent resident native/candidate sessions plus real primary OCR; no canonical changes or gold scoring" if joint_pipeline else "candidate only"}
     (output / f"{case}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
 
 
@@ -135,6 +178,7 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--joint-pipeline", action="store_true")
     parser.add_argument("--candidate", choices=["PP-DocLayout-S", "PP-DocLayout-L", "PP-DocLayout_plus-L_onnx"], default="PP-DocLayout-S")
     parser.add_argument("--case", choices=["F02", "F06", "F07", "F08", "F11", "F12", "F13", "F14"])
     args = parser.parse_args()
@@ -170,7 +214,7 @@ def main():
         print(json.dumps(manifest), flush=True)
         return
     if args.case:
-        child(args.model, args.case, args.output, args.candidate)
+        child(args.model, args.case, args.output, args.candidate, args.joint_pipeline)
         return
     report = {"schema": "layout-model-diagnostic/v1", "candidate": args.candidate, "model_files": verify(args.model),
               "scope": "raw candidate regions only; no gold input, no OCR/projection modification",
@@ -179,7 +223,7 @@ def main():
         try:
             process = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                 "--model", str(args.model), "--output", str(args.output), "--case", case,
-                "--candidate", args.candidate],
+                "--candidate", args.candidate] + (["--joint-pipeline"] if args.joint_pipeline else []),
                 capture_output=True, timeout=60, check=True)
             item = json.loads((args.output / f"{case}.json").read_text())
         except Exception as error:

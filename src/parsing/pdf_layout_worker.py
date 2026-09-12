@@ -538,7 +538,10 @@ def main():
         observations = [p["ocr_retry_diagnostic"] for p in layout["pages"]
                         if "ocr_retry_diagnostic" in p]
         if any(not observation["complete"] for observation in observations):
-            json.dump({"schema_version": VERSION, "ocr_attempts": observations,
+            json.dump({"schema": "ocr-worker-failure/v1",
+                       "original_sha256": hashlib.sha256(raw).hexdigest(),
+                       "runtime_identity_sha256": actual_identity["sha256"],
+                       "ocr_attempts": observations,
                        "error": "OCR_NO_SUPPORTED_PROJECTION"}, protocol_stdout, ensure_ascii=False)
             raise ValueError("OCR geometric conflict remains unresolved")
         result = project(layout)
@@ -561,7 +564,10 @@ def main():
                 "operator_revision": OCR_CONFIG["operator_revision"], "pages": []}
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):
             if OCR_CONFIG.get("enabled", False):
-                json.dump({"schema_version": VERSION, "error": "OCR_NO_SUPPORTED_PROJECTION",
+                json.dump({"schema": "ocr-worker-failure/v1",
+                           "original_sha256": hashlib.sha256(raw).hexdigest(),
+                           "runtime_identity_sha256": actual_identity["sha256"],
+                           "error": "OCR_NO_SUPPORTED_PROJECTION",
                            "ocr_attempts": observations}, protocol_stdout, ensure_ascii=False)
                 raise ValueError("no supported prose text in inspected original pages")
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")

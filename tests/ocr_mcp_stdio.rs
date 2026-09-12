@@ -115,9 +115,10 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                 )
                 .await
                 .expect_err("a blank PDF must not publish fabricated supported prose");
-            // Preserve the actual error as public synthetic evidence, without
-            // treating the current generic error taxonomy as final acceptance.
             println!("F09 MCP failure: {blank_error}");
+            let error_text = blank_error.to_string();
+            assert!(error_text.contains("OCR_NO_SUPPORTED_PROJECTION"));
+            assert!(error_text.contains("\"retryable\":false"));
             assert_eq!(
                 published_documents(&state),
                 before_failure,

@@ -112,6 +112,10 @@ pub enum ApplicationError {
     RetrievalFailed(String),
     #[error("parse failed: {0}")]
     ParseFailed(String),
+    #[error("local OCR worker failed; no parsed document was published")]
+    OcrFailed,
+    #[error("local OCR found no supported prose projection; inspect the original source")]
+    OcrNoSupportedProjection,
     #[error("resource limit exceeded: {0}")]
     ResourceLimitExceeded(String),
     #[error("authentication profile failed: {0}")]

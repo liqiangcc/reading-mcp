@@ -79,9 +79,47 @@ fn worker_failure(ocr_enabled: bool, stderr: &[u8]) -> ApplicationError {
     if ocr_enabled {
         // OCR errors can contain input text or local paths. Keep bounded stderr
         // only inside this parse operation, never expose it via MCP/telemetry.
-        failed("local OCR worker failed; no parsed document was published")
+        ApplicationError::OcrFailed
     } else {
         failed(String::from_utf8_lossy(stderr))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OcrWorkerFailure {
+    schema: String,
+    original_sha256: String,
+    runtime_identity_sha256: String,
+    error: String,
+    // Failure observations are diagnostic only, never published as canonical evidence.
+    ocr_attempts: Vec<OcrPageObservations>,
+}
+
+fn validated_worker_failure(
+    output: &[u8],
+    original_sha256: &str,
+    identity_sha256: &str,
+) -> ApplicationError {
+    let Ok(failure) = serde_json::from_slice::<OcrWorkerFailure>(output) else {
+        return ApplicationError::OcrFailed;
+    };
+    if failure.schema == "ocr-worker-failure/v1"
+        && failure.original_sha256 == original_sha256
+        && failure.runtime_identity_sha256 == identity_sha256
+        && failure.error == "OCR_NO_SUPPORTED_PROJECTION"
+        && !failure.ocr_attempts.is_empty()
+        && failure.ocr_attempts.iter().all(|page| {
+            page.schema == "ocr-regional-observations/v3"
+                && page.page > 0
+                && page.page_bounds.iter().all(|value| value.is_finite())
+                && page.page_bounds[0] < page.page_bounds[2]
+                && page.page_bounds[1] < page.page_bounds[3]
+        })
+    {
+        ApplicationError::OcrNoSupportedProjection
+    } else {
+        ApplicationError::OcrFailed
     }
 }
 
@@ -179,6 +217,14 @@ impl Parser for LayoutPdfParser {
             async { process.wait().await.map_err(failed) },
         )?;
         if !status.success() {
+            if ocr_enabled && let Some(identity) = &self.ocr_identity {
+                use sha2::{Digest, Sha256};
+                return Err(validated_worker_failure(
+                    &output,
+                    &format!("{:x}", Sha256::digest(&resource.bytes)),
+                    &identity.sha256,
+                ));
+            }
             return Err(worker_failure(ocr_enabled, &errors));
         }
         write_result.map_err(failed)?;
@@ -561,6 +607,47 @@ mod tests {
                 .any(|(key, value)| key == "NATIVE_LAYOUT_SETTING"
                     && value == Some(std::ffi::OsStr::new("preserve")))
         );
+    }
+
+    #[test]
+    fn failure_protocol_requires_matching_identity_and_typed_observations() {
+        let raw = "a".repeat(64);
+        let identity = "b".repeat(64);
+        let valid = serde_json::json!({
+            "schema":"ocr-worker-failure/v1", "original_sha256":raw,
+            "runtime_identity_sha256":identity, "error":"OCR_NO_SUPPORTED_PROJECTION",
+            "ocr_attempts":[{"schema":"ocr-regional-observations/v3", "page":1,
+                "page_bounds":[0,0,595,842], "complete":false,
+                "attempts":[], "selection":[], "components":[]}]
+        });
+        let check = |value: &serde_json::Value| {
+            validated_worker_failure(&serde_json::to_vec(value).unwrap(), &raw, &identity)
+        };
+        assert!(matches!(
+            check(&valid),
+            ApplicationError::OcrNoSupportedProjection
+        ));
+        for field in [
+            "schema",
+            "original_sha256",
+            "runtime_identity_sha256",
+            "error",
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = serde_json::json!("private invalid value");
+            assert!(matches!(check(&invalid), ApplicationError::OcrFailed));
+            assert!(!check(&invalid).to_string().contains("private"));
+        }
+        let mut invalid = valid.clone();
+        invalid["ocr_attempts"][0]["page"] = serde_json::json!("one");
+        assert!(matches!(check(&invalid), ApplicationError::OcrFailed));
+        invalid = valid.clone();
+        invalid["unexpected"] = serde_json::json!("private diagnostic");
+        assert!(matches!(check(&invalid), ApplicationError::OcrFailed));
+        assert!(matches!(
+            validated_worker_failure(b"invalid JSON", &raw, &identity),
+            ApplicationError::OcrFailed
+        ));
     }
 
     #[test]

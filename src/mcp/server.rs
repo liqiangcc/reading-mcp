@@ -1045,6 +1045,8 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::ResourceLimitExceeded(_)
         | ApplicationError::RetrievalFailed(_)
         | ApplicationError::ParseFailed(_)
+        | ApplicationError::OcrFailed
+        | ApplicationError::OcrNoSupportedProjection
         | ApplicationError::SourceViewFailed(_)
         | ApplicationError::DocumentNotFound
         | ApplicationError::SectionNotFound => ErrorData::invalid_params(message, data),
@@ -1072,6 +1074,8 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::ResourceLimitExceeded(_) => ("RESOURCE_LIMIT_EXCEEDED", false),
         ApplicationError::RetrievalFailed(_) => ("RETRIEVAL_FAILED", true),
         ApplicationError::ParseFailed(_) => ("PARSE_FAILED", false),
+        ApplicationError::OcrFailed => ("OCR_FAILED", false),
+        ApplicationError::OcrNoSupportedProjection => ("OCR_NO_SUPPORTED_PROJECTION", false),
         ApplicationError::SourceViewFailed(_) => ("SOURCE_VIEW_FAILED", false),
         ApplicationError::DocumentNotFound => ("DOCUMENT_NOT_FOUND", false),
         ApplicationError::SectionNotFound => ("SECTION_NOT_FOUND", false),
@@ -1089,6 +1093,14 @@ mod tests {
 
     #[test]
     fn error_taxonomy_is_stable_and_exposes_retryability() {
+        assert_eq!(
+            error_descriptor(&ApplicationError::OcrFailed),
+            ("OCR_FAILED", false)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::OcrNoSupportedProjection),
+            ("OCR_NO_SUPPORTED_PROJECTION", false)
+        );
         assert_eq!(
             error_descriptor(&ApplicationError::RetrievalFailed("network".into())),
             ("RETRIEVAL_FAILED", true)

@@ -24,6 +24,119 @@ fn chinese_config() -> OcrConfig {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn real_f14_long_sentence_survives_sqlite_reopen_and_exact_read() {
+    use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
+    use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};
+    use reading_mcp::domain::{OriginalSourceTarget, TextLocator};
+    use reading_mcp::infrastructure::SqliteDocumentRepository;
+
+    let directory = tempdir().unwrap();
+    let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
+    let bytes = std::fs::read("tests/fixtures/scanned_pdf/pdf/F14.pdf").unwrap();
+    let source = DocumentSource("file:///frozen/F14.pdf".into());
+    let mut documents = Vec::new();
+    for revision in ["1", "2"] {
+        let mut config = chinese_config();
+        config.languages = vec!["eng".into()];
+        config.operator_revision = revision.into();
+        let identity = build_ocr_runtime_identity(config.clone()).unwrap();
+        let parser = LayoutPdfParser::new(
+            std::env::var("READING_MCP_PDF_LAYOUT_PYTHON")
+                .unwrap()
+                .into(),
+            reading_mcp::infrastructure::ResourceBudget::default(),
+        )
+        .with_ocr_config(config)
+        .with_ocr_identity(identity)
+        .with_evidence_store(store.clone());
+        let document = parser
+            .parse(RetrievedResource {
+                source: source.clone(),
+                final_source: source.clone(),
+                media_type: MediaType("application/pdf".into()),
+                bytes: bytes.clone(),
+                etag: None,
+                last_modified: None,
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+        document.validate_ocr_publication().unwrap();
+        documents.push(document);
+    }
+    let document = &documents[0];
+    let paragraphs = document.try_paragraph_text_units().unwrap();
+    let sentences = document.try_sentence_text_units().unwrap();
+    assert_eq!(
+        paragraphs.units.len(),
+        1,
+        "48 clauses must not be line-count chunks"
+    );
+    assert_eq!(sentences.units.len(), 1, "F14 has one natural sentence");
+    let sentence = &sentences.units[0];
+    assert!(sentence.text.chars().count() > 2000);
+    assert_eq!(sentence.text, paragraphs.units[0].text);
+    assert_eq!(
+        sentence.normalized_range,
+        paragraphs.units[0].normalized_range
+    );
+    let section = document.find_section(&sentence.owner_section_id).unwrap();
+    assert_eq!(
+        section
+            .normalized_text_slice(sentence.normalized_range)
+            .unwrap(),
+        sentence.text
+    );
+    let locator = TextLocator::for_sentence(document, section, sentence);
+    assert_eq!(
+        document
+            .original_source_target_for_range(&sentence.owner_section_id, sentence.normalized_range)
+            .unwrap(),
+        Some(OriginalSourceTarget::Page { page_number: 1 })
+    );
+    let db = directory.path().join("state.sqlite");
+    {
+        let repository = SqliteDocumentRepository::open(&db).unwrap();
+        repository.save(document.clone()).await.unwrap();
+    }
+    let repository = Arc::new(SqliteDocumentRepository::open(&db).unwrap());
+    let restored = repository.get(&document.id).await.unwrap().unwrap();
+    assert_eq!(restored.try_sentence_text_units().unwrap(), sentences);
+    assert_eq!(
+        restored.original_source_binding_map().unwrap(),
+        document.original_source_binding_map().unwrap()
+    );
+    let reader = ReadDocumentUseCase::new(repository.clone());
+    let command = ReadExactTargetCommand {
+        document_id: document.id.clone(),
+        target_locator: locator.clone(),
+        max_chars: Some(8192),
+    };
+    let read = reader.read_exact(command).await.unwrap();
+    assert!(read.complete);
+    assert_eq!(read.content, sentence.text);
+    assert_eq!(read.resolved_target_locator, locator);
+    let changed = &documents[1];
+    assert_eq!(changed.id, document.id);
+    assert_eq!(changed.content_hash, document.content_hash);
+    assert_ne!(
+        changed.normalized_document_hash(),
+        document.normalized_document_hash()
+    );
+    repository.save(changed.clone()).await.unwrap();
+    let error = reader
+        .read_exact(ReadExactTargetCommand {
+            document_id: document.id.clone(),
+            target_locator: locator,
+            max_chars: Some(8192),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ApplicationError::StaleLocator(_)));
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn real_f12_keeps_native_footer_and_excluded_ocr_observation() {
     let directory = tempdir().unwrap();
     let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));

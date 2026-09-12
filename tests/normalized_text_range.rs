@@ -176,7 +176,7 @@ fn open_contract_advertises_normalized_identity_and_coordinate_versions() {
     assert_eq!(NORMALIZATION_VERSION, "reading-mcp-normalization/v11");
     assert_eq!(
         NORMALIZED_DOCUMENT_HASH_VERSION,
-        "normalized-document-hash/v2"
+        "normalized-document-hash/v3"
     );
     assert_eq!(
         NORMALIZED_TEXT_COORDINATE_SPACE,

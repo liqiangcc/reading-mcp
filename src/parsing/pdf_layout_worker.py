@@ -20,6 +20,19 @@ ENGINE = "pymupdf4llm-layout/1.28.2"
 OCR_CONFIG = {"enabled": False}
 EXPECTED_IDENTITY = None
 
+def fingerprint_dependencies(config):
+    def sha(path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
+        return digest.hexdigest()
+    paths = [("engine", config["engine_path"])] + [(f"model:{lang}", os.path.join(config["tessdata_path"], lang + ".traineddata")) for lang in config["languages"]]
+    output = subprocess.run(["ldd", config["engine_path"]], text=True, capture_output=True)
+    if output.returncode != 0 or "not found" in output.stdout or "not found" in output.stderr: raise RuntimeError("OCR dependency ldd failure")
+    libraries = sorted({token for token in output.stdout.split() if token.startswith("/")})
+    paths += [("library:" + path, path) for path in libraries]
+    return [{"name": name, "sha256": sha(path)} for name, path in sorted(paths)]
+
 def cjk(value):
     return value and ("\u3400" <= value <= "\u9fff" or "\uf900" <= value <= "\ufaff")
 
@@ -241,6 +254,9 @@ def main():
         EXPECTED_IDENTITY = json.loads(sys.argv[5])
         if EXPECTED_IDENTITY.get("config") != OCR_CONFIG:
             raise ValueError("OCR config does not match expected identity")
+    if OCR_CONFIG.get("enabled"):
+        if EXPECTED_IDENTITY is None: raise ValueError("OCR expected identity is required")
+        if EXPECTED_IDENTITY.get("dependencies") != fingerprint_dependencies(OCR_CONFIG): raise ValueError("OCR dependency identity mismatch")
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):
         if importlib.metadata.version(package) != "1.28.2":
             raise ValueError(f"{package} must be version 1.28.2; run setup-pdf-layout.sh")
@@ -282,13 +298,9 @@ def main():
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
                 return digest.hexdigest()
             language = "+".join(OCR_CONFIG["languages"])
-            models = [os.path.join(tessdata, f"{name}.traineddata") for name in language.split("+")]
-            libraries = []
-            for token in subprocess.check_output(["ldd", engine], text=True).split():
-                if token.startswith("/") and os.path.isfile(token): libraries.append(sha(token))
             result["ocr_derivation"] = {"schema": "ocr-derivation/v1", "original_sha256": hashlib.sha256(raw).hexdigest(),
-                "engine_sha256": sha(engine), "model_sha256": [sha(path) for path in models],
-                "library_sha256": sorted(set(libraries)), "languages": OCR_CONFIG["languages"], "dpi": OCR_CONFIG["dpi"], "oem": OCR_CONFIG["oem"], "psm": OCR_CONFIG["psm"],
+                "engine_sha256": next(d["sha256"] for d in fingerprint_dependencies(OCR_CONFIG) if d["name"] == "engine"), "model_sha256": [d["sha256"] for d in fingerprint_dependencies(OCR_CONFIG) if d["name"].startswith("model:")],
+                "library_sha256": [d["sha256"] for d in fingerprint_dependencies(OCR_CONFIG) if d["name"].startswith("library:")], "languages": OCR_CONFIG["languages"], "dpi": OCR_CONFIG["dpi"], "oem": OCR_CONFIG["oem"], "psm": OCR_CONFIG["psm"],
                 "detector_version": OCR_CONFIG["detector_version"], "protocol_version": OCR_CONFIG["protocol_version"],
                 "operator_revision": OCR_CONFIG["operator_revision"], "pages": []}
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):

@@ -7,6 +7,7 @@ on:
       - 'scripts/ocr/canonical_quality.py'
       - 'scripts/ocr/language_order_probe.py'
       - 'scripts/ocr/regional_retry_probe.py'
+      - 'tests/ocr/test_regional_retry_probe.py'
       - 'tests/ocr_real_engine.rs'
       - 'src/domain/ocr.rs'
       - 'src/parsing/layout_pdf.rs'
@@ -19,6 +20,7 @@ on:
       - 'scripts/ocr/canonical_quality.py'
       - 'scripts/ocr/language_order_probe.py'
       - 'scripts/ocr/regional_retry_probe.py'
+      - 'tests/ocr/test_regional_retry_probe.py'
       - 'scripts/ocr/first_engine_probe.py'
       - 'scripts/ocr/worker_identity_probe.py'
       - 'tests/ocr_real_engine.rs'
@@ -58,6 +60,8 @@ jobs:
         run: python scripts/ocr/language_order_probe.py "$RUNNER_TEMP/ocr-first-probe/language-order-probe.json"
       - name: Regional PSM6 retry diagnostics (hosted real engine)
         run: python scripts/ocr/regional_retry_probe.py "$RUNNER_TEMP/ocr-first-probe/regional-retry-probe.json"
+      - name: Regional retry geometry tests
+        run: python -m unittest tests/ocr/test_regional_retry_probe.py
       - name: Rust real OCR integration (hosted only)
         env:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}

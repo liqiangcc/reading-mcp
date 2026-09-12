@@ -1,5 +1,5 @@
 """Diagnostic regional PSM6 retry; never used by production runtime."""
-import json, re, sys, unicodedata, statistics
+import copy, json, re, sys, unicodedata, statistics
 from pathlib import Path
 
 def norm(s): return " ".join(unicodedata.normalize("NFC", s).split())
@@ -24,6 +24,25 @@ def adjacent(a,b,gap):
             horizontal=max(0,max(x[0],y[0])-min(x[2],y[2]))
             if vertical >= min(x[3]-x[1], y[3]-y[1])*.5 and horizontal <= gap: return True
     return False
+def merge_components(pairs):
+    parent={i:i for pair in pairs for i in pair}
+    def find(x):
+        while parent[x]!=x: parent[x]=parent[parent[x]]; x=parent[x]
+        return x
+    for a,b in pairs:
+        ra,rb=find(a),find(b)
+        if ra!=rb: parent[rb]=ra
+    groups={}
+    for i in parent: groups.setdefault(find(i),set()).add(i)
+    return list(groups.values())
+def rebuild_boxes(original, replacements):
+    by_index={first:(members,candidates) for first,members,candidates in replacements}
+    members=set().union(*(m for _,m,_ in replacements)) if replacements else set()
+    out=[]
+    for i,box in enumerate(original):
+        if i in by_index: out.extend(by_index[i][1])
+        if i not in members: out.append(box)
+    return out
 
 def main():
     import pymupdf, pymupdf4llm
@@ -37,15 +56,11 @@ def main():
             pymupdf4llm.use_layout(True); layout=json.loads(pymupdf4llm.to_json(doc,use_ocr=False))
             for page,page_layout in zip(doc,layout["pages"]):
                 psm3=ns["ocr_page"](page); psm3=psm3 or []
-                boxes=psm3[:]; conflicts=[]
+                original_boxes=copy.deepcopy(psm3); boxes=psm3[:]; conflicts=[]
                 for i,a in enumerate(boxes):
                     for j,b in enumerate(boxes[i+1:],i+1):
                         if min(area(a["bbox"]),area(b["bbox"])) and overlap(a["bbox"],b["bbox"])/min(area(a["bbox"]),area(b["bbox"]))>=.9: conflicts.append((i,j))
-                components=[]
-                for i,j in conflicts:
-                    merged=next((c for c in components if i in c or j in c),None)
-                    if merged is None: components.append({i,j})
-                    else: merged.update((i,j))
+                components=merge_components(conflicts)
                 heights=[line["bbox"][3]-line["bbox"][1] for box in boxes for line in box.get("textlines", []) if line["bbox"][3]>line["bbox"][1]]
                 median_height=statistics.median(heights) if heights else 0
                 expanded=True
@@ -55,18 +70,22 @@ def main():
                         for index, box in enumerate(boxes):
                             if index not in component and any(adjacent(boxes[member], box, median_height) for member in component):
                                 component.add(index); expanded=True
-                page_diag={"psm3_boxes":boxes,"conflicts":conflicts,"components":[],"psm6_boxes":[]}
+                page_diag={"psm3_boxes":copy.deepcopy(original_boxes),"conflicts":conflicts,"components":[],"psm6_boxes":[]}
                 if components:
                     config6={**config,"psm":6}; ns["OCR_CONFIG"]=config6; psm6=ns["ocr_page"](page) or []; ns["OCR_CONFIG"]=config
                     page_diag["psm6_boxes"]=psm6; replacements=[]
+                    replacements=[]; tolerance=2*72/config["dpi"]
+                    page_rect=[0,0,page.rect.width,page.rect.height]
                     for component in components:
-                        roi=[min(boxes[i]["bbox"][k] for i in component) for k in (0,1)]+[max(boxes[i]["bbox"][k] for i in component) for k in (2,3)]
+                        raw_roi=[min(original_boxes[i]["bbox"][k] for i in component) for k in (0,1)]+[max(original_boxes[i]["bbox"][k] for i in component) for k in (2,3)]
+                        roi=[max(page_rect[0],raw_roi[0]-tolerance),max(page_rect[1],raw_roi[1]-tolerance),min(page_rect[2],raw_roi[2]+tolerance),min(page_rect[3],raw_roi[3]+tolerance)]
                         candidates=[b for b in psm6 if inside(b["bbox"],roi)]
-                        resolved=bool(candidates)
-                        page_diag["components"].append({"indices":sorted(component),"roi":roi,"candidate_count":len(candidates),"resolved":resolved})
+                        centers=[((s["bbox"][0]+s["bbox"][2])/2,(s["bbox"][1]+s["bbox"][3])/2) for i in component for l in original_boxes[i].get("textlines",[]) for s in l.get("spans",[])]
+                        covered=all(any(l["bbox"][0]<=x<=l["bbox"][2] and l["bbox"][1]<=y<=l["bbox"][3] for b in candidates for l in b.get("textlines",[])) for x,y in centers)
+                        resolved=bool(candidates) and covered
+                        page_diag["components"].append({"indices":sorted(component),"roi":raw_roi,"effective_roi":roi,"candidate_count":len(candidates),"covered_component_words":covered,"resolved":resolved})
                         if resolved: replacements.append((min(component),component,candidates))
-                    for first,component,candidates in sorted(replacements,reverse=True):
-                        boxes[first:first+1]=candidates; del boxes[first+1:first+1+len(component)-1]
+                    boxes = rebuild_boxes(original_boxes, replacements)
                 page_layout["boxes"]=boxes; item["pages"].append(page_diag)
             result=ns["project"](layout)
         gold=json.loads((root/"gold"/(case+".json")).read_text()); paragraphs=[b["text"] for s in result["sections"] for b in s["blocks"] if b["kind"]=="paragraph"]; text="\n\n".join(paragraphs)

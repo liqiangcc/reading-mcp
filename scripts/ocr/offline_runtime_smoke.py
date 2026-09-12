@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 
 def main():
@@ -19,9 +20,36 @@ def main():
     dependencies = worker.fingerprint_dependencies(config)
     identity = worker.runtime_identity(config, dependencies)
     raw = Path('/opt/ocr-smoke/F07.pdf').read_bytes()
-    result = subprocess.run([sys.executable, '-I', str(source), '1000', str(64 * 1024 * 1024),
+    deadline = time.monotonic() + 50
+    probes = []
+    for module, code in [('pymupdf', 'import pymupdf'),
+                         ('onnxruntime', 'import onnxruntime'),
+                         ('layout', 'import pymupdf4llm; pymupdf4llm.use_layout(True)')]:
+        try:
+            probe = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', '-c', code],
+                capture_output=True, timeout=max(.1, min(15, deadline - time.monotonic())))
+            record = {'module': module, 'returncode': probe.returncode,
+                      'stderr': probe.stderr.decode(errors='replace')[-8192:]}
+        except subprocess.TimeoutExpired as error:
+            record = {'module': module, 'error': 'timeout',
+                      'stderr': (error.stderr or b'').decode(errors='replace')[-8192:]}
+        probes.append(record)
+        print(json.dumps({'private_runtime_import_probe': record}), flush=True)
+    try:
+        result = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', str(source), '1000', str(64 * 1024 * 1024),
         str(4 * 1024 * 1024), json.dumps(config), json.dumps(identity)], input=raw,
-        capture_output=True, timeout=60, check=True)
+            capture_output=True, timeout=max(.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as error:
+        print(json.dumps({'schema': 'ocr-private-runtime-failure/v1', 'error': 'timeout',
+            'imports': probes, 'stderr': (error.stderr or b'').decode(errors='replace')[-8192:]}), flush=True)
+        raise SystemExit(1)
+    if result.returncode or any(probe.get('returncode') != 0 for probe in probes):
+        print(json.dumps({'schema': 'ocr-private-runtime-failure/v1',
+            'worker_returncode': result.returncode, 'imports': probes,
+            'stderr': result.stderr.decode(errors='replace')[-8192:],
+            'filesystem_presence': {path: Path(path).exists() for path in
+                ('/proc/self/maps', '/sys/devices/system/cpu', '/etc/passwd', '/etc/group', '/etc/ld.so.cache')}}), flush=True)
+        raise SystemExit(1)
     payload = json.loads(result.stdout)
     paragraphs = [block['text'] for section in payload['sections'] for block in section['blocks']
                   if block['kind'] == 'paragraph']

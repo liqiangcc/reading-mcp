@@ -24,7 +24,7 @@ class RegionalGeometryTests(unittest.TestCase):
         def observe(page, excluded_regions=()):
             remaining.append(worker["page_time_remaining"]())
             clock[0] += 14 if len(remaining) == 1 else .5
-            return primary if len(remaining) == 1 else [primary[0]]
+            return primary if len(remaining) == 1 else [self.box([10,10,20,20], "retry", 1)]
         worker["ocr_page"] = observe
         worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
         self.assertEqual(remaining, [15, 1])

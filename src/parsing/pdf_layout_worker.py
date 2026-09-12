@@ -15,11 +15,34 @@ import sys
 import unicodedata
 import hashlib
 import statistics
+import time
+import math
 
 VERSION = "pdf-layout/v1"
 ENGINE = "pymupdf4llm-layout/1.28.2"
 OCR_CONFIG = {"enabled": False}
 EXPECTED_IDENTITY = None
+PAGE_DEADLINE = None
+
+def page_time_remaining():
+    remaining = 15.0 if PAGE_DEADLINE is None else PAGE_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("local OCR page exceeded shared 15 second budget")
+    return remaining
+
+def raster_pixel_count(page, dpi):
+    # Round the transformed rectangle outward, as the renderer does. Check
+    # before allocating the pixmap; never downscale an oversized page.
+    rect = page.rect
+    scale = dpi / 72
+    coordinates = [rect.x0, rect.y0, rect.x1, rect.y1]
+    if not all(math.isfinite(value) for value in coordinates):
+        raise RuntimeError("invalid OCR page rectangle")
+    width = math.ceil(rect.x1 * scale) - math.floor(rect.x0 * scale)
+    height = math.ceil(rect.y1 * scale) - math.floor(rect.y0 * scale)
+    if width <= 0 or height <= 0 or width * height > 16_000_000:
+        raise RuntimeError("OCR raster exceeds 16 million pixel page limit")
+    return width * height
 RETRY_POLICY = {"version": "ocr-regional-retry/v1", "primary_psm": 3,
                 "retry_psm": 6, "max_retries_per_page": 1, "overlap_percent": 90,
                 "vertical_overlap_percent": 50, "roi_padding_pixels": 2}
@@ -59,6 +82,8 @@ def ocr_page(page, language=None, excluded_regions=()):
     if not config.get("enabled", False):
         return None
     language = "+".join(config["languages"])
+    page_time_remaining()
+    raster_pixel_count(page, config["dpi"])
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
         image = os.path.join(directory, "page.png")
         output = os.path.join(directory, "words")
@@ -71,7 +96,7 @@ def ocr_page(page, language=None, excluded_regions=()):
                    "-l", language, "--oem", str(config["oem"]), "--psm", str(config["psm"]), "--dpi", str(config["dpi"]), "tsv"]
         try:
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.PIPE, timeout=15, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"})
+                           stderr=subprocess.PIPE, timeout=page_time_remaining(), env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"})
         except FileNotFoundError as error:
             raise RuntimeError("local OCR engine is not installed") from error
         except subprocess.TimeoutExpired as error:
@@ -182,6 +207,18 @@ def _regional_evidence(page, bounds, primary, retry, selected, components):
             "attempts": attempts, "selection": selection, "components": components}
 
 def _regional_ocr(page, excluded_regions=()):
+    global PAGE_DEADLINE
+    previous = PAGE_DEADLINE
+    deadline = time.monotonic() + 15
+    PAGE_DEADLINE = deadline if previous is None else min(previous, deadline)
+    try:
+        result = _regional_ocr_attempts(page, excluded_regions)
+        page_time_remaining()
+        return result
+    finally:
+        PAGE_DEADLINE = previous
+
+def _regional_ocr_attempts(page, excluded_regions=()):
     global OCR_CONFIG
     primary=ocr_page(page, excluded_regions=excluded_regions); primary=primary or []
     conflicts=[(i,j) for i,a in enumerate(primary) for j,b in enumerate(primary[i+1:],i+1)
@@ -207,6 +244,7 @@ def _regional_ocr(page, excluded_regions=()):
     if not components:
         return primary, _regional_evidence(page_number, [0,0,page.rect.width,page.rect.height], primary, None, primary, [])
     original=list(primary); retry_config=dict(OCR_CONFIG); retry_config["psm"]=6
+    page_time_remaining()
     saved=OCR_CONFIG; OCR_CONFIG=retry_config
     try: retry=ocr_page(page, excluded_regions=excluded_regions) or []
     finally: OCR_CONFIG=saved

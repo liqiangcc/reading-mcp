@@ -8,6 +8,53 @@ spec = importlib.util.spec_from_file_location("regional_retry_probe", Path(__fil
 probe = importlib.util.module_from_spec(spec); spec.loader.exec_module(probe)
 
 class RegionalGeometryTests(unittest.TestCase):
+    def deadline_worker(self):
+        worker = {}
+        exec((Path(__file__).parents[2] / "src/parsing/pdf_layout_worker.py").read_text(), worker)
+        worker["OCR_CONFIG"] = {"enabled": True, "psm": 3, "dpi": 300}
+        clock = [100.0]
+        worker["time"] = SimpleNamespace(monotonic=lambda: clock[0])
+        return worker, clock
+
+    def test_primary_and_retry_share_page_deadline(self):
+        worker, clock = self.deadline_worker()
+        primary = [self.box([10,10,20,20], "primary", 1),
+                   self.box([12,12,14,14], "overlap", 2)]
+        remaining = []
+        def observe(page, excluded_regions=()):
+            remaining.append(worker["page_time_remaining"]())
+            clock[0] += 14 if len(remaining) == 1 else .5
+            return primary if len(remaining) == 1 else [primary[0]]
+        worker["ocr_page"] = observe
+        worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
+        self.assertEqual(remaining, [15, 1])
+        self.assertIsNone(worker["PAGE_DEADLINE"])
+
+    def test_exhausted_primary_never_starts_retry_and_restores_state(self):
+        worker, clock = self.deadline_worker()
+        calls = []
+        def observe(page, excluded_regions=()):
+            calls.append(worker["OCR_CONFIG"]["psm"])
+            clock[0] += 15
+            return [self.box([10,10,20,20], "primary", 1),
+                    self.box([12,12,14,14], "overlap", 2)]
+        worker["ocr_page"] = observe
+        with self.assertRaisesRegex(RuntimeError, "shared 15 second budget"):
+            worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
+        self.assertEqual(calls, [3])
+        self.assertEqual(worker["OCR_CONFIG"]["psm"], 3)
+        self.assertIsNone(worker["PAGE_DEADLINE"])
+
+    def test_raster_preflight_rejects_oversized_and_invalid_pages(self):
+        worker, _ = self.deadline_worker()
+        def pixels(x1, y1):
+            return worker["raster_pixel_count"](
+                SimpleNamespace(rect=SimpleNamespace(x0=0, y0=0, x1=x1, y1=y1)), 300)
+        self.assertEqual(pixels(72, 72), 90_000)
+        for x1, y1 in [(2000, 2000), (0, 72), (float("nan"), 72)]:
+            with self.assertRaises(RuntimeError):
+                pixels(x1, y1)
+
     def run_worker_retry(self, primary, retry):
         worker = {}
         exec((Path(__file__).parents[2] / "src/parsing/pdf_layout_worker.py").read_text(), worker)

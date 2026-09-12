@@ -19,7 +19,7 @@ def main():
     config={"enabled":True,"engine_path":"/usr/bin/tesseract","tessdata_path":"/usr/share/tesseract-ocr/5/tessdata","languages":["eng"],"operator_revision":"1","dpi":300,"oem":1,"psm":3,"detector_version":"pdf-layout/v1","protocol_version":"pdf-layout/v1"}
     ns={}; exec(a.worker.read_text(),ns); out={}
     failures=[]
-    for case in ("F02","F06","F07","F08","F14"):
+    for case in ("F01","F02","F03","F04-form","F04-flat","F05","F06","F07","F08","F12","F13","F14"):
         config["languages"] = ["chi_sim"] if case == "F07" else (["eng","chi_sim"] if case == "F08" else ["eng"])
         try:
             identity=ns["runtime_identity"](config,ns["fingerprint_dependencies"](config))
@@ -33,11 +33,28 @@ def main():
                 actual="\n\n".join(p for p in paragraphs if re.search(r"[A-Za-z]",p) and not re.search(r"[\u3400-\u9fff]",p)); wer=metric(expected,actual,True)
             else: wer = None if case == "F07" else metric(gold["text"],text,True)
             out[case]={"canonical_text":text,"canonical_paragraphs":[{"text":b["text"],"region":b.get("region")} for b in canonical_blocks],"ocr_evidence":result.get("ocr_evidence",[]),"cer":metric(gold["text"],text),"english_wer":wer,"ambiguous_mixed_paragraphs":ambiguous,"thresholds":{"cer":0.02 if case in ("F07","F08") else 0.01,"wer":None if case=="F07" else 0.03}}
+            if case in ("F01", "F03", "F04-form", "F04-flat"):
+                out[case]["thresholds"] = {"cer": 0, "wer": 0}
+            # Gold is consulted only after canonical output exists. It specifies
+            # acceptance, never engine input, region masks or paragraph order.
+            observed = result.get("ocr_attempts", [])
+            actual_pages = sorted(p["page"] for p in observed if p["attempts"])
+            expected_pages = sorted(p["page"] for p in gold["pages"] if p["expected_class"] == "requires_ocr")
+            actual_blank = sorted(p["page"] for p in observed if p.get("blank_raster"))
+            expected_blank = sorted(p["page"] for p in gold["pages"] if p["expected_class"] == "blank")
+            out[case]["page_execution"] = {"actual_ocr_pages": actual_pages, "expected_ocr_pages": expected_pages,
+                "actual_blank_pages": actual_blank, "expected_blank_pages": expected_blank,
+                "engine_attempt_count": sum(len(p["attempts"]) for p in observed)}
+            if actual_pages != expected_pages or actual_blank != expected_blank:
+                failures.append(case)
             if out[case]["cer"]["rate"] is None or out[case]["cer"]["rate"] > out[case]["thresholds"]["cer"] or (case == "F08" and ambiguous) or (wer is not None and wer["rate"] > out[case]["thresholds"]["wer"]): failures.append(case)
         except Exception as error:
             stderr = getattr(error, "stderr", b"") or b""
             out[case]={"error":str(error),"stderr":stderr.decode(errors="replace")[-4096:]}; failures.append(case)
-    out["status"]={"failures":failures,"f07_english_wer":"not_applicable"}
+    failures=list(dict.fromkeys(failures))
+    out["status"]={"failures":failures,"f07_english_wer":"not_applicable",
+                   "scope":"text accuracy and OCR/blank page execution; not boundary/order F1 or full MCP acceptance",
+                   "remaining_cases":["F09 no-prose contract", "F10 degradation", "F11 visual classification"]}
     rendered=json.dumps(out,ensure_ascii=False,indent=2)+"\n"
     a.output.write_text(rendered)
     print(rendered, end="", flush=True)

@@ -37,6 +37,8 @@ def main():
             stderr = getattr(error, "stderr", b"") or b""
             out[case]={"error":str(error),"stderr":stderr.decode(errors="replace")[-4096:]}; failures.append(case)
     out["status"]={"failures":failures,"f07_english_wer":"not_applicable"}
-    a.output.write_text(json.dumps(out,ensure_ascii=False,indent=2)+"\n")
+    rendered=json.dumps(out,ensure_ascii=False,indent=2)+"\n"
+    a.output.write_text(rendered)
+    print(rendered, end="", flush=True)
     if failures: raise SystemExit("quality thresholds failed: " + ",".join(failures))
 if __name__=="__main__": main()

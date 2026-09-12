@@ -135,6 +135,39 @@ def _adjacent(a,b,gap):
             vertical=max(0,min(x[3],y[3])-max(x[1],y[1])); horizontal=max(0,max(x[0],y[0])-min(x[2],y[2]))
             if vertical >= min(x[3]-x[1],y[3]-y[1])*.5 and horizontal <= gap: return True
     return False
+
+def _attempt_reference(page, attempt, box, line=None, word=None):
+    reference = {"page": page, "attempt": attempt, "box": box}
+    if line is not None:
+        reference["line"] = line
+    if word is not None:
+        reference["word"] = word
+    return reference
+
+def _regional_evidence(page, primary, retry, selected, components):
+    """References address immutable observations, not projected text or gold."""
+    attempts = [{"id": "primary", "psm": 3, "boxes": primary}]
+    if retry is not None:
+        attempts.append({"id": "retry", "psm": 6, "boxes": retry})
+    selection = []
+    for selected_index, box in enumerate(selected):
+        matches = [(attempt, index) for attempt in attempts
+                   for index, observed in enumerate(attempt["boxes"]) if observed is box]
+        if len(matches) != 1:
+            raise ValueError("OCR selected box has ambiguous attempt reference")
+        attempt, index = matches[0]
+        selection.append({
+            "selected_box": selected_index,
+            "source": _attempt_reference(page, attempt["id"], index),
+            "words": [_attempt_reference(page, attempt["id"], index, line_index, word_index)
+                      for line_index, line in enumerate(box.get("textlines", []))
+                      for word_index, _ in enumerate(line.get("spans", []))],
+        })
+    return {"schema": "ocr-regional-observations/v1", "page": page,
+            "complete": all(component["resolved"] for component in components),
+            "attempts": attempts, "selection": selection, "components": components,
+            "primary_boxes": primary, "retry_boxes": retry or []}
+
 def _regional_ocr(page, excluded_regions=()):
     global OCR_CONFIG
     primary=ocr_page(page, excluded_regions=excluded_regions); primary=primary or []
@@ -157,7 +190,9 @@ def _regional_ocr(page, excluded_regions=()):
                 if components[i] & components[j]:
                     components[i].update(components.pop(j)); changed=True; break
             if changed: break
-    if not components: return primary,{"primary_boxes":primary,"retry_boxes":[],"components":[]}
+    page_number = page.number + 1
+    if not components:
+        return primary, _regional_evidence(page_number, primary, None, primary, [])
     original=list(primary); retry_config=dict(OCR_CONFIG); retry_config["psm"]=6
     saved=OCR_CONFIG; OCR_CONFIG=retry_config
     try: retry=ocr_page(page, excluded_regions=excluded_regions) or []
@@ -166,18 +201,24 @@ def _regional_ocr(page, excluded_regions=()):
     for component in components:
         raw=[min(original[i]["bbox"][k] for i in component) for k in (0,1)]+[max(original[i]["bbox"][k] for i in component) for k in (2,3)]
         roi=[max(rect[0],raw[0]-tolerance),max(rect[1],raw[1]-tolerance),min(rect[2],raw[2]+tolerance),min(rect[3],raw[3]+tolerance)]
-        candidates=[b for b in retry if all(b["bbox"][k]>=roi[k] for k in (0,1)) and all(b["bbox"][k]<=roi[k] for k in (2,3))]
+        candidate_indices=[i for i,b in enumerate(retry) if all(b["bbox"][k]>=roi[k] for k in (0,1)) and all(b["bbox"][k]<=roi[k] for k in (2,3))]
+        candidates=[retry[i] for i in candidate_indices]
         centers=[((s["bbox"][0]+s["bbox"][2])/2,(s["bbox"][1]+s["bbox"][3])/2) for i in component for l in original[i].get("textlines",[]) for s in l.get("spans",[])]
         covered=all(any(l["bbox"][0]<=x<=l["bbox"][2] and l["bbox"][1]<=y<=l["bbox"][3] for b in candidates for l in b.get("textlines",[])) for x,y in centers)
         resolved=bool(candidates) and covered
-        diagnostics.append({"indices":sorted(component),"roi":raw,"effective_roi":roi,"candidate_count":len(candidates),"resolved":resolved})
+        diagnostics.append({"indices":sorted(component),"roi":raw,"effective_roi":roi,
+                            "candidate_count":len(candidates),"resolved":resolved,
+                            "failure":None if resolved else "candidate_does_not_cover_component",
+                            "primary_refs":[_attempt_reference(page_number,"primary",i) for i in sorted(component)],
+                            "candidate_refs":[_attempt_reference(page_number,"retry",i) for i in candidate_indices],
+                            "replaced_refs":[_attempt_reference(page_number,"primary",i) for i in sorted(component)] if resolved else []})
         if resolved: replacements.append((min(component),set(component),candidates))
     members=set().union(*(m for _,m,_ in replacements)) if replacements else set(); selected=[]
     by_first={i:c for i,_,c in replacements}
     for i,box in enumerate(original):
         if i in by_first: selected.extend(by_first[i])
         if i not in members: selected.append(box)
-    return selected,{"primary_boxes":original,"retry_boxes":retry,"components":diagnostics}
+    return selected, _regional_evidence(page_number, original, retry, selected, diagnostics)
 
 
 def line_text(line):
@@ -368,7 +409,14 @@ def main():
                         if selected:
                             page_layout["boxes"].extend(selected)
                         page_layout["ocr_retry_diagnostic"] = retry_diagnostic
+        observations = [p["ocr_retry_diagnostic"] for p in layout["pages"]
+                        if "ocr_retry_diagnostic" in p]
+        if any(not observation["complete"] for observation in observations):
+            json.dump({"schema_version": VERSION, "ocr_attempts": observations,
+                       "error": "OCR_NO_SUPPORTED_PROJECTION"}, sys.stdout, ensure_ascii=False)
+            raise ValueError("OCR geometric conflict remains unresolved")
         result = project(layout)
+        result["ocr_attempts"] = observations
         if OCR_CONFIG.get("enabled", False):
             engine = OCR_CONFIG["engine_path"]
             tessdata = OCR_CONFIG["tessdata_path"]

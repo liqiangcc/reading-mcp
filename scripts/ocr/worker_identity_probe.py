@@ -13,6 +13,18 @@ assert ok.returncode == 0, ok.stderr.decode()
 payload = json.loads(ok.stdout)
 blocks = [b for section in payload["sections"] for b in section["blocks"]]
 evidence = payload["ocr_evidence"]
+observations = payload["ocr_attempts"]
+assert observations and all(page["complete"] for page in observations)
+for page in observations:
+    attempts = {attempt["id"]: attempt for attempt in page["attempts"]}
+    assert set(attempts) == {"primary", "retry"}, "F07 must preserve both actual attempts"
+    assert page["components"] and all(c["replaced_refs"] for c in page["components"])
+    for selection in page["selection"]:
+        reference = selection["source"]
+        source_box = attempts[reference["attempt"]]["boxes"][reference["box"]]
+        assert reference["page"] == 1 and source_box["textlines"]
+        for word in selection["words"]:
+            assert source_box["textlines"][word["line"]]["spans"][word["word"]]["text"]
 assert len(blocks) > 1 and len(evidence) > 1
 assert all(e["paragraph"] and e["confidence"] is not None and len(e["bbox"]) == 4 for e in evidence)
 Path(os.environ.get("RUNNER_TEMP", "."), "ocr-first-probe", "f07-canonical.json").parent.mkdir(parents=True, exist_ok=True)

@@ -1,11 +1,66 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import copy
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location("regional_retry_probe", Path(__file__).parents[2] / "scripts/ocr/regional_retry_probe.py")
 probe = importlib.util.module_from_spec(spec); spec.loader.exec_module(probe)
 
 class RegionalGeometryTests(unittest.TestCase):
+    def run_worker_retry(self, primary, retry):
+        worker = {}
+        exec((Path(__file__).parents[2] / "src/parsing/pdf_layout_worker.py").read_text(), worker)
+        worker["OCR_CONFIG"] = {"enabled": True, "psm": 3, "dpi": 300}
+        calls = []
+        def observe(page, excluded_regions=()):
+            calls.append(worker["OCR_CONFIG"]["psm"])
+            return primary if calls[-1] == 3 else retry
+        worker["ocr_page"] = observe
+        selected, evidence = worker["_regional_ocr"](
+            SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
+        self.assertEqual(worker["OCR_CONFIG"]["psm"], 3)
+        return selected, evidence, calls
+
+    @staticmethod
+    def box(bbox, text, block):
+        return {"bbox": bbox, "ocr_block": block,
+                "textlines": [{"bbox": bbox, "spans": [{"bbox": bbox, "text": text}]}]}
+
+    def test_production_retry_retains_raw_observations_and_references(self):
+        primary = [self.box([10,10,20,20], "primary", 1),
+                   self.box([10,50,20,60], "unrelated", 2),
+                   self.box([12,12,14,14], "overlap", 3)]
+        before = copy.deepcopy(primary)
+        retry = [self.box([10,10,20,20], "retry", 1)]
+        selected, evidence, calls = self.run_worker_retry(primary, retry)
+        self.assertEqual(calls, [3,6])
+        self.assertEqual(primary, before)
+        self.assertEqual(selected, [retry[0], primary[1]])
+        self.assertTrue(evidence["complete"])
+        self.assertEqual(evidence["attempts"][0]["boxes"], before)
+        self.assertEqual(evidence["selection"][0]["source"],
+                         {"page":1,"attempt":"retry","box":0})
+        self.assertEqual(evidence["selection"][1]["source"]["box"], 1)
+        self.assertEqual([ref["box"] for ref in evidence["components"][0]["replaced_refs"]], [0,2])
+
+    def test_production_uncovered_component_is_incomplete(self):
+        primary = [self.box([10,10,20,20], "primary", 1),
+                   self.box([12,12,14,14], "overlap", 2)]
+        selected, evidence, calls = self.run_worker_retry(primary, [])
+        self.assertEqual(calls, [3,6])
+        self.assertEqual(selected, primary)
+        self.assertFalse(evidence["complete"])
+        self.assertEqual(evidence["components"][0]["replaced_refs"], [])
+
+    def test_production_nonconflicting_page_never_retries(self):
+        primary = [self.box([10,10,20,20], "primary", 1)]
+        selected, evidence, calls = self.run_worker_retry(primary, [])
+        self.assertEqual(calls, [3])
+        self.assertEqual(selected, primary)
+        self.assertEqual(len(evidence["attempts"]), 1)
+        self.assertTrue(evidence["complete"])
+
     def test_bridge_pairs_form_one_component(self):
         self.assertEqual(probe.merge_components([(0, 2), (2, 4)]), [{0, 2, 4}])
 

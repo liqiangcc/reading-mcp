@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Document, Section};
+use super::{Document, Section, OcrDerivation};
 
 pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v11";
 pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v3";
@@ -122,13 +122,14 @@ impl Document {
         hash_normalized_block_projection(&mut hasher, self);
         // OCR-derived identity and original-page bindings are typed derivation
         // inputs. Bind an explicit absent marker for native/non-derived docs.
-        for key in ["ocr_derivation_identity", "original_binding_map_digest"] {
-            hasher.update(b"derivation-field\0");
-            hash_text(&mut hasher, key);
-            match self.metadata.get(key) {
-                Some(value) => { hasher.update([1]); hash_text(&mut hasher, value); }
-                None => hasher.update([0]),
+        hasher.update(b"typed-ocr-derivation\0");
+        match OcrDerivation::from_metadata(&self.metadata) {
+            Some(value) => {
+                hasher.update([1]);
+                let encoded = serde_json::to_vec(&value).expect("typed OCR derivation serializes");
+                hash_bytes(&mut hasher, &encoded);
             }
+            None => hasher.update([0]),
         }
         NormalizedDocumentHash(format!("sha256:{:x}", hasher.finalize()))
     }
@@ -198,6 +199,11 @@ fn hash_normalized_block_projection(hasher: &mut Sha256, document: &Document) {
 fn hash_text(hasher: &mut Sha256, value: &str) {
     hash_usize(hasher, value.len());
     hasher.update(value.as_bytes());
+}
+
+fn hash_bytes(hasher: &mut Sha256, value: &[u8]) {
+    hash_usize(hasher, value.len());
+    hasher.update(value);
 }
 
 fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {

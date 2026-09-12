@@ -313,6 +313,8 @@ fn parsed_key(key: &ParsedCacheKey) -> String {
     input.extend_from_slice(key.raw_sha256.as_bytes());
     input.push(0);
     input.extend_from_slice(key.normalization_version.as_bytes());
+    input.push(0);
+    input.extend_from_slice(std::env::var("READING_MCP_OCR_FINGERPRINT").unwrap_or_else(|_| "ocr-disabled/v1".into()).as_bytes());
     digest_key(&input)
 }
 

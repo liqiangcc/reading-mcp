@@ -99,6 +99,7 @@ impl SystemdOcrUnit {
                 "--property=KillMode=control-group",
                 "--property=LimitNOFILE=256",
                 "--property=LimitFSIZE=536870912",
+                "--property=LimitCORE=0",
                 "--property=NoNewPrivileges=yes",
                 "--property=UMask=0077",
             ])
@@ -394,8 +395,9 @@ while True: time.sleep(1)
     async fn systemd_cancellation_reaps_descendant_and_retains_admission() {
         let (mut command, unit) = SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
         let child = command.args(["-I", "-c", r#"
-import os, signal, time, json
+import os, signal, time, json, resource
 from pathlib import Path
+assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
 group = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().split('::', 1)[1].strip().lstrip('/')
 assert int((group / 'memory.max').read_text()) == 768 * 1024 * 1024
 assert int((group / 'pids.max').read_text()) == 64

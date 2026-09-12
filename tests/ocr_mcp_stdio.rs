@@ -83,6 +83,16 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                 .into_typed::<OpenDocumentResponse>()
                 .unwrap();
             assert_eq!(opened.content_hash, raw_hash);
+            let codes: Vec<_> = opened
+                .reading_profile
+                .reliability
+                .evidence
+                .iter()
+                .flat_map(|evidence| evidence.degradation_codes.iter().map(String::as_str))
+                .collect();
+            assert!(codes.contains(&"pdf_local_ocr_unverified"));
+            assert!(!codes.contains(&"pdf_ocr_disabled"));
+            assert!(!codes.contains(&"pdf_local_ocr_not_applied"));
             let units =
                 client
                     .call_tool(CallToolRequestParams::new("get_text_units").with_arguments(

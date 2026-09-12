@@ -1,4 +1,6 @@
-use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievedResource};
+use reading_mcp::application::ports::{
+    DocumentReliabilityInspector, DocumentRepository, Parser, RetrievedResource,
+};
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};
 use reading_mcp::domain::{
     DocumentSource, MediaType, OcrConfig, OriginalSourceTarget, SentenceEligibility, TextLocator,
@@ -6,7 +8,7 @@ use reading_mcp::domain::{
 use reading_mcp::infrastructure::{
     FileOcrEvidenceStore, ResourceBudget, SqliteDocumentRepository, build_ocr_runtime_identity,
 };
-use reading_mcp::parsing::LayoutPdfParser;
+use reading_mcp::parsing::{LayoutPdfParser, PersistedDocumentReliabilityInspector};
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -67,6 +69,28 @@ async fn export_real_canonical_boundaries_without_gold_input() {
                 }
             };
         let paragraphs = document.try_paragraph_text_units().unwrap();
+        let reliability = PersistedDocumentReliabilityInspector
+            .inspect(&document)
+            .unwrap();
+        let expected_code = if matches!(case, "F01" | "F03" | "F04-form" | "F04-flat") {
+            "pdf_local_ocr_not_applied"
+        } else {
+            "pdf_local_ocr_unverified"
+        };
+        assert!(
+            reliability.evidence.iter().any(|evidence| evidence
+                .degradation_codes
+                .iter()
+                .any(|code| code == expected_code)),
+            "{case}"
+        );
+        let mut invalid = document.clone();
+        invalid.metadata.insert("ocr_derivation".into(), "{".into());
+        assert!(
+            PersistedDocumentReliabilityInspector
+                .inspect(&invalid)
+                .is_err()
+        );
         let sentences = document.try_sentence_text_units().unwrap();
         assert!(!paragraphs.units.is_empty());
         assert!(!sentences.units.is_empty());

@@ -5,7 +5,7 @@ use crate::application::reading_profile::{
     NavigationResolutionCoverage, PublicationCoverage, ReliabilityEvidence, ReliabilityIntegrity,
     ReliabilitySummary, StructureProvenanceCoverage,
 };
-use crate::domain::Document;
+use crate::domain::{Document, OcrDerivation};
 
 use super::epub_validator::{
     EPUB_VALIDATION_DEGRADATIONS_METADATA_KEY, EPUB_VALIDATION_ERRORS_METADATA_KEY,
@@ -55,7 +55,22 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
                 .get("pdf_layout_pages_without_text")
                 .and_then(|v| v.parse::<usize>().ok())
                 .ok_or_else(invalid)?;
-            let mut codes = vec!["pdf_layout_inferred".into(), "pdf_ocr_disabled".into()];
+            document.validate_ocr_publication().map_err(|_| invalid())?;
+            let derived = OcrDerivation::from_metadata(&document.metadata)
+                .map_err(|_| invalid())?
+                .is_some();
+            // Persisted evidence says whether local OCR contributed, not whether
+            // the current deployment switch is enabled. Valid provenance does
+            // not establish recognition accuracy, even with high confidence.
+            let mut codes = vec![
+                "pdf_layout_inferred".into(),
+                if derived {
+                    "pdf_local_ocr_unverified"
+                } else {
+                    "pdf_local_ocr_not_applied"
+                }
+                .into(),
+            ];
             if count > 0 {
                 codes.push("pdf_ambiguous_hyphens_preserved".into());
             }

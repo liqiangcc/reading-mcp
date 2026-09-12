@@ -64,6 +64,17 @@ fn failed(message: impl std::fmt::Display) -> ApplicationError {
     ApplicationError::ParseFailed(format!("PDF layout: {message}"))
 }
 
+fn configure_worker_environment(command: &mut Command, ocr_enabled: bool) {
+    if ocr_enabled {
+        // This prevents credential/proxy inheritance, not network syscalls.
+        // Match dependency discovery; never resolve one library environment
+        // and execute the engine under a different one.
+        command
+            .env_clear()
+            .envs(crate::infrastructure::OCR_PROCESS_ENV);
+    }
+}
+
 fn worker_failure(ocr_enabled: bool, stderr: &[u8]) -> ApplicationError {
     if ocr_enabled {
         // OCR errors can contain input text or local paths. Keep bounded stderr
@@ -106,6 +117,7 @@ impl Parser for LayoutPdfParser {
             ));
         }
         let mut command = Command::new(&self.python);
+        configure_worker_environment(&mut command, ocr_enabled);
         #[cfg(unix)]
         command.process_group(0);
         let child = command
@@ -514,6 +526,42 @@ mod tests {
     use super::*;
     use crate::domain::{DocumentSource, MediaType};
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ocr_worker_environment_is_an_exact_allowlist() {
+        let mut command = Command::new("/usr/bin/env");
+        command.env("OCR_TEST_SECRET", "synthetic-secret");
+        command.env("HTTPS_PROXY", "http://synthetic-proxy.invalid");
+        command.env("LD_LIBRARY_PATH", "/synthetic-library-override");
+        configure_worker_environment(&mut command, true);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        let actual: std::collections::BTreeSet<_> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let expected = crate::infrastructure::OCR_PROCESS_ENV
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn native_worker_environment_configuration_remains_unchanged() {
+        let mut command = Command::new("python");
+        command.env("NATIVE_LAYOUT_SETTING", "preserve");
+        configure_worker_environment(&mut command, false);
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(key, value)| key == "NATIVE_LAYOUT_SETTING"
+                    && value == Some(std::ffi::OsStr::new("preserve")))
+        );
+    }
 
     #[test]
     fn ocr_stderr_is_not_exposed_but_native_diagnostics_remain_compatible() {

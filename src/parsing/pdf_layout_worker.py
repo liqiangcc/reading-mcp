@@ -16,6 +16,8 @@ import unicodedata
 import hashlib
 import statistics
 import time
+
+OCR_PROCESS_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"}
 import math
 
 VERSION = "pdf-layout/v1"
@@ -85,7 +87,7 @@ def fingerprint_dependencies(config):
             for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
         return digest.hexdigest()
     paths = [("engine", config["engine_path"])] + [(f"model:{lang}", os.path.join(config["tessdata_path"], lang + ".traineddata")) for lang in config["languages"]]
-    output = subprocess.run(["ldd", config["engine_path"]], text=True, capture_output=True)
+    output = subprocess.run(["ldd", config["engine_path"]], text=True, capture_output=True, env=OCR_PROCESS_ENV)
     if output.returncode != 0 or "not found" in output.stdout or "not found" in output.stderr: raise RuntimeError("OCR dependency ldd failure")
     libraries = sorted({token for token in output.stdout.split() if token.startswith("/")})
     paths += [("library:" + path, path) for path in libraries]
@@ -134,7 +136,7 @@ def ocr_page(page, language=None, excluded_regions=()):
                    "-l", language, "--oem", str(config["oem"]), "--psm", str(config["psm"]), "--dpi", str(config["dpi"]), "tsv"]
         try:
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.PIPE, timeout=page_time_remaining(), env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"})
+                           stderr=subprocess.PIPE, timeout=page_time_remaining(), env=OCR_PROCESS_ENV)
         except FileNotFoundError as error:
             raise RuntimeError("local OCR engine is not installed") from error
         except subprocess.TimeoutExpired as error:

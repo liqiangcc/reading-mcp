@@ -3,6 +3,12 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
 
+pub(crate) const OCR_PROCESS_ENV: [(&str, &str); 3] = [
+    ("PATH", "/usr/bin:/bin"),
+    ("LANG", "C.UTF-8"),
+    ("OMP_THREAD_LIMIT", "1"),
+];
+
 pub fn build_ocr_runtime_identity(config: OcrConfig) -> Result<OcrRuntimeIdentity, String> {
     config.validate()?;
     let mut deps = Vec::new();
@@ -20,6 +26,8 @@ pub fn build_ocr_runtime_identity(config: OcrConfig) -> Result<OcrRuntimeIdentit
         });
     }
     let output = Command::new("ldd")
+        .env_clear()
+        .envs(OCR_PROCESS_ENV)
         .arg(&config.engine_path)
         .output()
         .map_err(|e| e.to_string())?;

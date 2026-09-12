@@ -55,6 +55,30 @@ class RegionalGeometryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 pixels(x1, y1)
 
+    def test_total_raster_budget_counts_retry_and_rejects_before_reservation(self):
+        worker, _ = self.deadline_worker()
+        budget = worker["OcrRasterBudget"]()
+        for page in range(2):
+            budget.reserve(page, 16_000_000)
+            budget.reserve(page, 16_000_000)  # retry is a real second allocation
+        self.assertEqual(budget.pixels, 64_000_000)
+        self.assertEqual(budget.pages, {0, 1})
+        with self.assertRaisesRegex(RuntimeError, "64 million"):
+            budget.reserve(2, 1)
+        self.assertEqual(budget.pixels, 64_000_000)
+        self.assertEqual(budget.pages, {0, 1})
+
+    def test_required_page_limit_does_not_double_count_retry(self):
+        worker, _ = self.deadline_worker()
+        budget = worker["OcrRasterBudget"]()
+        for page in range(8):
+            budget.reserve(page, 100)
+            budget.reserve(page, 100)
+        with self.assertRaisesRegex(RuntimeError, "8 required page"):
+            budget.reserve(8, 100)
+        self.assertEqual(len(budget.pages), 8)
+        self.assertEqual(budget.pixels, 1600)
+
     def run_worker_retry(self, primary, retry):
         worker = {}
         exec((Path(__file__).parents[2] / "src/parsing/pdf_layout_worker.py").read_text(), worker)

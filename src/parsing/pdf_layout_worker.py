@@ -23,6 +23,21 @@ ENGINE = "pymupdf4llm-layout/1.28.2"
 OCR_CONFIG = {"enabled": False}
 EXPECTED_IDENTITY = None
 PAGE_DEADLINE = None
+RASTER_BUDGET = None
+
+class OcrRasterBudget:
+    """Per-worker allocation accounting, including the second raster on retry."""
+    def __init__(self):
+        self.pages = set()
+        self.pixels = 0
+
+    def reserve(self, page_number, pixels):
+        if page_number not in self.pages and len(self.pages) >= 8:
+            raise RuntimeError("OCR exceeds 8 required page limit")
+        if self.pixels + pixels > 64_000_000:
+            raise RuntimeError("OCR exceeds 64 million total raster pixel limit")
+        self.pages.add(page_number)
+        self.pixels += pixels
 
 def page_time_remaining():
     remaining = 15.0 if PAGE_DEADLINE is None else PAGE_DEADLINE - time.monotonic()
@@ -83,7 +98,9 @@ def ocr_page(page, language=None, excluded_regions=()):
         return None
     language = "+".join(config["languages"])
     page_time_remaining()
-    raster_pixel_count(page, config["dpi"])
+    pixels = raster_pixel_count(page, config["dpi"])
+    if RASTER_BUDGET is not None:
+        RASTER_BUDGET.reserve(page.number, pixels)
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
         image = os.path.join(directory, "page.png")
         output = os.path.join(directory, "words")
@@ -415,7 +432,7 @@ def project(layout):
 
 
 def main():
-    global OCR_CONFIG, EXPECTED_IDENTITY
+    global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET
     max_pages, max_bytes, max_chars = map(int, sys.argv[1:4])
     if len(sys.argv) > 4 and sys.argv[4]:
         OCR_CONFIG = json.loads(sys.argv[4])
@@ -425,6 +442,7 @@ def main():
             raise ValueError("OCR config does not match expected identity")
     actual_dependencies = None
     if OCR_CONFIG.get("enabled"):
+        RASTER_BUDGET = OcrRasterBudget()
         if EXPECTED_IDENTITY is None: raise ValueError("OCR expected identity is required")
         actual_dependencies = fingerprint_dependencies(OCR_CONFIG)
         if EXPECTED_IDENTITY.get("dependencies") != actual_dependencies: raise ValueError("OCR dependency identity mismatch")

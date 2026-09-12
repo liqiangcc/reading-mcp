@@ -3,16 +3,54 @@ on:
   push:
     paths:
       - 'scripts/ocr/package_python_dependencies.py'
+      - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
   pull_request:
     paths:
       - 'scripts/ocr/package_python_dependencies.py'
+      - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
 permissions:
   contents: read
 jobs:
+  offline-engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve complete Debian closure without installed-package shortcuts
+        run: |
+          sudo apt-get update -qq
+          python3 scripts/ocr/package_engine_dependencies.py --output "$RUNNER_TEMP/ocr-engine-component"
+      - name: Start extracted engine without host libraries or network
+        run: |
+          set -euo pipefail
+          engine_root="$RUNNER_TEMP/ocr-engine-component/rootfs"
+          mkdir -p "$engine_root/tmp"
+          cp tests/fixtures/scanned_pdf/previews/F07-p1.png "$engine_root/tmp/public-F07.png"
+          sudo unshare --net -- chroot "$engine_root" /usr/bin/tesseract --version
+          sudo unshare --net -- chroot "$engine_root" /usr/bin/tesseract \
+            /tmp/public-F07.png stdout --tessdata-dir /usr/share/tesseract-ocr/5/tessdata \
+            -l chi_sim --oem 1 --psm 3 > "$RUNNER_TEMP/engine-offline-smoke.txt"
+          test -s "$RUNNER_TEMP/engine-offline-smoke.txt"
+          du -sb "$engine_root" "$RUNNER_TEMP/ocr-engine-component/debs"
+      - name: Archive immutable download inputs (not a deployment)
+        run: |
+          tar -czf "$RUNNER_TEMP/ocr-engine-component.tar.gz" -C "$RUNNER_TEMP/ocr-engine-component" debs manifest.json apt-source-uris.txt
+          sha256sum "$RUNNER_TEMP/ocr-engine-component.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-engine-component-candidate
+          path: |
+            ${{ runner.temp }}/ocr-engine-component/manifest.json
+            ${{ runner.temp }}/ocr-engine-component/apt-source-uris.txt
+            ${{ runner.temp }}/engine-offline-smoke.txt
+            ${{ runner.temp }}/ocr-engine-component.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
   offline-python:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

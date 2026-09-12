@@ -14,6 +14,39 @@ pub struct OcrConfig {
     pub protocol_version: String,
 }
 
+impl OcrConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.engine_path.starts_with('/')
+            || !self.tessdata_path.starts_with('/')
+            || self.engine_path.contains('\0')
+            || self.tessdata_path.contains('\0')
+        {
+            return Err("OCR paths must be absolute and NUL-free".into());
+        }
+        if self.dpi != 300
+            || self.oem != 1
+            || self.psm != 3
+            || self.protocol_version != "pdf-layout/v1"
+            || self.detector_version != "pdf-layout/v1"
+        {
+            return Err("unsupported OCR configuration".into());
+        }
+        let mut languages = std::collections::BTreeSet::new();
+        if self.languages.is_empty()
+            || self
+                .languages
+                .iter()
+                .any(|l| (l != "eng" && l != "chi_sim") || !languages.insert(l))
+        {
+            return Err("invalid OCR languages".into());
+        }
+        if self.operator_revision.trim().is_empty() {
+            return Err("OCR operator revision must be nonempty".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencyFingerprint {
     pub name: String,
@@ -59,34 +92,32 @@ impl OcrRuntimeIdentity {
         config: OcrConfig,
         mut dependencies: Vec<DependencyFingerprint>,
     ) -> Result<Self, String> {
-        if !config.engine_path.starts_with('/') || !config.tessdata_path.starts_with('/') {
-            return Err("OCR paths must be absolute".into());
-        }
-        if config.dpi != 300
-            || config.oem != 1
-            || config.psm != 3
-            || config.protocol_version != "pdf-layout/v1"
-            || config.detector_version != "pdf-layout/v1"
-        {
-            return Err("unsupported OCR configuration".into());
-        }
-        if config.languages.is_empty()
-            || config
-                .languages
-                .iter()
-                .any(|l| l != "eng" && l != "chi_sim")
-            || {
-                let mut s = config.languages.clone();
-                s.sort();
-                s.windows(2).any(|w| w[0] == w[1])
-            }
-        {
-            return Err("invalid OCR languages".into());
-        }
+        config.validate()?;
         if dependencies.is_empty() {
             return Err("missing OCR dependencies".into());
         }
         dependencies.sort_by(|a, b| a.name.cmp(&b.name));
+        if dependencies.iter().any(|d| !valid_sha256(&d.sha256))
+            || dependencies.windows(2).any(|w| w[0].name == w[1].name)
+        {
+            return Err("invalid/duplicate OCR dependency fingerprint".into());
+        }
+        let names: std::collections::BTreeSet<_> =
+            dependencies.iter().map(|d| d.name.as_str()).collect();
+        let models: std::collections::BTreeSet<_> = config
+            .languages
+            .iter()
+            .map(|l| format!("model:{l}"))
+            .collect();
+        if !names.contains("engine")
+            || !names.iter().any(|n| n.starts_with("library:/"))
+            || models.iter().any(|m| !names.contains(m.as_str()))
+            || names
+                .iter()
+                .any(|n| *n != "engine" && !n.starts_with("library:/") && !models.contains(*n))
+        {
+            return Err("incomplete/unexpected OCR dependency set".into());
+        }
         let retry_policy = OcrRetryPolicy::default();
         let bytes = serde_json::to_vec(&(config.clone(), &retry_policy, dependencies.clone()))
             .map_err(|e| e.to_string())?;
@@ -224,6 +255,28 @@ mod tests {
                 .sha256
         );
     }
+    #[test]
+    fn dependency_set_requires_only_selected_models_and_actual_digests() {
+        let seed = identity();
+        assert!(OcrRuntimeIdentity::build(seed.config.clone(), seed.dependencies.clone()).is_ok());
+        for index in 0..seed.dependencies.len() {
+            let mut missing = seed.dependencies.clone();
+            missing.remove(index);
+            assert!(OcrRuntimeIdentity::build(seed.config.clone(), missing).is_err());
+        }
+        let mut invalid = seed.dependencies.clone();
+        invalid[0].sha256 = "unknown".into();
+        assert!(OcrRuntimeIdentity::build(seed.config.clone(), invalid).is_err());
+        let mut duplicate = seed.dependencies.clone();
+        duplicate.push(duplicate[0].clone());
+        assert!(OcrRuntimeIdentity::build(seed.config.clone(), duplicate).is_err());
+        let mut extra = seed.dependencies.clone();
+        extra.push(DependencyFingerprint {
+            name: "model:chi_sim".into(),
+            sha256: "c".repeat(64),
+        });
+        assert!(OcrRuntimeIdentity::build(seed.config, extra).is_err());
+    }
     fn identity() -> OcrRuntimeIdentity {
         OcrRuntimeIdentity {
             retry_policy: OcrRetryPolicy::default(),
@@ -246,11 +299,11 @@ mod tests {
                 },
                 DependencyFingerprint {
                     name: "model:eng".into(),
-                    sha256: "m".repeat(64),
+                    sha256: "a".repeat(64),
                 },
                 DependencyFingerprint {
                     name: "library:/lib".into(),
-                    sha256: "l".repeat(64),
+                    sha256: "b".repeat(64),
                 },
             ],
             sha256: "x".into(),
@@ -263,8 +316,8 @@ mod tests {
             schema: "ocr-derivation/v2".into(),
             original_sha256: "raw".into(),
             engine_sha256: "e".repeat(64),
-            model_sha256: vec!["m".repeat(64)],
-            library_sha256: vec!["l".repeat(64)],
+            model_sha256: vec!["a".repeat(64)],
+            library_sha256: vec!["b".repeat(64)],
             languages: vec!["eng".into()],
             dpi: 300,
             oem: 1,
@@ -282,8 +335,8 @@ mod tests {
         d.schema = "ocr-evidence/v1".into();
         assert!(d.validate_against(&i, "raw").is_err());
         d.schema = "ocr-derivation/v2".into();
-        d.model_sha256[0] = "l".repeat(64);
-        d.library_sha256[0] = "m".repeat(64);
+        d.model_sha256[0] = "b".repeat(64);
+        d.library_sha256[0] = "a".repeat(64);
         assert!(d.validate_against(&i, "raw").is_err());
     }
 }

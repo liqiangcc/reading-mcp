@@ -21,7 +21,7 @@ jobs:
           python -m pip install --only-binary=:all: --report "$RUNNER_TEMP/layout-model-probe/pip-report.json" paddlepaddle==3.0.0 'paddlex[ocr]==3.1.0' PyMuPDF==1.28.2 setuptools==75.8.0
           python -m pip freeze > "$RUNNER_TEMP/layout-model-probe/pip-freeze.txt"
       - name: Download and verify fixed public model revision
-        run: python scripts/ocr/layout_model_probe.py --prepare --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
+        run: python scripts/ocr/layout_model_probe.py --candidate PP-DocLayout-L --prepare --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
       - name: Frozen input integrity
         working-directory: tests/fixtures/scanned_pdf
         run: sha256sum -c SHA256SUMS
@@ -29,7 +29,7 @@ jobs:
         env:
           PROBE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
-          sudo systemd-run --quiet --wait --pipe --collect --property=MemoryMax=2G --property=TasksMax=64 --property=PrivateNetwork=yes --property=RuntimeMaxSec=600 --property="WorkingDirectory=$GITHUB_WORKSPACE" --setenv=OMP_NUM_THREADS=1 --setenv=OPENBLAS_NUM_THREADS=1 --setenv=MKL_NUM_THREADS=1 --setenv=PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True "$PROBE_PYTHON" scripts/ocr/layout_model_probe.py --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
+          sudo systemd-run --quiet --wait --pipe --collect --property=MemoryMax=2G --property=TasksMax=64 --property=PrivateNetwork=yes --property=RuntimeMaxSec=600 --property="WorkingDirectory=$GITHUB_WORKSPACE" --setenv=OMP_NUM_THREADS=1 --setenv=OPENBLAS_NUM_THREADS=1 --setenv=MKL_NUM_THREADS=1 --setenv=PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True "$PROBE_PYTHON" scripts/ocr/layout_model_probe.py --candidate PP-DocLayout-L --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

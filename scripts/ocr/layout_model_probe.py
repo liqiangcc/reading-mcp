@@ -19,6 +19,14 @@ FILES = {
     "inference.yml": (1579, "f0995b690b0ed7a9d37786cdee8f204bc16230e0"),
     "inference.pdiparams": (4804904, "491c3382d84ca04d2033afbee0c105942ed82fea392bb4a19170646adebe088a"),
 }
+L_REVISION = "ca760c3336d922ee63cdbff85003181222e3911c"
+L_FILES = {
+    "README.md": (7434, "0972bad1446a331cb2e19bfff6154ab273dd05d1"),
+    "config.json": (6134, "0a3507f7365b0554e4e86d436421c53c3a738fb1"),
+    "inference.json": (1081389, "540c4f71da8b65c044f14a242314cc73de10d3d3"),
+    "inference.yml": (1871, "632a2724ad049bbb1ea75777597ad7f12d106692"),
+    "inference.pdiparams": (129021913, "4df69115349e1e6215629d058e3bc7f087cad7a0d2776ef40c463daf73c38982"),
+}
 
 
 def verify(path):
@@ -34,7 +42,7 @@ def verify(path):
     return records
 
 
-def child(model, case, output):
+def child(model, case, output, name):
     # Public diagnostic only. The enclosing systemd cgroup also bounds RSS/PIDs
     # and denies network. Do not mistake these exploratory limits for acceptance.
     resource.setrlimit(resource.RLIMIT_CPU, (45, 45))
@@ -45,8 +53,8 @@ def child(model, case, output):
     import pymupdf
     from paddlex import create_predictor
     from paddlex.inference.utils.pp_option import PaddlePredictorOption
-    options = PaddlePredictorOption("PP-DocLayout-S", run_mode="paddle", cpu_threads=1)
-    detector = create_predictor(model_name="PP-DocLayout-S", model_dir=str(model),
+    options = PaddlePredictorOption(name, run_mode="paddle", cpu_threads=1)
+    detector = create_predictor(model_name=name, model_dir=str(model),
                                 device="cpu", pp_option=options)
     loaded = time.monotonic()
     raw = Path(f"tests/fixtures/scanned_pdf/pdf/{case}.pdf").read_bytes()
@@ -71,18 +79,22 @@ def child(model, case, output):
 
 
 def main():
+    global REVISION, FILES
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--candidate", choices=["PP-DocLayout-S", "PP-DocLayout-L"], default="PP-DocLayout-S")
     parser.add_argument("--case", choices=["F02", "F06", "F07", "F08", "F11", "F12", "F13", "F14"])
     args = parser.parse_args()
+    if args.candidate == "PP-DocLayout-L":
+        REVISION, FILES = L_REVISION, L_FILES
     args.output.mkdir(parents=True, exist_ok=True)
     if args.prepare:
         args.model.mkdir(parents=True, exist_ok=False)
         for name, (size, _) in FILES.items():
             endpoint = "resolve" if name == "inference.pdiparams" else "raw"
-            url = f"https://huggingface.co/PaddlePaddle/PP-DocLayout-S/{endpoint}/{REVISION}/{name}"
+            url = f"https://huggingface.co/PaddlePaddle/{args.candidate}/{endpoint}/{REVISION}/{name}"
             for attempt in range(3):
                 print(f"Downloading pinned {name}, attempt {attempt + 1}/3", flush=True)
                 try:
@@ -98,22 +110,23 @@ def main():
                         raise RuntimeError("model host requested a longer retry delay; stop bounded attempt") from error
                     time.sleep(max(1, delay))
             (args.model / name).write_bytes(raw)
-        manifest = {"repository": "PaddlePaddle/PP-DocLayout-S", "revision": REVISION,
+        manifest = {"repository": "PaddlePaddle/" + args.candidate, "revision": REVISION,
                     "license_declaration": "Apache-2.0 in pinned model card; candidate only",
                     "files": verify(args.model)}
         (args.output / "model-manifest.json").write_text(json.dumps(manifest, indent=2))
         print(json.dumps(manifest), flush=True)
         return
     if args.case:
-        child(args.model, args.case, args.output)
+        child(args.model, args.case, args.output, args.candidate)
         return
-    report = {"schema": "layout-model-diagnostic/v1", "model_files": verify(args.model),
+    report = {"schema": "layout-model-diagnostic/v1", "candidate": args.candidate, "model_files": verify(args.model),
               "scope": "raw candidate regions only; no gold input, no OCR/projection modification",
               "cases": {}}
     for case in ("F02", "F06", "F07", "F08", "F11", "F12", "F13", "F14"):
         try:
             process = subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                "--model", str(args.model), "--output", str(args.output), "--case", case],
+                "--model", str(args.model), "--output", str(args.output), "--case", case,
+                "--candidate", args.candidate],
                 capture_output=True, timeout=60, check=True)
             item = json.loads((args.output / f"{case}.json").read_text())
         except Exception as error:

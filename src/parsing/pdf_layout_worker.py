@@ -115,12 +115,13 @@ def ocr_page(page, language=None, excluded_regions=()):
 
 
 def line_text(line):
+    is_ocr_line = any(span.get("ocr_block") is not None for span in line["spans"])
     result = ""
     previous = None
     for span in line["spans"]:
         # Preserve the engine's actual characters.  Compatibility folding (NFKC)
         # would silently turn full-width/CJK punctuation into different output.
-        text = unicodedata.normalize("NFC", span["text"])
+        text = unicodedata.normalize("NFC" if is_ocr_line else "NFKC", span["text"])
         if previous and result and text and not result[-1].isspace() and not text[0].isspace():
             gap = span["bbox"][0] - previous["bbox"][2]
             # Style changes and superscripts do not introduce word boundaries.
@@ -134,11 +135,11 @@ def line_text(line):
             no_boundary = ((cjk(left) and cjk(right))
                            or (right_punct and (cjk(left) or left_punct))
                            or (left_punct and (cjk(right) or right_punct)))
-            if separates and not no_boundary:
+            if separates and (not is_ocr_line or not no_boundary):
                 result += " "
         result += text
         previous = span
-    return result.strip()
+    return result.strip() if is_ocr_line else " ".join(result.split())
 
 
 def join_lines(lines, vocabulary):

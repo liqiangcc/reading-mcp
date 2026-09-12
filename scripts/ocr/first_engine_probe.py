@@ -210,7 +210,12 @@ def run(root, output, engine, tessdata):
                   "pixels": pixels, "render_seconds": rendered - started,
                   "engine_seconds": finished - rendered, "render_plus_engine_seconds": finished - started,
                   "page_budget_seconds": 15, "page_budget_pass": finished - rendered <= 15,
-                  "resources": json.loads((directory / "usage.json").read_text()), "metrics": scored}
+                  "resources": json.loads((directory / "usage.json").read_text()), "metrics": scored,
+                  # Keep raw words and projection diagnostics adjacent to the
+                  # canonical score for direct comparison with the worker.
+                  "raw_engine_all_text": scored["raw_engine_all_text"],
+                  "per_gold_paragraph": scored["per_gold_paragraph"],
+                  "unassigned_words": scored["unassigned_words"]}
         dump(directory / "words.json", words)
         dump(directory / "result.json", report)
         results.append(report)

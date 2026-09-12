@@ -145,7 +145,8 @@ pub fn build_server(
         .map(|i| i.sha256.clone())
         .unwrap_or_else(|| "ocr-disabled/v1".into());
     let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache)
-        .with_ocr_fingerprint(fingerprint);
+        .with_ocr_fingerprint(fingerprint)
+        .with_ocr_admission(config.ocr_enabled);
     if config.pdf_layout_python.is_some() {
         cached = cached.with_pdf_namespace(crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE);
     }

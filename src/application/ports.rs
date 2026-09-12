@@ -104,7 +104,7 @@ pub struct ParsedCacheKey {
     pub ocr_fingerprint: String,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ApplicationError {
     #[error("source blocked: {0}")]
     BlockedSource(String),

@@ -87,6 +87,7 @@ pub struct CachingParser {
     cache: Arc<dyn ParsedDocumentCache>,
     pdf_namespace: Option<String>,
     ocr_fingerprint: String,
+    ocr_admission: Option<Arc<super::ocr_singleflight::OcrSingleFlight>>,
 }
 
 impl CachingParser {
@@ -96,10 +97,16 @@ impl CachingParser {
             cache,
             pdf_namespace: None,
             ocr_fingerprint: "ocr-disabled/v1".into(),
+            ocr_admission: None,
         }
     }
     pub fn with_ocr_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
         self.ocr_fingerprint = fingerprint.into();
+        self
+    }
+    pub fn with_ocr_admission(mut self, enabled: bool) -> Self {
+        self.ocr_admission =
+            enabled.then(|| Arc::new(super::ocr_singleflight::OcrSingleFlight::default()));
         self
     }
     pub fn with_pdf_namespace(mut self, namespace: &str) -> Self {
@@ -138,6 +145,18 @@ impl Parser for CachingParser {
             return Ok(document);
         }
 
+        if let Some(admission) = &self.ocr_admission
+            && resource
+                .media_type
+                .0
+                .split(';')
+                .next()
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"))
+        {
+            return admission
+                .parse(key, resource, self.inner.clone(), self.cache.clone())
+                .await;
+        }
         let document = self.inner.parse(resource).await?;
         document
             .validate_ocr_publication()

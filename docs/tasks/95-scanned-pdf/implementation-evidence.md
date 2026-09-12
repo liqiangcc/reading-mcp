@@ -118,3 +118,34 @@ Format/Clippy/Test 已通过（记录时打包仍在运行）；新增真实 Ope
 的原始 layout、glyph visibility/geometry、image/drawing bounds 与真实 worker 输出，
 两个管道结束后才读取 gold；该诊断不取代正式质量门槛，也不将 worker failure 算通过。
 混合页/已有层/blank/visual 分类、完整 MCP 门槛、离线包及最终生产验收仍按设计待办。
+
+## 原页分类诊断实测（26baa615，非分类验收通过）
+
+精确代码：`26baa615d8aa6711865925c09e9cdd1d14e7bf72`。
+[hosted run 34691988235](https://github.com/liqiangcc/reading-mcp/actions/runs/34691988235)
+全部步骤完成；artifact `ocr-first-engine-probe/page-selection-probe.json` 已实际下载读取，
+SHA256 `c9b4107535643f116a93e3d7b5b9299a03033e499a4037fe5333eb5e21b21a30`。
+同一公开 JSON 同时打印在 job `103548753532` 的 page diagnostics 日志。
+
+| 样本 | worker 退出码 | prose 段数 | 成功 payload 声明的 OCR 页 |
+| --- | --- | --- | --- |
+| F01 | 0 | 6 | 无 |
+| F03 | 0 | 6 | 无 |
+| F04-form / F04-flat | 各 0 | 各 6 | 无 |
+| F05 | 0 | 6 | 2、4 |
+| F09 | 1 | 无成功 payload | 未知，不可写成未执行 |
+| F10 | 0 | 6 | 1 |
+| F11 | 0 | 9 | 1 |
+| F12 | 0 | 7 | 1 |
+| F13 | 0 | 1 | 1 |
+
+确定缺口：F05 第 4 页本应 blank，却执行 OCR。F11 把图表数字 `12` 与公式
+`x?+y?=2?` 当作 prose，且一处原正文被分成两个段；不得按这些字符串过滤。
+F12 OCR 的 `Page l` 成为第 7 个 prose 段，同时原生 `Page 1` 已保留为
+page-footer/preformatted。原始 layout box 实际只有 x0/y0/x1/y1，没有 bbox，
+现有 native exclusion 读取错误字段，确实未排除原生页脚。
+
+F11 的原始 `to_json(use_ocr=False)` 返回空 boxes，不提供可直接复用的图表区域；
+不能虚称已有 layout 分类足够，亦不能用 gold bbox 修剪。后续须验证独立原图 layout
+区域来源，并把分类、排除依据和未采用的原始 OCR 观察一起纳入 typed evidence/identity。
+以上段数与退出码只是诊断事实，不代替 CER、边界、原序或完整 MCP 验收。

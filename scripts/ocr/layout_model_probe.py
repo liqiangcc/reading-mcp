@@ -161,10 +161,13 @@ def child(model, case, output, name, joint_pipeline=False):
                           "joint_primary_ocr_boxes": raw_ocr})
             image.unlink()
     group = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().split('::', 1)[1].strip().lstrip('/')
+    fingerprint_started = time.monotonic()
+    dependencies = mapped_dependencies()
+    fingerprint_seconds = time.monotonic() - fingerprint_started
     report = {"case": case, "original_sha256": hashlib.sha256(raw).hexdigest(),
               "load_seconds": loaded - started, "total_seconds": time.monotonic() - started,
               "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "pages": pages,
-              "mapped_dependencies": mapped_dependencies(),
+              "mapped_dependencies": dependencies, "mapped_fingerprint_seconds": fingerprint_seconds,
               "cgroup_cumulative_memory_peak_bytes": int((group / 'memory.peak').read_text()),
               "joint_native_layout": native,
               "joint_ocr_dependencies": ocr_dependencies if joint_pipeline else None,
@@ -229,6 +232,15 @@ def main():
         except Exception as error:
             item = {"error": str(error), "stderr": (getattr(error, "stderr", b"") or b"").decode(errors="replace")[-4096:]}
         report["cases"][case] = item
+        # Keep an independently readable bounded line: rich native/model/word
+        # observations can exceed the log service's per-line limit. Full bytes
+        # remain in each case JSON and the all-case artifact, including failures.
+        summary = {key: item.get(key) for key in ('error', 'total_seconds', 'peak_rss_kib',
+            'cgroup_cumulative_memory_peak_bytes', 'mapped_fingerprint_seconds')}
+        summary['pages'] = [{'page': page['page'],
+            'labels': [box['label'] for prediction in page['raw_predictions'] for box in prediction['res']['boxes']],
+            'primary_ocr_boxes': len(page.get('joint_primary_ocr_boxes') or [])} for page in item.get('pages', [])]
+        print(json.dumps({'layout_model_summary': case, 'result': summary}, ensure_ascii=True), flush=True)
         print(json.dumps({"layout_model_case": case, "result": item}, ensure_ascii=False), flush=True)
     (args.output / "layout-model-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     if any("error" in item for item in report["cases"].values()):

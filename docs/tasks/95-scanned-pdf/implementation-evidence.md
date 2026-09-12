@@ -287,3 +287,45 @@ OCR 配置先纯验证，缓存查找前检查专用隔离支持，OCR enabled �
 process-group 回退。对应 stdio/HTTP 真实入口 hosted 验证尚待结果。
 生产未变更；剩余部署级故障矩阵、组合模型资源/区域验收、完整离线安装和
 精确版本最终审查仍不能省略。
+
+### 同一入口的限额故障与私有解释器候选后续结果
+
+`a430ac69c838c4f54e9e6aa21a7c25a2c9427ff3` 的两条 hosted Rust CI
+`34705356078` / `34705352640` 及两条真实 OCR
+`34705356128` / `34705352642` 均 success。真实入口包含 stdio/HTTP、原页
+locator 重启复用、F07 隔离解析和五项 systemd 故障测试。内存故障要求 manager
+实际 `oom-kill`，不是“任意非零退出”；泄漏抗 TERM 后代要求实际 PID 拒绝、
+manager `timeout` 和所有 PID 消失，不能当作正常成功解析。取消时同步关闭
+owner pipe，测试故意不轮询 Tokio 清理 future，仍须在 2 秒内回收。
+后续代码另设置 `LimitCORE=0`，防止私有 worker 内存落入系统 core dump。
+
+联合模型资源报告已实际下载，原 JSON SHA256
+`385402a8b3597df224d130c2d44d57dec926cfc8258f3ec02db12ca26ef65954`；
+派生摘要保存为 `evidence/layout-model-joint-f17ca91-summary.json`。全部八样本
+成功执行 native layout + 固定 ONNX candidate + 真实 primary OCR，但没有
+改变 canonical。累计 cgroup 峰值 **803176448 bytes**，接近 768 MiB 的
+805306368 bytes 限额；这是累计值，不伪称每页独立峰值，也不证明生产余量。
+每个 case 留有 76 个实际映射依赖文件摘要及对应 Tesseract 依赖摘要。
+
+私有解释器候选 `d429be14f0da10f904feeeb128df5f31b50d0223` 的
+[run 34706491682](https://github.com/liqiangcc/reading-mcp/actions/runs/34706491682)
+与 `34706489552` 均 success：空 dpkg 状态解析完整依赖，固定所选版本/hash，
+提取独立 Python，断网 RootDirectory 内安装 hash-locked wheels，再运行冻结
+F07 完整 Python worker，得到四段和完整两次尝试/derivation。没有使用宿主
+Python/库来替代候选路径。此前 native import 的 SIGSEGV 已用 hosted GDB
+定位到 `fclose`，在子进程启动后发生；提取树缺失 POSIX shell 入口。显式
+固定 dash 包及 `usr/bin/sh -> dash` 组装输入后 import 与完整 worker 均通过，
+该组装同时纳入重建校验，未执行生产 apt 或任意 maintainer scripts。
+
+此候选不是完成的 companion 安装器：根目录约 584989993 bytes，仍包含
+bootstrap wheels/测试材料；正式包还要处理冻结分类模型、namespace 路径身份
+接线、完整文件清单、原子安装/回滚与实测空间。ORT 的可选硬件/遥测辅助命令
+缺失警告在报告中原样保留；网络已禁用，不能把这些 warning 默认为完整依赖
+交付证据。生产仍为 `reading-mcp-1569c68d6220d129beb1f3218cd22d57f26f331c`，
+未重启/部署。只读磁盘快照 available=606978048 bytes，不构成准入结论。
+
+**仍需 Coordinator 明确 F11 100% 区域保留的评估定义。** 冻结 gold 的图表/
+公式框是包含空白的宽区域带，模型给实际对象框。不能用 gold 反推生产框，
+也不能未经裁决把“每个语义区域均保留并可回看原页”与“覆盖整个标注矩形
+（含空白）”混为同一指标。问题已发到 PR99 comment `5647122033` 和当前会话；
+没有改 gold、门槛或正式 F11 gate，也未宣称 F11 已通过。

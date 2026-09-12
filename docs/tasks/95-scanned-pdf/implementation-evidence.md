@@ -30,3 +30,27 @@ MCP 集成，不由 OCR 段落数量推断。引擎高置信度不等于准确�
 其余 ingestion/identity/cache/监督/MCP 故障门禁尚未实现或验收；本轮先取得真实
 引擎指标，再按最小 Port / atomic Document upsert / normalized hash 身份边界完成。
 无本机编译测试、私有上传、云 OCR 或生产变更。
+
+## 首轮评分解释修订（保留原始结果）
+
+首轮 head `35653e2363b2cc03707d5dcc0ef94f45832039b0` 的
+[hosted probe](https://github.com/liqiangcc/reading-mcp/actions/runs/34677501137)
+执行成功仅表示诊断脚本完成，不表示准确率或集成验收通过。原脚本、raw TSV 和
+该次 artifact 不追溯改写。
+
+Coordinator 指出：`join_words` 对全页中文连续拼接会丢掉引擎已经识别的段间空白，
+而 gold 的 `\n\n` 经既定 NFC + whitespace 归一化后仍是一个空格。因此全页
+raw/gold-region CER 同时包含识别错误与投影拼接错误，不能把它全部解释成错字。
+后续诊断须同时查看 `per_gold_paragraph` 和实际 engine block/par IDs；即使逐段
+准确，也不能用 gold 插入边界、重排或选择文本来冒充 canonical 输出。
+
+首轮日志中的 gold-region CER：F02/F06/F11 为 0，F07 为 5/110（4.55%），
+F08 为 9/217（4.15%），F14 为 1/2102（0.048%）。这些是原始诊断数值，
+尚未完成上述误差归因，尤其不能宣称中文阈值已通过。英文逐段 WER 除 F14
+1/384（0.26%）外为 0；六例诊断顺序分均为 1。单引擎耗时 0.716–1.970s，
+引擎进程峰值 RSS 126508–175080 KiB；不是整棵进程树、并发或 connector 冷开验收。
+
+最终 canonical 评分必须读取实际生产 adapter/MCP 输出的段与自然句文本，按
+既定 NFC + whitespace 规则与冻结 gold 比较。引擎段边界投影诊断如另加，必须
+单独命名、保留原 raw 指标，且不得使用 gold 指导输出边界。raw/gold-region、
+逐 gold 段指标以及 Actions green 均不能替代最终集成门禁。

@@ -83,6 +83,7 @@ impl Default for OcrRetryPolicy {
 pub struct OcrRuntimeIdentity {
     pub config: OcrConfig,
     pub retry_policy: OcrRetryPolicy,
+    pub inspection_policy: String,
     pub dependencies: Vec<DependencyFingerprint>,
     pub sha256: String,
 }
@@ -119,12 +120,19 @@ impl OcrRuntimeIdentity {
             return Err("incomplete/unexpected OCR dependency set".into());
         }
         let retry_policy = OcrRetryPolicy::default();
-        let bytes = serde_json::to_vec(&(config.clone(), &retry_policy, dependencies.clone()))
-            .map_err(|e| e.to_string())?;
+        let inspection_policy = "ocr-white-raster-inspection/v1".to_owned();
+        let bytes = serde_json::to_vec(&(
+            config.clone(),
+            &retry_policy,
+            &inspection_policy,
+            dependencies.clone(),
+        ))
+        .map_err(|e| e.to_string())?;
         use sha2::{Digest, Sha256};
         Ok(Self {
             config,
             retry_policy,
+            inspection_policy,
             dependencies,
             sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
         })
@@ -148,6 +156,7 @@ pub struct OcrDerivation {
     pub pages: Vec<OcrPageBinding>,
     pub retry_policy: OcrRetryPolicy,
     pub runtime_identity_sha256: String,
+    pub inspection_policy: String,
     #[serde(default)]
     pub binding_map_sha256: Option<String>,
     #[serde(default)]
@@ -160,12 +169,13 @@ impl OcrDerivation {
         identity: &OcrRuntimeIdentity,
         original_sha256: &str,
     ) -> Result<(), String> {
-        if self.schema != "ocr-derivation/v2" || self.original_sha256 != original_sha256 {
+        if self.schema != "ocr-derivation/v3" || self.original_sha256 != original_sha256 {
             return Err("OCR derivation source/schema mismatch".into());
         }
         if self.retry_policy != identity.retry_policy
             || self.retry_policy != OcrRetryPolicy::default()
             || self.runtime_identity_sha256 != identity.sha256
+            || self.inspection_policy != identity.inspection_policy
         {
             return Err("OCR retry policy/runtime identity mismatch".into());
         }
@@ -280,6 +290,7 @@ mod tests {
     fn identity() -> OcrRuntimeIdentity {
         OcrRuntimeIdentity {
             retry_policy: OcrRetryPolicy::default(),
+            inspection_policy: "ocr-white-raster-inspection/v1".into(),
             config: OcrConfig {
                 enabled: true,
                 engine_path: "/e".into(),
@@ -313,7 +324,7 @@ mod tests {
     fn derivation_schema_and_classed_digests_are_strict() {
         let i = identity();
         let mut d = OcrDerivation {
-            schema: "ocr-derivation/v2".into(),
+            schema: "ocr-derivation/v3".into(),
             original_sha256: "raw".into(),
             engine_sha256: "e".repeat(64),
             model_sha256: vec!["a".repeat(64)],
@@ -328,13 +339,14 @@ mod tests {
             pages: vec![],
             retry_policy: OcrRetryPolicy::default(),
             runtime_identity_sha256: i.sha256.clone(),
+            inspection_policy: i.inspection_policy.clone(),
             binding_map_sha256: None,
             evidence_blob: None,
         };
         assert!(d.validate_against(&i, "raw").is_ok());
         d.schema = "ocr-evidence/v1".into();
         assert!(d.validate_against(&i, "raw").is_err());
-        d.schema = "ocr-derivation/v2".into();
+        d.schema = "ocr-derivation/v3".into();
         d.model_sha256[0] = "b".repeat(64);
         d.library_sha256[0] = "a".repeat(64);
         assert!(d.validate_against(&i, "raw").is_err());
@@ -368,7 +380,8 @@ impl OcrDerivation {
         };
         let value: Self =
             serde_json::from_str(raw).map_err(|e| format!("invalid OCR derivation: {e}"))?;
-        if value.schema != "ocr-derivation/v2"
+        if value.schema != "ocr-derivation/v3"
+            || value.inspection_policy != "ocr-white-raster-inspection/v1"
             || value.retry_policy != OcrRetryPolicy::default()
             || !valid_sha256(&value.original_sha256)
             || !valid_sha256(&value.engine_sha256)

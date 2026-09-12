@@ -12,6 +12,7 @@ class RegionalGeometryTests(unittest.TestCase):
         worker = {}
         exec((Path(__file__).parents[2] / "src/parsing/pdf_layout_worker.py").read_text(), worker)
         worker["OCR_CONFIG"] = {"enabled": True, "psm": 3, "dpi": 300}
+        worker["prepare_page_raster"] = lambda page: SimpleNamespace(n=3, width=1, height=1, samples=b"\0\0\0")
         clock = [100.0]
         worker["time"] = SimpleNamespace(monotonic=lambda: clock[0])
         return worker, clock
@@ -21,14 +22,36 @@ class RegionalGeometryTests(unittest.TestCase):
         primary = [self.box([10,10,20,20], "primary", 1),
                    self.box([12,12,14,14], "overlap", 2)]
         remaining = []
+        rasters = []
         def observe(page, excluded_regions=()):
             remaining.append(worker["page_time_remaining"]())
+            rasters.append(worker["PAGE_RASTER"])
             clock[0] += 14 if len(remaining) == 1 else .5
             return primary if len(remaining) == 1 else [self.box([10,10,20,20], "retry", 1)]
         worker["ocr_page"] = observe
         worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
         self.assertEqual(remaining, [15, 1])
         self.assertIsNone(worker["PAGE_DEADLINE"])
+        self.assertIs(rasters[0], rasters[1])
+        self.assertIsNone(worker["PAGE_RASTER"])
+
+    def test_white_raster_skips_engine_but_a_single_nonwhite_sample_does_not(self):
+        worker, _ = self.deadline_worker()
+        white = SimpleNamespace(n=3, width=1, height=1, samples=b"\xff\xff\xff")
+        page = SimpleNamespace(number=0, rect=SimpleNamespace(width=1, height=1), get_texttrace=lambda: [])
+        worker["prepare_page_raster"] = lambda page: white
+        def unexpected(*args, **kwargs):
+            self.fail("blank raster must not invoke OCR")
+        worker["ocr_page"] = unexpected
+        selected, observed = worker["_regional_ocr"](page)
+        self.assertEqual(selected, [])
+        self.assertEqual(observed["attempts"], [])
+        self.assertEqual(observed["blank_raster"]["white_samples"], 3)
+        white.samples = b"\xff\xfe\xff"
+        self.assertIsNone(worker["blank_raster_evidence"](page, white))
+        white.samples = b"\xff\xff\xff"
+        page.get_texttrace = lambda: [{"type": 3}]
+        self.assertIsNone(worker["blank_raster_evidence"](page, white))
 
     def test_exhausted_primary_never_starts_retry_and_restores_state(self):
         worker, clock = self.deadline_worker()
@@ -55,16 +78,17 @@ class RegionalGeometryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 pixels(x1, y1)
 
-    def test_total_raster_budget_counts_retry_and_rejects_before_reservation(self):
+    def test_total_raster_budget_counts_allocations_and_rejects_before_reservation(self):
         worker, _ = self.deadline_worker()
         budget = worker["OcrRasterBudget"]()
         for page in range(2):
-            budget.reserve(page, 16_000_000)
-            budget.reserve(page, 16_000_000)  # retry is a real second allocation
+            budget.require_page(page)
+            budget.reserve_raster(16_000_000)
+            budget.reserve_raster(16_000_000)
         self.assertEqual(budget.pixels, 64_000_000)
         self.assertEqual(budget.pages, {0, 1})
         with self.assertRaisesRegex(RuntimeError, "64 million"):
-            budget.reserve(2, 1)
+            budget.reserve_raster(1)
         self.assertEqual(budget.pixels, 64_000_000)
         self.assertEqual(budget.pages, {0, 1})
 
@@ -72,17 +96,32 @@ class RegionalGeometryTests(unittest.TestCase):
         worker, _ = self.deadline_worker()
         budget = worker["OcrRasterBudget"]()
         for page in range(8):
-            budget.reserve(page, 100)
-            budget.reserve(page, 100)
+            budget.require_page(page)
+            budget.reserve_raster(100)
+            budget.require_page(page)
+            budget.reserve_raster(100)
         with self.assertRaisesRegex(RuntimeError, "8 required page"):
-            budget.reserve(8, 100)
+            budget.require_page(8)
         self.assertEqual(len(budget.pages), 8)
         self.assertEqual(budget.pixels, 1600)
+
+    def test_inspection_rasters_do_not_consume_required_recognition_slots(self):
+        worker, _ = self.deadline_worker()
+        budget = worker["OcrRasterBudget"]()
+        for _ in range(10):
+            budget.reserve_raster(100)
+        self.assertEqual(budget.pages, set())
+        self.assertEqual(budget.pixels, 1000)
+        for page in range(8):
+            budget.require_page(page)
+        with self.assertRaisesRegex(RuntimeError, "8 required page"):
+            budget.require_page(8)
 
     def run_worker_retry(self, primary, retry):
         worker = {}
         exec((Path(__file__).parents[2] / "src/parsing/pdf_layout_worker.py").read_text(), worker)
         worker["OCR_CONFIG"] = {"enabled": True, "psm": 3, "dpi": 300}
+        worker["prepare_page_raster"] = lambda page: SimpleNamespace(n=3, width=1, height=1, samples=b"\0\0\0")
         calls = []
         def observe(page, excluded_regions=()):
             calls.append(worker["OCR_CONFIG"]["psm"])

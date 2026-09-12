@@ -88,6 +88,44 @@ pub struct OcrRetryComponent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BlankRasterEvidence {
+    pub width: u32,
+    pub height: u32,
+    pub channels: u8,
+    pub white_samples: u64,
+    pub glyph_spans: u32,
+    pub samples_sha256: String,
+}
+
+impl BlankRasterEvidence {
+    fn validate(&self) -> Result<(), String> {
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        if pixels == 0
+            || pixels > 16_000_000
+            || self.channels != 3
+            || self.white_samples != pixels * 3
+            || self.glyph_spans != 0
+        {
+            return Err("invalid blank raster observation".into());
+        }
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let bytes = [255_u8; 4096];
+        let mut remaining = self.white_samples;
+        while remaining > 0 {
+            let count = remaining.min(bytes.len() as u64) as usize;
+            digest.update(&bytes[..count]);
+            remaining -= count as u64;
+        }
+        if format!("{:x}", digest.finalize()) != self.samples_sha256 {
+            return Err("blank raster pixel digest mismatch".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OcrPageObservations {
     pub schema: String,
     pub page: u32,
@@ -96,6 +134,8 @@ pub struct OcrPageObservations {
     pub attempts: Vec<OcrRawAttempt>,
     pub selection: Vec<OcrBoxSelection>,
     pub components: Vec<OcrRetryComponent>,
+    #[serde(default)]
+    pub blank_raster: Option<BlankRasterEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,7 +171,7 @@ impl OcrPageObservations {
     }
 
     pub fn validate(&self, max_page: u32) -> Result<Vec<OcrEvidenceRecord>, String> {
-        if self.schema != "ocr-regional-observations/v1"
+        if self.schema != "ocr-regional-observations/v2"
             || self.page == 0
             || self.page > max_page
             || !self.complete
@@ -140,6 +180,21 @@ impl OcrPageObservations {
             || !within(self.page_bounds, self.page_bounds)
         {
             return Err("invalid/incomplete OCR page observations".into());
+        }
+        if let Some(blank) = &self.blank_raster {
+            blank.validate()?;
+            if f64::from(blank.width) != (self.page_bounds[2] * 300.0 / 72.0).ceil()
+                || f64::from(blank.height) != (self.page_bounds[3] * 300.0 / 72.0).ceil()
+            {
+                return Err("blank raster dimensions do not match original page at 300 DPI".into());
+            }
+            if !self.attempts.is_empty()
+                || !self.selection.is_empty()
+                || !self.components.is_empty()
+            {
+                return Err("blank raster must not claim OCR attempts or selected text".into());
+            }
+            return Ok(vec![]);
         }
         if self.attempts.is_empty()
             || self.attempts.len() > 2
@@ -286,7 +341,7 @@ impl OcrPageObservations {
 
 impl OcrEvidenceBlob {
     pub fn validate(&self, max_page: u32) -> Result<(), String> {
-        if self.schema != "ocr-evidence/v2" || self.pages.is_empty() {
+        if self.schema != "ocr-evidence/v3" || self.pages.is_empty() {
             return Err("missing/version-mismatched OCR observations".into());
         }
         if !super::ocr::valid_sha256(&self.original_sha256)
@@ -309,5 +364,39 @@ impl OcrEvidenceBlob {
             return Err("selected OCR evidence differs from raw attempts".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod blank_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn blank_pixels_require_exact_white_digest_and_no_claimed_recognition() {
+        let mut observation: OcrPageObservations = serde_json::from_value(serde_json::json!({
+            "schema":"ocr-regional-observations/v2", "page":1, "page_bounds":[0,0,0.24,0.24],
+            "complete":true,"attempts":[],"selection":[],"components":[],
+            "blank_raster":{"width":1,"height":1,"channels":3,"white_samples":3,"glyph_spans":0,
+                "samples_sha256":format!("{:x}", Sha256::digest([255_u8;3]))}
+        }))
+        .unwrap();
+        assert!(observation.validate(1).unwrap().is_empty());
+        observation.blank_raster.as_mut().unwrap().samples_sha256 =
+            format!("{:x}", Sha256::digest([255_u8, 254, 255]));
+        assert!(observation.validate(1).unwrap_err().contains("digest"));
+        observation.blank_raster.as_mut().unwrap().samples_sha256 =
+            format!("{:x}", Sha256::digest([255_u8; 3]));
+        observation.attempts.push(OcrRawAttempt {
+            id: OcrAttemptId::Primary,
+            psm: 3,
+            boxes: vec![],
+        });
+        assert!(
+            observation
+                .validate(1)
+                .unwrap_err()
+                .contains("must not claim")
+        );
     }
 }

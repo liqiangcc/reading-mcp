@@ -209,7 +209,7 @@ impl Parser for LayoutPdfParser {
                     .unwrap_or(u32::MAX),
             )?;
             let blob = OcrEvidenceBlob {
-                schema: "ocr-evidence/v2".into(),
+                schema: "ocr-evidence/v3".into(),
                 original_sha256: derivation.original_sha256.clone(),
                 runtime_identity: identity.clone(),
                 pages: attempts,

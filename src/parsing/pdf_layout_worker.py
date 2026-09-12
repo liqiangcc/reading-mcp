@@ -24,20 +24,24 @@ OCR_CONFIG = {"enabled": False}
 EXPECTED_IDENTITY = None
 PAGE_DEADLINE = None
 RASTER_BUDGET = None
+PAGE_RASTER = None
+INSPECTION_POLICY = "ocr-white-raster-inspection/v1"
 
 class OcrRasterBudget:
-    """Per-worker allocation accounting, including the second raster on retry."""
+    """Allocation accounting is separate from the count of required OCR pages."""
     def __init__(self):
         self.pages = set()
         self.pixels = 0
 
-    def reserve(self, page_number, pixels):
-        if page_number not in self.pages and len(self.pages) >= 8:
-            raise RuntimeError("OCR exceeds 8 required page limit")
+    def reserve_raster(self, pixels):
         if self.pixels + pixels > 64_000_000:
             raise RuntimeError("OCR exceeds 64 million total raster pixel limit")
-        self.pages.add(page_number)
         self.pixels += pixels
+
+    def require_page(self, page_number):
+        if page_number not in self.pages and len(self.pages) >= 8:
+            raise RuntimeError("OCR exceeds 8 required page limit")
+        self.pages.add(page_number)
 
 def page_time_remaining():
     remaining = 15.0 if PAGE_DEADLINE is None else PAGE_DEADLINE - time.monotonic()
@@ -68,9 +72,10 @@ def runtime_identity(config, dependencies):
               "dpi", "oem", "psm", "detector_version", "protocol_version")
     ordered_config = {key: config[key] for key in fields}
     dependencies = sorted(dependencies, key=lambda d: d["name"])
-    encoded = json.dumps([ordered_config, RETRY_POLICY, dependencies],
+    encoded = json.dumps([ordered_config, RETRY_POLICY, INSPECTION_POLICY, dependencies],
                          ensure_ascii=False, separators=(",", ":")).encode()
     return {"config": ordered_config, "retry_policy": RETRY_POLICY,
+            "inspection_policy": INSPECTION_POLICY,
             "dependencies": dependencies, "sha256": "sha256:" + hashlib.sha256(encoded).hexdigest()}
 
 def fingerprint_dependencies(config):
@@ -90,21 +95,35 @@ def cjk(value):
     return value and ("\u3400" <= value <= "\u9fff" or "\uf900" <= value <= "\ufaff")
 
 
+def prepare_page_raster(page):
+    import pymupdf
+    pixels = raster_pixel_count(page, OCR_CONFIG["dpi"])
+    if RASTER_BUDGET is not None:
+        RASTER_BUDGET.reserve_raster(pixels)
+    return page.get_pixmap(dpi=OCR_CONFIG["dpi"], colorspace=pymupdf.csRGB, alpha=False)
+
+def blank_raster_evidence(page, pixmap):
+    samples = pixmap.samples
+    if (pixmap.n != 3 or len(samples) != pixmap.width * pixmap.height * 3
+            or samples.count(b"\xff") != len(samples) or page.get_texttrace()):
+        return None
+    return {"width": pixmap.width, "height": pixmap.height, "channels": 3,
+            "white_samples": len(samples), "glyph_spans": 0,
+            "samples_sha256": hashlib.sha256(samples).hexdigest()}
+
 def ocr_page(page, language=None, excluded_regions=()):
     """Run the deployer-selected local Tesseract and retain engine grouping."""
-    import pymupdf
     config = OCR_CONFIG
     if not config.get("enabled", False):
         return None
     language = "+".join(config["languages"])
     page_time_remaining()
-    pixels = raster_pixel_count(page, config["dpi"])
+    pixmap = PAGE_RASTER if PAGE_RASTER is not None else prepare_page_raster(page)
     if RASTER_BUDGET is not None:
-        RASTER_BUDGET.reserve(page.number, pixels)
+        RASTER_BUDGET.require_page(page.number)
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
         image = os.path.join(directory, "page.png")
         output = os.path.join(directory, "words")
-        pixmap = page.get_pixmap(dpi=config["dpi"], colorspace=pymupdf.csRGB, alpha=False)
         scale_x = pixmap.width / page.rect.width
         scale_y = pixmap.height / page.rect.height
         pixmap.save(image)
@@ -219,21 +238,31 @@ def _regional_evidence(page, bounds, primary, retry, selected, components):
                       for line_index, line in enumerate(box.get("textlines", []))
                       for word_index, _ in enumerate(line.get("spans", []))],
         })
-    return {"schema": "ocr-regional-observations/v1", "page": page, "page_bounds": bounds,
+    return {"schema": "ocr-regional-observations/v2", "page": page, "page_bounds": bounds,
             "complete": all(component["resolved"] for component in components),
             "attempts": attempts, "selection": selection, "components": components}
 
 def _regional_ocr(page, excluded_regions=()):
-    global PAGE_DEADLINE
+    global PAGE_DEADLINE, PAGE_RASTER
     previous = PAGE_DEADLINE
+    previous_raster = PAGE_RASTER
     deadline = time.monotonic() + 15
     PAGE_DEADLINE = deadline if previous is None else min(previous, deadline)
     try:
+        PAGE_RASTER = prepare_page_raster(page)
+        blank = blank_raster_evidence(page, PAGE_RASTER)
+        if blank is not None:
+            page_time_remaining()
+            return [], {"schema": "ocr-regional-observations/v2", "page": page.number + 1,
+                        "page_bounds": [0, 0, page.rect.width, page.rect.height],
+                        "complete": True, "attempts": [], "selection": [], "components": [],
+                        "blank_raster": blank}
         result = _regional_ocr_attempts(page, excluded_regions)
         page_time_remaining()
         return result
     finally:
         PAGE_DEADLINE = previous
+        PAGE_RASTER = previous_raster
 
 def _regional_ocr_attempts(page, excluded_regions=()):
     global OCR_CONFIG
@@ -498,13 +527,18 @@ def main():
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
                 return digest.hexdigest()
             language = "+".join(OCR_CONFIG["languages"])
-            result["ocr_derivation"] = {"schema": "ocr-derivation/v2", "original_sha256": hashlib.sha256(raw).hexdigest(),
+            result["ocr_derivation"] = {"schema": "ocr-derivation/v3", "original_sha256": hashlib.sha256(raw).hexdigest(),
+                "inspection_policy": INSPECTION_POLICY,
                 "retry_policy": RETRY_POLICY, "runtime_identity_sha256": actual_identity["sha256"],
                 "engine_sha256": next(d["sha256"] for d in actual_dependencies if d["name"] == "engine"), "model_sha256": [d["sha256"] for d in actual_dependencies if d["name"].startswith("model:")],
                 "library_sha256": [d["sha256"] for d in actual_dependencies if d["name"].startswith("library:")], "languages": OCR_CONFIG["languages"], "dpi": OCR_CONFIG["dpi"], "oem": OCR_CONFIG["oem"], "psm": OCR_CONFIG["psm"],
                 "detector_version": OCR_CONFIG["detector_version"], "protocol_version": OCR_CONFIG["protocol_version"],
                 "operator_revision": OCR_CONFIG["operator_revision"], "pages": []}
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):
+            if OCR_CONFIG.get("enabled", False):
+                json.dump({"schema_version": VERSION, "error": "OCR_NO_SUPPORTED_PROJECTION",
+                           "ocr_attempts": observations}, sys.stdout, ensure_ascii=False)
+                raise ValueError("no supported prose text in inspected original pages")
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")
         if sum(len(b["text"]) for s in result["sections"] for b in s["blocks"]) > max_chars:
             raise ValueError("PDF exceeds normalized text limit")

@@ -126,6 +126,15 @@ def main():
             # Gold is an observation after both pipelines, never an input to
             # classification, region selection, ordering or recognition.
             item["frozen_gold"] = json.loads((fixtures / "gold" / f"{case}.json").read_text())
+            observed = item["worker"].get("payload", {}).get("ocr_attempts", [])
+            item["actual_engine_attempts"] = [{"page": p["page"], "psms": [a["psm"] for a in p["attempts"]]}
+                                               for p in observed if p["attempts"]]
+            item["blank_pages"] = [p["page"] for p in observed if p.get("blank_raster")]
+            for expected in item["frozen_gold"]["pages"]:
+                if expected["expected_class"] == "blank":
+                    blank = next((p for p in observed if p["page"] == expected["page"]), None)
+                    if blank is None or not blank.get("blank_raster") or blank["attempts"]:
+                        raise RuntimeError("frozen blank page lacks non-OCR raster evidence")
         except Exception as error:
             item["error"] = str(error)
         print(json.dumps({"page_selection_case": case, "evidence": item}, ensure_ascii=False, indent=2), flush=True)

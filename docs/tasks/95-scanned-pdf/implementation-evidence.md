@@ -149,3 +149,23 @@ F11 的原始 `to_json(use_ocr=False)` 返回空 boxes，不提供可直接复�
 不能虚称已有 layout 分类足够，亦不能用 gold bbox 修剪。后续须验证独立原图 layout
 区域来源，并把分类、排除依据和未采用的原始 OCR 观察一起纳入 typed evidence/identity。
 以上段数与退出码只是诊断事实，不代替 CER、边界、原序或完整 MCP 验收。
+
+## 全白栅格检查接线（待本提交 hosted 验证）
+
+只在既有逻辑判定需检查 OCR 的页上执行实际 300 DPI RGB/无 alpha 渲染。完整像素
+必须全为 255 且原页无 texttrace span 才能记为 blank；一个非白样本或存在隐藏文字
+对象都会阻止该判定。不是以空文字、短段、低置信度或 gold 区域当作 blank。
+主识别与重试复用该栅格；像素分配累计额度仍为 6400 万，blank 检查不消耗 8 个
+required-recognition page 名额。
+
+blank 的 typed observation 保存尺寸、通道数、样本数、glyph span 数及实际像素
+SHA256，attempts/selection/components 均为空。Rust 重算同尺寸全白像素摘要，
+验证尺寸匹配原页 300 DPI，拒绝矛盾的识别声明，再随完整 evidence blob 持久化。
+纯 blank 文档仍以无可支持正文失败返回，公开 worker 失败 JSON 留下检查证据；
+不伪造可读正文。混合文档的 blank 事实可随其他 OCR 页一起持久化。
+
+缓存迁移：固定 `ocr-white-raster-inspection/v1` 进入 runtime identity 的结构化
+哈希并由 derivation 严格匹配；page observations 为 v2，derivation/evidence blob
+为 v3。旧未部署候选 OCR 文档需显式 reopen；旧 blob 不删除、不覆盖。全局
+normalization v11/hash v3 及原始 content hash 语义不变。仍需完成 blank 事实向
+完整 MCP coverage/reliability 的映射，以及 F11/F12 分类/去重和执行隔离验收。

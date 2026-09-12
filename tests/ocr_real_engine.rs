@@ -24,6 +24,66 @@ fn chinese_config() -> OcrConfig {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn real_f05_blank_page_is_persisted_without_an_engine_attempt() {
+    let directory = tempdir().unwrap();
+    let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
+    let mut config = chinese_config();
+    config.languages = vec!["eng".into()];
+    let identity = build_ocr_runtime_identity(config.clone()).unwrap();
+    let parser = LayoutPdfParser::new(
+        std::env::var("READING_MCP_PDF_LAYOUT_PYTHON")
+            .unwrap()
+            .into(),
+        reading_mcp::infrastructure::ResourceBudget::default(),
+    )
+    .with_ocr_config(config)
+    .with_ocr_identity(identity)
+    .with_evidence_store(store.clone());
+    let source = DocumentSource("file:///frozen/F05.pdf".into());
+    let bytes = std::fs::read("tests/fixtures/scanned_pdf/pdf/F05.pdf").unwrap();
+    let document = parser
+        .parse(RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: MediaType("application/pdf".into()),
+            bytes: bytes.clone(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        document.content_hash.0,
+        format!("sha256:{:x}", sha2::Sha256::digest(&bytes))
+    );
+    document.validate_ocr_publication().unwrap();
+    let blob = store
+        .get(document.metadata.get("ocr_evidence_blob").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut persisted: reading_mcp::domain::OcrEvidenceBlob =
+        serde_json::from_slice(&blob).unwrap();
+    persisted.validate(4).unwrap();
+    assert_eq!(
+        persisted
+            .pages
+            .iter()
+            .filter(|p| !p.attempts.is_empty())
+            .map(|p| p.page)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    let blank = persisted.pages.iter_mut().find(|p| p.page == 4).unwrap();
+    assert!(blank.attempts.is_empty());
+    assert!(blank.blank_raster.is_some());
+    blank.blank_raster.as_mut().unwrap().samples_sha256 = "0".repeat(64);
+    assert!(persisted.validate(4).unwrap_err().contains("digest"));
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn real_f07_ocr_publishes_typed_evidence_and_page_bindings() {
     let bytes = std::fs::read("tests/fixtures/scanned_pdf/pdf/F07.pdf").unwrap();
     let source = DocumentSource("file:///frozen/F07.pdf".into());

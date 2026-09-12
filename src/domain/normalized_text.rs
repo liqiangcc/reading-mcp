@@ -6,11 +6,11 @@ use sha2::{Digest, Sha256};
 
 use super::{Document, Section};
 
-pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v9";
-pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v2";
+pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v11";
+pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v3";
 pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scalar/v1";
 
-const NORMALIZED_DOCUMENT_HASH_DOMAIN: &[u8] = b"reading-mcp/normalized-document-hash/v2\0";
+const NORMALIZED_DOCUMENT_HASH_DOMAIN: &[u8] = b"reading-mcp/normalized-document-hash/v3\0";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NormalizedDocumentHash(pub String);
@@ -120,6 +120,16 @@ impl Document {
             hash_section(&mut hasher, section);
         }
         hash_normalized_block_projection(&mut hasher, self);
+        // OCR-derived identity and original-page bindings are typed derivation
+        // inputs. Bind an explicit absent marker for native/non-derived docs.
+        for key in ["ocr_derivation_identity", "original_binding_map_digest"] {
+            hasher.update(b"derivation-field\0");
+            hash_text(&mut hasher, key);
+            match self.metadata.get(key) {
+                Some(value) => { hasher.update([1]); hash_text(&mut hasher, value); }
+                None => hasher.update([0]),
+            }
+        }
         NormalizedDocumentHash(format!("sha256:{:x}", hasher.finalize()))
     }
 }

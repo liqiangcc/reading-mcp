@@ -132,10 +132,12 @@ def line_text(line):
             left, right = result[-1], text[0]
             left_punct = unicodedata.category(left).startswith("P")
             right_punct = unicodedata.category(right).startswith("P")
-            no_boundary = ((cjk(left) and cjk(right))
-                           or (right_punct and (cjk(left) or left_punct))
-                           or (left_punct and (cjk(right) or right_punct)))
-            if separates and (not is_ocr_line or not no_boundary):
+            no_boundary = cjk(left) and cjk(right)
+            if is_ocr_line:
+                no_boundary = (no_boundary
+                               or (right_punct and (cjk(left) or left_punct))
+                               or (left_punct and (cjk(right) or right_punct)))
+            if separates and not no_boundary:
                 result += " "
         result += text
         previous = span

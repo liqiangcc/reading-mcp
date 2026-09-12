@@ -222,6 +222,10 @@ def run(root, output, engine, tessdata):
         print(json.dumps({"id": identifier, "cer": scored["gold_region_prose_cer_engine_order"],
                           "english_wer": scored["gold_region_english_wer"], "order": scored["paragraph_order_score"],
                           "engine_seconds": report["engine_seconds"], "peak_kib": report["resources"]["max_rss_kib"]}), flush=True)
+        if identifier in ("F07", "F08"):
+            print(json.dumps({"id": identifier, "raw_engine_all_text": scored["raw_engine_all_text"],
+                              "per_gold_paragraph": scored["per_gold_paragraph"],
+                              "unassigned_words": scored["unassigned_words"]}, ensure_ascii=False), flush=True)
     final = {"schema": "ocr-first-engine-probe/v1", "fixture_sha": FIXTURE_SHA,
              "fixture_manifest_sha256": MANIFEST_SHA, "host": {"platform": platform.platform(), "cpus": os.cpu_count()},
              "parent_process_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,

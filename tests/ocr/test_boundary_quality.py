@@ -3,10 +3,35 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/ocr"))
-from boundary_quality import alignment, boundaries, score
+from boundary_quality import alignment, boundaries, score, reading_order
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_order_detects_swapped_paragraphs_without_changing_actual(self):
+        actual = ["Bravo sentence.", "Alpha sentence.", "Charlie sentence."]
+        before = actual.copy()
+        result = reading_order(["Alpha sentence.", "Bravo sentence.", "Charlie sentence."], actual)
+        self.assertEqual(actual, before)
+        self.assertEqual(result["actual_to_reference"], [1, 0, 2])
+        self.assertEqual(result["concordant_pairs"], 2)
+        self.assertEqual(result["expected_pairs"], 3)
+        self.assertLess(result["score"], 1)
+
+    def test_order_omissions_and_ambiguous_duplicates_cannot_pass(self):
+        missing = reading_order(["Alpha.", "Bravo.", "Charlie."], ["Alpha.", "Charlie."])
+        self.assertFalse(missing["proven"])
+        self.assertEqual(missing["expected_pairs"], 3)
+        self.assertIsNone(missing["score"])
+        ambiguous = reading_order(["Same.", "Same."], ["Same.", "Same."])
+        self.assertFalse(ambiguous["proven"])
+        self.assertEqual(ambiguous["optimal_assignments"], 2)
+
+    def test_order_accepts_unique_matching_with_recognition_error(self):
+        result = reading_order(["Alpha.", "Bravo."], ["Alxha.", "Bravo."])
+        self.assertTrue(result["proven"])
+        self.assertEqual(result["score"], 1)
+        self.assertEqual(result["minimum_edit_cost"], 1)
+
     def test_interior_character_substitution_does_not_change_boundary(self):
         mapping, errors = alignment("abc. def.", "axc. def.")
         self.assertEqual(errors, 1)

@@ -2,8 +2,39 @@
 import argparse
 from array import array
 import json
+from itertools import permutations
 from pathlib import Path
-from canonical_quality import norm
+from canonical_quality import norm, distance
+
+
+def reading_order(reference, actual):
+    """Independent, non-monotone assignment for the small frozen corpus only."""
+    count = len(reference)
+    pairs = count * (count - 1) // 2
+    base = {"expected_paragraphs": count, "actual_paragraphs": len(actual),
+            "expected_pairs": pairs, "method": "unique-minimum-total-edit-assignment/v1"}
+    if not count or count != len(actual):
+        return {**base, "proven": False, "score": None,
+                "reason": "missing or additional paragraphs; denominator is not reduced"}
+    if count > 8:
+        raise ValueError("bounded frozen-corpus assignment supports at most eight paragraphs")
+    expected = [norm(p) for p in reference]
+    observed = [norm(p) for p in actual]
+    costs = [[distance(r, a) for r in expected] for a in observed]
+    best_cost, best, ties = None, None, 0
+    for assignment in permutations(range(count)):
+        cost = sum(costs[i][j] for i, j in enumerate(assignment))
+        if best_cost is None or cost < best_cost:
+            best_cost, best, ties = cost, assignment, 1
+        elif cost == best_cost:
+            ties += 1
+    if ties != 1:
+        return {**base, "proven": False, "score": None, "minimum_edit_cost": best_cost,
+                "optimal_assignments": ties, "reason": "paragraph correspondence is ambiguous"}
+    concordant = sum(best[i] < best[j] for i in range(count) for j in range(i + 1, count))
+    return {**base, "proven": True, "score": concordant / pairs if pairs else 1.0,
+            "concordant_pairs": concordant, "actual_to_reference": list(best),
+            "minimum_edit_cost": best_cost, "optimal_assignments": 1}
 
 
 def alignment(reference, actual):
@@ -86,15 +117,16 @@ def main():
             got, ap, ass = boundaries(actual)
             mapping, errors = alignment(ref, got)
             p, s = score(rp, ap, mapping), score(rs, ass, mapping)
+            order = reading_order([p["text"] for p in gold["paragraphs"]], [p["text"] for p in actual])
             threshold = 1.0 if case in ("F01", "F03", "F04-form", "F04-flat") else .95
             results[case] = {"paragraph": p, "sentence": s, "threshold": threshold,
-                             "alignment_errors": errors, "reference_chars": len(ref)}
-            if min(p["f1"], s["f1"]) < threshold:
+                             "alignment_errors": errors, "reference_chars": len(ref), "reading_order": order}
+            if min(p["f1"], s["f1"]) < threshold or not order["proven"] or order["score"] != 1.0:
                 failures.append(case)
         except Exception as error:
             results[case] = {"error": str(error)}
             failures.append(case)
-    results["scope"] = "Aligned paragraph/sentence end boundaries; not independent reading-order or full coverage acceptance"
+    results["scope"] = "Aligned paragraph/sentence boundaries and independent paragraph-pair order; not full source-region coverage acceptance"
     results["failures"] = failures
     encoded = json.dumps(results, ensure_ascii=False, indent=2) + "\n"
     args.output.write_text(encoded)

@@ -2,7 +2,6 @@ use crate::application::ports::{ApplicationError, OcrEvidenceStore};
 use async_trait::async_trait;
 use std::path::PathBuf;
 
-#[async_trait]
 pub struct FileOcrEvidenceStore {
     root: PathBuf,
 }

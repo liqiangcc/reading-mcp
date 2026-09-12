@@ -6,6 +6,7 @@ mod memory_index;
 mod memory_repository;
 mod memory_text_unit_index;
 mod noop_index;
+mod ocr_evidence;
 mod observability;
 mod sqlite;
 mod sqlite_search_index;
@@ -19,6 +20,7 @@ pub use memory_index::InMemorySearchIndex;
 pub use memory_repository::InMemoryDocumentRepository;
 pub use memory_text_unit_index::InMemoryTextUnitIndex;
 pub use noop_index::NoopSearchIndex;
+pub use ocr_evidence::{FileOcrEvidenceStore, OcrEvidenceStore};
 pub use observability::{
     ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
     ObservedSearchIndex,

@@ -25,6 +25,12 @@ const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OCR_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Runtime preflight before cache lookup. Direct parser probes may explicitly
+/// exercise the unsandboxed adapter, but the MCP runtime has no such fallback.
+pub fn require_systemd_ocr_support() -> Result<(), ApplicationError> {
+    SystemdOcrUnit::validate_host().map_err(failed)
+}
+
 /// Optional layout engine, isolated from the server and bounded by the outer parse timeout.
 pub struct LayoutPdfParser {
     python: PathBuf,

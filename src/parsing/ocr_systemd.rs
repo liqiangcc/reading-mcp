@@ -43,7 +43,7 @@ fn owner_pipe(_: &str) -> io::Result<(std::fs::File, std::fs::File, Vec<String>)
 }
 
 impl SystemdOcrUnit {
-    pub(super) fn command(python: &Path) -> io::Result<(Command, Self)> {
+    pub(super) fn validate_host() -> io::Result<()> {
         #[cfg(target_os = "linux")]
         let available = unsafe { libc::geteuid() } == 0
             && Path::new("/run/systemd/system").is_dir()
@@ -55,6 +55,18 @@ impl SystemdOcrUnit {
                 "OCR requires the configured systemd/cgroup-v2 boundary",
             ));
         }
+        for path in ["/usr/bin/systemd-run", "/usr/bin/systemctl", "/usr/bin/env"] {
+            if !Path::new(path).is_file() {
+                return Err(io::Error::other(
+                    "OCR systemd launcher dependency is missing",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn command(python: &Path) -> io::Result<(Command, Self)> {
+        Self::validate_host()?;
         // Kernel-generated identity, never an input document/operator unit name.
         let token = std::fs::read_to_string("/proc/sys/kernel/random/uuid")?;
         let token = token.trim();

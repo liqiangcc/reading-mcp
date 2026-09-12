@@ -112,8 +112,13 @@ pub fn build_server(
         ));
     }
     let identity = if config.ocr_enabled {
+        let ocr_config = config.ocr_config();
+        ocr_config
+            .validate()
+            .map_err(crate::application::ports::ApplicationError::ParseFailed)?;
+        crate::parsing::require_systemd_ocr_support()?;
         Some(
-            crate::infrastructure::build_ocr_runtime_identity(config.ocr_config())
+            crate::infrastructure::build_ocr_runtime_identity(ocr_config)
                 .map_err(crate::application::ports::ApplicationError::ParseFailed)?,
         )
     } else {
@@ -127,6 +132,7 @@ pub fn build_server(
             parser
                 .with_ocr_config(config.ocr_config())
                 .with_ocr_identity(identity.clone())
+                .with_systemd_ocr_sandbox()
         } else {
             parser
         };

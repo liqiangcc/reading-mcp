@@ -14,6 +14,7 @@ import tempfile
 import sys
 import unicodedata
 import hashlib
+import statistics
 
 VERSION = "pdf-layout/v1"
 ENGINE = "pymupdf4llm-layout/1.28.2"
@@ -112,6 +113,64 @@ def ocr_page(page, language=None, excluded_regions=()):
                          "textlines": block_lines,
                          "ocr_block": block, "ocr_paragraph": paragraph})
         return boxes
+
+def _bbox_area(box):
+    b=box["bbox"]; return max(0,b[2]-b[0])*max(0,b[3]-b[1])
+def _bbox_overlap(a,b):
+    return max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]))
+def _merge_components(pairs):
+    parent={i:i for pair in pairs for i in pair}
+    def find(x):
+        while parent[x]!=x: parent[x]=parent[parent[x]]; x=parent[x]
+        return x
+    for a,b in pairs:
+        a,b=find(a),find(b)
+        if a!=b: parent[b]=a
+    groups={}
+    for i in parent: groups.setdefault(find(i),set()).add(i)
+    return list(groups.values())
+def _adjacent(a,b,gap):
+    for x in [l["bbox"] for l in a.get("textlines",[])]:
+        for y in [l["bbox"] for l in b.get("textlines",[])]:
+            vertical=max(0,min(x[3],y[3])-max(x[1],y[1])); horizontal=max(0,max(x[0],y[0])-min(x[2],y[2]))
+            if vertical >= min(x[3]-x[1],y[3]-y[1])*.5 and horizontal <= gap: return True
+    return False
+def _regional_ocr(page, excluded_regions=()):
+    global OCR_CONFIG
+    primary=ocr_page(page, excluded_regions=excluded_regions); primary=primary or []
+    conflicts=[(i,j) for i,a in enumerate(primary) for j,b in enumerate(primary[i+1:],i+1)
+               if min(_bbox_area(a),_bbox_area(b)) and _bbox_overlap(a["bbox"],b["bbox"])/min(_bbox_area(a),_bbox_area(b))>=.9]
+    components=_merge_components(conflicts)
+    heights=[l["bbox"][3]-l["bbox"][1] for b in primary for l in b.get("textlines",[]) if l["bbox"][3]>l["bbox"][1]]
+    gap=statistics.median(heights) if heights else 0
+    changed=True
+    while changed:
+        changed=False
+        for component in components:
+            for i,box in enumerate(primary):
+                if i not in component and any(_adjacent(primary[j],box,gap) for j in component): component.add(i); changed=True
+    components=_merge_components([(a,b) for n,a in enumerate(components) for b in list(components)[n+1:] if a & b])
+    if not components: return primary,{"primary_boxes":primary,"retry_boxes":[],"components":[]}
+    original=list(primary); retry_config=dict(OCR_CONFIG); retry_config["psm"]=6
+    saved=OCR_CONFIG; OCR_CONFIG=retry_config
+    try: retry=ocr_page(page, excluded_regions=excluded_regions) or []
+    finally: OCR_CONFIG=saved
+    tolerance=2*72/saved["dpi"]; rect=[0,0,page.rect.width,page.rect.height]; replacements=[]; diagnostics=[]
+    for component in components:
+        raw=[min(original[i]["bbox"][k] for i in component) for k in (0,1)]+[max(original[i]["bbox"][k] for i in component) for k in (2,3)]
+        roi=[max(rect[0],raw[0]-tolerance),max(rect[1],raw[1]-tolerance),min(rect[2],raw[2]+tolerance),min(rect[3],raw[3]+tolerance)]
+        candidates=[b for b in retry if all(b["bbox"][k]>=roi[k] for k in (0,1)) and all(b["bbox"][k]<=roi[k] for k in (2,3))]
+        centers=[((s["bbox"][0]+s["bbox"][2])/2,(s["bbox"][1]+s["bbox"][3])/2) for i in component for l in original[i].get("textlines",[]) for s in l.get("spans",[])]
+        covered=all(any(l["bbox"][0]<=x<=l["bbox"][2] and l["bbox"][1]<=y<=l["bbox"][3] for b in candidates for l in b.get("textlines",[])) for x,y in centers)
+        resolved=bool(candidates) and covered
+        diagnostics.append({"indices":sorted(component),"roi":raw,"effective_roi":roi,"candidate_count":len(candidates),"resolved":resolved})
+        if resolved: replacements.append((min(component),set(component),candidates))
+    members=set().union(*(m for _,m,_ in replacements)) if replacements else set(); selected=[]
+    by_first={i:c for i,_,c in replacements}
+    for i,box in enumerate(original):
+        if i in by_first: selected.extend(by_first[i])
+        if i not in members: selected.append(box)
+    return selected,{"primary_boxes":original,"retry_boxes":retry,"components":diagnostics}
 
 
 def line_text(line):
@@ -298,9 +357,10 @@ def main():
                         excluded = [tuple(box.get("bbox", [])[i] for i in range(4))
                                     for box in page_layout["boxes"]
                                     if box.get("textlines") and len(box.get("bbox", [])) == 4]
-                        box = ocr_page(page, language, excluded)
-                        if box is not None:
-                            page_layout["boxes"].extend(box)
+                        selected, retry_diagnostic = _regional_ocr(page, excluded)
+                        if selected:
+                            page_layout["boxes"].extend(selected)
+                        page_layout["ocr_retry_diagnostic"] = retry_diagnostic
         result = project(layout)
         if OCR_CONFIG.get("enabled", False):
             engine = OCR_CONFIG["engine_path"]

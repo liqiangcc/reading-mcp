@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - 'scripts/ocr/first_engine_probe.py'
+      - 'src/parsing/pdf_layout_worker.py'
       - '.github/workflows/ocr-first-engine-probe.yml'
   pull_request:
     paths:
@@ -30,6 +31,24 @@ jobs:
       - name: First raw recognition and performance evidence (not final acceptance)
         run: |
           python scripts/ocr/first_engine_probe.py --fixtures tests/fixtures/scanned_pdf --output "$RUNNER_TEMP/ocr-first-probe"
+      - name: Canonical projection preserves engine paragraphs (hosted real engine)
+        env:
+          READING_MCP_OCR_ENABLED: '1'
+          READING_MCP_OCR_LANG: chi_sim
+        run: |
+          python -I -c "$(cat src/parsing/pdf_layout_worker.py)" 2000 134217728 16000000 \
+            < tests/fixtures/scanned_pdf/pdf/F07.pdf > "$RUNNER_TEMP/f07-layout.json"
+          python - <<'PY'
+          import json, os
+          payload = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'f07-layout.json')))
+          boxes = [b for p in payload['pages'] for b in p['boxes'] if b.get('ocr_block')]
+          assert len(boxes) > 1, 'OCR projection collapsed the page into one box'
+          assert all('ocr_paragraph' in b for b in boxes)
+          spans = [s for b in boxes for l in b['textlines'] for s in l['spans']]
+          assert spans and all('size' not in s and 'origin' not in s for s in spans)
+          assert all('confidence' in s and 'ocr_line' in s for s in spans)
+          print('canonical OCR projection boxes=', len(boxes), 'spans=', len(spans))
+          PY
       - name: Upload public synthetic evidence, including failed cases
         if: always()
         uses: actions/upload-artifact@v4

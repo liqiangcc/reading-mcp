@@ -66,6 +66,10 @@ impl SystemdOcrUnit {
     }
 
     pub(super) fn command(python: &Path) -> io::Result<(Command, Self)> {
+        Self::command_with_collection(python, true)
+    }
+
+    fn command_with_collection(python: &Path, collect_failed: bool) -> io::Result<(Command, Self)> {
         Self::validate_host()?;
         // Kernel-generated identity, never an input document/operator unit name.
         let token = std::fs::read_to_string("/proc/sys/kernel/random/uuid")?;
@@ -85,7 +89,6 @@ impl SystemdOcrUnit {
                 "--quiet",
                 "--wait",
                 "--pipe",
-                "--collect",
                 "--property=MemoryMax=768M",
                 "--property=MemorySwapMax=0",
                 "--property=TasksMax=64",
@@ -100,6 +103,9 @@ impl SystemdOcrUnit {
                 "--property=UMask=0077",
             ])
             .arg(format!("--unit={}", unit.name));
+        if collect_failed {
+            command.arg("--collect");
+        }
         // The manager's environment is distinct from the client's. Explicitly
         // set the same allowlisted dependency-discovery environment in the unit.
         for (key, value) in crate::infrastructure::OCR_PROCESS_ENV {
@@ -116,6 +122,34 @@ impl SystemdOcrUnit {
             .args(owner_arguments)
             .arg(python);
         Ok((command, unit))
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    async fn fault_result_and_reset(&self) -> String {
+        // Only tests retain failed units to inspect the manager's actual reason.
+        // Production always collects them automatically.
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            Command::new("/usr/bin/systemctl")
+                .args(["show", &self.name, "--property=Result", "--value"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        let reset = tokio::time::timeout(
+            Duration::from_secs(2),
+            Command::new("/usr/bin/systemctl")
+                .args(["reset-failed", &self.name])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(reset.status.success());
+        let result = result.unwrap().unwrap();
+        assert!(result.status.success());
+        String::from_utf8(result.stdout).unwrap().trim().into()
     }
 
     /// Stop only our unique unit, including descendants outside the client PGID.
@@ -177,8 +211,11 @@ mod tests {
         // The existing public mechanism fault payload is reused only in this
         // test binary, now launched through the actual Rust production builder.
         for case in ["bounds", "memory"] {
-            let (mut command, unit) =
-                SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
+            let (mut command, unit) = SystemdOcrUnit::command_with_collection(
+                Path::new("/usr/bin/python3"),
+                case == "bounds",
+            )
+            .unwrap();
             let result = tokio::time::timeout(
                 Duration::from_secs(20),
                 command
@@ -196,6 +233,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+            let reason = if case == "memory" {
+                Some(unit.fault_result_and_reset().await)
+            } else {
+                None
+            };
             let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
             if case == "bounds" {
                 assert!(
@@ -208,15 +250,10 @@ mod tests {
                 assert_eq!(value["tmp_written"], 512 * 1024 * 1024);
                 assert_eq!(value["pids_max"], 64);
             } else {
-                // The supervisor reports a SIGKILL child as 128 + SIGKILL. A
-                // surviving allocation raises AssertionError (exit 1), so a
-                // generic nonzero assertion would incorrectly accept no limit.
-                assert_eq!(
-                    result.status.code(),
-                    Some(137),
-                    "{}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
+                // Require the manager's actual OOM result, not a generic nonzero
+                // exit or an assumption that systemd forwards child exit codes.
+                assert!(!result.status.success());
+                assert_eq!(reason.as_deref(), Some("oom-kill"));
                 assert_eq!(value["attempted_bytes"], 850 * 1024 * 1024);
             }
             drop(unit);
@@ -226,7 +263,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires hosted root and systemd cgroup v2"]
     async fn runtime_pid_cap_rejects_forks_and_reaps_escaped_process_groups() {
-        let (mut command, unit) = SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
+        let (mut command, unit) =
+            SystemdOcrUnit::command_with_collection(Path::new("/usr/bin/python3"), false).unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             command
@@ -259,11 +297,11 @@ else:
         .await
         .unwrap()
         .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        let reason = unit.fault_result_and_reset().await;
+        // Leaking resistant descendants must fail the unit even if the direct
+        // worker exits zero. Still require actual EAGAIN and complete reaping.
+        assert!(!result.status.success());
+        assert_eq!(reason, "timeout");
         let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(report["rejected"], true);
         let children = report["children"].as_array().unwrap();

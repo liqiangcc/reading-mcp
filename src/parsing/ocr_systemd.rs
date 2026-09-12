@@ -173,6 +173,112 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires hosted root and systemd cgroup v2"]
+    async fn runtime_unit_enforces_memory_and_aggregate_private_temp_limits() {
+        // The existing public mechanism fault payload is reused only in this
+        // test binary, now launched through the actual Rust production builder.
+        for case in ["bounds", "memory"] {
+            let (mut command, unit) =
+                SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(20),
+                command
+                    .args([
+                        "-I",
+                        "-c",
+                        include_str!("../../scripts/ocr/sandbox_probe.py"),
+                        "--child",
+                        case,
+                    ])
+                    .stdin(Stdio::null())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            if case == "bounds" {
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert_eq!(value["memory_max"], 768 * 1024 * 1024);
+                assert_eq!(value["tmp_capacity"], 512 * 1024 * 1024);
+                assert_eq!(value["tmp_written"], 512 * 1024 * 1024);
+                assert_eq!(value["pids_max"], 64);
+            } else {
+                // The supervisor reports a SIGKILL child as 128 + SIGKILL. A
+                // surviving allocation raises AssertionError (exit 1), so a
+                // generic nonzero assertion would incorrectly accept no limit.
+                assert_eq!(
+                    result.status.code(),
+                    Some(137),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert_eq!(value["attempted_bytes"], 850 * 1024 * 1024);
+            }
+            drop(unit);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires hosted root and systemd cgroup v2"]
+    async fn runtime_pid_cap_rejects_forks_and_reaps_escaped_process_groups() {
+        let (mut command, unit) = SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            command
+                .args([
+                    "-I",
+                    "-c",
+                    r#"
+import errno, json, os, signal, time
+children = []
+for unused in range(100):
+    try:
+        pid = os.fork()
+    except OSError as error:
+        assert error.errno == errno.EAGAIN
+        print(json.dumps({'rejected': True, 'children': children}), flush=True)
+        break
+    if pid == 0:
+        os.setsid()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        while True: time.sleep(1)
+    children.append(pid)
+else:
+    raise AssertionError('cgroup PID cap did not reject forks')
+"#,
+                ])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["rejected"], true);
+        let children = report["children"].as_array().unwrap();
+        assert!(!children.is_empty() && children.len() < 64);
+        for pid in children {
+            assert!(
+                !Path::new(&format!("/proc/{}", pid.as_u64().unwrap())).exists(),
+                "escaped descendant not reaped"
+            );
+        }
+        drop(unit);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires hosted root and systemd cgroup v2"]
     async fn owner_closed_before_unit_start_never_executes_worker() {
         let (mut command, unit) = SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
         drop(unit);

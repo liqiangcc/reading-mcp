@@ -112,7 +112,7 @@ impl Drop for WorkerProcess {
         let group = self.group.take();
         let permit = self.permit.take();
         let unit = self.unit.take();
-        if let Some(unit) = unit {
+        if let Some(mut unit) = unit {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
                     // Stop the service before its systemd-run client. Killing
@@ -130,8 +130,9 @@ impl Drop for WorkerProcess {
                     }
                 });
             } else {
-                // No async cleanup is possible during runtime destruction.
-                // Refuse to claim the slot is safe for reuse.
+                // Dropping the unit closes its owner pipe: the service main
+                // independently exits and systemd kills/reaps its descendants.
+                // Refuse to claim the slot is safe for reuse without observation.
                 if let Some(permit) = permit {
                     permit.forget();
                 }

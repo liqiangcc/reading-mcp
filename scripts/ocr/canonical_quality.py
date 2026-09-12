@@ -28,7 +28,7 @@ def main():
         gold=json.loads((a.fixtures/"gold"/(case+".json")).read_text())
         wer = None if case == "F08" else metric(gold["text"],text,True)
         out[case]={"canonical_text":text,"cer":metric(gold["text"],text),"english_wer":wer,"thresholds":{"cer":0.02 if case in ("F07","F08") else 0.01,"wer":0.03}}
-        if out[case]["cer"]["rate"] is None or out[case]["cer"]["rate"] > out[case]["thresholds"]["cer"] or (wer is not None and wer["rate"] > out[case]["thresholds"]["wer"]): failures.append(case)
+        if case == "F08" or out[case]["cer"]["rate"] is None or out[case]["cer"]["rate"] > out[case]["thresholds"]["cer"] or (wer is not None and wer["rate"] > out[case]["thresholds"]["wer"]): failures.append(case)
     out["status"]={"failures":failures,"f08_english_wer":"not_implemented_reliable_bilingual_token_split"}
     a.output.write_text(json.dumps(out,ensure_ascii=False,indent=2)+"\n")
     if failures: raise SystemExit("quality thresholds failed: " + ",".join(failures))

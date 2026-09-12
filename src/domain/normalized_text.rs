@@ -123,11 +123,16 @@ impl Document {
         // OCR-derived identity and original-page bindings are typed derivation
         // inputs. Bind an explicit absent marker for native/non-derived docs.
         hasher.update(b"binding-map\0");
-        if let Ok(Some(map)) = self.original_source_binding_map() {
-            let bytes = serde_json::to_vec(&map).expect("binding map serializes");
-            hash_bytes(&mut hasher, &bytes);
-        } else {
-            hasher.update(b"absent\0");
+        match self.original_source_binding_map() {
+            Ok(Some(map)) => {
+                let bytes = serde_json::to_vec(&map).expect("binding map serializes");
+                hash_bytes(&mut hasher, &bytes);
+            }
+            Ok(None) => hasher.update(b"absent\0"),
+            Err(error) => {
+                hasher.update(b"invalid\0");
+                hash_text(&mut hasher, &error.to_string());
+            }
         }
         hasher.update(b"typed-ocr-derivation\0");
         match OcrDerivation::from_metadata(&self.metadata) {

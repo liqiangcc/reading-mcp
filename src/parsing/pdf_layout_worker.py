@@ -33,7 +33,7 @@ def ocr_page(page, language=None, excluded_regions=()):
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
         image = os.path.join(directory, "page.png")
         output = os.path.join(directory, "words")
-        pixmap = page.get_pixmap(dpi=300, colorspace=pymupdf.csRGB, alpha=False)
+        pixmap = page.get_pixmap(dpi=config["dpi"], colorspace=pymupdf.csRGB, alpha=False)
         scale_x = pixmap.width / page.rect.width
         scale_y = pixmap.height / page.rect.height
         pixmap.save(image)
@@ -253,8 +253,8 @@ def main():
             if not 0 < len(doc) <= max_pages:
                 raise ValueError("PDF exceeds page limit or has no pages")
             layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
-            if os.environ.get("READING_MCP_OCR_ENABLED") == "1":
-                language = os.environ.get("READING_MCP_OCR_LANG", "eng+chi_sim")
+            if OCR_CONFIG.get("enabled", False):
+                language = "+".join(OCR_CONFIG["languages"])
                 for page, page_layout in zip(doc, layout["pages"]):
                     has_body_text = any((box.get("textlines") or []) and box.get("boxclass") not in ("page-footer", "page-header")
                                         for box in page_layout["boxes"])
@@ -268,7 +268,7 @@ def main():
                         if box is not None:
                             page_layout["boxes"].extend(box)
         result = project(layout)
-        if os.environ.get("READING_MCP_OCR_ENABLED") == "1":
+        if OCR_CONFIG.get("enabled", False):
             engine = OCR_CONFIG["engine_path"]
             tessdata = OCR_CONFIG["tessdata_path"]
             def sha(path):
@@ -283,8 +283,8 @@ def main():
                 if token.startswith("/") and os.path.isfile(token): libraries.append(sha(token))
             result["ocr_derivation"] = {"schema": "ocr-derivation/v1", "original_sha256": hashlib.sha256(raw).hexdigest(),
                 "engine_sha256": sha(engine), "model_sha256": [sha(path) for path in models],
-                "library_sha256": sorted(set(libraries)), "languages": language.split("+"), "dpi": 300, "oem": 1, "psm": 3,
-                "detector_version": "pdf-layout/v1", "protocol_version": VERSION,
+                "library_sha256": sorted(set(libraries)), "languages": OCR_CONFIG["languages"], "dpi": OCR_CONFIG["dpi"], "oem": OCR_CONFIG["oem"], "psm": OCR_CONFIG["psm"],
+                "detector_version": OCR_CONFIG["detector_version"], "protocol_version": OCR_CONFIG["protocol_version"],
                 "operator_revision": OCR_CONFIG["operator_revision"], "pages": []}
         if not any(b["kind"] == "paragraph" for s in result["sections"] for b in s["blocks"]):
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")

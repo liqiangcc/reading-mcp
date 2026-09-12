@@ -1,0 +1,29 @@
+name: Transport public fixture font blob
+on:
+  push:
+    branches: ['transport/issue-95-fixture-font']
+permissions:
+  contents: write
+jobs:
+  transfer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Copy exact public upstream blob into this repository object database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, urllib.request
+          url = 'https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf'
+          with urllib.request.urlopen(url, timeout=60) as response:
+              raw = response.read()
+          assert hashlib.sha256(raw).hexdigest() == '2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b'
+          body = json.dumps({'encoding':'base64', 'content':base64.b64encode(raw).decode()}).encode()
+          request = urllib.request.Request('https://api.github.com/repos/liqiangcc/reading-mcp/git/blobs', data=body,
+              headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json', 'Content-Type':'application/json'})
+          with urllib.request.urlopen(request, timeout=90) as response:
+              result = json.load(response)
+          assert result['sha'] == 'dc15562470b4f842321894787a0d066879ccff8b'
+          print(json.dumps({'git_blob_sha':result['sha'], 'bytes':len(raw), 'source':'public-pinned-font', 'fixture_changed':False}))
+          PY

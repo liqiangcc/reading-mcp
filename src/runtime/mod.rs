@@ -108,10 +108,17 @@ pub fn build_server(
     };
     let mut router = ParserRouter::release(config.resource_budget.max_pdf_pages, archive_limits);
     if let Some(python) = &config.pdf_layout_python {
-        router = router.with_pdf_parser(Arc::new(crate::parsing::LayoutPdfParser::new(
-            python.clone(),
-            config.resource_budget.clone(),
-        )));
+        let parser =
+            crate::parsing::LayoutPdfParser::new(python.clone(), config.resource_budget.clone());
+        let parser = if let Some(state) = &config.state_dir {
+            let store = Arc::new(crate::infrastructure::FileOcrEvidenceStore::new(
+                state.join("ocr-evidence"),
+            ));
+            parser.with_evidence_store(store)
+        } else {
+            parser
+        };
+        router = router.with_pdf_parser(Arc::new(parser));
     }
     let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache);
     if config.pdf_layout_python.is_some() {

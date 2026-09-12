@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Stdio};
+use std::{path::PathBuf, process::Stdio, sync::Arc};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -15,6 +15,7 @@ use crate::domain::{
     NormalizedBlockProvenance, NormalizedTextRange, OriginalSourceBinding,
     OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
+use crate::infrastructure::OcrEvidenceStore;
 use crate::infrastructure::ResourceBudget;
 
 pub const PDF_LAYOUT_CACHE_NAMESPACE: &str = "pdf-layout/v1:pymupdf4llm-layout/1.28.2";
@@ -26,6 +27,7 @@ pub struct LayoutPdfParser {
     python: PathBuf,
     budget: ResourceBudget,
     permit: Semaphore,
+    evidence_store: Option<Arc<dyn OcrEvidenceStore>>,
 }
 
 impl LayoutPdfParser {
@@ -34,7 +36,13 @@ impl LayoutPdfParser {
             python,
             budget,
             permit: Semaphore::new(1),
+            evidence_store: None,
         }
+    }
+
+    pub fn with_evidence_store(mut self, store: Arc<dyn OcrEvidenceStore>) -> Self {
+        self.evidence_store = Some(store);
+        self
     }
 }
 
@@ -111,8 +119,67 @@ impl Parser for LayoutPdfParser {
         }
         write_result.map_err(failed)?;
         let payload: LayoutResult = serde_json::from_slice(&output).map_err(failed)?;
-        project(resource, payload, &self.budget)
+        let evidence = payload.ocr_evidence.clone();
+        let mut document = project(resource, payload, &self.budget)?;
+        if !evidence.is_empty() {
+            validate_ocr_evidence(&evidence)?;
+            let bytes = serde_json::to_vec(&evidence).map_err(failed)?;
+            let store = self
+                .evidence_store
+                .as_ref()
+                .ok_or_else(|| failed("OCR evidence store is not configured"))?;
+            let identity = document.content_hash.0.clone();
+            let digest = store.put_immutable(&identity, &bytes).await?;
+            document.metadata.insert("ocr_evidence_blob".into(), digest);
+            let map = document
+                .original_source_binding_map()
+                .map_err(failed)?
+                .ok_or_else(|| failed("missing binding map"))?;
+            let map_bytes = serde_json::to_vec(&map).map_err(failed)?;
+            use sha2::{Digest, Sha256};
+            document.metadata.insert(
+                "original_binding_map_digest".into(),
+                format!("sha256:{:x}", Sha256::digest(map_bytes)),
+            );
+        }
+        Ok(document)
     }
+}
+
+fn validate_ocr_evidence(values: &[serde_json::Value]) -> Result<(), ApplicationError> {
+    for value in values {
+        let object = value
+            .as_object()
+            .ok_or_else(|| failed("invalid OCR evidence record"))?;
+        for key in [
+            "page",
+            "block",
+            "paragraph",
+            "line",
+            "text",
+            "bbox",
+            "confidence",
+        ] {
+            if !object.contains_key(key) {
+                return Err(failed(format!("OCR evidence missing {key}")));
+            }
+        }
+        let page = object["page"]
+            .as_u64()
+            .ok_or_else(|| failed("invalid OCR evidence page"))?;
+        let bbox = object["bbox"]
+            .as_array()
+            .ok_or_else(|| failed("invalid OCR evidence bbox"))?;
+        if page == 0 || bbox.len() != 4 || bbox.iter().any(|v| !v.is_number()) {
+            return Err(failed("invalid OCR evidence coordinates"));
+        }
+        if let Some(conf) = object["confidence"].as_f64() {
+            if !(0.0..=100.0).contains(&conf) {
+                return Err(failed("invalid OCR confidence"));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -124,6 +191,8 @@ struct LayoutResult {
     sections: Vec<LayoutSection>,
     regions: serde_json::Value,
     preserved_ambiguous_hyphens: usize,
+    #[serde(default)]
+    ocr_evidence: Vec<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct LayoutSection {

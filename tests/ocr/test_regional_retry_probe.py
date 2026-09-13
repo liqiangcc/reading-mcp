@@ -110,6 +110,22 @@ class RegionalGeometryTests(unittest.TestCase):
         worker['require_disabled_page_coverage'](page, layout)
         self.assertIsNone(worker['PAGE_DEADLINE'])
 
+    def test_disabled_covered_native_return_cannot_escape_page_deadline(self):
+        for previous, elapsed in [(None, 15), (104., 4)]:
+            worker, clock = self.deadline_worker()
+            worker['OCR_CONFIG'] = {'enabled':False}
+            worker['PAGE_DEADLINE'] = previous
+            worker['has_native_body'] = lambda layout: True
+            worker['native_text_regions'] = lambda layout: []
+            worker['prepare_page_raster'] = lambda page, dpi: None
+            def covered(*args, **kwargs):
+                clock[0] += elapsed
+                return {'uncovered_samples':0, 'masks':[{}]}
+            worker['native_raster_coverage'] = covered
+            with self.assertRaisesRegex(RuntimeError, 'shared 15 second budget'):
+                worker['require_disabled_page_coverage'](SimpleNamespace(get_image_info=lambda:[{}]), {})
+            self.assertEqual(worker['PAGE_DEADLINE'], previous)
+
     def test_exhausted_primary_never_starts_retry_and_restores_state(self):
         worker, clock = self.deadline_worker()
         calls = []

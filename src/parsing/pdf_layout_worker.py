@@ -400,10 +400,12 @@ def require_disabled_page_coverage(page, page_layout):
     if not has_native_body(page_layout):
         raise OcrRequired('image-only page requires local OCR inspection')
     previous = PAGE_DEADLINE
-    PAGE_DEADLINE = time.monotonic() + 15
+    deadline = time.monotonic() + 15
+    PAGE_DEADLINE = deadline if previous is None else min(previous, deadline)
     try:
         pixmap = prepare_page_raster(page, dpi=300)
         coverage = native_raster_coverage(page, pixmap, native_text_regions(page_layout), dpi=300)
+        page_time_remaining()
         if coverage is None or not coverage['masks']:
             raise OcrRequired('native image coverage cannot be proven')
         if coverage['uncovered_samples'] == 0:

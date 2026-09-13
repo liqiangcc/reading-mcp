@@ -123,7 +123,7 @@ jobs:
           set -euo pipefail
           test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "ocr_private_runtime" and .executable != null) | .executable' "$RUNNER_TEMP/ocr-private-rust-build.jsonl")
           test -x "$test_binary"
-          sudo env READING_MCP_OCR_DEBUG_STDERR=1 OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" OCR_TEST_RUNTIME_MANIFEST="$RUNNER_TEMP/ocr-private-package/runtime-manifest.json" "$test_binary" --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/ocr-private-rust-test.log"
+          sudo env OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" OCR_TEST_RUNTIME_MANIFEST="$RUNNER_TEMP/ocr-private-package/runtime-manifest.json" "$test_binary" --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/ocr-private-rust-test.log"
       - name: Capture native import backtrace in the same private root on failure
         if: failure() && (steps.initial_private_smoke.conclusion == 'failure' || steps.archive_smoke.conclusion == 'failure')
         env:

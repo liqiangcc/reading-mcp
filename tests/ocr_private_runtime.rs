@@ -111,6 +111,13 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
         .await
         .unwrap();
     let f11_paragraphs = f11.try_paragraph_text_units().unwrap().units;
+    println!(
+        "F11 canonical paragraph texts: {:?}",
+        f11_paragraphs
+            .iter()
+            .map(|unit| &unit.text)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(f11_paragraphs.len(), 6);
     let f11_payload = store
         .get(f11.metadata.get("ocr_evidence_blob").unwrap())

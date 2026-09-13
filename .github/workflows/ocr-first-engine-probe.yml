@@ -7,6 +7,7 @@ on:
       - 'scripts/ocr/worker_identity_probe.py'
       - 'scripts/ocr/canonical_quality.py'
       - 'scripts/ocr/page_selection_probe.py'
+      - 'scripts/ocr/mixed_order_probe.py'
       - 'scripts/ocr/native_layout_probe.py'
       - 'scripts/ocr/language_order_probe.py'
       - 'scripts/ocr/regional_retry_probe.py'
@@ -45,6 +46,7 @@ on:
     paths:
       - 'scripts/ocr/canonical_quality.py'
       - 'scripts/ocr/page_selection_probe.py'
+      - 'scripts/ocr/mixed_order_probe.py'
       - 'scripts/ocr/native_layout_probe.py'
       - 'scripts/ocr/language_order_probe.py'
       - 'scripts/ocr/regional_retry_probe.py'
@@ -121,6 +123,8 @@ jobs:
       - name: Mixed, existing-layer and visual page diagnostics (public frozen fixtures)
         if: ${{ !cancelled() }}
         run: python scripts/ocr/page_selection_probe.py --output "$RUNNER_TEMP/ocr-first-probe/page-selection-probe.json"
+      - name: Supplementary mixed-page order diagnostics (not frozen acceptance)
+        run: python scripts/ocr/mixed_order_probe.py --output "$RUNNER_TEMP/ocr-first-probe/mixed-order.json"
       - name: Rust real OCR integration (hosted only)
         env:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}

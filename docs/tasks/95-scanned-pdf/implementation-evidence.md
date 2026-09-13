@@ -568,3 +568,18 @@ https://raw.githubusercontent.com/systemd/systemd/v255/man/systemd.service.xml
 exit(137) 保持普通失败。逐例要求失败单元仍被自动回收；既有无 runtime 取消、
 晚启动 owner EOF、进程树回收与非特权隔离测试保持执行。生产60秒限制不变。
 本机仅 fmt/py_compile，所有故障执行与 Rust 构建均交 GitHub-hosted Actions。
+
+### 同页 mixed 顺序缺口的独立实测（新增 diagnostic，未声称修复）
+
+当前 worker 在 native boxes 后追加 OCR boxes。仅 F05 跨页/F12 页脚成功不能
+证明同页 mixed 的阅读顺序。新增 mixed_order_probe.py 在 hosted 使用自撰四段
+英文生成六种布局：上下两种、左右两种、单列交替、双列交替；原生字与扫描字
+分布互换。只使用公开自撰文本/内建 Helvetica，不改冻结语料、字体、gold、
+manifest 或正式门槛，不把新样本声称为 Coordinator 已冻结验收。
+
+实际 worker 只收到 PDF bytes/配置/实物 identity；识别返回后才读取独立
+authored expectation。完整 canonical、native 区域、primary/retry 原始词、
+selected/excluded 引用、CER/WER 分母和错误数公开输出日志/artifact，失败逐例记录。
+诊断结果不重排 canonical，不用 expectation 引导算法，不以 workflow green
+冒称 mixed order 已支持。用真实观察决定是否能沿原引擎 source refs 合并 native
+锚点；不能从简单 y/x 排序或尚未证明的顺序关系捏造完整成功。

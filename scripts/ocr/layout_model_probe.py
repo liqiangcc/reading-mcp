@@ -177,7 +177,7 @@ def child(model, case, output, name, joint_pipeline=False):
                           "joint_primary_ocr_boxes": raw_ocr,
                           "regional_observations":regional, "visual_projection":visual})
             image.unlink()
-    canonical = worker.project({'pages':canonical_pages}) if worker is not None else None
+    canonical = worker.project(dict(native, pages=canonical_pages)) if worker is not None else None
     quality = None
     if canonical is not None:
         # Only completed engine/projection output may be compared with gold.

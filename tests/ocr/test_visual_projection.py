@@ -30,7 +30,7 @@ class VisualProjectionTests(unittest.TestCase):
         self.assertEqual([b['boxclass'] for b in result], ['text','image','formula'])
         self.assertEqual([b['textlines'] for b in result], [b['textlines'] for b in boxes])
         self.assertEqual(result[2]['bbox'], [50,50,65,65])
-        projected = self.worker['project']({'pages':[{'page_number':1, 'width':100, 'height':100, 'boxes':result}]})
+        projected = self.worker['project']({'page_count':1, 'pages':[{'page_number':1, 'width':100, 'height':100, 'boxes':result}]})
         blocks = [b for s in projected['sections'] for b in s['blocks']]
         self.assertEqual([b['text'] for b in blocks], ['Source prose.', '12', 'x?+y?'])
         self.assertEqual([b['kind'] for b in blocks], ['paragraph','preformatted','preformatted'])

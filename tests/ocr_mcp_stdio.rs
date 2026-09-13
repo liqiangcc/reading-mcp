@@ -30,6 +30,69 @@ fn published_documents(state: &std::path::Path) -> Vec<String> {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn disabled_ocr_preserves_native_documents_and_rejects_incomplete_scans() {
+    let directory = tempfile::tempdir().unwrap();
+    for case in ["F01", "F02", "F03", "F05", "F12"] {
+        std::fs::copy(
+            format!("tests/fixtures/scanned_pdf/pdf/{case}.pdf"),
+            directory.path().join(format!("{case}.pdf")),
+        )
+        .unwrap();
+    }
+    let state = directory.path().join("state");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
+    command
+        .env("READING_MCP_LOCAL_ROOTS", directory.path())
+        .env("READING_MCP_STATE_DIR", &state)
+        .env(
+            "READING_MCP_PDF_LAYOUT_PYTHON",
+            std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
+        )
+        .env("READING_MCP_OCR_ENABLED", "false")
+        .env("READING_MCP_OCR_ENGINE", "/nonexistent/disabled-engine")
+        .env("READING_MCP_OCR_TESSDATA", "/nonexistent/disabled-models")
+        .kill_on_drop(true);
+    let (transport, _) = TokioChildProcess::builder(command).spawn().unwrap();
+    let client = ().serve(transport).await.unwrap();
+    for case in ["F01", "F03"] {
+        let opened = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.call_tool(CallToolRequestParams::new("open_document").with_arguments(
+                arguments(json!({"source":directory.path().join(format!("{case}.pdf"))})),
+            )),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .into_typed::<OpenDocumentResponse>()
+        .unwrap();
+        assert!(!opened.normalized_document_hash.is_empty());
+    }
+    let before = published_documents(&state);
+    assert_eq!(before.len(), 2);
+    for case in ["F02", "F05", "F12"] {
+        let error = tokio::time::timeout(std::time::Duration::from_secs(30),
+            client.call_tool(CallToolRequestParams::new("open_document").with_arguments(
+                arguments(json!({"source":directory.path().join(format!("{case}.pdf")), "force_refresh":true})),
+            )))
+            .await.unwrap().expect_err("scanned pages must not become partial successful documents");
+        assert!(
+            error.to_string().contains("OCR_REQUIRED"),
+            "{case}: {error}"
+        );
+        assert!(error.to_string().contains("\"retryable\":false"));
+        assert!(
+            !error
+                .to_string()
+                .contains(directory.path().to_str().unwrap())
+        );
+        assert_eq!(published_documents(&state), before);
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn frozen_four_page_cold_and_restarted_warm_open_budgets() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("public-F05.pdf");

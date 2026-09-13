@@ -531,3 +531,19 @@ OCR_UNAVAILABLE/retryable=false，保存前失败，旧 SQLite Document 保留�
 顺手去掉 worker 已验证 dependencies 之后的无用 engine/tessdata/sha 定义，
 以及持有整份 manifest 到 OCR 结束的 `_` 引用；不改实际正向识别/投影结果。
 仍未关闭 OCR_REQUIRED、真实 systemd 终止分类、F11 与最终发布/生产验收。
+
+### OCR disabled 的必需检查与防止部分发布（本包待 hosted 验证）
+
+对无原生正文、但包含实际 PDF image 对象的页，disabled worker 返回
+`pdf-layout-ocr-required/v1`，绑定完整原始字节 SHA256；Rust 仅在 disabled
+且 schema/code/raw hash 全匹配时映射 `OCR_REQUIRED`（不可重试）。
+这是要求开启图像检查，不承诺图像一定有可读文字；纯原生空白/矢量页不受影响。
+在整份文档发布前检查每页，避免 F05 只发布 native 子集；页脚不算正文。
+未在此包扩展“有正文的同页图片是否含更多文字”的判断，混合区域仍为后续项。
+
+PDF parsed cache namespace 升级为 required-inspection/v1，旧解析结果不命中；
+不删除旧 canonical/evidence，成功原生正文的 normalized hash 规则不变。
+缓存测试证明相同 raw 的旧 namespace miss、新 namespace 重复 hit。
+真实 MCP 测试配置 OCR disabled 和不存在的引擎/模型路径：F01/F03 正常发布，
+F02/F05/F12 返回 OCR_REQUIRED、无路径泄漏，已有两个 SQLite Document 原样保留。
+该测试由现有 hosted real-engine workflow 执行，未本机运行。

@@ -12,6 +12,23 @@ spec.loader.exec_module(worker)
 
 
 class WorkerFailureTests(unittest.TestCase):
+    def test_disabled_requirement_envelope_is_source_bound_without_engine_identity(self):
+        worker.OCR_CONFIG = {'enabled': False}
+        worker.EXPECTED_IDENTITY = None
+        worker.INPUT_SHA256 = 'c' * 64
+        output = io.StringIO()
+        with (patch.object(worker, 'main', side_effect=worker.OcrRequired()),
+              contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO())):
+            self.assertEqual(worker.run(), 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            'schema':'pdf-layout-ocr-required/v1', 'original_sha256':'c' * 64, 'error':'OCR_REQUIRED'})
+
+    def test_footer_or_empty_spans_do_not_prove_native_body(self):
+        def box(kind, text):
+            return {'boxclass':kind,'textlines':[{'spans':[{'text':text}]}]}
+        self.assertFalse(worker.has_native_body({'boxes':[box('page-footer', 'Page 1'), box('text', ' ')]}))
+        self.assertTrue(worker.has_native_body({'boxes':[box('text', 'Native prose.')]}))
+
     def setUp(self):
         worker.OCR_CONFIG = {'enabled': True}
         worker.EXPECTED_IDENTITY = {'config': worker.OCR_CONFIG, 'sha256': 'sha256:' + 'a' * 64}

@@ -1047,6 +1047,7 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::ParseFailed(_)
         | ApplicationError::OcrFailed
         | ApplicationError::OcrUnavailable
+        | ApplicationError::OcrRequired
         | ApplicationError::OcrNoSupportedProjection
         | ApplicationError::OcrBusy
         | ApplicationError::OcrTimeout
@@ -1080,6 +1081,7 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::ParseFailed(_) => ("PARSE_FAILED", false),
         ApplicationError::OcrFailed => ("OCR_FAILED", false),
         ApplicationError::OcrUnavailable => ("OCR_UNAVAILABLE", false),
+        ApplicationError::OcrRequired => ("OCR_REQUIRED", false),
         ApplicationError::OcrNoSupportedProjection => ("OCR_NO_SUPPORTED_PROJECTION", false),
         ApplicationError::OcrBusy => ("OCR_RESOURCE_LIMIT", true),
         ApplicationError::OcrTimeout => ("OCR_TIMEOUT", true),

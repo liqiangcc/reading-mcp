@@ -34,6 +34,17 @@ INPUT_SHA256 = None
 INSPECTION_POLICY = "ocr-original-region-inspection/v2"
 
 
+class OcrRequired(RuntimeError):
+    """Image-bearing pages without native body text need enabled inspection."""
+
+
+def has_native_body(page_layout):
+    return any(any(span.get('text', '').strip() for line in box.get('textlines', [])
+                   for span in line.get('spans', []))
+               and box.get('boxclass') not in ('page-footer', 'page-header')
+               for box in page_layout['boxes'])
+
+
 class OcrStageFailure(RuntimeError):
     """Only explicit engine/budget producers assign these public categories."""
     def __init__(self, code, reason):
@@ -774,6 +785,13 @@ def main():
             if not 0 < len(doc) <= max_pages:
                 raise ValueError("PDF exceeds page limit or has no pages")
             layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
+            if not OCR_CONFIG.get('enabled', False):
+                # Do not publish only the native subset of a multi-page PDF.
+                # This is an inspection requirement, not a claim that images
+                # contain readable text. Native blank/vector pages are unchanged.
+                if any(not has_native_body(page_layout) and page.get_images(full=True)
+                       for page, page_layout in zip(doc, layout['pages'])):
+                    raise OcrRequired('image-only page requires local OCR inspection')
             if OCR_CONFIG.get("enabled", False):
                 language = "+".join(OCR_CONFIG["languages"])
                 for page, page_layout in zip(doc, layout["pages"]):
@@ -826,6 +844,12 @@ def run():
     try:
         main()
         return 0
+    except OcrRequired:
+        json.dump({'schema': 'pdf-layout-ocr-required/v1',
+                   'original_sha256': INPUT_SHA256, 'error': 'OCR_REQUIRED'},
+                  sys.stdout, separators=(',', ':'))
+        print('PDF layout requires enabled local OCR inspection', file=sys.stderr)
+        return 1
     except OcrStageFailure as error:
         if OCR_CONFIG.get('enabled') and EXPECTED_IDENTITY is not None:
             # Before input is consumed there is deliberately no source-hash

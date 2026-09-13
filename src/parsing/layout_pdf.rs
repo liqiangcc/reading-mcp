@@ -24,7 +24,8 @@ use crate::domain::{
 };
 use crate::infrastructure::ResourceBudget;
 
-pub const PDF_LAYOUT_CACHE_NAMESPACE: &str = "pdf-layout/v1:pymupdf4llm-layout/1.28.2";
+pub const PDF_LAYOUT_CACHE_NAMESPACE: &str =
+    "pdf-layout/v2:required-inspection/v1:pymupdf4llm-layout/1.28.2";
 const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OCR_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
@@ -217,6 +218,23 @@ struct OcrWorkerFailure {
 enum OcrFailureStage {
     Dependency,
     Ingestion,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OcrRequiredFailure {
+    schema: String,
+    original_sha256: String,
+    error: String,
+}
+
+fn validated_ocr_required(output: &[u8], raw: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    serde_json::from_slice::<OcrRequiredFailure>(output).is_ok_and(|failure| {
+        failure.schema == "pdf-layout-ocr-required/v1"
+            && failure.error == "OCR_REQUIRED"
+            && failure.original_sha256 == format!("{:x}", Sha256::digest(raw))
+    })
 }
 
 #[derive(Deserialize)]
@@ -415,6 +433,9 @@ impl Parser for LayoutPdfParser {
             }
         })?;
         if !status.success() {
+            if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {
+                return Err(ApplicationError::OcrRequired);
+            }
             if ocr_enabled && let Some(identity) = &self.ocr_identity {
                 use sha2::{Digest, Sha256};
                 return Err(validated_worker_failure(
@@ -892,6 +913,29 @@ mod tests {
         let mut invalid = base.clone();
         invalid["stage"] = json!("dependency");
         assert_eq!(check(&invalid), ApplicationError::OcrFailed);
+    }
+
+    #[test]
+    fn disabled_requirement_protocol_binds_actual_source_and_rejects_extra_fields() {
+        use sha2::{Digest, Sha256};
+        let raw = b"public synthetic PDF bytes";
+        let value = serde_json::json!({"schema":"pdf-layout-ocr-required/v1",
+            "original_sha256":format!("{:x}", Sha256::digest(raw)),"error":"OCR_REQUIRED"});
+        let check = |value: &serde_json::Value| {
+            validated_ocr_required(&serde_json::to_vec(value).unwrap(), raw)
+        };
+        assert!(check(&value));
+        for (key, replacement) in [
+            ("schema", serde_json::json!("other")),
+            ("original_sha256", serde_json::json!("0".repeat(64))),
+            ("error", serde_json::json!("OCR_UNAVAILABLE")),
+            ("private_details", serde_json::json!("reject")),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = replacement;
+            assert!(!check(&changed));
+        }
+        assert!(!validated_ocr_required(b"OCR_REQUIRED", raw));
     }
 
     #[test]

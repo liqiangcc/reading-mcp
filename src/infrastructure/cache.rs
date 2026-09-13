@@ -192,6 +192,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn required_inspection_namespace_cannot_reuse_legacy_partial_pdf_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cache: Arc<dyn ParsedDocumentCache> = Arc::new(InMemoryParsedDocumentCache::default());
+        let resource = RetrievedResource {
+            source: DocumentSource("file:///mixed.pdf".into()),
+            final_source: DocumentSource("file:///mixed.pdf".into()),
+            media_type: MediaType("application/pdf".into()),
+            bytes: b"same original".to_vec(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        };
+        for (namespace, expected) in [
+            ("pdf-layout/v1:pymupdf4llm-layout/1.28.2", 1),
+            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 2),
+            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 2),
+        ] {
+            CachingParser::new(
+                Arc::new(FakeParser {
+                    calls: calls.clone(),
+                }),
+                cache.clone(),
+            )
+            .with_pdf_namespace(namespace)
+            .parse(resource.clone())
+            .await
+            .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn ocr_fingerprint_changes_parsed_cache_identity() {
         let calls = Arc::new(AtomicUsize::new(0));
         let cache: Arc<dyn ParsedDocumentCache> = Arc::new(InMemoryParsedDocumentCache::default());

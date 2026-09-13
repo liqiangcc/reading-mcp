@@ -116,6 +116,10 @@ pub enum ApplicationError {
     OcrFailed,
     #[error("local OCR dependencies are unavailable or changed; operator repair is required")]
     OcrUnavailable,
+    #[error(
+        "source contains image-only pages requiring inspection; enable local OCR or provide a usable text layer"
+    )]
+    OcrRequired,
     #[error("local OCR found no supported prose projection; inspect the original source")]
     OcrNoSupportedProjection,
     #[error("local OCR is busy; retry explicitly later")]

@@ -131,15 +131,17 @@ jobs:
         env:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
           READING_MCP_OCR_BOUNDARY_REPORT: ${{ runner.temp }}/ocr-first-probe/rust-canonical-boundaries.json
+          READING_MCP_MIXED_ORDER_DIR: ${{ runner.temp }}/ocr-first-probe/supplementary-mixed-order
         run: cargo test --locked --test ocr_real_engine --test ocr_boundary_engine -- --ignored --nocapture
       - name: Actual MCP stdio and HTTP with required OCR isolation (hosted root only)
         env:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
+          READING_MCP_MIXED_ORDER_DIR: ${{ runner.temp }}/ocr-first-probe/supplementary-mixed-order
         run: |
           for mcp_target in ocr_mcp_stdio ocr_mcp_http; do
             mcp_test=$(cargo test --locked --test "$mcp_target" --no-run --message-format=json | jq -sr --arg target "$mcp_target" '[.[] | select(.reason == "compiler-artifact" and .target.name == $target and .profile.test) | .executable][0]')
             test -x "$mcp_test"
-            sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" "$mcp_test" --ignored --nocapture
+            sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" READING_MCP_MIXED_ORDER_DIR="$READING_MCP_MIXED_ORDER_DIR" "$mcp_test" --ignored --nocapture
           done
       - name: Rust OCR systemd launch and cancellation integration (hosted root only)
         env:

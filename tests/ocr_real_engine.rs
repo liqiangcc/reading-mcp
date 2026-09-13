@@ -24,6 +24,106 @@ fn chinese_config() -> OcrConfig {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn supplementary_mixed_native_anchors_preserve_actual_canonical_order() {
+    use reading_mcp::application::ports::DocumentRepository;
+    use reading_mcp::infrastructure::SqliteDocumentRepository;
+    let inputs = std::path::PathBuf::from(std::env::var("READING_MCP_MIXED_ORDER_DIR").unwrap());
+    let directory = tempdir().unwrap();
+    let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
+    let mut config = chinese_config();
+    config.languages = vec!["eng".into()];
+    let identity = build_ocr_runtime_identity(config.clone()).unwrap();
+    let parser = LayoutPdfParser::new(
+        std::env::var("READING_MCP_PDF_LAYOUT_PYTHON")
+            .unwrap()
+            .into(),
+        reading_mcp::infrastructure::ResourceBudget::default(),
+    )
+    .with_ocr_config(config)
+    .with_ocr_identity(identity)
+    .with_evidence_store(store.clone());
+    for case in [
+        "scan_then_native",
+        "native_then_scan",
+        "alternating_vertical",
+    ] {
+        let source = DocumentSource(format!("file:///supplementary/{case}.pdf"));
+        let raw = std::fs::read(inputs.join(format!("{case}.pdf"))).unwrap();
+        let raw_hash = format!("sha256:{:x}", sha2::Sha256::digest(&raw));
+        let document = parser
+            .parse(RetrievedResource {
+                source: source.clone(),
+                final_source: source,
+                media_type: MediaType("application/pdf".into()),
+                bytes: raw,
+                etag: None,
+                last_modified: None,
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+        // Authored truth is read only after actual parsing, never fed into OCR.
+        let expected: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(inputs.join(format!("{case}.expected.json"))).unwrap(),
+        )
+        .unwrap();
+        let actual: Vec<_> = document
+            .try_paragraph_text_units()
+            .unwrap()
+            .units
+            .into_iter()
+            .map(|u| u.text)
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected["paragraphs"], "{case}");
+        assert_eq!(document.content_hash.0, raw_hash);
+        let map = document.original_source_binding_map().unwrap().unwrap();
+        assert!(!map.bindings.is_empty());
+        assert!(map.bindings.iter().all(|binding| matches!(
+            binding.target,
+            reading_mcp::domain::OriginalSourceTarget::Page { page_number: 1 }
+        )));
+        let bytes = store
+            .get(&document.metadata["ocr_evidence_blob"])
+            .await
+            .unwrap()
+            .unwrap();
+        let blob: reading_mcp::domain::OcrEvidenceBlob = serde_json::from_slice(&bytes).unwrap();
+        blob.validate(1).unwrap();
+        assert_eq!(blob.pages[0].mixed_order.as_ref().unwrap().entries.len(), 4);
+        let mut wrong = blob.clone();
+        wrong.pages[0]
+            .mixed_order
+            .as_mut()
+            .unwrap()
+            .entries
+            .swap(0, 1);
+        assert!(wrong.validate(1).is_err(), "reordered evidence must fail");
+        wrong.pages[0].mixed_order = None;
+        assert!(wrong.validate(1).is_err(), "missing evidence must fail");
+        let database = directory.path().join(format!("{case}.sqlite"));
+        {
+            let repository = SqliteDocumentRepository::open(&database).unwrap();
+            repository.save(document.clone()).await.unwrap();
+        }
+        let restored = SqliteDocumentRepository::open(&database)
+            .unwrap()
+            .get(&document.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.try_paragraph_text_units().unwrap(),
+            document.try_paragraph_text_units().unwrap()
+        );
+        assert_eq!(
+            restored.normalized_document_hash(),
+            document.normalized_document_hash()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn existing_layers_have_persistent_native_coverage_without_engine_attempts() {
     let directory = tempdir().unwrap();
     let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));

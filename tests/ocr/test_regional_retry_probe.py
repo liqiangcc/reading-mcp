@@ -176,6 +176,49 @@ class RegionalGeometryTests(unittest.TestCase):
         self.assertEqual(evidence["selection"][1]["source"]["box"], 1)
         self.assertEqual([ref["box"] for ref in evidence["components"][0]["replaced_refs"]], [0,2])
 
+    def mixed_example(self, reverse_native=False):
+        worker, clock = self.deadline_worker()
+        primary = [self.box([10,y,20,y+10], text, i+1)
+                   for i, (y,text) in enumerate([(10,'A'),(30,'engine B'),(50,'C'),(70,'engine D')])]
+        native = [self.box([10,30,20,40], 'native B', 2), self.box([10,70,20,80], 'native D', 4)]
+        if reverse_native:
+            native.reverse()
+        original = [{'boxclass':'picture'}] + native
+        regions = [{'source_box':i+1,'source_class':'text','bbox':box['bbox'],
+                    'text':box['textlines'][0]['spans'][0]['text']} for i,box in enumerate(native)]
+        evidence = worker['_regional_evidence'](1, [0,0,100,100], primary, None, primary, [])
+        selected, evidence = worker['exclude_native_boxes'](primary, evidence, regions)
+        return worker, clock, original, selected, evidence
+
+    def test_mixed_order_preserves_native_text_nontext_and_immutable_source_ids(self):
+        worker, _, original, selected, evidence = self.mixed_example()
+        before, raw_before = copy.deepcopy(original), copy.deepcopy(evidence['attempts'])
+        ordered = worker['merge_native_order'](original, selected, evidence)
+        self.assertEqual([box['_original_box'] for box in ordered], [0,3,1,4,2])
+        self.assertEqual([box['textlines'][0]['spans'][0]['text'] for box in ordered if box.get('textlines')],
+                         ['A','native B','C','native D'])
+        self.assertEqual([entry['origin'] for entry in evidence['mixed_order']['entries']],
+                         ['local_ocr','native','local_ocr','native'])
+        self.assertEqual(original, before)
+        self.assertEqual(evidence['attempts'], raw_before)
+
+    def test_mixed_order_rejects_conflicting_native_order_and_missing_anchors(self):
+        worker, _, original, selected, evidence = self.mixed_example(True)
+        worker['merge_native_order'](original, selected, evidence)
+        self.assertFalse(evidence['complete'])
+        self.assertEqual(evidence['projection_failure'], 'unproven_mixed_order')
+        worker, _, original, selected, evidence = self.mixed_example()
+        original.append(self.box([10,90,20,100], 'unanchored native', 5))
+        evidence['native_regions'].append({'source_box':3,'source_class':'text','bbox':[10,90,20,100], 'text':'unanchored native'})
+        worker['merge_native_order'](original, selected, evidence)
+        self.assertFalse(evidence['complete'])
+
+    def test_mixed_order_uses_remaining_page_deadline(self):
+        worker, clock, original, selected, evidence = self.mixed_example()
+        worker['PAGE_DEADLINE'] = clock[0]
+        with self.assertRaisesRegex(RuntimeError, 'shared 15 second budget'):
+            worker['merge_native_order'](original, selected, evidence)
+
     def test_production_uncovered_component_is_incomplete(self):
         primary = [self.box([10,10,20,20], "primary", 1),
                    self.box([12,12,14,14], "overlap", 2)]

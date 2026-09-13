@@ -23,7 +23,9 @@ pub use ocr::{
     DependencyFingerprint, OcrConfig, OcrDerivation, OcrEvidenceRecord, OcrPageBinding,
     OcrRetryPolicy, OcrRuntimeIdentity, OcrRuntimePackageIdentity,
 };
-pub use ocr_observations::{OcrEvidenceBlob, OcrPageObservations};
+#[cfg(test)]
+pub(crate) use ocr_observations::mixed_order_fixture;
+pub use ocr_observations::{MixedOrderEntry, OcrEvidenceBlob, OcrPageObservations};
 pub use original_source::{
     ORIGINAL_SOURCE_BINDING_COUNT_METADATA_KEY, ORIGINAL_SOURCE_BINDING_METADATA_KEY,
     ORIGINAL_SOURCE_BINDING_MODEL_VERSION, ORIGINAL_SOURCE_BINDING_VERSION_METADATA_KEY,

@@ -159,7 +159,7 @@ impl OcrRuntimeIdentity {
             return Err("incomplete/unexpected OCR dependency set".into());
         }
         let retry_policy = OcrRetryPolicy::default();
-        let inspection_policy = "ocr-original-region-inspection/v4".to_owned();
+        let inspection_policy = "ocr-original-region-inspection/v5".to_owned();
         // Retain the accepted non-package identity byte encoding. A verified
         // private package adds a typed fifth component, not an env fingerprint.
         let bytes = if let Some(package) = &runtime_package {
@@ -340,7 +340,7 @@ mod tests {
     fn identity() -> OcrRuntimeIdentity {
         OcrRuntimeIdentity {
             retry_policy: OcrRetryPolicy::default(),
-            inspection_policy: "ocr-original-region-inspection/v4".into(),
+            inspection_policy: "ocr-original-region-inspection/v5".into(),
             config: OcrConfig {
                 enabled: true,
                 engine_path: "/e".into(),
@@ -488,7 +488,7 @@ impl OcrDerivation {
         let value: Self =
             serde_json::from_str(raw).map_err(|e| format!("invalid OCR derivation: {e}"))?;
         if value.schema != "ocr-derivation/v3"
-            || value.inspection_policy != "ocr-original-region-inspection/v4"
+            || value.inspection_policy != "ocr-original-region-inspection/v5"
             || value.selected_word_count.is_none()
             || value.retry_policy != OcrRetryPolicy::default()
             || !valid_sha256(&value.original_sha256)

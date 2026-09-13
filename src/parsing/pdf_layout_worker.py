@@ -31,7 +31,7 @@ PAGE_DEADLINE = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
 INPUT_SHA256 = None
-INSPECTION_POLICY = "ocr-original-region-inspection/v4"
+INSPECTION_POLICY = "ocr-original-region-inspection/v5"
 
 
 class OcrRequired(RuntimeError):
@@ -540,7 +540,67 @@ def exclude_native_boxes(selected, evidence, regions):
     evidence["selection"] = selection
     return retained, evidence
 
-def _regional_ocr(page, excluded_regions=(), inspect_native=False):
+def merge_native_order(original, selected, evidence):
+    """Merge unique native anchors into the retained engine sequence.
+
+    No text matching/reordering by gold or coordinate sort. Ambiguous anchors
+    cannot authorize a complete projection. All raw observations stay intact.
+    """
+    if not evidence.get('native_regions') or not selected or not evidence['complete']:
+        return original + selected
+    count = len(original)
+    attempts = {attempt['id']: attempt for attempt in evidence['attempts']}
+    replaced = {ref['box'] for component in evidence['components'] for ref in component['primary_refs']}
+    replacements = {component['indices'][0]: component['candidate_refs'] for component in evidence['components']}
+    sources = []
+    for index in range(len(attempts['primary']['boxes'])):
+        sources.extend(replacements.get(index, []))
+        if index not in replaced:
+            sources.append(_attempt_reference(evidence['page'], 'primary', index))
+    auxiliary = {'page-header', 'page-footer', 'footnote', 'caption'}
+    entries, ordered, native_ids, body_ids = [], [], set(), []
+    try:
+        for source in sources:
+            page_time_remaining()
+            if source in evidence['excluded_sources']:
+                box = attempts[source['attempt']]['boxes'][source['box']]
+                centers = [((word['bbox'][0] + word['bbox'][2]) / 2,
+                            (word['bbox'][1] + word['bbox'][3]) / 2)
+                           for line in box['textlines'] for word in line['spans']]
+                candidates = [region for region in evidence['native_regions'] if centers and
+                    all(region['bbox'][0] <= x <= region['bbox'][2] and
+                        region['bbox'][1] <= y <= region['bbox'][3] for x, y in centers)]
+                if len(candidates) != 1 or candidates[0]['source_box'] in native_ids:
+                    raise ValueError('nonunique native anchor')
+                region = candidates[0]
+                index = region['source_box']
+                native_ids.add(index)
+                if region['source_class'] not in auxiliary:
+                    body_ids.append(index)
+                entries.append({'origin':'native', 'source_box':index, 'projected_box':index})
+                ordered.append(dict(original[index], _original_box=index))
+            else:
+                indices = [index for index, entry in enumerate(evidence['selection']) if entry['source'] == source]
+                if len(indices) != 1:
+                    raise ValueError('missing selected source')
+                index = indices[0]
+                entries.append({'origin':'local_ocr', 'source':source, 'projected_box':count + index})
+                ordered.append(dict(selected[index], _original_box=count + index))
+        required = sorted(region['source_box'] for region in evidence['native_regions']
+                          if region['source_class'] not in auxiliary)
+        if body_ids != required:
+            raise ValueError('native order missing or inconsistent with engine order')
+    except (ValueError, IndexError, KeyError):
+        evidence['complete'] = False
+        evidence['projection_failure'] = 'unproven_mixed_order'
+        return original + selected
+    # Nontext regions and unanchored notes are retained, not promoted into body.
+    prefix = [dict(box, _original_box=index) for index, box in enumerate(original) if index not in native_ids]
+    evidence['mixed_order'] = {'schema':'ocr-native-anchor-order/v1',
+                              'original_box_count':count, 'entries':entries}
+    return prefix + ordered
+
+def _regional_ocr(page, excluded_regions=(), inspect_native=False, original_boxes=None):
     global PAGE_DEADLINE, PAGE_RASTER
     previous = PAGE_DEADLINE
     previous_raster = PAGE_RASTER
@@ -566,6 +626,8 @@ def _regional_ocr(page, excluded_regions=(), inspect_native=False):
         if coverage is not None:
             evidence['native_coverage'] = coverage
         result = exclude_native_boxes(selected, evidence, list(excluded_regions))
+        if original_boxes is not None:
+            result = (merge_native_order(original_boxes, result[0], result[1]), result[1])
         page_time_remaining()
         return result
     finally:
@@ -710,7 +772,7 @@ def project(layout):
             text, count = join_lines(lines, vocabulary)
             uncertain += count
             bbox = [box[k] for k in ("x0", "y0", "x1", "y1")]
-            region = {"page": page_no, "box": index, "bbox": bbox, "class": cls}
+            region = {"page": page_no, "box": box.get('_original_box', index), "bbox": bbox, "class": cls}
             regions.append(region)
             if box.get("ocr_block") is not None:
                 for line in box.get("textlines") or []:
@@ -858,9 +920,10 @@ def main():
                         for box in page_layout["boxes"])
                     if not has_body_text or has_image_region:
                         excluded = native_text_regions(page_layout)
-                        selected, retry_diagnostic = _regional_ocr(page, excluded, inspect_native=has_body_text)
-                        if selected:
-                            page_layout["boxes"].extend(selected)
+                        projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
+                            inspect_native=has_body_text, original_boxes=page_layout['boxes'])
+                        if projected_boxes:
+                            page_layout["boxes"] = projected_boxes
                         page_layout["ocr_retry_diagnostic"] = retry_diagnostic
         observations = [p["ocr_retry_diagnostic"] for p in layout["pages"]
                         if "ocr_retry_diagnostic" in p]

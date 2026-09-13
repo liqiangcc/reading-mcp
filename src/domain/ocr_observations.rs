@@ -139,11 +139,44 @@ pub struct OcrPageObservations {
     #[serde(default)]
     pub native_coverage: Option<NativeRasterCoverage>,
     #[serde(default)]
+    pub mixed_order: Option<OcrMixedOrder>,
+    #[serde(default)]
     pub native_regions: Vec<NativeTextRegion>,
     #[serde(default)]
     pub excluded_sources: Vec<OcrObservationReference>,
     #[serde(default)]
     pub projection_failure: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MixedOrderEntry {
+    Native {
+        source_box: usize,
+        projected_box: usize,
+    },
+    LocalOcr {
+        source: OcrObservationReference,
+        projected_box: usize,
+    },
+}
+
+impl MixedOrderEntry {
+    pub fn projected_box(&self) -> usize {
+        match self {
+            Self::Native { projected_box, .. } | Self::LocalOcr { projected_box, .. } => {
+                *projected_box
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrMixedOrder {
+    pub schema: String,
+    pub original_box_count: usize,
+    pub entries: Vec<MixedOrderEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -275,6 +308,96 @@ fn within(b: [f64; 4], outer: [f64; 4]) -> bool {
 }
 
 impl OcrPageObservations {
+    fn validate_mixed_order(&self, sources: &[OcrObservationReference]) -> Result<(), String> {
+        if self.native_regions.is_empty() || self.selection.is_empty() {
+            return if self.mixed_order.is_none() {
+                Ok(())
+            } else {
+                Err("unexpected mixed order".into())
+            };
+        }
+        let order = self
+            .mixed_order
+            .as_ref()
+            .ok_or("missing mixed source order")?;
+        if order.schema != "ocr-native-anchor-order/v1"
+            || self
+                .native_regions
+                .iter()
+                .any(|n| n.source_box >= order.original_box_count)
+        {
+            return Err("invalid mixed source order".into());
+        }
+        let auxiliary = |class: &str| {
+            matches!(
+                class,
+                "page-header" | "page-footer" | "footnote" | "caption"
+            )
+        };
+        let mut expected = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut body = Vec::new();
+        for source in sources {
+            if self.excluded_sources.contains(source) {
+                let words: Vec<_> = self
+                    .box_at(source)?
+                    .textlines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .collect();
+                let candidates: Vec<_> = self
+                    .native_regions
+                    .iter()
+                    .filter(|region| {
+                        !words.is_empty()
+                            && words.iter().all(|word| {
+                                let x = (word.bbox[0] + word.bbox[2]) / 2.0;
+                                let y = (word.bbox[1] + word.bbox[3]) / 2.0;
+                                region.bbox[0] <= x
+                                    && x <= region.bbox[2]
+                                    && region.bbox[1] <= y
+                                    && y <= region.bbox[3]
+                            })
+                    })
+                    .collect();
+                if candidates.len() != 1 || !seen.insert(candidates[0].source_box) {
+                    return Err("nonunique native order anchor".into());
+                }
+                let native = candidates[0];
+                if !auxiliary(&native.source_class) {
+                    body.push(native.source_box);
+                }
+                expected.push(MixedOrderEntry::Native {
+                    source_box: native.source_box,
+                    projected_box: native.source_box,
+                });
+            } else {
+                let index = self
+                    .selection
+                    .iter()
+                    .position(|entry| &entry.source == source)
+                    .ok_or("missing mixed OCR source")?;
+                expected.push(MixedOrderEntry::LocalOcr {
+                    source: source.clone(),
+                    projected_box: order
+                        .original_box_count
+                        .checked_add(index)
+                        .ok_or("mixed box overflow")?,
+                });
+            }
+        }
+        let mut required: Vec<_> = self
+            .native_regions
+            .iter()
+            .filter(|n| !auxiliary(&n.source_class))
+            .map(|n| n.source_box)
+            .collect();
+        required.sort_unstable();
+        if body != required || expected != order.entries {
+            return Err("mixed order missing or inconsistent with original anchors".into());
+        }
+        Ok(())
+    }
     fn box_at(&self, reference: &OcrObservationReference) -> Result<&OcrObservedBox, String> {
         if reference.page != self.page || reference.line.is_some() || reference.word.is_some() {
             return Err("invalid OCR box reference".into());
@@ -318,6 +441,7 @@ impl OcrPageObservations {
                     || !self.selection.is_empty()
                     || !self.components.is_empty()
                     || !self.excluded_sources.is_empty()
+                    || self.mixed_order.is_some()
                 {
                     return Err("covered native layer must not claim OCR attempts".into());
                 }
@@ -336,6 +460,7 @@ impl OcrPageObservations {
                 || !self.components.is_empty()
                 || !self.native_regions.is_empty()
                 || !self.excluded_sources.is_empty()
+                || self.mixed_order.is_some()
             {
                 return Err("blank raster must not claim OCR attempts or selected text".into());
             }
@@ -449,6 +574,7 @@ impl OcrPageObservations {
         }
         let mut retained = Vec::new();
         let mut excluded = Vec::new();
+        let order_sources = expected_sources.clone();
         for source in expected_sources {
             let words: Vec<_> = self
                 .box_at(&source)?
@@ -480,6 +606,7 @@ impl OcrPageObservations {
         if self.selection.len() != retained.len() {
             return Err("incomplete OCR selection".into());
         }
+        self.validate_mixed_order(&order_sources)?;
         let mut selected_words = Vec::new();
         for (index, (selection, expected)) in self.selection.iter().zip(retained).enumerate() {
             if selection.selected_box != index || selection.source != expected {
@@ -542,9 +669,51 @@ impl OcrEvidenceBlob {
 }
 
 #[cfg(test)]
+pub(crate) fn mixed_order_fixture() -> OcrPageObservations {
+    let source = |index| serde_json::json!({"page":1,"attempt":"primary","box":index});
+    let bbox = |y: u32| [10, y, 20, y + 10];
+    let observed = |index: u32, y: u32, text: &str| {
+        serde_json::json!({
+            "boxclass":"text","bbox":bbox(y),"x0":10,"y0":y,"x1":20,"y1":y+10,
+            "ocr_block":index+1,"ocr_paragraph":1,
+            "textlines":[{"text":text,"bbox":bbox(y),"spans":[{"text":text,"bbox":bbox(y),
+                "flags":0,"ocr_block":index+1,"ocr_paragraph":1,"ocr_line":1,"confidence":90}]}]
+        })
+    };
+    serde_json::from_value(serde_json::json!({
+        "schema":"ocr-regional-observations/v3","page":1,"page_bounds":[0,0,100,100],"complete":true,
+        "attempts":[{"id":"primary","psm":3,"boxes":[observed(0,10,"A"),observed(1,30,"B")]}],
+        "components":[],"native_regions":[{"source_box":0,"source_class":"text","bbox":bbox(30),"text":"Native B"}],
+        "excluded_sources":[source(1)],
+        "selection":[{"selected_box":0,"source":source(0),"words":[{"page":1,"attempt":"primary","box":0,"line":0,"word":0}]}],
+        "mixed_order":{"schema":"ocr-native-anchor-order/v1","original_box_count":1,"entries":[
+            {"origin":"local_ocr","source":source(0),"projected_box":1},
+            {"origin":"native","source_box":0,"projected_box":0}]}
+    })).unwrap()
+}
+
+#[cfg(test)]
 mod blank_tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn mixed_order_replays_raw_observations_and_rejects_changed_or_missing_anchors() {
+        let page = mixed_order_fixture();
+        assert_eq!(page.validate(1).unwrap().len(), 1);
+        let mut changed = page.clone();
+        changed.mixed_order.as_mut().unwrap().entries.swap(0, 1);
+        assert!(changed.validate(1).is_err());
+        changed = page.clone();
+        changed.mixed_order = None;
+        assert!(changed.validate(1).is_err());
+        changed = page.clone();
+        changed.native_regions[0].bbox = [30., 30., 40., 40.];
+        assert!(changed.validate(1).is_err());
+        changed = page;
+        changed.mixed_order.as_mut().unwrap().original_box_count = usize::MAX;
+        assert!(changed.validate(1).is_err());
+    }
 
     #[test]
     fn native_coverage_binds_masks_transform_and_exact_white_digest_before_reuse() {

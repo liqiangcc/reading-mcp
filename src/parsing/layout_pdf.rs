@@ -321,6 +321,76 @@ async fn read_bounded(
     Ok(bytes)
 }
 
+fn validate_mixed_projection(
+    regions: &serde_json::Value,
+    page: &OcrPageObservations,
+) -> Result<(), ApplicationError> {
+    use crate::domain::MixedOrderEntry;
+    let Some(order) = &page.mixed_order else {
+        return Ok(());
+    };
+    let page_regions: Vec<_> = regions
+        .as_array()
+        .ok_or_else(|| failed("missing mixed regions"))?
+        .iter()
+        .filter(|region| region["page"].as_u64() == Some(u64::from(page.page)))
+        .collect();
+    let total = order
+        .original_box_count
+        .checked_add(page.selection.len())
+        .ok_or_else(|| failed("mixed region count overflow"))?;
+    if page_regions.len() != total {
+        return Err(failed("mixed region coverage mismatch"));
+    }
+    let ids: Vec<_> = page_regions
+        .iter()
+        .map(|region| {
+            region["box"]
+                .as_u64()
+                .and_then(|id| usize::try_from(id).ok())
+                .ok_or_else(|| failed("invalid mixed region id"))
+        })
+        .collect::<Result<_, _>>()?;
+    let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+    if unique.len() != total || !unique.iter().copied().eq(0..total) {
+        return Err(failed("mixed region ids are not complete and unique"));
+    }
+    let expected: Vec<_> = order
+        .entries
+        .iter()
+        .map(MixedOrderEntry::projected_box)
+        .collect();
+    let included: std::collections::BTreeSet<_> = expected.iter().copied().collect();
+    if ids
+        .into_iter()
+        .filter(|id| included.contains(id))
+        .collect::<Vec<_>>()
+        != expected
+    {
+        return Err(failed("canonical region order differs from mixed evidence"));
+    }
+    for entry in &order.entries {
+        if let MixedOrderEntry::LocalOcr {
+            source,
+            projected_box,
+        } = entry
+        {
+            let observed = page
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == source.attempt)
+                .and_then(|attempt| attempt.boxes.get(source.r#box))
+                .ok_or_else(|| failed("missing mixed OCR observation"))?;
+            let expected = serde_json::json!({"page":page.page,"box":projected_box,
+                "bbox":observed.bbox,"class":observed.boxclass});
+            if !page_regions.contains(&&expected) {
+                return Err(failed("mixed OCR region differs from original observation"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Parser for LayoutPdfParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
@@ -455,6 +525,7 @@ impl Parser for LayoutPdfParser {
         let derivation = payload.ocr_derivation.clone();
         let attempts = payload.ocr_attempts.clone();
         for page in &attempts {
+            validate_mixed_projection(&payload.regions, page)?;
             for native in &page.native_regions {
                 let expected = serde_json::json!({"page":page.page,"box":native.source_box,
                     "bbox":native.bbox,"class":native.source_class});
@@ -917,6 +988,28 @@ mod tests {
         let mut invalid = base.clone();
         invalid["stage"] = json!("dependency");
         assert_eq!(check(&invalid), ApplicationError::OcrFailed);
+    }
+
+    #[test]
+    fn mixed_regions_must_match_verified_order_geometry_and_stable_ids() {
+        let page = crate::domain::mixed_order_fixture();
+        page.validate(1).unwrap();
+        let regions = serde_json::json!([
+            {"page":1,"box":1,"bbox":[10.0,10.0,20.0,20.0],"class":"text"},
+            {"page":1,"box":0,"bbox":[10.0,30.0,20.0,40.0],"class":"text"}]);
+        validate_mixed_projection(&regions, &page).unwrap();
+        let mut changed = regions.clone();
+        changed.as_array_mut().unwrap().swap(0, 1);
+        assert!(validate_mixed_projection(&changed, &page).is_err());
+        changed = regions.clone();
+        changed[0]["box"] = serde_json::json!(0);
+        assert!(validate_mixed_projection(&changed, &page).is_err());
+        changed = regions.clone();
+        changed[0]["bbox"][0] = serde_json::json!(11.0);
+        assert!(validate_mixed_projection(&changed, &page).is_err());
+        changed = regions;
+        changed.as_array_mut().unwrap().pop();
+        assert!(validate_mixed_projection(&changed, &page).is_err());
     }
 
     #[test]

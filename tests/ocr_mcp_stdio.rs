@@ -30,6 +30,90 @@ fn published_documents(state: &std::path::Path) -> Vec<String> {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn mixed_native_order_survives_real_mcp_publication_and_restart() {
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        let inputs =
+            std::path::PathBuf::from(std::env::var("READING_MCP_MIXED_ORDER_DIR").unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let cases = [
+            "scan_then_native",
+            "native_then_scan",
+            "alternating_vertical",
+        ];
+        for case in cases {
+            std::fs::copy(
+                inputs.join(format!("{case}.pdf")),
+                directory.path().join(format!("{case}.pdf")),
+            )
+            .unwrap();
+        }
+        let mut previous = Vec::new();
+        for restart in [false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
+            command
+                .env("READING_MCP_LOCAL_ROOTS", directory.path())
+                .env("READING_MCP_STATE_DIR", &state)
+                .env(
+                    "READING_MCP_PDF_LAYOUT_PYTHON",
+                    std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
+                )
+                .env("READING_MCP_OCR_ENABLED", "true")
+                .env("READING_MCP_OCR_ENGINE", "/usr/bin/tesseract")
+                .env(
+                    "READING_MCP_OCR_TESSDATA",
+                    "/usr/share/tesseract-ocr/5/tessdata",
+                )
+                .env("READING_MCP_OCR_LANG", "eng")
+                .env("READING_MCP_OCR_REVISION", "1")
+                .kill_on_drop(true);
+            let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+            for (index, case) in cases.iter().enumerate() {
+                let opened = client
+                    .call_tool(CallToolRequestParams::new("open_document").with_arguments(
+                        arguments(json!({"source":directory.path().join(format!("{case}.pdf"))})),
+                    ))
+                    .await
+                    .unwrap()
+                    .into_typed::<OpenDocumentResponse>()
+                    .unwrap();
+                let units = client
+                    .call_tool(CallToolRequestParams::new("get_text_units").with_arguments(
+                        arguments(json!({"document_id":opened.document_id,
+                        "section_id":"section://pdf-layout/1", "requested_kind":"paragraph",
+                        "coverage_policy":"preserve_source", "max_items":100})),
+                    ))
+                    .await
+                    .unwrap()
+                    .into_typed::<GetTextUnitsResponse>()
+                    .unwrap();
+                // Authored expectations are not consulted until the real MCP output exists.
+                let expected: Value = serde_json::from_slice(
+                    &std::fs::read(inputs.join(format!("{case}.expected.json"))).unwrap(),
+                )
+                .unwrap();
+                let texts: Vec<_> = units.items.iter().map(|item| item.text.as_str()).collect();
+                assert_eq!(json!(texts), expected["paragraphs"], "{case}");
+                let actual = (opened.normalized_document_hash, units.items);
+                if restart {
+                    assert_eq!(
+                        &actual, &previous[index],
+                        "{case}: restart changed identity or locators"
+                    );
+                } else {
+                    previous.push(actual);
+                }
+            }
+            assert_eq!(published_documents(&state).len(), cases.len());
+            client.cancel().await.unwrap();
+        }
+    })
+    .await
+    .expect("bounded mixed-page MCP acceptance");
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn disabled_ocr_preserves_native_documents_and_rejects_incomplete_scans() {
     let directory = tempfile::tempdir().unwrap();
     for case in ["F01", "F02", "F03", "F05", "F12"] {

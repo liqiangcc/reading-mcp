@@ -26,7 +26,11 @@ def main():
         pass
     else:
         raise ValueError("OCR owner already closed")
-    child = subprocess.Popen(sys.argv[5:])
+    # Only this small trusted supervisor may open the root caller's owner pipe.
+    # The PDF/native-library process must not inherit root credentials/capabilities.
+    # Numeric overflow/nobody credentials do not require NSS inside an offline root.
+    child = subprocess.Popen(sys.argv[5:], user=65534, group=65534,
+                             extra_groups=[], umask=0o077)
     while child.poll() is None:
         if select.select([descriptor], [], [], .05)[0]:
             # Any unexpected control data is also fail-closed. Exiting the unit's

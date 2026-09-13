@@ -93,7 +93,16 @@ impl SystemdOcrUnit {
                 "--property=MemorySwapMax=0",
                 "--property=TasksMax=64",
                 "--property=PrivateNetwork=yes",
-                "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700",
+                "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534",
+                "--property=ProtectHome=tmpfs",
+                "--property=ProtectSystem=strict",
+                "--property=PrivateDevices=yes",
+                "--property=ProtectControlGroups=yes",
+                "--property=ProtectKernelTunables=yes",
+                "--property=RestrictNamespaces=yes",
+                "--property=ReadOnlyPaths=-/dev/shm",
+                "--property=CapabilityBoundingSet=CAP_SYS_PTRACE CAP_SETUID CAP_SETGID",
+                "--property=AmbientCapabilities=",
                 "--property=RuntimeMaxSec=60",
                 "--property=TimeoutStopSec=1",
                 "--property=KillMode=control-group",
@@ -209,6 +218,67 @@ mod tests {
         io::{AsyncBufReadExt, BufReader},
         sync::Semaphore,
     };
+
+    #[tokio::test]
+    #[ignore = "requires hosted root and systemd cgroup v2"]
+    async fn runtime_pdf_worker_cannot_restore_root_or_access_supervisor_credentials() {
+        let (mut command, unit) = SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            command
+                .args([
+                    "-I",
+                    "-c",
+                    r#"
+import json, os, stat, tempfile
+from pathlib import Path
+assert os.getresuid() == (65534, 65534, 65534)
+assert os.getresgid() == (65534, 65534, 65534)
+assert os.getgroups() == []
+status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines())
+caps = {key: int(status[key].strip(), 16) for key in ('CapEff', 'CapPrm', 'CapInh', 'CapAmb')}
+assert all(value == 0 for value in caps.values()), caps
+assert status['NoNewPrivs'].strip() == '1'
+try:
+    os.setuid(0)
+except PermissionError:
+    pass
+else:
+    raise AssertionError('worker restored root credentials')
+for path in (f'/proc/{os.getppid()}/environ', f'/proc/{os.getppid()}/fd/0', '/proc/1/ns/net'):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except PermissionError:
+        pass
+    else:
+        os.close(descriptor)
+        raise AssertionError('worker accessed a privileged process: ' + path)
+tmp = os.stat('/tmp')
+assert tmp.st_uid == 65534 and tmp.st_gid == 65534
+assert stat.S_IMODE(tmp.st_mode) == 0o700
+with tempfile.TemporaryFile(dir='/tmp') as stream:
+    stream.write(b'bounded unprivileged scratch')
+print(json.dumps({'uid': os.getuid(), 'gid': os.getgid(), 'capabilities': caps,
+                  'no_new_privileges': True, 'privileged_proc_denied': True}), flush=True)
+"#,
+                ])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(value["uid"], 65534);
+        assert_eq!(value["privileged_proc_denied"], true);
+        drop(unit);
+    }
 
     #[tokio::test]
     #[ignore = "requires hosted root and systemd cgroup v2"]

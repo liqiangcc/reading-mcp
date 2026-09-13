@@ -397,3 +397,41 @@ source 不符、预检后输入变化、路径/链接拒绝、已有目标与原
 内通过只读挂载的公开 F07 再跑真实 worker，要求解释器/worker/dependencies
 身份和四段 canonical 文本与打包前一致。只在这些步骤全部成功后上传 verified
 candidate archive；执行结果尚待该 head，不以 py_compile 代替测试。
+
+`77a0d6f2a92eae8e3268b5b3d3a2b81e942c1a1d` 的
+[push run 34738431660](https://github.com/liqiangcc/reading-mcp/actions/runs/34738431660)
+及 PR run `34738433269` 的全部离线组件均 success。已读取 push 日志：7 个
+归档/原子发布测试通过，真实重建后的 F07 解释器/worker/dependencies/四段
+canonical 与打包前一致。前一 `c3834c8` 的真实重建和 OCR 对比其实已成功，
+但普通 runner 的 `du` 无权遍历保留下来的 root/private 目录，使 gate failure；
+修正为 sudo 只读统计，没有 chmod 放宽权限。回溯仅在实际 smoke 失败时触发，
+不再把统计或比较失败当原生崩溃。
+
+该 push 的 source SHA 就是上述分支 SHA，不借用 PR merge checkout identity。
+内层 `ocr-private-runtime.tar.gz` SHA256：
+`19b0544ea72e54678d868a19752ae5cdc67363a6d7b77ff968ab5bd28818ae1b`，
+200838180 bytes；9766 inventory entries、regular bytes 473153410，解包目录
+apparent size 473161882。Artifact `10312136205`
+(`ocr-private-runtime-verified-candidate`) 是外层 GitHub ZIP，202595936 bytes，
+其 digest `cdeef95af8176a4766094f1be1cecdbff4ec8efd75997a8fab0d20d84b316b0f`
+与内层 tar.gz 身份分开记录。没有将候选下载/安装到生产，也没有发布 Release。
+这些 apparent/regular 字节还不是完整分类 companion 的最终容量准入。
+
+### 真实解析进程降权（待该提交 hosted 验证）
+
+审查发现原 supervisor 的 Popen 未设置 user/group，PDF/native-library child
+继承了 root 身份；此前普通 socket 外连拒绝不能证明它无法利用 root 权限
+绕过 namespace。此处不增加任务框架，只收紧已有 OCR unit 的权限边界：
+可信小型 supervisor 保留读取 root owner pipe 所需的 SYS_PTRACE 和设置
+child credentials 的 SETUID/SETGID，其他 capability 从 bounding set 移除。
+实际 PDF worker 改为 UID/GID 65534、空 supplementary groups、umask 0077；
+NoNewPrivileges 持续生效。tmpfs 在创建时归此 UID/GID 所有且保持 0700/
+512MiB，不对宿主 /tmp 做 chmod/chown。另隐藏 home、只读系统/控制组/内核
+参数、隔离设备、禁止创建 namespace，保留原有资源和取消门槛。
+
+新增实际 Rust launcher 测试必须证明 child 三种 UID/GID 都为 65534、
+effective/permitted/inheritable/ambient capabilities 都为零，无法恢复 UID0、
+读取 supervisor environ/stdin 或打开 PID1 network namespace，且私有 scratch
+可正常使用。原 OOM/PID/temp/network/取消/真实 stdio/HTTP/#92 测试不删除。
+归档重建后的 F07 同时改用无 capability 的非 root 用户执行，与原输出作
+严格比较；是否兼容真实库由 hosted 结果决定，不通过降门槛或回退 root 掩盖。

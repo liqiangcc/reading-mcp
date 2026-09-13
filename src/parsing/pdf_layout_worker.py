@@ -989,9 +989,12 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
     ordered, source_groups, merges = [], [], []
     for index, box in enumerate(projected):
         model_ref = text_region(box)
+        previous_ref = text_region(ordered[-1]) if ordered else None
+        adjacent_unassigned = model_ref is None and previous_ref is None
+        same_model_region = model_ref is not None and model_ref == previous_ref
         if (ordered and box.get('ocr_block') is not None and ordered[-1].get('ocr_block') is not None
                 and box['boxclass'] == ordered[-1]['boxclass'] == 'text'
-                and model_ref is not None and model_ref == text_region(ordered[-1])):
+                and (same_model_region or adjacent_unassigned)):
             before = ' '.join(line_text(line) for line in ordered[-1]['textlines']).strip()
             after = ' '.join(line_text(line) for line in box['textlines']).strip()
             heights = [line['bbox'][3] - line['bbox'][1]

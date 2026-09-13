@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - 'scripts/ocr/layout_model_probe.py'
+      - 'tests/ocr/test_visual_projection.py'
+      - 'src/parsing/pdf_layout_worker.py'
       - '.github/workflows/ocr-layout-model-probe.yml'
 jobs:
   candidate:
@@ -22,6 +24,8 @@ jobs:
           sudo apt-get install -y tesseract-ocr=5.3.4-1build5 libtesseract5=5.3.4-1build5 liblept5=1.82.0-3build4 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-chi-sim=1:4.1.0-2
           python -m pip install --only-binary=:all: --report "$RUNNER_TEMP/layout-model-probe/pip-report.json" onnxruntime==1.29.0 numpy==2.5.3 opencv-python-headless==4.10.0.84 PyMuPDF==1.28.2 PyYAML==6.0.3 pymupdf4llm==1.28.2 pymupdf-layout==1.28.2
           python -m pip freeze > "$RUNNER_TEMP/layout-model-probe/pip-freeze.txt"
+      - name: Source-preserving visual geometry tests
+        run: python -m unittest tests/ocr/test_visual_projection.py
       - name: Download and verify fixed public model revision
         run: python scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --prepare --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
       - name: Frozen input integrity

@@ -800,6 +800,81 @@ def join_lines(lines, vocabulary):
     return text, uncertain
 
 
+def project_visual_observations(page_number, page_rect, raster_size, boxes, predictions):
+    """Candidate pure adapter; raw observations and engine order are immutable.
+
+    This helper does not load a model or choose its configuration. The caller
+    must preserve and bind the complete model attempt before publication. No
+    runtime path enables it until that typed identity/evidence wiring exists.
+    """
+    import copy
+    if (len(page_rect) != 4 or page_rect[:2] != [0, 0]
+            or not all(math.isfinite(v) for v in page_rect)
+            or page_rect[2] <= 0 or page_rect[3] <= 0
+            or len(raster_size) != 2 or any(type(v) is not int or v <= 0 for v in raster_size)):
+        raise ValueError('unsupported visual page transform')
+    regions = []
+    for index, prediction in enumerate(predictions):
+        if prediction['label'] not in ('image', 'formula', 'table'):
+            continue
+        bounds = prediction['coordinate']
+        score = prediction['score']
+        if (len(bounds) != 4 or not all(math.isfinite(v) for v in bounds)
+                or not math.isfinite(score) or not .5 <= score <= 1
+                or not (0 <= bounds[0] < bounds[2] <= raster_size[0]
+                        and 0 <= bounds[1] < bounds[3] <= raster_size[1])):
+            raise ValueError('invalid selected visual observation')
+        bbox = [bounds[0] * page_rect[2] / raster_size[0],
+                bounds[1] * page_rect[3] / raster_size[1],
+                bounds[2] * page_rect[2] / raster_size[0],
+                bounds[3] * page_rect[3] / raster_size[1]]
+        regions.append({'prediction_index':index, 'label':prediction['label'],
+                        'model_score':score, 'pixel_bbox':list(bounds), 'bbox':bbox,
+                        'box_sources':[]})
+    projected = copy.deepcopy(boxes)
+    bindings, failures = [], []
+    for index, box in enumerate(boxes):
+        if box.get('ocr_block') is None:
+            continue
+        words = [span for line in box.get('textlines', []) for span in line['spans']]
+        if not words:
+            continue
+        centers = [((word['bbox'][0] + word['bbox'][2]) / 2,
+                    (word['bbox'][1] + word['bbox'][3]) / 2) for word in words]
+        matches = []
+        partial = False
+        for region in regions:
+            b = region['bbox']
+            included = [b[0] <= x <= b[2] and b[1] <= y <= b[3] for x, y in centers]
+            if all(included):
+                matches.append(region)
+            elif any(included):
+                partial = True
+        if partial or len(matches) > 1:
+            failures.append({'source_box':index, 'reason':'ambiguous_visual_word_coverage'})
+            continue
+        if not matches:
+            continue
+        region = matches[0]
+        region['box_sources'].append(index)
+        source_bbox = [box[key] for key in ('x0', 'y0', 'x1', 'y1')]
+        # Model bounds may exclude a small part of an observed word. Preserve
+        # BOTH geometries, never crop away source glyphs to fit a prediction.
+        b = region['bbox']
+        bbox = [min(b[0], source_bbox[0]), min(b[1], source_bbox[1]),
+                max(b[2], source_bbox[2]), max(b[3], source_bbox[3])]
+        projected[index]['boxclass'] = 'table' if region['label'] == 'table' else region['label']
+        for key, value in zip(('x0', 'y0', 'x1', 'y1'), bbox):
+            projected[index][key] = value
+        projected[index]['bbox'] = bbox
+        bindings.append({'source_box':index, 'prediction_index':region['prediction_index'],
+                         'source_bbox':source_bbox, 'projected_bbox':bbox})
+    unanchored = [region['prediction_index'] for region in regions if not region['box_sources']]
+    return projected, {'schema':'ocr-visual-projection/v1', 'page':page_number,
+        'page_bounds':list(page_rect), 'raster_size':list(raster_size),
+        'regions':regions, 'bindings':bindings, 'failures':failures,
+        'unanchored_visual_regions':unanchored, 'complete':not failures and not unanchored}
+
 def project(layout):
     vocabulary = set()
     for page in layout["pages"]:

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import re
 import subprocess
 import sys
 import time
@@ -141,6 +142,7 @@ def child(model, case, output, name, joint_pipeline=False):
     loaded = time.monotonic()
     raw = Path(f"tests/fixtures/scanned_pdf/pdf/{case}.pdf").read_bytes()
     pages = []
+    canonical_pages = []
     with pymupdf.open(stream=raw, filetype="pdf") as document:
         native = json.loads(pymupdf4llm.to_json(document, use_ocr=False)) if joint_pipeline else None
         for page in document:
@@ -151,15 +153,58 @@ def child(model, case, output, name, joint_pipeline=False):
             result = predict(image)
             inference_seconds = time.monotonic() - begin
             ocr_started = time.monotonic()
-            raw_ocr = worker.ocr_page(page) if worker is not None else None
+            raw_ocr = None
+            regional = None
+            visual = None
+            if worker is not None:
+                original = native['pages'][page.number]
+                selected, regional = worker._regional_ocr(page, worker.native_text_regions(original),
+                    inspect_native=worker.has_native_body(original), original_boxes=original['boxes'])
+                if not selected:
+                    selected = original['boxes']
+                raw_ocr = regional['attempts'][0]['boxes'] if regional['attempts'] else []
+                if len(result) != 1:
+                    raise ValueError('candidate must return one model attempt per page')
+                selected, visual = worker.project_visual_observations(page.number + 1, list(page.rect),
+                    [raster.width, raster.height], selected, result[0]['res']['boxes'])
+                canonical_pages.append(dict(original, boxes=selected))
             pages.append({"page": page.number + 1, "original_rect": list(page.rect),
                           "raster_size": [raster.width, raster.height], "dpi": 300,
                           "raster_sha256": hashlib.sha256(raster.samples).hexdigest(),
                           "inference_seconds": inference_seconds,
                           "raw_predictions": result,
                           "joint_primary_ocr_seconds": time.monotonic() - ocr_started if worker is not None else None,
-                          "joint_primary_ocr_boxes": raw_ocr})
+                          "joint_primary_ocr_boxes": raw_ocr,
+                          "regional_observations":regional, "visual_projection":visual})
             image.unlink()
+    canonical = worker.project({'pages':canonical_pages}) if worker is not None else None
+    quality = None
+    if canonical is not None:
+        # Only completed engine/projection output may be compared with gold.
+        # No reference text/coordinates are passed to either production helper.
+        from canonical_quality import metric
+        gold = json.loads(Path(f'tests/fixtures/scanned_pdf/gold/{case}.json').read_text())
+        paragraphs = [block['text'] for section in canonical['sections']
+                      for block in section['blocks'] if block['kind'] == 'paragraph']
+        actual = '\n\n'.join(paragraphs)
+        ambiguous = []
+        if case == 'F08':
+            ambiguous = [text for text in paragraphs if re.search(r'[A-Za-z]', text)
+                         and re.search(r'[\u3400-\u9fff]', text)]
+            expected_english = '\n\n'.join(p['text'] for p in gold['paragraphs'] if p['font'] == 'goldeng')
+            actual_english = '\n\n'.join(p for p in paragraphs if re.search(r'[A-Za-z]', p)
+                and not re.search(r'[\u3400-\u9fff]', p))
+            wer = metric(expected_english, actual_english, True)
+        else:
+            wer = None if case == 'F07' else metric(gold['text'], actual, True)
+        cer = metric(gold['text'], actual)
+        quality = {'cer':cer, 'english_wer':wer, 'paragraph_count':len(paragraphs),
+            'ambiguous_mixed_paragraphs':ambiguous,
+            'projection_complete':all(p['regional_observations']['complete'] and
+                                      p['visual_projection']['complete'] for p in pages),
+            'text_thresholds_met':cer['rate'] is not None and cer['rate'] <= (.02 if case in ('F07','F08') else .01)
+                and not ambiguous and (wer is None or (wer['rate'] is not None and wer['rate'] <= .03)),
+            'scope':'candidate text only; not final F11 region-retention or Rust publication acceptance'}
     group = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().split('::', 1)[1].strip().lstrip('/')
     fingerprint_started = time.monotonic()
     dependencies = mapped_dependencies()
@@ -171,7 +216,8 @@ def child(model, case, output, name, joint_pipeline=False):
               "cgroup_cumulative_memory_peak_bytes": int((group / 'memory.peak').read_text()),
               "joint_native_layout": native,
               "joint_ocr_dependencies": ocr_dependencies if joint_pipeline else None,
-              "scope": "Concurrent resident native/candidate sessions plus real primary OCR; no canonical changes or gold scoring" if joint_pipeline else "candidate only"}
+              "candidate_canonical":canonical, "candidate_quality":quality,
+              "scope": "Candidate production geometry helper with raw model/regional attempts; not enabled in runtime" if joint_pipeline else "candidate only"}
     (output / f"{case}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
 
 
@@ -240,6 +286,9 @@ def main():
         summary['pages'] = [{'page': page['page'],
             'labels': [box['label'] for prediction in page['raw_predictions'] for box in prediction['res']['boxes']],
             'primary_ocr_boxes': len(page.get('joint_primary_ocr_boxes') or [])} for page in item.get('pages', [])]
+        summary['candidate_quality'] = item.get('candidate_quality')
+        if case == 'F11' and item.get('candidate_canonical'):
+            summary['actual_blocks'] = [block for section in item['candidate_canonical']['sections'] for block in section['blocks']]
         print(json.dumps({'layout_model_summary': case, 'result': summary}, ensure_ascii=True), flush=True)
         print(json.dumps({"layout_model_case": case, "result": item}, ensure_ascii=False), flush=True)
     (args.output / "layout-model-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))

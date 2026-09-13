@@ -117,7 +117,7 @@ jobs:
       - name: Regional PSM6 retry diagnostics (hosted real engine)
         run: python scripts/ocr/regional_retry_probe.py "$RUNNER_TEMP/ocr-first-probe/regional-retry-probe.json"
       - name: Regional retry geometry tests
-        run: python -m unittest tests/ocr/test_regional_retry_probe.py
+        run: python -m unittest tests/ocr/test_regional_retry_probe.py tests/ocr/test_visual_projection.py
       - name: Bounded dependency discovery faults
         run: python -m unittest tests/ocr/test_dependency_process.py tests/ocr/test_worker_failures.py
       - name: Boundary scorer corruption and split tests

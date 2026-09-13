@@ -159,7 +159,7 @@ impl OcrRuntimeIdentity {
             return Err("incomplete/unexpected OCR dependency set".into());
         }
         let retry_policy = OcrRetryPolicy::default();
-        let inspection_policy = "ocr-original-region-inspection/v3".to_owned();
+        let inspection_policy = "ocr-original-region-inspection/v4".to_owned();
         // Retain the accepted non-package identity byte encoding. A verified
         // private package adds a typed fifth component, not an env fingerprint.
         let bytes = if let Some(package) = &runtime_package {
@@ -204,6 +204,9 @@ pub struct OcrDerivation {
     pub retry_policy: OcrRetryPolicy,
     pub runtime_identity_sha256: String,
     pub inspection_policy: String,
+    /// Filled by the Rust parser from validated selected evidence before publication.
+    #[serde(default)]
+    pub selected_word_count: Option<u64>,
     #[serde(default)]
     pub binding_map_sha256: Option<String>,
     #[serde(default)]
@@ -337,7 +340,7 @@ mod tests {
     fn identity() -> OcrRuntimeIdentity {
         OcrRuntimeIdentity {
             retry_policy: OcrRetryPolicy::default(),
-            inspection_policy: "ocr-original-region-inspection/v3".into(),
+            inspection_policy: "ocr-original-region-inspection/v4".into(),
             config: OcrConfig {
                 enabled: true,
                 engine_path: "/e".into(),
@@ -443,6 +446,7 @@ mod tests {
             retry_policy: OcrRetryPolicy::default(),
             runtime_identity_sha256: i.sha256.clone(),
             inspection_policy: i.inspection_policy.clone(),
+            selected_word_count: None,
             binding_map_sha256: None,
             evidence_blob: None,
         };
@@ -484,7 +488,8 @@ impl OcrDerivation {
         let value: Self =
             serde_json::from_str(raw).map_err(|e| format!("invalid OCR derivation: {e}"))?;
         if value.schema != "ocr-derivation/v3"
-            || value.inspection_policy != "ocr-original-region-inspection/v3"
+            || value.inspection_policy != "ocr-original-region-inspection/v4"
+            || value.selected_word_count.is_none()
             || value.retry_policy != OcrRetryPolicy::default()
             || !valid_sha256(&value.original_sha256)
             || !valid_sha256(&value.engine_sha256)

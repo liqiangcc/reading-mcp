@@ -31,7 +31,7 @@ PAGE_DEADLINE = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
 INPUT_SHA256 = None
-INSPECTION_POLICY = "ocr-original-region-inspection/v3"
+INSPECTION_POLICY = "ocr-original-region-inspection/v4"
 
 
 class OcrRequired(RuntimeError):

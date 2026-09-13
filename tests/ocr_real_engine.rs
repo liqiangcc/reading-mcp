@@ -58,6 +58,19 @@ async fn existing_layers_have_persistent_native_coverage_without_engine_attempts
         assert_eq!(document.content_hash.0, raw_hash);
         assert_eq!(document.try_paragraph_text_units().unwrap().units.len(), 6);
         document.validate_ocr_publication().unwrap();
+        let derivation: reading_mcp::domain::OcrDerivation =
+            serde_json::from_str(&document.metadata["ocr_derivation"]).unwrap();
+        assert_eq!(derivation.selected_word_count, Some(0));
+        let mut missing_count = document.clone();
+        let mut incomplete = serde_json::to_value(&derivation).unwrap();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_word_count");
+        missing_count
+            .metadata
+            .insert("ocr_derivation".into(), incomplete.to_string());
+        assert!(missing_count.validate_ocr_publication().is_err());
         let bytes = store
             .get(&document.metadata["ocr_evidence_blob"])
             .await

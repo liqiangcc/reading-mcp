@@ -517,6 +517,7 @@ impl Parser for LayoutPdfParser {
                 selected_words: evidence,
             };
             blob.validate(page_count).map_err(failed)?;
+            derivation.selected_word_count = Some(blob.selected_words.len() as u64);
             let bytes = serde_json::to_vec(&blob).map_err(failed)?;
             let store = self
                 .evidence_store

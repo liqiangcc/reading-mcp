@@ -58,7 +58,11 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
             document.validate_ocr_publication().map_err(|_| invalid())?;
             let derived = OcrDerivation::from_metadata(&document.metadata)
                 .map_err(|_| invalid())?
-                .is_some();
+                .is_some_and(|derivation| {
+                    derivation
+                        .selected_word_count
+                        .is_some_and(|count| count > 0)
+                });
             // Persisted evidence says whether local OCR contributed, not whether
             // the current deployment switch is enabled. Valid provenance does
             // not establish recognition accuracy, even with high confidence.

@@ -611,3 +611,10 @@ inspection policy v2→v3 进入统一runtime identity/cache/hash；旧策略的
 新增真实F03/F04-form/F04-flat Rust测试锁住零engine调用及coverage落盘；
 原正式CER/WER/页执行门禁、补充六组混合诊断继续跑。补充诊断完整raw留artifact，
 日志打印紧凑覆盖/原引擎顺序/排除来源，避免重复多MB输出，不删除原始观察。
+
+852d58b hosted 真测试进一步暴露 F03 reliability 分类错误：以前只要存在
+derivation 就认为 local OCR 被采用。覆盖检查会产生 derivation 但没有选入OCR词，
+不能把它标成OCR正文。修复为 Rust 对验证后的 blob.selected_words 计数、写入
+typed selected_word_count，发布/加载拒绝缺计数，reliability按真实采用词数分类。
+不修改既有F03/F04“not_applied”断言。inspection policy再升v4以隔离中间v3缓存，
+不让缺计数的中间缓存混入新结果，旧对象保留且要求显式reopen。

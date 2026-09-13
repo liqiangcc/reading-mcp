@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           actual_sha=$(git -C source rev-parse 'HEAD^{commit}')
-          tag_sha=$(git -C source ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 {print $1}')
+          tag_sha=$(git -C packaging ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 {print $1}')
           source_status=$(git -C source status --porcelain --untracked-files=all)
           printf 'source_sha=%s tag_sha=%s status_bytes=%s\n' "$actual_sha" "$tag_sha" "${#source_status}"
           [[ "$actual_sha" == "$EXPECTED_SHA" && "$tag_sha" == "$EXPECTED_SHA" ]]

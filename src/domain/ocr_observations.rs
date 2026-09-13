@@ -65,6 +65,126 @@ pub struct OcrRawAttempt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum OcrVisualTensor {
+    Matrix(Vec<Vec<f64>>),
+    Vector(Vec<f64>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualRawBox {
+    pub cls_id: u32,
+    pub label: String,
+    pub score: f64,
+    pub coordinate: [f64; 4],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualRawAttempt {
+    pub res: OcrVisualRawResult,
+    pub raw_outputs: Vec<OcrVisualTensor>,
+    pub postprocess: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualRawResult {
+    pub boxes: Vec<OcrVisualRawBox>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualRegion {
+    pub prediction_index: usize,
+    pub label: String,
+    pub model_score: f64,
+    pub pixel_bbox: [f64; 4],
+    pub bbox: [f64; 4],
+    pub box_sources: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualBinding {
+    pub source_box: usize,
+    pub prediction_index: usize,
+    pub source_bbox: [f64; 4],
+    pub projected_bbox: [f64; 4],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualFailure {
+    #[serde(default)]
+    pub source_box: Option<usize>,
+    #[serde(default)]
+    pub source_boxes: Vec<usize>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualParagraphMerge {
+    pub source_boxes: Vec<usize>,
+    pub prediction_index: Option<usize>,
+    pub bbox: [f64; 4],
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualMove {
+    pub source_boxes: Vec<usize>,
+    pub from_group: usize,
+    pub to_group: usize,
+    pub prose_source_boxes: Vec<usize>,
+    pub prose_bottom: f64,
+    pub visual_top: f64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualTerminalOrder {
+    pub schema: String,
+    pub input_source_groups: Vec<Vec<usize>>,
+    pub output_group_indices: Vec<usize>,
+    pub moves: Vec<OcrVisualMove>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualProjection {
+    pub schema: String,
+    pub page: u32,
+    pub page_bounds: [f64; 4],
+    pub raster_size: [u32; 2],
+    pub regions: Vec<OcrVisualRegion>,
+    pub bindings: Vec<OcrVisualBinding>,
+    pub failures: Vec<OcrVisualFailure>,
+    pub text_regions: Vec<OcrVisualRegion>,
+    pub paragraph_merges: Vec<OcrVisualParagraphMerge>,
+    pub projected_source_groups: Vec<Vec<usize>>,
+    pub unanchored_visual_regions: Vec<usize>,
+    pub terminal_visual_order: OcrVisualTerminalOrder,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrVisualAttempt {
+    pub schema: String,
+    pub page: u32,
+    pub raster_size: [u32; 2],
+    pub raster_sha256: String,
+    pub dependencies: Vec<super::DependencyFingerprint>,
+    pub attempts: Vec<OcrVisualRawAttempt>,
+    pub projection: OcrVisualProjection,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OcrBoxSelection {
     pub selected_box: usize,
@@ -295,6 +415,8 @@ pub struct OcrEvidenceBlob {
     pub runtime_identity: OcrRuntimeIdentity,
     pub pages: Vec<OcrPageObservations>,
     pub selected_words: Vec<OcrEvidenceRecord>,
+    #[serde(default)]
+    pub visual_attempts: Vec<OcrVisualAttempt>,
 }
 
 fn within(b: [f64; 4], outer: [f64; 4]) -> bool {
@@ -663,6 +785,57 @@ impl OcrEvidenceBlob {
         }
         if selected != self.selected_words {
             return Err("selected OCR evidence differs from raw attempts".into());
+        }
+        let mut visual_pages = BTreeSet::new();
+        for visual in &self.visual_attempts {
+            if visual.schema != "ocr-visual-model-attempt/v1"
+                || visual.page == 0
+                || visual.page > max_page
+                || !visual_pages.insert(visual.page)
+                || visual.raster_size.iter().any(|value| *value == 0)
+                || !super::ocr::valid_sha256(&visual.raster_sha256)
+                || visual.attempts.len() != 1
+                || visual.projection.schema != "ocr-visual-projection/v1"
+                || visual.projection.page != visual.page
+                || visual.projection.raster_size != visual.raster_size
+                || !visual.projection.complete
+            {
+                return Err("invalid OCR visual model evidence".into());
+            }
+            let mut dependency_names = BTreeSet::new();
+            for dependency in &visual.dependencies {
+                if !dependency_names.insert(&dependency.name)
+                    || dependency.name.is_empty()
+                    || !super::ocr::valid_sha256(&dependency.sha256)
+                {
+                    return Err("invalid OCR visual dependency evidence".into());
+                }
+            }
+            for attempt in &visual.attempts {
+                if attempt.postprocess
+                    != "pinned draw_threshold only; no layout NMS or gold selection"
+                    || attempt.raw_outputs.is_empty()
+                {
+                    return Err("invalid OCR visual raw attempt".into());
+                }
+                for value in &attempt.res.boxes {
+                    if !value.score.is_finite()
+                        || !(0.0..=1.0).contains(&value.score)
+                        || value.label.is_empty()
+                        || !within(
+                            value.coordinate,
+                            [
+                                0.0,
+                                0.0,
+                                f64::from(visual.raster_size[0]),
+                                f64::from(visual.raster_size[1]),
+                            ],
+                        )
+                    {
+                        return Err("invalid OCR visual model box".into());
+                    }
+                }
+            }
         }
         Ok(())
     }

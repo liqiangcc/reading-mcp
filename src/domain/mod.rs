@@ -25,7 +25,12 @@ pub use ocr::{
 };
 #[cfg(test)]
 pub(crate) use ocr_observations::mixed_order_fixture;
-pub use ocr_observations::{MixedOrderEntry, OcrEvidenceBlob, OcrPageObservations};
+pub use ocr_observations::{
+    MixedOrderEntry, OcrEvidenceBlob, OcrPageObservations, OcrVisualAttempt, OcrVisualBinding,
+    OcrVisualFailure, OcrVisualMove, OcrVisualParagraphMerge, OcrVisualProjection,
+    OcrVisualRawAttempt, OcrVisualRawBox, OcrVisualRawResult, OcrVisualRegion, OcrVisualTensor,
+    OcrVisualTerminalOrder,
+};
 pub use original_source::{
     ORIGINAL_SOURCE_BINDING_COUNT_METADATA_KEY, ORIGINAL_SOURCE_BINDING_METADATA_KEY,
     ORIGINAL_SOURCE_BINDING_MODEL_VERSION, ORIGINAL_SOURCE_BINDING_VERSION_METADATA_KEY,

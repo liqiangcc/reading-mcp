@@ -19,8 +19,8 @@ use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, Retr
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
     NormalizedBlockProvenance, NormalizedTextRange, OcrConfig, OcrDerivation, OcrEvidenceBlob,
-    OcrEvidenceRecord, OcrPageObservations, OcrRuntimeIdentity, OriginalSourceBinding,
-    OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
+    OcrEvidenceRecord, OcrPageObservations, OcrRuntimeIdentity, OcrVisualAttempt,
+    OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
 use crate::infrastructure::ResourceBudget;
 
@@ -524,6 +524,7 @@ impl Parser for LayoutPdfParser {
         let evidence = payload.ocr_evidence.clone();
         let derivation = payload.ocr_derivation.clone();
         let attempts = payload.ocr_attempts.clone();
+        let visual_attempts = payload.ocr_visual_attempts.clone();
         for page in &attempts {
             validate_mixed_projection(&payload.regions, page)?;
             for native in &page.native_regions {
@@ -586,6 +587,7 @@ impl Parser for LayoutPdfParser {
                 runtime_identity: identity.clone(),
                 pages: attempts,
                 selected_words: evidence,
+                visual_attempts,
             };
             blob.validate(page_count).map_err(failed)?;
             derivation.selected_word_count = Some(blob.selected_words.len() as u64);
@@ -668,6 +670,8 @@ struct LayoutResult {
     ocr_derivation: Option<OcrDerivation>,
     #[serde(default)]
     ocr_attempts: Vec<OcrPageObservations>,
+    #[serde(default)]
+    ocr_visual_attempts: Vec<OcrVisualAttempt>,
 }
 #[derive(Deserialize)]
 struct LayoutSection {

@@ -1204,6 +1204,7 @@ def main():
                         or observation.get('raster_size') != [pixmap.width, pixmap.height]
                         or observation.get('raster_sha256') != hashlib.sha256(pixmap.samples).hexdigest()):
                     raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model raster identity mismatch')
+                observation['page'] = visual_page.number + 1
                 visual_results[visual_page.number] = observation
         # The bytes are retained as the canonical input for the normal parse;
         # the stream is not readable a second time after the pre-classification.

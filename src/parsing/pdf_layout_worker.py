@@ -981,7 +981,7 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
             overlap = max(0.0, min(box_bounds[2], x1) - max(box_bounds[0], x0)) * max(
                 0.0, min(box_bounds[3], y1) - max(box_bounds[1], y0))
             box_center_inside = x0 <= (box_bounds[0] + box_bounds[2]) / 2 <= x1 and y0 <= (box_bounds[1] + box_bounds[3]) / 2 <= y1
-            if all_centers or (box_area > 0 and box_center_inside and overlap / box_area >= 0.75):
+            if all_centers or (box_area > 0 and box_center_inside and overlap / box_area >= 0.25):
                 matches.append((region['prediction_index'], all_centers, overlap / box_area if box_area else 0.0))
         if len(matches) != 1:
             return None
@@ -990,11 +990,10 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
     for index, box in enumerate(projected):
         model_ref = text_region(box)
         previous_ref = text_region(ordered[-1]) if ordered else None
-        adjacent_unassigned = model_ref is None and previous_ref is None
         same_model_region = model_ref is not None and model_ref == previous_ref
         if (ordered and box.get('ocr_block') is not None and ordered[-1].get('ocr_block') is not None
                 and box['boxclass'] == ordered[-1]['boxclass'] == 'text'
-                and (same_model_region or adjacent_unassigned)):
+                and same_model_region):
             before = ' '.join(line_text(line) for line in ordered[-1]['textlines']).strip()
             after = ' '.join(line_text(line) for line in box['textlines']).strip()
             heights = [line['bbox'][3] - line['bbox'][1]

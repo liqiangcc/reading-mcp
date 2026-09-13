@@ -1,0 +1,39 @@
+{
+  "schema": "scanned-pdf-gold-source/v1",
+  "design_sha": "76f449061b20b6c8d79b57b871ce67ac1cfa7c6b",
+  "rights": "Original synthetic text authored for reading-mcp fixtures; project MIT license. Fonts retain their own licenses.",
+  "paragraphs": {
+    "E1": ["The observatory opens before sunrise.", "Each camera records one image every minute."],
+    "E2": ["Mira checks the northern lens.", "Leon writes the exposure time in the field notebook."],
+    "E3": ["A clear label connects each sample to its original page.", "The label does not measure recognition accuracy."],
+    "E4": ["The first column ends beside the diagram.", "Reading continues at the top of the second column."],
+    "E5": ["The measured change was -8.8 units, not +8.8 units.", "Trial 12 used 0.25 grams at 07:30."],
+    "E6": ["Questions do not advance the saved reading position.", "An explicit request moves to the next item."],
+    "C1": ["清晨，研究员打开观测站。", "相机每分钟记录一张图像。"],
+    "C2": ["每个样本都有原始页码。", "页码不能证明文字识别完全准确。"],
+    "C3": ["左栏结束后，阅读从右栏顶部继续。", "不能把两栏的文字交错连接。"],
+    "C4": ["提问不会改变阅读位置。", "只有明确要求继续时，才读取下一项。"]
+  },
+  "long_sentence": {
+    "id": "L1", "count": 48, "first_n": 1,
+    "clause": "sample N remains bound to original page 1",
+    "join": ", ", "terminal": ".", "expected_sentence_count": 1
+  },
+  "metrics": {
+    "normalization": "NFC; collapse whitespace; retain case, punctuation, signs and digits",
+    "english_clean_max_cer": 0.01,
+    "english_clean_max_wer": 0.03,
+    "chinese_bilingual_clean_max_cer": 0.02,
+    "min_prose_coverage": 0.99,
+    "min_paragraph_sentence_boundary_f1": 0.95,
+    "reading_order": 1.0,
+    "exact_read_and_original_page_binding": 1.0,
+    "native_existing_layer_cer_wer": 0.0,
+    "native_existing_layer_boundary_f1": 1.0,
+    "native_existing_layer_ocr_calls": 0,
+    "F09": "no supported prose; zero hallucinated words",
+    "F10": "report metrics/degradation; not a successful clean case if thresholds missed",
+    "F11": "clean prose thresholds plus 100% chart/formula retention, zero fabricated prose sentences",
+    "E5": "signed number tokens must match exactly"
+  }
+}

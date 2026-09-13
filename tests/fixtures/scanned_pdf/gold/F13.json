@@ -1,0 +1,76 @@
+{
+  "fixture": "F13",
+  "pages": [
+    {
+      "expected_class": "requires_ocr",
+      "height_points": 842,
+      "mode": "scan",
+      "page": 1,
+      "raster_dpi": 300,
+      "regions": [],
+      "rotation": 0,
+      "width_points": 595
+    }
+  ],
+  "paragraphs": [
+    {
+      "font": "goldeng",
+      "id": "E1",
+      "lines": [
+        {
+          "baseline": 72,
+          "bbox": [
+            48,
+            60.861328,
+            515.90625,
+            74.830078
+          ],
+          "paragraph_range": [
+            0,
+            73
+          ],
+          "text": "The observatory opens before sunrise. Each camera records one image every"
+        },
+        {
+          "baseline": 90,
+          "bbox": [
+            48,
+            78.861328,
+            94.136719,
+            92.830078
+          ],
+          "paragraph_range": [
+            74,
+            81
+          ],
+          "text": "minute."
+        }
+      ],
+      "page": 1,
+      "sentences": [
+        {
+          "source_range": [
+            0,
+            37
+          ],
+          "text": "The observatory opens before sunrise."
+        },
+        {
+          "source_range": [
+            38,
+            81
+          ],
+          "text": "Each camera records one image every minute."
+        }
+      ],
+      "source_order": 0,
+      "source_range": [
+        0,
+        81
+      ],
+      "text": "The observatory opens before sunrise. Each camera records one image every minute."
+    }
+  ],
+  "schema": "scanned-pdf-gold/v1",
+  "text": "The observatory opens before sunrise. Each camera records one image every minute."
+}

@@ -1,0 +1,361 @@
+"""Approved public-only candidate diagnostic; never imported by production."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import resource
+import re
+import subprocess
+import sys
+import time
+import types
+import urllib.request
+import urllib.error
+
+REVISION = "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2"
+FILES = {
+    "README.md": (7298, "e08620abd7706f53567c6123596b02809e5a9b91"),
+    "config.json": (4715, "436e96f29b801071ebaa2b8126e9c6e76c5e0476"),
+    "inference.json": (339876, "6178df1e64b9c8e99b8955db7a20ecc17ae8559b"),
+    "inference.yml": (1579, "f0995b690b0ed7a9d37786cdee8f204bc16230e0"),
+    "inference.pdiparams": (4804904, "491c3382d84ca04d2033afbee0c105942ed82fea392bb4a19170646adebe088a"),
+}
+L_REVISION = "ca760c3336d922ee63cdbff85003181222e3911c"
+L_FILES = {
+    "README.md": (7434, "0972bad1446a331cb2e19bfff6154ab273dd05d1"),
+    "config.json": (6134, "0a3507f7365b0554e4e86d436421c53c3a738fb1"),
+    "inference.json": (1081389, "540c4f71da8b65c044f14a242314cc73de10d3d3"),
+    "inference.yml": (1871, "632a2724ad049bbb1ea75777597ad7f12d106692"),
+    "inference.pdiparams": (129021913, "4df69115349e1e6215629d058e3bc7f087cad7a0d2776ef40c463daf73c38982"),
+}
+ONNX_REVISION = "feb74619326f634e0e883218598096a3733ad9f7"
+ONNX_FILES = {
+    "README.md": (1669, "15d99d1c81c251b2b57b742b064e03b7ca4b4fd5"),
+    "inference.yml": (1838, "9a236587eae068a1e7906fd158f712dc41400563"),
+    "inference.onnx": (129736329, "77afb2caa74dd13240d087d2eced91d7fcd2caebd16006a0a66162fc8707ff0e"),
+}
+
+
+def load_worker():
+    worker = types.ModuleType('joint_candidate_worker')
+    source = Path('src/parsing/pdf_layout_worker.py')
+    exec(compile(source.read_text(), str(source), 'exec'), worker.__dict__)
+    return worker
+
+
+def verify(path):
+    records = []
+    for name, (size, expected) in FILES.items():
+        raw = (path / name).read_bytes()
+        sha256 = hashlib.sha256(raw).hexdigest()
+        digest = sha256 if len(expected) == 64 else hashlib.sha1(
+            f"blob {len(raw)}\0".encode() + raw).hexdigest()
+        if len(raw) != size or digest != expected:
+            raise ValueError("pinned model file mismatch: " + name)
+        records.append({"name": name, "bytes": size, "sha256": sha256})
+    return records
+
+
+def mapped_dependencies():
+    """Actual loaded executable/library files, not caller-supplied fingerprints."""
+    paths = {str(Path(sys.executable).resolve())}
+    for line in Path('/proc/self/maps').read_text().splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) == 6 and 'x' in fields[1] and fields[5].startswith('/'):
+            paths.add(fields[5])
+    result = []
+    for name in sorted(paths):
+        digest = hashlib.sha256()
+        with open(name, 'rb') as stream:
+            for chunk in iter(lambda: stream.read(65536), b''):
+                digest.update(chunk)
+        result.append({'name': name, 'sha256': digest.hexdigest()})
+    return result
+
+
+def child(model, case, output, name, joint_pipeline=False, sequential_model=False):
+    # Public diagnostic only. The enclosing systemd cgroup also bounds RSS/PIDs
+    # and denies network. Do not mistake these exploratory limits for acceptance.
+    resource.setrlimit(resource.RLIMIT_CPU, (45, 45))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024,) * 2)
+    started = time.monotonic()
+    verify(model)
+    import pymupdf
+    model_stage = None
+    if sequential_model:
+        # Reap the classifier before importing native layout. The outer case
+        # still has ONE 60s timeout; this is not 60s per stage.
+        stage_output = output / f'{case}-model-stage'
+        stage_output.mkdir()
+        subprocess.run([sys.executable, str(Path(__file__).resolve()), '--model', str(model),
+            '--output', str(stage_output), '--case', case, '--candidate', name],
+            capture_output=True, check=True, timeout=max(.001, 60 - (time.monotonic() - started)))
+        model_stage = json.loads((stage_output / f'{case}.json').read_text())
+    model_reaped_seconds = time.monotonic() - started if model_stage is not None else None
+    worker = None
+    if joint_pipeline:
+        import pymupdf4llm
+        pymupdf4llm.use_layout(True)
+        worker = load_worker()
+        worker.OCR_CONFIG = {'enabled': True, 'engine_path': '/usr/bin/tesseract',
+            'tessdata_path': '/usr/share/tesseract-ocr/5/tessdata',
+            'languages': ['chi_sim'] if case == 'F07' else ['eng', 'chi_sim'] if case == 'F08' else ['eng'],
+            'operator_revision': '1', 'dpi': 300, 'oem': 1, 'psm': 3,
+            'detector_version': 'pdf-layout/v1', 'protocol_version': 'pdf-layout/v1'}
+        ocr_dependencies = worker.fingerprint_dependencies(worker.OCR_CONFIG)
+    geometry_worker = worker or load_worker()
+    model_dependencies = None
+    if model_stage is not None:
+        model_dependencies = model_stage['visual_model_dependencies']
+    elif name.endswith("_onnx"):
+        predict, model_dependencies = geometry_worker.visual_model_predictor(str(model.resolve()))
+    else:
+        from paddlex import create_predictor
+        from paddlex.inference.utils.pp_option import PaddlePredictorOption
+        options = PaddlePredictorOption(name, run_mode="paddle", cpu_threads=1)
+        detector = create_predictor(model_name=name, model_dir=str(model), device="cpu", pp_option=options)
+        def predict(path):
+            return [item.json for item in detector.predict(str(path), batch_size=1, layout_nms=True)]
+    loaded = time.monotonic()
+    raw = Path(f"tests/fixtures/scanned_pdf/pdf/{case}.pdf").read_bytes()
+    if model_stage is not None and model_stage['original_sha256'] != hashlib.sha256(raw).hexdigest():
+        raise ValueError('sequential stage original identity mismatch')
+    pages = []
+    canonical_pages = []
+    with pymupdf.open(stream=raw, filetype="pdf") as document:
+        native = json.loads(pymupdf4llm.to_json(document, use_ocr=False)) if joint_pipeline else None
+        if model_stage is not None and len(model_stage['pages']) != len(document):
+            raise ValueError('sequential stage page coverage mismatch')
+        raster_budget = geometry_worker.OcrRasterBudget()
+        for page in document:
+            raster_budget.reserve_raster(geometry_worker.raster_pixel_count(page, 300))
+            raster = page.get_pixmap(dpi=300, colorspace=pymupdf.csRGB, alpha=False)
+            begin = time.monotonic()
+            raster_sha256 = hashlib.sha256(raster.samples).hexdigest()
+            if model_stage is not None:
+                observed = model_stage['pages'][page.number]
+                if (observed['page'] != page.number + 1 or observed['original_rect'] != list(page.rect)
+                        or observed['raster_size'] != [raster.width,raster.height]
+                        or observed['dpi'] != 300 or observed['raster_sha256'] != raster_sha256):
+                    raise ValueError('sequential stage raster/transform mismatch')
+                result = observed['raw_predictions']
+                inference_seconds = observed['inference_seconds']
+            elif name.endswith('_onnx'):
+                result = predict(raster.samples, raster.width, raster.height)
+                inference_seconds = time.monotonic() - begin
+            else:
+                image = output / f"{case}-{page.number + 1}.png"
+                raster.save(image)
+                try:
+                    result = predict(image)
+                finally:
+                    image.unlink()
+                inference_seconds = time.monotonic() - begin
+            ocr_started = time.monotonic()
+            raw_ocr = None
+            regional = None
+            visual = None
+            if worker is not None:
+                original = native['pages'][page.number]
+                selected, regional = worker._regional_ocr(page, worker.native_text_regions(original),
+                    inspect_native=worker.has_native_body(original), original_boxes=original['boxes'])
+                if not selected:
+                    selected = original['boxes']
+                raw_ocr = regional['attempts'][0]['boxes'] if regional['attempts'] else []
+                if len(result) != 1:
+                    raise ValueError('candidate must return one model attempt per page')
+                selected, visual = worker.project_visual_observations(page.number + 1, list(page.rect),
+                    [raster.width, raster.height], selected, result[0]['res']['boxes'])
+                canonical_pages.append(dict(original, boxes=selected))
+            pages.append({"page": page.number + 1, "original_rect": list(page.rect),
+                          "raster_size": [raster.width, raster.height], "dpi": 300,
+                          "raster_sha256": raster_sha256,
+                          "inference_seconds": inference_seconds,
+                          "raw_predictions": result,
+                          "joint_primary_ocr_seconds": time.monotonic() - ocr_started if worker is not None else None,
+                          "joint_primary_ocr_boxes": raw_ocr,
+                          "regional_observations":regional, "visual_projection":visual})
+    canonical = worker.project(dict(native, pages=canonical_pages)) if worker is not None else None
+    pre_scoring_seconds = time.monotonic() - started
+    quality = None
+    if canonical is not None:
+        # Only completed engine/projection output may be compared with gold.
+        # No reference text/coordinates are passed to either production helper.
+        from canonical_quality import metric, norm
+        from boundary_quality import alignment, score, reading_order
+        gold = json.loads(Path(f'tests/fixtures/scanned_pdf/gold/{case}.json').read_text())
+        paragraphs = [block['text'] for section in canonical['sections']
+                      for block in section['blocks'] if block['kind'] == 'paragraph']
+        actual = '\n\n'.join(paragraphs)
+        ambiguous = []
+        if case == 'F08':
+            ambiguous = [text for text in paragraphs if re.search(r'[A-Za-z]', text)
+                         and re.search(r'[\u3400-\u9fff]', text)]
+            expected_english = '\n\n'.join(p['text'] for p in gold['paragraphs'] if p['font'] == 'goldeng')
+            actual_english = '\n\n'.join(p for p in paragraphs if re.search(r'[A-Za-z]', p)
+                and not re.search(r'[\u3400-\u9fff]', p))
+            wer = metric(expected_english, actual_english, True)
+        else:
+            wer = None if case == 'F07' else metric(gold['text'], actual, True)
+        cer = metric(gold['text'], actual)
+        def paragraph_edges(values):
+            combined, ends = '', []
+            for value in values:
+                if combined:
+                    combined += ' '
+                combined += norm(value)
+                ends.append(len(combined))
+            return combined, ends
+        reference_text, expected_ends = paragraph_edges([p['text'] for p in gold['paragraphs']])
+        actual_text, actual_ends = paragraph_edges(paragraphs)
+        mapping, _ = alignment(reference_text, actual_text)
+        paragraph_score = score(expected_ends, actual_ends, mapping)
+        order = reading_order([p['text'] for p in gold['paragraphs']], paragraphs)
+        coarse_contract = None
+        if case == 'F11':
+            blocks = [block for section in canonical['sections'] for block in section['blocks']]
+            body_indices = [i for i, block in enumerate(blocks) if block['kind'] == 'paragraph']
+            expected_objects = []
+            for page in gold['pages']:
+                for expected in page.get('regions', []):
+                    kind = 'image' if expected['kind'] == 'chart' else expected['kind']
+                    bbox = expected['bbox']
+                    matches = []
+                    for index, block in enumerate(blocks):
+                        region = block.get('region') or {}
+                        actual_bbox = region.get('bbox')
+                        if (region.get('page') == page['page'] and region.get('class') == kind
+                                and block['kind'] in ('preformatted', 'table') and actual_bbox
+                                and bbox[0] <= (actual_bbox[0] + actual_bbox[2]) / 2 <= bbox[2]
+                                and bbox[1] <= (actual_bbox[1] + actual_bbox[3]) / 2 <= bbox[3]):
+                            matches.append(index)
+                    expected_objects.append({'page':page['page'], 'kind':expected['kind'],
+                        'expected':expected['expected'], 'matching_actual_blocks':matches})
+            unique = all(len(item['matching_actual_blocks']) == 1 for item in expected_objects)
+            object_indices = [item['matching_actual_blocks'][0] for item in expected_objects] if unique else []
+            coarse_contract = {'method':'original-page-kind-and-region-center/v1',
+                'objects':expected_objects, 'expected_count':len(expected_objects),
+                'retained_count':sum(len(item['matching_actual_blocks']) == 1 for item in expected_objects),
+                'after_both_prose_columns':bool(body_indices) and unique and
+                    len(set(object_indices)) == len(expected_objects) and
+                    all(index > max(body_indices) for index in object_indices),
+                'scope':'canonical coarse blocks only; Rust Sentence exclusion and source-view still require integration'}
+        quality = {'cer':cer, 'english_wer':wer, 'paragraph_count':len(paragraphs),
+            'ambiguous_mixed_paragraphs':ambiguous,
+            'visual_mapping_complete':all(p['regional_observations']['complete'] and
+                                      p['visual_projection']['complete'] for p in pages),
+            'paragraph_boundary':paragraph_score, 'paragraph_order':order,
+            'f11_coarse_contract':coarse_contract,
+            'paragraph_contract_met':paragraph_score['f1'] >= .95 and order['proven'] and order['score'] == 1,
+            'text_thresholds_met':cer['rate'] is not None and cer['rate'] <= (.02 if case in ('F07','F08') else .01)
+                and not ambiguous and (wer is None or (wer['rate'] is not None and wer['rate'] <= .03)),
+            'scope':'candidate text only; not final F11 region-retention or Rust publication acceptance'}
+    group = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().split('::', 1)[1].strip().lstrip('/')
+    fingerprint_started = time.monotonic()
+    dependencies = mapped_dependencies()
+    fingerprint_seconds = time.monotonic() - fingerprint_started
+    report = {"case": case, "original_sha256": hashlib.sha256(raw).hexdigest(),
+              "load_seconds": loaded - started, "total_seconds": time.monotonic() - started,
+              "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "pages": pages,
+              "mapped_dependencies": dependencies, "mapped_fingerprint_seconds": fingerprint_seconds,
+              "cgroup_cumulative_memory_peak_bytes": int((group / 'memory.peak').read_text()),
+              "joint_native_layout": native,
+              "joint_ocr_dependencies": ocr_dependencies if joint_pipeline else None,
+              "visual_model_dependencies":model_dependencies,
+              "sequential_model_stage":model_stage,
+              "model_reaped_before_layout_import_seconds":model_reaped_seconds,
+              "candidate_canonical":canonical, "candidate_quality":quality,
+              "pre_scoring_seconds":pre_scoring_seconds,
+              "scope": "Candidate production geometry helper with raw model/regional attempts; not enabled in runtime" if joint_pipeline else "candidate only"}
+    (output / f"{case}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def main():
+    global REVISION, FILES
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--joint-pipeline", action="store_true")
+    parser.add_argument("--sequential-model", action="store_true")
+    parser.add_argument("--candidate", choices=["PP-DocLayout-S", "PP-DocLayout-L", "PP-DocLayout_plus-L_onnx"], default="PP-DocLayout-S")
+    parser.add_argument("--case", choices=["F02", "F06", "F07", "F08", "F11", "F12", "F13", "F14"])
+    args = parser.parse_args()
+    if args.sequential_model and (not args.joint_pipeline or args.candidate != 'PP-DocLayout_plus-L_onnx'):
+        parser.error('--sequential-model requires the fixed ONNX joint pipeline')
+    if args.candidate == "PP-DocLayout-L":
+        REVISION, FILES = L_REVISION, L_FILES
+    elif args.candidate == "PP-DocLayout_plus-L_onnx":
+        REVISION, FILES = ONNX_REVISION, ONNX_FILES
+    args.output.mkdir(parents=True, exist_ok=True)
+    if args.prepare:
+        args.model.mkdir(parents=True, exist_ok=False)
+        for name, (size, _) in FILES.items():
+            endpoint = "resolve" if len(FILES[name][1]) == 64 else "raw"
+            url = f"https://huggingface.co/PaddlePaddle/{args.candidate}/{endpoint}/{REVISION}/{name}"
+            for attempt in range(3):
+                print(f"Downloading pinned {name}, attempt {attempt + 1}/3", flush=True)
+                try:
+                    with urllib.request.urlopen(url, timeout=60) as response:
+                        raw = response.read(size + 1)
+                    break
+                except urllib.error.HTTPError as error:
+                    if error.code not in (429, 502, 503, 504) or attempt == 2:
+                        raise
+                    retry_after = error.headers.get("Retry-After", "15")
+                    delay = int(retry_after) if retry_after.isdigit() else 15
+                    if delay > 60:
+                        raise RuntimeError("model host requested a longer retry delay; stop bounded attempt") from error
+                    time.sleep(max(1, delay))
+            (args.model / name).write_bytes(raw)
+        manifest = {"repository": "PaddlePaddle/" + args.candidate, "revision": REVISION,
+                    "license_declaration": "Apache-2.0 in pinned model card; candidate only",
+                    "files": verify(args.model)}
+        (args.output / "model-manifest.json").write_text(json.dumps(manifest, indent=2))
+        print(json.dumps(manifest), flush=True)
+        return
+    if args.case:
+        child(args.model, args.case, args.output, args.candidate, args.joint_pipeline, args.sequential_model)
+        return
+    report = {"schema": "layout-model-diagnostic/v1", "candidate": args.candidate, "model_files": verify(args.model),
+              "scope": "raw candidate regions only; no gold input, no OCR/projection modification",
+              "cases": {}}
+    for case in ("F02", "F06", "F07", "F08", "F11", "F12", "F13", "F14"):
+        try:
+            process = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                "--model", str(args.model), "--output", str(args.output), "--case", case,
+                "--candidate", args.candidate] + (["--joint-pipeline"] if args.joint_pipeline else [])
+                + (["--sequential-model"] if args.sequential_model else []),
+                capture_output=True, timeout=60, check=True)
+            item = json.loads((args.output / f"{case}.json").read_text())
+        except Exception as error:
+            item = {"error": str(error), "stderr": (getattr(error, "stderr", b"") or b"").decode(errors="replace")[-4096:]}
+        report["cases"][case] = item
+        # Keep an independently readable bounded line: rich native/model/word
+        # observations can exceed the log service's per-line limit. Full bytes
+        # remain in each case JSON and the all-case artifact, including failures.
+        summary = {key: item.get(key) for key in ('error', 'total_seconds', 'peak_rss_kib',
+            'cgroup_cumulative_memory_peak_bytes', 'mapped_fingerprint_seconds',
+            'model_reaped_before_layout_import_seconds', 'pre_scoring_seconds')}
+        if item.get('sequential_model_stage'):
+            summary['model_stage_peak_rss_kib'] = item['sequential_model_stage']['peak_rss_kib']
+        summary['pages'] = [{'page': page['page'],
+            'labels': [box['label'] for prediction in page['raw_predictions'] for box in prediction['res']['boxes']],
+            'primary_ocr_boxes': len(page.get('joint_primary_ocr_boxes') or [])} for page in item.get('pages', [])]
+        summary['candidate_quality'] = item.get('candidate_quality')
+        if case == 'F11' and item.get('candidate_canonical'):
+            summary['actual_blocks'] = [block for section in item['candidate_canonical']['sections'] for block in section['blocks']]
+        print(json.dumps({'layout_model_summary': case, 'result': summary}, ensure_ascii=True), flush=True)
+        # Full raw tensors/words remain in the artifact. Printing them here can
+        # exhaust the job log limit before subsequent case summaries appear.
+        print(json.dumps({"layout_model_case_artifact": case,
+                          "path": f"{case}.json"}), flush=True)
+    (args.output / "layout-model-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    if any("error" in item for item in report["cases"].values()):
+        raise SystemExit("candidate diagnostic failed; see all-case report")
+
+
+if __name__ == "__main__":
+    main()

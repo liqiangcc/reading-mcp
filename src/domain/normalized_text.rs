@@ -4,13 +4,13 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Document, Section};
+use super::{Document, OcrDerivation, Section};
 
-pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v9";
-pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v2";
+pub const NORMALIZATION_VERSION: &str = "reading-mcp-normalization/v11";
+pub const NORMALIZED_DOCUMENT_HASH_VERSION: &str = "normalized-document-hash/v3";
 pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scalar/v1";
 
-const NORMALIZED_DOCUMENT_HASH_DOMAIN: &[u8] = b"reading-mcp/normalized-document-hash/v2\0";
+const NORMALIZED_DOCUMENT_HASH_DOMAIN: &[u8] = b"reading-mcp/normalized-document-hash/v3\0";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NormalizedDocumentHash(pub String);
@@ -120,6 +120,33 @@ impl Document {
             hash_section(&mut hasher, section);
         }
         hash_normalized_block_projection(&mut hasher, self);
+        // OCR-derived identity and original-page bindings are typed derivation
+        // inputs. Bind an explicit absent marker for native/non-derived docs.
+        hasher.update(b"binding-map\0");
+        match self.original_source_binding_map() {
+            Ok(Some(map)) => {
+                let bytes = serde_json::to_vec(&map).expect("binding map serializes");
+                hash_bytes(&mut hasher, &bytes);
+            }
+            Ok(None) => hasher.update(b"absent\0"),
+            Err(error) => {
+                hasher.update(b"invalid\0");
+                hash_text(&mut hasher, &error.to_string());
+            }
+        }
+        hasher.update(b"typed-ocr-derivation\0");
+        match OcrDerivation::from_metadata(&self.metadata) {
+            Ok(Some(value)) => {
+                hasher.update([1]);
+                let encoded = serde_json::to_vec(&value).expect("typed OCR derivation serializes");
+                hash_bytes(&mut hasher, &encoded);
+            }
+            Ok(None) => hasher.update([0]),
+            Err(error) => {
+                hasher.update([2]);
+                hash_text(&mut hasher, &error);
+            }
+        }
         NormalizedDocumentHash(format!("sha256:{:x}", hasher.finalize()))
     }
 }
@@ -188,6 +215,11 @@ fn hash_normalized_block_projection(hasher: &mut Sha256, document: &Document) {
 fn hash_text(hasher: &mut Sha256, value: &str) {
     hash_usize(hasher, value.len());
     hasher.update(value.as_bytes());
+}
+
+fn hash_bytes(hasher: &mut Sha256, value: &[u8]) {
+    hash_usize(hasher, value.len());
+    hasher.update(value);
 }
 
 fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {

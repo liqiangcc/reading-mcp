@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 mod normalized_block;
 mod normalized_text;
+mod ocr;
+mod ocr_observations;
 mod original_source;
 mod text_locator;
 mod text_unit;
@@ -16,6 +18,18 @@ pub use normalized_block::{
 pub use normalized_text::{
     NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE,
     NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
+};
+pub use ocr::{
+    DependencyFingerprint, OcrConfig, OcrDerivation, OcrEvidenceRecord, OcrPageBinding,
+    OcrRetryPolicy, OcrRuntimeIdentity, OcrRuntimePackageIdentity,
+};
+#[cfg(test)]
+pub(crate) use ocr_observations::mixed_order_fixture;
+pub use ocr_observations::{
+    MixedOrderEntry, OcrEvidenceBlob, OcrPageObservations, OcrVisualAttempt, OcrVisualBinding,
+    OcrVisualFailure, OcrVisualMove, OcrVisualParagraphMerge, OcrVisualProjection,
+    OcrVisualRawAttempt, OcrVisualRawBox, OcrVisualRawResult, OcrVisualRegion, OcrVisualTensor,
+    OcrVisualTerminalOrder,
 };
 pub use original_source::{
     ORIGINAL_SOURCE_BINDING_COUNT_METADATA_KEY, ORIGINAL_SOURCE_BINDING_METADATA_KEY,

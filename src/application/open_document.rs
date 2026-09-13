@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::{Instant, timeout_at};
 
 use crate::application::ports::{
     ApplicationError, DocumentReliabilityInspector, DocumentRepository, Parser, RetrievalOptions,
-    Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
+    RetrievedResource, Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
 };
 use crate::application::reading_profile::{
     ReadingProfile, ReliabilitySummary, build_reading_profile,
@@ -41,6 +43,7 @@ pub struct OpenDocumentUseCase {
     text_unit_index: Option<Arc<dyn TextUnitIndex>>,
     search_index: Arc<dyn SearchIndex>,
     reliability_inspector: Option<Arc<dyn DocumentReliabilityInspector>>,
+    ocr_enabled: bool,
 }
 
 impl OpenDocumentUseCase {
@@ -59,6 +62,7 @@ impl OpenDocumentUseCase {
             text_unit_index: None,
             search_index,
             reliability_inspector: None,
+            ocr_enabled: false,
         }
     }
 
@@ -78,6 +82,7 @@ impl OpenDocumentUseCase {
             text_unit_index: Some(text_unit_index),
             search_index,
             reliability_inspector: None,
+            ocr_enabled: false,
         }
     }
 
@@ -93,6 +98,39 @@ impl OpenDocumentUseCase {
         &self,
         command: OpenDocumentCommand,
     ) -> Result<OpenDocumentResult, ApplicationError> {
+        if self.ocr_enabled {
+            let known_ocr_pdf = std::sync::atomic::AtomicBool::new(false);
+            let deadline = Instant::now() + Duration::from_secs(90);
+            timeout_at(
+                deadline,
+                self.execute_inner(command, Some(deadline), Some(&known_ocr_pdf)),
+            )
+            .await
+            .map_err(|_| {
+                if known_ocr_pdf.load(std::sync::atomic::Ordering::Relaxed) {
+                    ApplicationError::OcrTimeout
+                } else {
+                    ApplicationError::ResourceLimitExceeded(
+                        "OCR whole-open exceeded 90 second deadline".into(),
+                    )
+                }
+            })?
+        } else {
+            self.execute_inner(command, None, None).await
+        }
+    }
+
+    pub fn with_ocr_budget(mut self, enabled: bool) -> Self {
+        self.ocr_enabled = enabled;
+        self
+    }
+
+    async fn execute_inner(
+        &self,
+        command: OpenDocumentCommand,
+        whole_deadline: Option<Instant>,
+        known_ocr_pdf: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<OpenDocumentResult, ApplicationError> {
         self.source_policy.validate(&command.source).await?;
 
         let resource = self
@@ -100,7 +138,39 @@ impl OpenDocumentUseCase {
             .retrieve(&command.source, &command.options)
             .await?;
 
+        let is_pdf = resource
+            .media_type
+            .0
+            .split(';')
+            .next()
+            .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"));
+        if self.ocr_enabled && is_pdf {
+            if let Some(known) = known_ocr_pdf {
+                known.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = whole_deadline.map_or(deadline, |whole| whole.min(deadline));
+            timeout_at(deadline, self.ingest(resource, Some(deadline)))
+                .await
+                .map_err(|_| ApplicationError::OcrTimeout)?
+        } else {
+            self.ingest(resource, None).await
+        }
+    }
+
+    async fn ingest(
+        &self,
+        resource: RetrievedResource,
+        deadline: Option<Instant>,
+    ) -> Result<OpenDocumentResult, ApplicationError> {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(ApplicationError::OcrTimeout);
+        }
+
         let document = self.parser.parse(resource).await?;
+        document
+            .validate_ocr_publication()
+            .map_err(ApplicationError::ParseFailed)?;
         let paragraph_units = document.try_paragraph_text_units().map_err(|error| {
             ApplicationError::TextUnitIndexFailed(format!(
                 "cannot build current Paragraph coverage from persisted block evidence: {error}"
@@ -136,6 +206,11 @@ impl OpenDocumentUseCase {
             reading_profile,
         };
 
+        // CPU-only projection/profile work may not yield to the timeout. Never
+        // start publication after its deadline even in that case.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(ApplicationError::OcrTimeout);
+        }
         self.repository.save(document.clone()).await?;
         if let Some(index) = &self.text_unit_index {
             index

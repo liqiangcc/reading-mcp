@@ -55,6 +55,9 @@ impl SqliteDocumentRepository {
 #[async_trait]
 impl DocumentRepository for SqliteDocumentRepository {
     async fn save(&self, document: Document) -> Result<(), ApplicationError> {
+        document
+            .validate_ocr_publication()
+            .map_err(ApplicationError::RepositoryFailed)?;
         let json = serde_json::to_string(&StoredDocument::from_document(&document))
             .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
         let connection = self
@@ -96,7 +99,11 @@ impl DocumentRepository for SqliteDocumentRepository {
         json.map(|json| {
             let stored = serde_json::from_str::<StoredDocument>(&json)
                 .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
-            stored.into_document()
+            let document = stored.into_document()?;
+            document
+                .validate_ocr_publication()
+                .map_err(ApplicationError::RepositoryFailed)?;
+            Ok(document)
         })
         .transpose()
     }

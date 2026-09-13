@@ -86,6 +86,8 @@ pub struct CachingParser {
     inner: Arc<dyn Parser>,
     cache: Arc<dyn ParsedDocumentCache>,
     pdf_namespace: Option<String>,
+    ocr_fingerprint: String,
+    ocr_admission: Option<Arc<super::ocr_singleflight::OcrSingleFlight>>,
 }
 
 impl CachingParser {
@@ -94,7 +96,18 @@ impl CachingParser {
             inner,
             cache,
             pdf_namespace: None,
+            ocr_fingerprint: "ocr-disabled/v1".into(),
+            ocr_admission: None,
         }
+    }
+    pub fn with_ocr_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.ocr_fingerprint = fingerprint.into();
+        self
+    }
+    pub fn with_ocr_admission(mut self, enabled: bool) -> Self {
+        self.ocr_admission =
+            enabled.then(|| Arc::new(super::ocr_singleflight::OcrSingleFlight::default()));
+        self
     }
     pub fn with_pdf_namespace(mut self, namespace: &str) -> Self {
         self.pdf_namespace = Some(namespace.into());
@@ -122,14 +135,130 @@ impl Parser for CachingParser {
             } else {
                 NORMALIZATION_VERSION.into()
             },
+            ocr_fingerprint: self.ocr_fingerprint.clone(),
         };
 
         if let Some(document) = self.cache.get(&key).await? {
+            document
+                .validate_ocr_publication()
+                .map_err(ApplicationError::CacheFailed)?;
             return Ok(document);
         }
 
+        if let Some(admission) = &self.ocr_admission
+            && resource
+                .media_type
+                .0
+                .split(';')
+                .next()
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"))
+        {
+            return admission
+                .parse(key, resource, self.inner.clone(), self.cache.clone())
+                .await;
+        }
         let document = self.inner.parse(resource).await?;
+        document
+            .validate_ocr_publication()
+            .map_err(ApplicationError::CacheFailed)?;
         self.cache.put(key, document.clone()).await?;
         Ok(document)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{ContentHash, DocumentId, DocumentSource, MediaType};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeParser {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Parser for FakeParser {
+        async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Document {
+                id: DocumentId("fake".into()),
+                source: resource.final_source,
+                title: "fake".into(),
+                media_type: resource.media_type,
+                content_hash: ContentHash("raw".into()),
+                metadata: Default::default(),
+                root_sections: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn required_inspection_namespace_cannot_reuse_legacy_partial_pdf_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cache: Arc<dyn ParsedDocumentCache> = Arc::new(InMemoryParsedDocumentCache::default());
+        let resource = RetrievedResource {
+            source: DocumentSource("file:///mixed.pdf".into()),
+            final_source: DocumentSource("file:///mixed.pdf".into()),
+            media_type: MediaType("application/pdf".into()),
+            bytes: b"same original".to_vec(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        };
+        for (namespace, expected) in [
+            ("pdf-layout/v1:pymupdf4llm-layout/1.28.2", 1),
+            (
+                "pdf-layout/v2:required-inspection/v1:pymupdf4llm-layout/1.28.2",
+                2,
+            ),
+            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 3),
+            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 3),
+        ] {
+            CachingParser::new(
+                Arc::new(FakeParser {
+                    calls: calls.clone(),
+                }),
+                cache.clone(),
+            )
+            .with_pdf_namespace(namespace)
+            .parse(resource.clone())
+            .await
+            .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn ocr_fingerprint_changes_parsed_cache_identity() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cache: Arc<dyn ParsedDocumentCache> = Arc::new(InMemoryParsedDocumentCache::default());
+        let source = DocumentSource("file:///fixture.pdf".into());
+        let resource = RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: MediaType("application/pdf".into()),
+            bytes: b"same".to_vec(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        };
+        let parser_a = CachingParser::new(
+            Arc::new(FakeParser {
+                calls: calls.clone(),
+            }),
+            cache.clone(),
+        )
+        .with_ocr_fingerprint("A");
+        parser_a.parse(resource.clone()).await.unwrap();
+        parser_a.parse(resource.clone()).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let parser_b = CachingParser::new(
+            Arc::new(FakeParser {
+                calls: calls.clone(),
+            }),
+            cache,
+        )
+        .with_ocr_fingerprint("B");
+        parser_b.parse(resource).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

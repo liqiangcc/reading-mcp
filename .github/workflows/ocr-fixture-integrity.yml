@@ -1,0 +1,33 @@
+name: OCR fixture integrity (no recognition)
+
+on:
+  push:
+    paths:
+      - 'tests/fixtures/scanned_pdf/**'
+      - '.github/workflows/ocr-fixture-integrity.yml'
+  pull_request:
+    paths:
+      - 'tests/fixtures/scanned_pdf/**'
+      - '.github/workflows/ocr-fixture-integrity.yml'
+
+jobs:
+  fixture-integrity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fixture rendering dependency only (no OCR engine)
+        run: |
+          python -m pip install --only-binary=:all: PyMuPDF==1.28.2
+      - name: Frozen byte and authored gold integrity
+        run: |
+          (cd tests/fixtures/scanned_pdf && sha256sum -c SHA256SUMS)
+          python tests/fixtures/scanned_pdf/verify.py
+      - name: Independent hosted regeneration (no OCR or tuning)
+        run: |
+          python tests/fixtures/scanned_pdf/generate.py --output "$RUNNER_TEMP/scanned-pdf-rebuilt"
+          cmp tests/fixtures/scanned_pdf/manifest.json "$RUNNER_TEMP/scanned-pdf-rebuilt/manifest.json"
+          cmp tests/fixtures/scanned_pdf/SHA256SUMS "$RUNNER_TEMP/scanned-pdf-rebuilt/SHA256SUMS"

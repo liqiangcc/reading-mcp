@@ -313,6 +313,8 @@ fn parsed_key(key: &ParsedCacheKey) -> String {
     input.extend_from_slice(key.raw_sha256.as_bytes());
     input.push(0);
     input.extend_from_slice(key.normalization_version.as_bytes());
+    input.push(0);
+    input.extend_from_slice(key.ocr_fingerprint.as_bytes());
     digest_key(&input)
 }
 

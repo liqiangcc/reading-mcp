@@ -1,0 +1,171 @@
+{
+  "schema": "layout-model-joint-summary/v1",
+  "source_run": "https://github.com/liqiangcc/reading-mcp/actions/runs/34704320989",
+  "source_head": "f17ca91af1378c3478467bb8db75a6dd9288b342",
+  "source_report_sha256": "385402a8b3597df224d130c2d44d57dec926cfc8258f3ec02db12ca26ef65954",
+  "scope": "Derived resource summary only; full raw observations remain in original artifact. No gold scoring or canonical policy change.",
+  "cases": {
+    "F02": {
+      "original_sha256": "c5b0e6dc33543730d54b1e084c3cfb78506caa81a36b0aa92c75188471029e6f",
+      "load_seconds": 2.978517146999991,
+      "total_seconds": 5.051797941999979,
+      "peak_rss_kib": 668580,
+      "cgroup_cumulative_memory_peak_bytes": 721293312,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 59
+    },
+    "F06": {
+      "original_sha256": "d7eb62f74881037ce8b06cf48240c03f3544f7bddf93115d279f1ad0570e32a8",
+      "load_seconds": 0.8144187759999966,
+      "total_seconds": 2.902963366999984,
+      "peak_rss_kib": 664748,
+      "cgroup_cumulative_memory_peak_bytes": 721293312,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 59
+    },
+    "F07": {
+      "original_sha256": "b1260df48704416aa9c5edb7112b68ac1322635f7e7220a06caf809e68994ebc",
+      "load_seconds": 1.0996284299999957,
+      "total_seconds": 3.1383656639999913,
+      "peak_rss_kib": 666276,
+      "cgroup_cumulative_memory_peak_bytes": 780681216,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 59
+    },
+    "F08": {
+      "original_sha256": "759caef6ad37944df978758439ee031438a6a8d7d13e509994ff4c0951a27fb1",
+      "load_seconds": 0.9222565549999899,
+      "total_seconds": 3.146022076999998,
+      "peak_rss_kib": 670592,
+      "cgroup_cumulative_memory_peak_bytes": 803176448,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 60
+    },
+    "F11": {
+      "original_sha256": "b0060396b5b4962246d0f896e3ec3f90686286736ea7a015205885a75dad9e52",
+      "load_seconds": 0.7934290099999828,
+      "total_seconds": 2.9489084859999934,
+      "peak_rss_kib": 667920,
+      "cgroup_cumulative_memory_peak_bytes": 803176448,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 59
+    },
+    "F12": {
+      "original_sha256": "63350cb59db0c590bc683973597bceeb24273a2c53b1d55e109eb2b85f129b45",
+      "load_seconds": 1.3166504989999908,
+      "total_seconds": 3.443654546999994,
+      "peak_rss_kib": 683992,
+      "cgroup_cumulative_memory_peak_bytes": 803176448,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 59
+    },
+    "F13": {
+      "original_sha256": "3a646d92d23146249a2ebbe5fe94623061c749de24af114db7944618a708ca2d",
+      "load_seconds": 0.7733022120000044,
+      "total_seconds": 2.6322399610000105,
+      "peak_rss_kib": 670784,
+      "cgroup_cumulative_memory_peak_bytes": 803176448,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 59
+    },
+    "F14": {
+      "original_sha256": "e99afb67414ad5181848c081246452f203cc3dd0fb3b9040d9a3d32a0e47c762",
+      "load_seconds": 0.7945848490000174,
+      "total_seconds": 3.7246738080000057,
+      "peak_rss_kib": 657684,
+      "cgroup_cumulative_memory_peak_bytes": 803176448,
+      "mapped_dependency_count": 76,
+      "ocr_dependency_count": 59
+    }
+  },
+  "F11_raw_regions": [
+    {
+      "cls_id": 2,
+      "label": "text",
+      "score": 0.9687602519989014,
+      "coordinate": [
+        1280.295654296875,
+        552.804931640625,
+        2226.67578125,
+        753.805419921875
+      ]
+    },
+    {
+      "cls_id": 2,
+      "label": "text",
+      "score": 0.9686352014541626,
+      "coordinate": [
+        189.12879943847656,
+        853.694091796875,
+        1149.1513671875,
+        1056.72802734375
+      ]
+    },
+    {
+      "cls_id": 2,
+      "label": "text",
+      "score": 0.9679772853851318,
+      "coordinate": [
+        189.61032104492188,
+        552.7862548828125,
+        1105.8944091796875,
+        750.1018676757812
+      ]
+    },
+    {
+      "cls_id": 2,
+      "label": "text",
+      "score": 0.9678795337677002,
+      "coordinate": [
+        189.25906372070312,
+        254.40476989746094,
+        1165.27197265625,
+        450.7918395996094
+      ]
+    },
+    {
+      "cls_id": 2,
+      "label": "text",
+      "score": 0.9677285552024841,
+      "coordinate": [
+        1279.880859375,
+        853.5372314453125,
+        2203.661865234375,
+        1050.794921875
+      ]
+    },
+    {
+      "cls_id": 2,
+      "label": "text",
+      "score": 0.9671573638916016,
+      "coordinate": [
+        1280.2742919921875,
+        253.7297821044922,
+        2253.03466796875,
+        452.9137268066406
+      ]
+    },
+    {
+      "cls_id": 1,
+      "label": "image",
+      "score": 0.680310845375061,
+      "coordinate": [
+        404.27593994140625,
+        2094.82373046875,
+        859.7103271484375,
+        2649.78857421875
+      ]
+    },
+    {
+      "cls_id": 7,
+      "label": "formula",
+      "score": 0.528245747089386,
+      "coordinate": [
+        410.08355712890625,
+        2785.036865234375,
+        646.3302001953125,
+        2838.437744140625
+      ]
+    }
+  ]
+}

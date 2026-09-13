@@ -1,4 +1,8 @@
-use std::{path::PathBuf, process::Stdio};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -9,23 +13,118 @@ use tokio::{
 };
 
 use super::common::{content_hash, document_id, title_from_metadata};
-use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
+use super::ocr_systemd::SystemdOcrUnit;
+use super::ocr_worker_process::WorkerProcess;
+use crate::application::ports::{ApplicationError, OcrEvidenceStore, Parser, RetrievedResource};
 use crate::domain::{
     Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
-    NormalizedBlockProvenance, NormalizedTextRange, OriginalSourceBinding,
-    OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
+    NormalizedBlockProvenance, NormalizedTextRange, OcrConfig, OcrDerivation, OcrEvidenceBlob,
+    OcrEvidenceRecord, OcrPageObservations, OcrRuntimeIdentity, OcrVisualAttempt,
+    OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
 use crate::infrastructure::ResourceBudget;
 
-pub const PDF_LAYOUT_CACHE_NAMESPACE: &str = "pdf-layout/v1:pymupdf4llm-layout/1.28.2";
+pub const PDF_LAYOUT_CACHE_NAMESPACE: &str =
+    "pdf-layout/v2:required-inspection/v2:pymupdf4llm-layout/1.28.2";
 const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_OCR_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Runtime preflight before cache lookup. Direct parser probes may explicitly
+/// exercise the unsandboxed adapter, but the MCP runtime has no such fallback.
+pub fn require_systemd_ocr_support() -> Result<(), ApplicationError> {
+    SystemdOcrUnit::validate_host().map_err(failed)
+}
+
+/// Verify installed bytes using the existing trusted layout interpreter, then
+/// discover engine dependencies inside that verified root before cache lookup.
+/// No PDF processing and no externally supplied fingerprint is involved.
+pub fn inspect_private_ocr_runtime(
+    config: OcrConfig,
+    verifier_python: &Path,
+    root: &Path,
+    manifest: &Path,
+) -> Result<OcrRuntimeIdentity, ApplicationError> {
+    config.validate().map_err(failed)?;
+    require_systemd_ocr_support()?;
+    if !verifier_python.is_absolute()
+        || !root.is_absolute()
+        || root == Path::new("/")
+        || root.canonicalize().map_err(failed)? != root
+    {
+        return Err(failed("invalid private runtime verification paths"));
+    }
+    if !root
+        .join("run")
+        .symlink_metadata()
+        .map_err(failed)?
+        .is_dir()
+    {
+        return Err(failed("private OCR runtime requires a real run directory"));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut verify = std::process::Command::new(verifier_python);
+    verify
+        .env_clear()
+        .envs(crate::infrastructure::OCR_PROCESS_ENV)
+        .args(["-I", "-c", WORKER, "--verify-runtime"])
+        .arg(root)
+        .arg(manifest);
+    let output = crate::infrastructure::dependency_output(
+        &mut verify,
+        deadline.saturating_duration_since(std::time::Instant::now()),
+    )
+    .map_err(failed)?;
+    if !output.status.success() {
+        return Err(failed("private OCR runtime inventory verification failed"));
+    }
+    let package: crate::domain::OcrRuntimePackageIdentity =
+        serde_json::from_slice(&output.stdout).map_err(failed)?;
+    package.validate().map_err(failed)?;
+    let (mut command, unit) =
+        SystemdOcrUnit::command_in_package(Path::new(&package.python_path), root, manifest)
+            .map_err(failed)?;
+    command
+        .env_clear()
+        .envs(crate::infrastructure::OCR_PROCESS_ENV)
+        .args(["-I", "-c", WORKER, "--runtime-identity"])
+        .arg(serde_json::to_string(&config).map_err(failed)?)
+        .arg(serde_json::to_string(&package).map_err(failed)?);
+    let output = crate::infrastructure::dependency_output(
+        &mut command.into_std(),
+        deadline.saturating_duration_since(std::time::Instant::now()),
+    );
+    // Synchronous owner close also terminates late-starting service children if
+    // bounded discovery failed. No Tokio cleanup future is required at startup.
+    drop(unit);
+    let output = output.map_err(failed)?;
+    if !output.status.success() {
+        return Err(failed("private OCR runtime dependency verification failed"));
+    }
+    let observed: OcrRuntimeIdentity = serde_json::from_slice(&output.stdout).map_err(failed)?;
+    let identity = OcrRuntimeIdentity::build_with_package(
+        config,
+        observed.dependencies.clone(),
+        Some(package),
+    )
+    .map_err(failed)?;
+    if observed != identity {
+        return Err(failed("private OCR runtime identity mismatch"));
+    }
+    Ok(identity)
+}
 
 /// Optional layout engine, isolated from the server and bounded by the outer parse timeout.
 pub struct LayoutPdfParser {
     python: PathBuf,
     budget: ResourceBudget,
-    permit: Semaphore,
+    permit: Arc<Semaphore>,
+    evidence_store: Option<Arc<dyn OcrEvidenceStore>>,
+    ocr_config: Option<OcrConfig>,
+    ocr_identity: Option<OcrRuntimeIdentity>,
+    systemd_ocr_sandbox: bool,
+    ocr_runtime_root: Option<PathBuf>,
+    ocr_runtime_manifest: Option<PathBuf>,
 }
 
 impl LayoutPdfParser {
@@ -33,13 +132,175 @@ impl LayoutPdfParser {
         Self {
             python,
             budget,
-            permit: Semaphore::new(1),
+            permit: Arc::new(Semaphore::new(1)),
+            evidence_store: None,
+            ocr_config: None,
+            ocr_identity: None,
+            systemd_ocr_sandbox: false,
+            ocr_runtime_root: None,
+            ocr_runtime_manifest: None,
         }
+    }
+
+    pub fn with_evidence_store(mut self, store: Arc<dyn OcrEvidenceStore>) -> Self {
+        self.evidence_store = Some(store);
+        self
+    }
+    pub fn with_ocr_config(mut self, config: OcrConfig) -> Self {
+        self.ocr_config = Some(config);
+        self
+    }
+    pub fn with_ocr_identity(mut self, identity: OcrRuntimeIdentity) -> Self {
+        self.ocr_identity = Some(identity);
+        self
+    }
+
+    /// Explicit integration entrypoint; never changes native-only layout launch.
+    pub fn with_systemd_ocr_sandbox(mut self) -> Self {
+        self.systemd_ocr_sandbox = true;
+        self
+    }
+
+    /// Uses an already verified private runtime; `python` is its internal path.
+    /// No host interpreter fallback. Native source-view keeps its own renderer.
+    pub fn with_ocr_runtime_root(mut self, root: PathBuf) -> Self {
+        self.ocr_runtime_root = Some(root);
+        self.systemd_ocr_sandbox = true;
+        self
+    }
+
+    pub fn with_ocr_runtime_package(mut self, root: PathBuf, manifest: PathBuf) -> Self {
+        self.ocr_runtime_root = Some(root);
+        self.ocr_runtime_manifest = Some(manifest);
+        self.systemd_ocr_sandbox = true;
+        self
     }
 }
 
 fn failed(message: impl std::fmt::Display) -> ApplicationError {
     ApplicationError::ParseFailed(format!("PDF layout: {message}"))
+}
+
+fn configure_worker_environment(command: &mut Command, ocr_enabled: bool) {
+    if ocr_enabled {
+        // This prevents credential/proxy inheritance, not network syscalls.
+        // Match dependency discovery; never resolve one library environment
+        // and execute the engine under a different one.
+        command
+            .env_clear()
+            .envs(crate::infrastructure::OCR_PROCESS_ENV);
+    }
+}
+
+fn worker_failure(ocr_enabled: bool, stderr: &[u8]) -> ApplicationError {
+    if ocr_enabled {
+        // OCR errors can contain input text or local paths. Keep bounded stderr
+        // only inside this parse operation, never expose it via MCP/telemetry.
+        ApplicationError::OcrFailed
+    } else {
+        failed(String::from_utf8_lossy(stderr))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OcrWorkerFailure {
+    schema: String,
+    original_sha256: String,
+    runtime_identity_sha256: String,
+    error: String,
+    // Failure observations are diagnostic only, never published as canonical evidence.
+    ocr_attempts: Vec<OcrPageObservations>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OcrFailureStage {
+    Dependency,
+    Ingestion,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OcrRequiredFailure {
+    schema: String,
+    original_sha256: String,
+    error: String,
+}
+
+fn validated_ocr_required(output: &[u8], raw: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    serde_json::from_slice::<OcrRequiredFailure>(output).is_ok_and(|failure| {
+        failure.schema == "pdf-layout-ocr-required/v1"
+            && failure.error == "OCR_REQUIRED"
+            && failure.original_sha256 == format!("{:x}", Sha256::digest(raw))
+    })
+}
+
+#[derive(Deserialize)]
+enum OcrFailureCode {
+    #[serde(rename = "OCR_UNAVAILABLE")]
+    Unavailable,
+    #[serde(rename = "OCR_TIMEOUT")]
+    Timeout,
+    #[serde(rename = "OCR_RESOURCE_LIMIT")]
+    ResourceLimit,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OcrWorkerStageFailure {
+    schema: String,
+    stage: OcrFailureStage,
+    original_sha256: Option<String>,
+    runtime_identity_sha256: String,
+    error: OcrFailureCode,
+}
+
+fn validated_worker_failure(
+    output: &[u8],
+    original_sha256: &str,
+    identity_sha256: &str,
+) -> ApplicationError {
+    if let Ok(failure) = serde_json::from_slice::<OcrWorkerStageFailure>(output) {
+        let source_matches = match failure.stage {
+            OcrFailureStage::Dependency => failure.original_sha256.is_none(),
+            OcrFailureStage::Ingestion => {
+                failure.original_sha256.as_deref() == Some(original_sha256)
+            }
+        };
+        if failure.schema != "ocr-worker-failure/v2"
+            || failure.runtime_identity_sha256 != identity_sha256
+            || !source_matches
+        {
+            return ApplicationError::OcrFailed;
+        }
+        return match failure.error {
+            OcrFailureCode::Unavailable => ApplicationError::OcrUnavailable,
+            OcrFailureCode::Timeout => ApplicationError::OcrTimeout,
+            OcrFailureCode::ResourceLimit => ApplicationError::OcrResourceLimit,
+        };
+    }
+    let Ok(failure) = serde_json::from_slice::<OcrWorkerFailure>(output) else {
+        return ApplicationError::OcrFailed;
+    };
+    if failure.schema == "ocr-worker-failure/v1"
+        && failure.original_sha256 == original_sha256
+        && failure.runtime_identity_sha256 == identity_sha256
+        && failure.error == "OCR_NO_SUPPORTED_PROJECTION"
+        && !failure.ocr_attempts.is_empty()
+        && failure.ocr_attempts.iter().all(|page| {
+            page.schema == "ocr-regional-observations/v3"
+                && page.page > 0
+                && page.page_bounds.iter().all(|value| value.is_finite())
+                && page.page_bounds[0] < page.page_bounds[2]
+                && page.page_bounds[1] < page.page_bounds[3]
+        })
+    {
+        ApplicationError::OcrNoSupportedProjection
+    } else {
+        ApplicationError::OcrFailed
+    }
 }
 
 async fn read_bounded(
@@ -60,20 +321,140 @@ async fn read_bounded(
     Ok(bytes)
 }
 
+fn validate_mixed_projection(
+    regions: &serde_json::Value,
+    page: &OcrPageObservations,
+) -> Result<(), ApplicationError> {
+    use crate::domain::MixedOrderEntry;
+    let Some(order) = &page.mixed_order else {
+        return Ok(());
+    };
+    let page_regions: Vec<_> = regions
+        .as_array()
+        .ok_or_else(|| failed("missing mixed regions"))?
+        .iter()
+        .filter(|region| region["page"].as_u64() == Some(u64::from(page.page)))
+        .collect();
+    let total = order
+        .original_box_count
+        .checked_add(page.selection.len())
+        .ok_or_else(|| failed("mixed region count overflow"))?;
+    if page_regions.len() != total {
+        return Err(failed("mixed region coverage mismatch"));
+    }
+    let ids: Vec<_> = page_regions
+        .iter()
+        .map(|region| {
+            region["box"]
+                .as_u64()
+                .and_then(|id| usize::try_from(id).ok())
+                .ok_or_else(|| failed("invalid mixed region id"))
+        })
+        .collect::<Result<_, _>>()?;
+    let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+    if unique.len() != total || !unique.iter().copied().eq(0..total) {
+        return Err(failed("mixed region ids are not complete and unique"));
+    }
+    let expected: Vec<_> = order
+        .entries
+        .iter()
+        .map(MixedOrderEntry::projected_box)
+        .collect();
+    let included: std::collections::BTreeSet<_> = expected.iter().copied().collect();
+    if ids
+        .into_iter()
+        .filter(|id| included.contains(id))
+        .collect::<Vec<_>>()
+        != expected
+    {
+        return Err(failed("canonical region order differs from mixed evidence"));
+    }
+    for entry in &order.entries {
+        if let MixedOrderEntry::LocalOcr {
+            source,
+            projected_box,
+        } = entry
+        {
+            let observed = page
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == source.attempt)
+                .and_then(|attempt| attempt.boxes.get(source.r#box))
+                .ok_or_else(|| failed("missing mixed OCR observation"))?;
+            let expected = serde_json::json!({"page":page.page,"box":projected_box,
+                "bbox":observed.bbox,"class":observed.boxclass});
+            if !page_regions.contains(&&expected) {
+                return Err(failed("mixed OCR region differs from original observation"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Parser for LayoutPdfParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let _permit = self.permit.acquire().await.map_err(failed)?;
+        let ocr_enabled = self
+            .ocr_config
+            .as_ref()
+            .is_some_and(|config| config.enabled);
+        if self.ocr_runtime_root.is_some() && !ocr_enabled {
+            return Err(failed("private OCR runtime requires enabled OCR"));
+        }
+        if self
+            .ocr_identity
+            .as_ref()
+            .and_then(|i| i.runtime_package.as_ref())
+            .is_some()
+            != self.ocr_runtime_manifest.is_some()
+        {
+            return Err(failed(
+                "OCR runtime package identity/manifest configuration mismatch",
+            ));
+        }
+        let permit = self.permit.clone().acquire_owned().await.map_err(failed)?;
         if resource.bytes.len() > self.budget.max_document_bytes {
+            if ocr_enabled {
+                return Err(ApplicationError::OcrResourceLimit);
+            }
             return Err(ApplicationError::ResourceLimitExceeded(
                 "PDF byte limit exceeded".into(),
             ));
         }
-        let mut child = Command::new(&self.python)
+        let (mut command, unit) = if ocr_enabled && self.systemd_ocr_sandbox {
+            let (command, unit) = match (&self.ocr_runtime_root, &self.ocr_runtime_manifest) {
+                (Some(root), Some(manifest)) => {
+                    SystemdOcrUnit::command_in_package(&self.python, root, manifest)
+                }
+                (Some(root), None) => SystemdOcrUnit::command_in_root(&self.python, root),
+                _ => SystemdOcrUnit::command(&self.python),
+            }
+            .map_err(failed)?;
+            (command, Some(unit))
+        } else {
+            (Command::new(&self.python), None)
+        };
+        configure_worker_environment(&mut command, ocr_enabled);
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .args(["-I", "-c", WORKER])
             .arg(self.budget.max_pdf_pages.to_string())
             .arg(self.budget.max_document_bytes.to_string())
             .arg(self.budget.max_normalized_chars.to_string())
+            .arg(
+                self.ocr_config
+                    .as_ref()
+                    .and_then(|c| serde_json::to_string(c).ok())
+                    .unwrap_or_default(),
+            )
+            .arg(
+                self.ocr_identity
+                    .as_ref()
+                    .and_then(|i| serde_json::to_string(i).ok())
+                    .unwrap_or_default(),
+            )
+            .arg(WORKER)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -84,6 +465,8 @@ impl Parser for LayoutPdfParser {
                     "cannot start configured Python: {error}; run setup-pdf-layout.sh"
                 ))
             })?;
+        let mut process = WorkerProcess::new(child, permit).with_systemd_unit(unit);
+        let child = process.child_mut();
         let mut stdin = child.stdin.take().ok_or_else(|| failed("missing stdin"))?;
         let stdout = child
             .stdout
@@ -102,17 +485,175 @@ impl Parser for LayoutPdfParser {
         };
         let (write_result, output, errors, status) = tokio::try_join!(
             write,
-            read_bounded(stdout, MAX_OUTPUT_BYTES),
+            read_bounded(
+                stdout,
+                if ocr_enabled {
+                    MAX_OCR_OUTPUT_BYTES
+                } else {
+                    MAX_OUTPUT_BYTES
+                }
+            ),
             read_bounded(stderr, 64 * 1024),
-            async { child.wait().await.map_err(failed) },
-        )?;
+            async { process.wait().await.map_err(failed) },
+        )
+        .map_err(|error| {
+            if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                ApplicationError::OcrResourceLimit
+            } else {
+                error
+            }
+        })?;
         if !status.success() {
-            return Err(failed(String::from_utf8_lossy(&errors)));
+            if ocr_enabled && let Some(error) = process.termination_error() {
+                return Err(error);
+            }
+            if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {
+                return Err(ApplicationError::OcrRequired);
+            }
+            if ocr_enabled && let Some(identity) = &self.ocr_identity {
+                use sha2::{Digest, Sha256};
+                return Err(validated_worker_failure(
+                    &output,
+                    &format!("{:x}", Sha256::digest(&resource.bytes)),
+                    &identity.sha256,
+                ));
+            }
+            return Err(worker_failure(ocr_enabled, &errors));
         }
         write_result.map_err(failed)?;
         let payload: LayoutResult = serde_json::from_slice(&output).map_err(failed)?;
-        project(resource, payload, &self.budget)
+        let evidence = payload.ocr_evidence.clone();
+        let derivation = payload.ocr_derivation.clone();
+        let attempts = payload.ocr_attempts.clone();
+        let visual_attempts = payload.ocr_visual_attempts.clone();
+        for page in &attempts {
+            validate_mixed_projection(&payload.regions, page)?;
+            for native in &page.native_regions {
+                let expected = serde_json::json!({"page":page.page,"box":native.source_box,
+                    "bbox":native.bbox,"class":native.source_class});
+                if !payload
+                    .regions
+                    .as_array()
+                    .is_some_and(|regions| regions.contains(&expected))
+                {
+                    return Err(failed(
+                        "native exclusion has no matching original layout region",
+                    ));
+                }
+            }
+        }
+        let page_count = payload.page_count;
+        let mut document = project(resource, payload, &self.budget).map_err(|error| {
+            if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                ApplicationError::OcrResourceLimit
+            } else {
+                error
+            }
+        })?;
+        if !evidence.is_empty() || !attempts.is_empty() {
+            let mut derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
+            let identity = self
+                .ocr_identity
+                .as_ref()
+                .ok_or_else(|| failed("OCR expected identity missing"))?;
+            derivation
+                .validate_against(
+                    identity,
+                    document.content_hash.0.trim_start_matches("sha256:"),
+                )
+                .map_err(failed)?;
+            if derivation.original_sha256 != document.content_hash.0.trim_start_matches("sha256:")
+                || derivation.engine_sha256.len() != 64
+                || derivation.model_sha256.is_empty()
+                || derivation.library_sha256.is_empty()
+                || derivation
+                    .model_sha256
+                    .iter()
+                    .chain(derivation.library_sha256.iter())
+                    .any(|v| v.len() != 64)
+            {
+                return Err(failed("invalid OCR derivation fingerprint"));
+            }
+            validate_ocr_evidence(
+                &evidence,
+                document
+                    .metadata
+                    .get("pdf_pages")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(u32::MAX),
+            )?;
+            let blob = OcrEvidenceBlob {
+                schema: "ocr-evidence/v3".into(),
+                original_sha256: derivation.original_sha256.clone(),
+                runtime_identity: identity.clone(),
+                pages: attempts,
+                selected_words: evidence,
+                visual_attempts,
+            };
+            blob.validate(page_count).map_err(failed)?;
+            derivation.selected_word_count = Some(blob.selected_words.len() as u64);
+            let bytes = serde_json::to_vec(&blob).map_err(failed)?;
+            let store = self
+                .evidence_store
+                .as_ref()
+                .ok_or_else(|| failed("OCR evidence store is not configured"))?;
+            let identity = document.content_hash.0.clone();
+            let digest = store.put_immutable(&identity, &bytes).await?;
+            document
+                .metadata
+                .insert("ocr_evidence_blob".into(), digest.clone());
+            derivation.evidence_blob = Some(digest);
+            let map = document
+                .original_source_binding_map()
+                .map_err(failed)?
+                .ok_or_else(|| failed("missing binding map"))?;
+            let map_bytes = serde_json::to_vec(&map).map_err(failed)?;
+            use sha2::{Digest, Sha256};
+            let binding_digest = format!("sha256:{:x}", Sha256::digest(map_bytes));
+            derivation.binding_map_sha256 = Some(binding_digest.clone());
+            document
+                .metadata
+                .insert("original_binding_map_digest".into(), binding_digest);
+            document.metadata.insert(
+                "ocr_derivation".into(),
+                serde_json::to_string(&derivation).map_err(failed)?,
+            );
+        }
+        document.validate_ocr_publication().map_err(failed)?;
+        Ok(document)
     }
+}
+
+fn validate_ocr_evidence(
+    values: &[OcrEvidenceRecord],
+    max_page: u32,
+) -> Result<(), ApplicationError> {
+    for value in values {
+        if value.page == 0
+            || value.page > max_page
+            || value.block == 0
+            || value.paragraph == 0
+            || value.line == 0
+            || value.text.trim().is_empty()
+        {
+            return Err(failed("invalid OCR evidence identity"));
+        }
+        let [x0, y0, x1, y1] = value.bbox;
+        if ![x0, y0, x1, y1].iter().all(|v| v.is_finite())
+            || x0 < 0.0
+            || y0 < 0.0
+            || x1 <= x0
+            || y1 <= y0
+        {
+            return Err(failed("invalid OCR evidence coordinates"));
+        }
+        if let Some(conf) = value.confidence
+            && (!conf.is_finite() || !(0.0..=100.0).contains(&conf))
+        {
+            return Err(failed("invalid OCR confidence"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -124,6 +665,14 @@ struct LayoutResult {
     sections: Vec<LayoutSection>,
     regions: serde_json::Value,
     preserved_ambiguous_hyphens: usize,
+    #[serde(default)]
+    ocr_evidence: Vec<OcrEvidenceRecord>,
+    #[serde(default)]
+    ocr_derivation: Option<OcrDerivation>,
+    #[serde(default)]
+    ocr_attempts: Vec<OcrPageObservations>,
+    #[serde(default)]
+    ocr_visual_attempts: Vec<OcrVisualAttempt>,
 }
 #[derive(Deserialize)]
 struct LayoutSection {
@@ -328,6 +877,192 @@ mod tests {
     use super::*;
     use crate::domain::{DocumentSource, MediaType};
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ocr_worker_environment_is_an_exact_allowlist() {
+        let mut command = Command::new("/usr/bin/env");
+        command.env("OCR_TEST_SECRET", "synthetic-secret");
+        command.env("HTTPS_PROXY", "http://synthetic-proxy.invalid");
+        command.env("LD_LIBRARY_PATH", "/synthetic-library-override");
+        configure_worker_environment(&mut command, true);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        let actual: std::collections::BTreeSet<_> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let expected: std::collections::BTreeSet<_> = crate::infrastructure::OCR_PROCESS_ENV
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn native_worker_environment_configuration_remains_unchanged() {
+        let mut command = Command::new("python");
+        command.env("NATIVE_LAYOUT_SETTING", "preserve");
+        configure_worker_environment(&mut command, false);
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(key, value)| key == "NATIVE_LAYOUT_SETTING"
+                    && value == Some(std::ffi::OsStr::new("preserve")))
+        );
+    }
+
+    #[test]
+    fn failure_protocol_requires_matching_identity_and_typed_observations() {
+        let raw = "a".repeat(64);
+        let identity = "b".repeat(64);
+        let valid = serde_json::json!({
+            "schema":"ocr-worker-failure/v1", "original_sha256":raw,
+            "runtime_identity_sha256":identity, "error":"OCR_NO_SUPPORTED_PROJECTION",
+            "ocr_attempts":[{"schema":"ocr-regional-observations/v3", "page":1,
+                "page_bounds":[0,0,595,842], "complete":false,
+                "attempts":[], "selection":[], "components":[]}]
+        });
+        let check = |value: &serde_json::Value| {
+            validated_worker_failure(&serde_json::to_vec(value).unwrap(), &raw, &identity)
+        };
+        assert!(matches!(
+            check(&valid),
+            ApplicationError::OcrNoSupportedProjection
+        ));
+        for field in [
+            "schema",
+            "original_sha256",
+            "runtime_identity_sha256",
+            "error",
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = serde_json::json!("private invalid value");
+            assert!(matches!(check(&invalid), ApplicationError::OcrFailed));
+            assert!(!check(&invalid).to_string().contains("private"));
+        }
+        let mut invalid = valid.clone();
+        invalid["ocr_attempts"][0]["page"] = serde_json::json!("one");
+        assert!(matches!(check(&invalid), ApplicationError::OcrFailed));
+        invalid = valid.clone();
+        invalid["unexpected"] = serde_json::json!("private diagnostic");
+        assert!(matches!(check(&invalid), ApplicationError::OcrFailed));
+        assert!(matches!(
+            validated_worker_failure(b"invalid JSON", &raw, &identity),
+            ApplicationError::OcrFailed
+        ));
+    }
+
+    #[test]
+    fn stage_failure_protocol_rejects_unknown_codes_and_false_source_claims() {
+        use serde_json::json;
+        let source = "a".repeat(64);
+        let identity = format!("sha256:{}", "b".repeat(64));
+        let base = json!({"schema":"ocr-worker-failure/v2", "stage":"ingestion",
+            "original_sha256":source,"runtime_identity_sha256":identity,"error":"OCR_TIMEOUT"});
+        let check = |value: &serde_json::Value| {
+            validated_worker_failure(&serde_json::to_vec(value).unwrap(), &source, &identity)
+        };
+        for (code, expected) in [
+            ("OCR_TIMEOUT", ApplicationError::OcrTimeout),
+            ("OCR_RESOURCE_LIMIT", ApplicationError::OcrResourceLimit),
+            ("OCR_UNAVAILABLE", ApplicationError::OcrUnavailable),
+        ] {
+            let mut valid = base.clone();
+            valid["error"] = json!(code);
+            assert_eq!(check(&valid), expected);
+            valid["stage"] = json!("dependency");
+            valid["original_sha256"] = serde_json::Value::Null;
+            assert_eq!(check(&valid), expected);
+        }
+        for (field, value) in [
+            ("schema", json!("unknown")),
+            ("stage", json!("other")),
+            ("original_sha256", json!("c".repeat(64))),
+            ("original_sha256", serde_json::Value::Null),
+            ("runtime_identity_sha256", json!("changed")),
+            ("error", json!("OCR_REQUIRED")),
+            ("private_diagnostic", json!("must not be accepted")),
+        ] {
+            let mut invalid = base.clone();
+            invalid[field] = value;
+            assert_eq!(check(&invalid), ApplicationError::OcrFailed);
+        }
+        let mut invalid = base.clone();
+        invalid["stage"] = json!("dependency");
+        assert_eq!(check(&invalid), ApplicationError::OcrFailed);
+    }
+
+    #[test]
+    fn mixed_regions_must_match_verified_order_geometry_and_stable_ids() {
+        let page = crate::domain::mixed_order_fixture();
+        page.validate(1).unwrap();
+        let regions = serde_json::json!([
+            {"page":1,"box":1,"bbox":[10.0,10.0,20.0,20.0],"class":"text"},
+            {"page":1,"box":0,"bbox":[10.0,30.0,20.0,40.0],"class":"text"}]);
+        validate_mixed_projection(&regions, &page).unwrap();
+        let mut changed = regions.clone();
+        changed.as_array_mut().unwrap().swap(0, 1);
+        assert!(validate_mixed_projection(&changed, &page).is_err());
+        changed = regions.clone();
+        changed[0]["box"] = serde_json::json!(0);
+        assert!(validate_mixed_projection(&changed, &page).is_err());
+        changed = regions.clone();
+        changed[0]["bbox"][0] = serde_json::json!(11.0);
+        assert!(validate_mixed_projection(&changed, &page).is_err());
+        changed = regions;
+        changed.as_array_mut().unwrap().pop();
+        assert!(validate_mixed_projection(&changed, &page).is_err());
+    }
+
+    #[test]
+    fn disabled_requirement_protocol_binds_actual_source_and_rejects_extra_fields() {
+        use sha2::{Digest, Sha256};
+        let raw = b"public synthetic PDF bytes";
+        let value = serde_json::json!({"schema":"pdf-layout-ocr-required/v1",
+            "original_sha256":format!("{:x}", Sha256::digest(raw)),"error":"OCR_REQUIRED"});
+        let check = |value: &serde_json::Value| {
+            validated_ocr_required(&serde_json::to_vec(value).unwrap(), raw)
+        };
+        assert!(check(&value));
+        for (key, replacement) in [
+            ("schema", serde_json::json!("other")),
+            ("original_sha256", serde_json::json!("0".repeat(64))),
+            ("error", serde_json::json!("OCR_UNAVAILABLE")),
+            ("private_details", serde_json::json!("reject")),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = replacement;
+            assert!(!check(&changed));
+        }
+        assert!(!validated_ocr_required(b"OCR_REQUIRED", raw));
+    }
+
+    #[test]
+    fn ocr_stderr_is_not_exposed_but_native_diagnostics_remain_compatible() {
+        let diagnostic = b"private document passage at /private/source.pdf";
+        let error = worker_failure(true, diagnostic).to_string();
+        assert!(error.contains("local OCR worker failed"));
+        assert!(!error.contains("private"));
+        assert!(
+            worker_failure(false, diagnostic)
+                .to_string()
+                .contains("private document passage")
+        );
+        assert_eq!(MAX_OCR_OUTPUT_BYTES, 32 * 1024 * 1024);
+        assert_eq!(MAX_OUTPUT_BYTES, 128 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn worker_output_rejects_the_first_byte_over_limit() {
+        assert_eq!(read_bounded(&b"abc"[..], 3).await.unwrap(), b"abc");
+        assert!(matches!(
+            read_bounded(&b"abcd"[..], 3).await,
+            Err(ApplicationError::ResourceLimitExceeded(_))
+        ));
+    }
 
     fn resource() -> RetrievedResource {
         let source = DocumentSource("https://example.org/paper.pdf".into());

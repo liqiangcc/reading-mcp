@@ -1,0 +1,711 @@
+{
+  "schema": "layout-model-diagnostic-summary/v1",
+  "source_run": "https://github.com/liqiangcc/reading-mcp/actions/runs/34702814921",
+  "source_head": "c03fb61ea544be6be6f39b6d462a01da7787053f",
+  "scope": "Derived summary of public diagnostic logs; raw output tensors remain in the source run artifact. No canonical projection or gold scoring.",
+  "cases": [
+    {
+      "case": "F02",
+      "result": {
+        "case": "F02",
+        "original_sha256": "c5b0e6dc33543730d54b1e084c3cfb78506caa81a36b0aa92c75188471029e6f",
+        "load_seconds": 0.6183279469999974,
+        "total_seconds": 2.9113778420000003,
+        "peak_rss_kib": 576860,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "0e07e9b84ac432da2afa124cc71e83464df920d5ab3cd7e66a31665bad7d27e6",
+            "inference_seconds": 2.045985207000001,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9493952393531799,
+                      "coordinate": [
+                        187.816162109375,
+                        703.31640625,
+                        2062.57470703125,
+                        830.9857177734375
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9487439393997192,
+                      "coordinate": [
+                        187.0604248046875,
+                        930.0930786132812,
+                        2160.929443359375,
+                        1051.7991943359375
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9483896493911743,
+                      "coordinate": [
+                        187.7545928955078,
+                        1153.8455810546875,
+                        2235.18505859375,
+                        1277.4876708984375
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9471590518951416,
+                      "coordinate": [
+                        188.75155639648438,
+                        478.5735778808594,
+                        2023.1019287109375,
+                        600.9163818359375
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9460318684577942,
+                      "coordinate": [
+                        188.73655700683594,
+                        255.85821533203125,
+                        2143.909912109375,
+                        376.4505310058594
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9416778087615967,
+                      "coordinate": [
+                        187.96241760253906,
+                        1379.0201416015625,
+                        2213.52685546875,
+                        1502.9014892578125
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case": "F06",
+      "result": {
+        "case": "F06",
+        "original_sha256": "d7eb62f74881037ce8b06cf48240c03f3544f7bddf93115d279f1ad0570e32a8",
+        "load_seconds": 0.5852693279999954,
+        "total_seconds": 2.8644617479999965,
+        "peak_rss_kib": 576744,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "b3a4e4262c40803ee5af785dafe570641a0d7ce42b1b8bc0d035fe0a8b865c4e",
+            "inference_seconds": 2.0312138930000003,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9641274213790894,
+                      "coordinate": [
+                        189.0366668701172,
+                        854.4547729492188,
+                        1149.578857421875,
+                        1057.2774658203125
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9631662964820862,
+                      "coordinate": [
+                        189.20632934570312,
+                        255.0470733642578,
+                        1165.8826904296875,
+                        451.1614074707031
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9626582860946655,
+                      "coordinate": [
+                        189.6291961669922,
+                        553.2636108398438,
+                        1106.262451171875,
+                        750.6520385742188
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9621304869651794,
+                      "coordinate": [
+                        1280.4422607421875,
+                        254.2072296142578,
+                        2253.474609375,
+                        453.1815185546875
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9608051776885986,
+                      "coordinate": [
+                        1280.4774169921875,
+                        553.201904296875,
+                        2226.831787109375,
+                        754.4398193359375
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9593796133995056,
+                      "coordinate": [
+                        1280.0048828125,
+                        854.1126098632812,
+                        2203.81689453125,
+                        1051.3070068359375
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case": "F07",
+      "result": {
+        "case": "F07",
+        "original_sha256": "b1260df48704416aa9c5edb7112b68ac1322635f7e7220a06caf809e68994ebc",
+        "load_seconds": 0.589199991000001,
+        "total_seconds": 2.867567907999998,
+        "peak_rss_kib": 576852,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "411655859c768fbd355b540e5b9bf1ff0b4d0e2da5621851a29ebca64039af73",
+            "inference_seconds": 2.0343245549999978,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9353145956993103,
+                      "coordinate": [
+                        187.93536376953125,
+                        551.3775024414062,
+                        1618.287353515625,
+                        601.615478515625
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9323126077651978,
+                      "coordinate": [
+                        190.2057342529297,
+                        402.99322509765625,
+                        1468.3250732421875,
+                        450.82476806640625
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9313403367996216,
+                      "coordinate": [
+                        187.8896942138672,
+                        702.443359375,
+                        1568.59130859375,
+                        751.6182250976562
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9226186871528625,
+                      "coordinate": [
+                        189.38140869140625,
+                        252.27255249023438,
+                        1369.1365966796875,
+                        300.6700744628906
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case": "F08",
+      "result": {
+        "case": "F08",
+        "original_sha256": "759caef6ad37944df978758439ee031438a6a8d7d13e509994ff4c0951a27fb1",
+        "load_seconds": 0.5932348060000052,
+        "total_seconds": 2.876295466000002,
+        "peak_rss_kib": 576608,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "567c89b9aa6a961292bffbbd05b80e7e560705355fdfde9d59813110f8ce5911",
+            "inference_seconds": 2.036543406,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9303513169288635,
+                      "coordinate": [
+                        189.27684020996094,
+                        628.74609375,
+                        2020.1148681640625,
+                        752.4916381835938
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.8910550475120544,
+                      "coordinate": [
+                        189.0789031982422,
+                        256.0861511230469,
+                        2142.768798828125,
+                        377.0709533691406
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.8692629337310791,
+                      "coordinate": [
+                        189.91290283203125,
+                        852.1504516601562,
+                        1465.993896484375,
+                        903.121337890625
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.8281873464584351,
+                      "coordinate": [
+                        189.83348083496094,
+                        476.28826904296875,
+                        1368.9608154296875,
+                        528.5624389648438
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case": "F11",
+      "result": {
+        "case": "F11",
+        "original_sha256": "b0060396b5b4962246d0f896e3ec3f90686286736ea7a015205885a75dad9e52",
+        "load_seconds": 0.5988295249999993,
+        "total_seconds": 2.881286944000003,
+        "peak_rss_kib": 576720,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "698fc0c5f3d541293a3088e36e925f14d033174f41dfbd6eedcc8ef87addad31",
+            "inference_seconds": 2.0377562899999973,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9687603712081909,
+                      "coordinate": [
+                        1280.295654296875,
+                        552.8048095703125,
+                        2226.67578125,
+                        753.8055419921875
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9686352014541626,
+                      "coordinate": [
+                        189.12872314453125,
+                        853.694091796875,
+                        1149.1514892578125,
+                        1056.72802734375
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9679774045944214,
+                      "coordinate": [
+                        189.61032104492188,
+                        552.7862548828125,
+                        1105.8944091796875,
+                        750.1018676757812
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9678795337677002,
+                      "coordinate": [
+                        189.25927734375,
+                        254.40476989746094,
+                        1165.272216796875,
+                        450.7918395996094
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9677286148071289,
+                      "coordinate": [
+                        1279.880859375,
+                        853.5372924804688,
+                        2203.661865234375,
+                        1050.794921875
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9671574831008911,
+                      "coordinate": [
+                        1280.2742919921875,
+                        253.7297821044922,
+                        2253.03466796875,
+                        452.9137268066406
+                      ]
+                    },
+                    {
+                      "cls_id": 1,
+                      "label": "image",
+                      "score": 0.6803104877471924,
+                      "coordinate": [
+                        404.27593994140625,
+                        2094.82373046875,
+                        859.7103271484375,
+                        2649.78857421875
+                      ]
+                    },
+                    {
+                      "cls_id": 7,
+                      "label": "formula",
+                      "score": 0.5282459855079651,
+                      "coordinate": [
+                        410.08367919921875,
+                        2785.036865234375,
+                        646.3302001953125,
+                        2838.43798828125
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case": "F12",
+      "result": {
+        "case": "F12",
+        "original_sha256": "63350cb59db0c590bc683973597bceeb24273a2c53b1d55e109eb2b85f129b45",
+        "load_seconds": 0.5857999730000003,
+        "total_seconds": 2.892099913999999,
+        "peak_rss_kib": 577572,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "7e979b21334a9a7e92f68ee3d1b4bc7cd9113b90b3092902be36f14a19f9d4bf",
+            "inference_seconds": 2.052047685000005,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9575248956680298,
+                      "coordinate": [
+                        187.6948699951172,
+                        703.1019897460938,
+                        2061.809814453125,
+                        830.6427612304688
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9560151100158691,
+                      "coordinate": [
+                        187.7222900390625,
+                        1153.4683837890625,
+                        2234.4443359375,
+                        1276.9580078125
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9556905627250671,
+                      "coordinate": [
+                        188.67454528808594,
+                        255.53387451171875,
+                        2143.04541015625,
+                        376.0890808105469
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9554612636566162,
+                      "coordinate": [
+                        188.79103088378906,
+                        478.37054443359375,
+                        2022.00048828125,
+                        600.518310546875
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9550114870071411,
+                      "coordinate": [
+                        187.03440856933594,
+                        929.800537109375,
+                        2160.16552734375,
+                        1051.2984619140625
+                      ]
+                    },
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9508916139602661,
+                      "coordinate": [
+                        187.76309204101562,
+                        1378.77490234375,
+                        2213.156494140625,
+                        1502.4993896484375
+                      ]
+                    },
+                    {
+                      "cls_id": 3,
+                      "label": "number",
+                      "score": 0.8240143060684204,
+                      "coordinate": [
+                        195.58847045898438,
+                        3351.332275390625,
+                        362.6144104003906,
+                        3403.115966796875
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case": "F13",
+      "result": {
+        "case": "F13",
+        "original_sha256": "3a646d92d23146249a2ebbe5fe94623061c749de24af114db7944618a708ca2d",
+        "load_seconds": 0.5959654119999982,
+        "total_seconds": 2.882733015999996,
+        "peak_rss_kib": 576940,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "e1e44714efa27f1c65cf4b8af02d869168db96f31591c1138253f4766b0d13c4",
+            "inference_seconds": 2.047662428999999,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9207284450531006,
+                      "coordinate": [
+                        190.08059692382812,
+                        256.2613220214844,
+                        2143.54296875,
+                        376.7477111816406
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case": "F14",
+      "result": {
+        "case": "F14",
+        "original_sha256": "e99afb67414ad5181848c081246452f203cc3dd0fb3b9040d9a3d32a0e47c762",
+        "load_seconds": 0.6078516550000046,
+        "total_seconds": 2.896716444000006,
+        "peak_rss_kib": 576896,
+        "pages": [
+          {
+            "page": 1,
+            "original_rect": [
+              0,
+              0,
+              595,
+              842
+            ],
+            "raster_size": [
+              2480,
+              3509
+            ],
+            "dpi": 300,
+            "raster_sha256": "5c5a01d419fb295a8a7201bc8fc93554596113e685e28c655cc2cc387fdff1cd",
+            "inference_seconds": 2.0267685770000057,
+            "raw_predictions": [
+              {
+                "res": {
+                  "boxes": [
+                    {
+                      "cls_id": 2,
+                      "label": "text",
+                      "score": 0.9672466516494751,
+                      "coordinate": [
+                        186.20558166503906,
+                        251.9670867919922,
+                        2265.615234375,
+                        2263.191162109375
+                      ]
+                    }
+                  ]
+                },
+                "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

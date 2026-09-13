@@ -9,6 +9,8 @@ mod html;
 mod layout_pdf;
 mod limited_pdf;
 mod markdown;
+mod ocr_systemd;
+mod ocr_worker_process;
 mod openapi;
 mod pdf;
 mod pdf_front_matter;
@@ -31,7 +33,10 @@ pub use epub_validator::{
     validate_epub_document,
 };
 pub use html::HtmlParser;
-pub use layout_pdf::{LayoutPdfParser, PDF_LAYOUT_CACHE_NAMESPACE};
+pub use layout_pdf::{
+    LayoutPdfParser, PDF_LAYOUT_CACHE_NAMESPACE, inspect_private_ocr_runtime,
+    require_systemd_ocr_support,
+};
 pub use limited_pdf::LimitedPdfParser;
 pub use markdown::MarkdownParser;
 pub use openapi::OpenApiParser;

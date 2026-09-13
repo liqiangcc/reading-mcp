@@ -1,0 +1,175 @@
+name: First frozen real OCR engine probe
+on:
+  push:
+    paths:
+      - 'scripts/ocr/first_engine_probe.py'
+      - 'scripts/ocr/sandbox_probe.py'
+      - 'scripts/ocr/worker_identity_probe.py'
+      - 'scripts/ocr/canonical_quality.py'
+      - 'scripts/ocr/page_selection_probe.py'
+      - 'scripts/ocr/mixed_order_probe.py'
+      - 'scripts/ocr/native_layout_probe.py'
+      - 'scripts/ocr/language_order_probe.py'
+      - 'scripts/ocr/regional_retry_probe.py'
+      - 'tests/ocr/test_regional_retry_probe.py'
+      - 'tests/ocr/test_visual_projection.py'
+      - 'tests/ocr/test_dependency_process.py'
+      - 'tests/ocr/test_worker_failures.py'
+      - 'src/infrastructure/ocr_identity_process.rs'
+      - 'src/infrastructure/budget.rs'
+      - 'src/infrastructure/ocr_singleflight.rs'
+      - 'src/application/open_document.rs'
+      - 'src/application/ports.rs'
+      - 'src/mcp/server.rs'
+      - 'src/mcp/ocr_error_tests.rs'
+      - 'tests/ocr_ingestion_deadline.rs'
+      - 'tests/ocr_real_engine.rs'
+      - 'tests/ocr_sandbox_runtime.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_service_supervisor.py'
+      - 'src/parsing/ocr_service_result.py'
+      - 'src/parsing/ocr_worker_process.rs'
+      - 'tests/ocr_mcp_stdio.rs'
+      - 'tests/ocr_mcp_http.rs'
+      - 'tests/ocr_boundary_engine.rs'
+      - 'tests/ocr/test_boundary_quality.py'
+      - 'scripts/ocr/boundary_quality.py'
+      - 'src/domain/ocr.rs'
+      - 'src/domain/ocr_observations.rs'
+      - 'src/domain/ocr_observations.rs'
+      - 'src/infrastructure/ocr_evidence.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/reliability.rs'
+      - 'src/infrastructure/ocr_identity.rs'
+      - 'src/runtime/**'
+      - 'src/parsing/pdf_layout_worker.py'
+      - '.github/workflows/ocr-first-engine-probe.yml'
+  pull_request:
+    paths:
+      - 'scripts/ocr/canonical_quality.py'
+      - 'scripts/ocr/page_selection_probe.py'
+      - 'scripts/ocr/mixed_order_probe.py'
+      - 'scripts/ocr/native_layout_probe.py'
+      - 'scripts/ocr/language_order_probe.py'
+      - 'scripts/ocr/regional_retry_probe.py'
+      - 'tests/ocr/test_regional_retry_probe.py'
+      - 'tests/ocr/test_visual_projection.py'
+      - 'tests/ocr/test_dependency_process.py'
+      - 'tests/ocr/test_worker_failures.py'
+      - 'src/infrastructure/ocr_identity_process.rs'
+      - 'src/infrastructure/budget.rs'
+      - 'src/infrastructure/ocr_singleflight.rs'
+      - 'src/application/open_document.rs'
+      - 'src/application/ports.rs'
+      - 'src/mcp/server.rs'
+      - 'src/mcp/ocr_error_tests.rs'
+      - 'tests/ocr_ingestion_deadline.rs'
+      - 'scripts/ocr/first_engine_probe.py'
+      - 'scripts/ocr/sandbox_probe.py'
+      - 'scripts/ocr/worker_identity_probe.py'
+      - 'tests/ocr_real_engine.rs'
+      - 'tests/ocr_sandbox_runtime.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_service_supervisor.py'
+      - 'src/parsing/ocr_service_result.py'
+      - 'src/parsing/ocr_worker_process.rs'
+      - 'tests/ocr_mcp_stdio.rs'
+      - 'tests/ocr_mcp_http.rs'
+      - 'tests/ocr_boundary_engine.rs'
+      - 'tests/ocr/test_boundary_quality.py'
+      - 'scripts/ocr/boundary_quality.py'
+      - 'src/domain/ocr.rs'
+      - 'src/domain/ocr_observations.rs'
+      - 'src/domain/ocr_observations.rs'
+      - 'src/infrastructure/ocr_evidence.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/reliability.rs'
+      - 'src/infrastructure/ocr_identity.rs'
+      - 'src/runtime/**'
+      - 'src/parsing/pdf_layout_worker.py'
+      - '.github/workflows/ocr-first-engine-probe.yml'
+jobs:
+  real-engine-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install fixed real engine and fixture renderer (hosted only)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr=5.3.4-1build5 libtesseract5=5.3.4-1build5 \
+            liblept5=1.82.0-3build4 tesseract-ocr-eng=1:4.1.0-2 tesseract-ocr-chi-sim=1:4.1.0-2 time
+          python -m pip install --only-binary=:all: PyMuPDF==1.28.2 pymupdf4llm==1.28.2 pymupdf-layout==1.28.2
+      - name: Preserve Coordinator frozen assets
+        run: |
+          cd tests/fixtures/scanned_pdf
+          sha256sum -c SHA256SUMS
+      - name: First raw recognition and performance evidence (not final acceptance)
+        run: |
+          python scripts/ocr/first_engine_probe.py --fixtures tests/fixtures/scanned_pdf --output "$RUNNER_TEMP/ocr-first-probe"
+      - name: Canonical projection preserves engine paragraphs (hosted real engine)
+        run: python scripts/ocr/worker_identity_probe.py
+      - name: Bounded language-order diagnostics (hosted real engine)
+        run: python scripts/ocr/language_order_probe.py "$RUNNER_TEMP/ocr-first-probe/language-order-probe.json"
+      - name: Regional PSM6 retry diagnostics (hosted real engine)
+        run: python scripts/ocr/regional_retry_probe.py "$RUNNER_TEMP/ocr-first-probe/regional-retry-probe.json"
+      - name: Regional retry geometry tests
+        run: python -m unittest tests/ocr/test_regional_retry_probe.py tests/ocr/test_visual_projection.py
+      - name: Bounded dependency discovery faults
+        run: python -m unittest tests/ocr/test_dependency_process.py tests/ocr/test_worker_failures.py
+      - name: Boundary scorer corruption and split tests
+        run: python -m unittest tests/ocr/test_boundary_quality.py
+      - name: Mixed, existing-layer and visual page diagnostics (public frozen fixtures)
+        if: ${{ !cancelled() }}
+        run: python scripts/ocr/page_selection_probe.py --output "$RUNNER_TEMP/ocr-first-probe/page-selection-probe.json"
+      - name: Supplementary mixed-page order diagnostics (not frozen acceptance)
+        run: python scripts/ocr/mixed_order_probe.py --output "$RUNNER_TEMP/ocr-first-probe/mixed-order.json"
+      - name: Rust real OCR integration (hosted only)
+        env:
+          READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
+          READING_MCP_OCR_BOUNDARY_REPORT: ${{ runner.temp }}/ocr-first-probe/rust-canonical-boundaries.json
+          READING_MCP_MIXED_ORDER_DIR: ${{ runner.temp }}/ocr-first-probe/supplementary-mixed-order
+        run: cargo test --locked --test ocr_real_engine --test ocr_boundary_engine -- --ignored --nocapture
+      - name: Actual MCP stdio and HTTP with required OCR isolation (hosted root only)
+        env:
+          READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
+          READING_MCP_MIXED_ORDER_DIR: ${{ runner.temp }}/ocr-first-probe/supplementary-mixed-order
+        run: |
+          benchmark_test=frozen_four_page_cold_and_restarted_warm_open_budgets
+          for mcp_target in ocr_mcp_stdio ocr_mcp_http; do
+            mcp_test=$(cargo test --locked --test "$mcp_target" --no-run --message-format=json | jq -sr --arg target "$mcp_target" '[.[] | select(.reason == "compiler-artifact" and .target.name == $target and .profile.test) | .executable][0]')
+            test -x "$mcp_test"
+            sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" READING_MCP_MIXED_ORDER_DIR="$READING_MCP_MIXED_ORDER_DIR" "$mcp_test" --ignored --nocapture --skip "$benchmark_test"
+            if [ "$mcp_target" = ocr_mcp_stdio ]; then
+              # Measure the single-service 45s/5s profile without other tests
+              # starting independent servers. Dedicated queue/race tests remain.
+              sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" "$mcp_test" --ignored --nocapture --exact "$benchmark_test"
+            fi
+          done
+      - name: Rust OCR systemd launch and cancellation integration (hosted root only)
+        env:
+          READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          sandbox_test=$(cargo test --locked --test ocr_sandbox_runtime --no-run --message-format=json | jq -sr '[.[] | select(.reason == "compiler-artifact" and .target.name == "ocr_sandbox_runtime" and .profile.test) | .executable][0]')
+          test -x "$sandbox_test"
+          sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" "$sandbox_test" --ignored --nocapture
+          sandbox_unit_test=$(cargo test --locked --lib --no-run --message-format=json | jq -sr '[.[] | select(.reason == "compiler-artifact" and .target.kind == ["lib"] and .profile.test) | .executable][0]')
+          test -x "$sandbox_unit_test"
+          sudo "$sandbox_unit_test" parsing::ocr_systemd::tests:: --ignored --nocapture
+      - name: Real Rust canonical boundary gates
+        run: python scripts/ocr/boundary_quality.py --input "$RUNNER_TEMP/ocr-first-probe/rust-canonical-boundaries.json" --output "$RUNNER_TEMP/ocr-first-probe/boundary-quality.json"
+      - name: Canonical OCR quality gates (hosted only)
+        run: python scripts/ocr/canonical_quality.py --output "$RUNNER_TEMP/ocr-first-probe/canonical-quality.json"
+      - name: Upload public synthetic evidence, including failed cases
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-first-engine-probe
+          path: ${{ runner.temp }}/ocr-first-probe
+          if-no-files-found: warn
+          retention-days: 14

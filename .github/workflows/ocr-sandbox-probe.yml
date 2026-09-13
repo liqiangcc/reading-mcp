@@ -1,0 +1,20 @@
+name: OCR dedicated sandbox mechanism faults
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/ocr/sandbox_probe.py'
+      - '.github/workflows/ocr-sandbox-probe.yml'
+jobs:
+  isolation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify dedicated limits, network denial and descendant cleanup
+        run: sudo /usr/bin/python3 scripts/ocr/sandbox_probe.py --output "$RUNNER_TEMP/ocr-sandbox-report.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-ocr-sandbox-faults
+          path: ${{ runner.temp }}/ocr-sandbox-report.json

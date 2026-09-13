@@ -29,6 +29,13 @@ pub struct RetrievedResource {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[async_trait]
+pub trait OcrEvidenceStore: Send + Sync {
+    async fn put_immutable(&self, identity: &str, bytes: &[u8])
+    -> Result<String, ApplicationError>;
+    async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceViewRenderOptions {
     pub dpi: u32,
@@ -94,9 +101,10 @@ pub struct ParsedCacheKey {
     pub final_source: DocumentSource,
     pub raw_sha256: String,
     pub normalization_version: String,
+    pub ocr_fingerprint: String,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ApplicationError {
     #[error("source blocked: {0}")]
     BlockedSource(String),
@@ -104,6 +112,22 @@ pub enum ApplicationError {
     RetrievalFailed(String),
     #[error("parse failed: {0}")]
     ParseFailed(String),
+    #[error("local OCR worker failed; no parsed document was published")]
+    OcrFailed,
+    #[error("local OCR dependencies are unavailable or changed; operator repair is required")]
+    OcrUnavailable,
+    #[error(
+        "source contains image-only pages requiring inspection; enable local OCR or provide a usable text layer"
+    )]
+    OcrRequired,
+    #[error("local OCR found no supported prose projection; inspect the original source")]
+    OcrNoSupportedProjection,
+    #[error("local OCR is busy; retry explicitly later")]
+    OcrBusy,
+    #[error("local OCR exceeded its shared time budget; retry explicitly later")]
+    OcrTimeout,
+    #[error("local OCR input or output exceeds the configured resource limit")]
+    OcrResourceLimit,
     #[error("resource limit exceeded: {0}")]
     ResourceLimitExceeded(String),
     #[error("authentication profile failed: {0}")]

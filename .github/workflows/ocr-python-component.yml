@@ -1,0 +1,246 @@
+name: OCR offline Python dependency component
+on:
+  push:
+    paths:
+      - 'scripts/ocr/layout_model_probe.py'
+      - 'scripts/ocr/package_python_dependencies.py'
+      - 'scripts/ocr/package_engine_dependencies.py'
+      - 'scripts/ocr/verify_engine_component.py'
+      - 'scripts/ocr/offline_runtime_smoke.py'
+      - 'scripts/ocr/runtime_archive.py'
+      - 'tests/ocr/test_runtime_archive.py'
+      - 'tests/ocr/test_engine_component.py'
+      - 'tests/ocr_private_runtime.rs'
+      - 'tests/support/ocr_private_mcp.rs'
+      - 'tests/ocr/test_runtime_inventory.py'
+      - 'src/runtime/**'
+      - 'src/domain/ocr*.rs'
+      - 'src/parsing/pdf_layout_worker.py'
+      - 'src/infrastructure/ocr_identity_process.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_service_supervisor.py'
+      - 'src/parsing/ocr_service_result.py'
+      - 'scripts/pdf-layout/requirements.txt'
+      - '.github/workflows/ocr-python-component.yml'
+  pull_request:
+    paths:
+      - 'scripts/ocr/layout_model_probe.py'
+      - 'scripts/ocr/package_python_dependencies.py'
+      - 'scripts/ocr/package_engine_dependencies.py'
+      - 'scripts/ocr/verify_engine_component.py'
+      - 'scripts/ocr/offline_runtime_smoke.py'
+      - 'scripts/ocr/runtime_archive.py'
+      - 'tests/ocr/test_runtime_archive.py'
+      - 'tests/ocr/test_engine_component.py'
+      - 'tests/ocr_private_runtime.rs'
+      - 'tests/support/ocr_private_mcp.rs'
+      - 'tests/ocr/test_runtime_inventory.py'
+      - 'src/runtime/**'
+      - 'src/domain/ocr*.rs'
+      - 'src/parsing/pdf_layout_worker.py'
+      - 'src/infrastructure/ocr_identity_process.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_service_supervisor.py'
+      - 'src/parsing/ocr_service_result.py'
+      - 'scripts/pdf-layout/requirements.txt'
+      - '.github/workflows/ocr-python-component.yml'
+permissions:
+  contents: read
+jobs:
+  offline-private-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Private runtime archive corruption and publication tests
+        run: python -m unittest tests/ocr/test_runtime_archive.py tests/ocr/test_runtime_inventory.py
+      - name: Resolve private interpreter and engine without host package installation
+        run: |
+          sudo apt-get update -qq
+          python scripts/ocr/package_engine_dependencies.py --python-runtime --output "$RUNNER_TEMP/ocr-private-runtime"
+          python scripts/ocr/package_python_dependencies.py --output "$RUNNER_TEMP/ocr-private-wheels"
+      - name: Stage the approved immutable classifier and model provenance
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          python scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --prepare --model "$runtime_root/opt/ocr-layout-model" --output "$RUNNER_TEMP/ocr-layout-model-provenance"
+      - name: Install hash-locked wheels using only the extracted interpreter offline
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          mkdir -p "$runtime_root/opt/ocr-bootstrap" "$runtime_root/opt/ocr-smoke" "$runtime_root/tmp" "$runtime_root/run"
+          cp -R "$RUNNER_TEMP/ocr-private-wheels/." "$runtime_root/opt/ocr-bootstrap/"
+          cp src/parsing/pdf_layout_worker.py scripts/ocr/offline_runtime_smoke.py tests/fixtures/scanned_pdf/pdf/F07.pdf tests/fixtures/scanned_pdf/pdf/F11.pdf "$runtime_root/opt/ocr-smoke/"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/python3.12 -m venv /opt/ocr-python
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /opt/ocr-python/bin/python -m pip install --no-index --no-cache-dir --require-hashes --find-links /opt/ocr-bootstrap/wheels -r /opt/ocr-bootstrap/requirements.lock
+      - name: Actual frozen OCR with private interpreter libraries and network isolation
+        id: initial_private_smoke
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
+          du -sb "$runtime_root" "$runtime_root/opt/ocr-python" "$runtime_root/opt/ocr-bootstrap"
+      - name: Archive the installed private runtime and verify into a new root
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          notice_root="$runtime_root/usr/share/doc/reading-mcp-ocr"
+          mkdir -p "$notice_root"
+          cp "$RUNNER_TEMP/ocr-private-runtime/manifest.json" "$notice_root/engine-manifest.json"
+          cp "$RUNNER_TEMP/ocr-private-runtime/apt-source-uris.txt" "$notice_root/"
+          cp "$RUNNER_TEMP/ocr-private-wheels/manifest.json" "$notice_root/python-manifest.json"
+          cp "$RUNNER_TEMP/ocr-private-wheels/requirements.lock" "$notice_root/"
+          cp "$RUNNER_TEMP/ocr-layout-model-provenance/model-manifest.json" "$notice_root/"
+          cp -R "$RUNNER_TEMP/ocr-private-wheels/notices" "$notice_root/"
+          runtime_source_sha=$(git rev-parse HEAD)
+          sudo /usr/bin/python3 scripts/ocr/runtime_archive.py build --root "$runtime_root" --source-sha "$runtime_source_sha" --output "$RUNNER_TEMP/ocr-private-package" | tee "$RUNNER_TEMP/ocr-private-package-build.json"
+          runtime_archive_sha=$(cut -d ' ' -f 1 "$RUNNER_TEMP/ocr-private-package/SHA256SUMS")
+          sudo /usr/bin/python3 scripts/ocr/runtime_archive.py unpack --archive "$RUNNER_TEMP/ocr-private-package/ocr-private-runtime.tar.gz" --sha256 "$runtime_archive_sha" --source-sha "$runtime_source_sha" --output "$RUNNER_TEMP/verified-ocr-runtime" | tee "$RUNNER_TEMP/ocr-private-package-verify.json"
+      - name: Execute frozen OCR from the verified archive without network or host interpreter
+        id: archive_smoke
+        run: |
+          set -euo pipefail
+          verified_root="$RUNNER_TEMP/verified-ocr-runtime"
+          public_smoke="$RUNNER_TEMP/ocr-private-runtime/rootfs/opt/ocr-smoke"
+          test ! -e "$verified_root/opt/ocr-bootstrap"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$verified_root" --property="BindReadOnlyPaths=$public_smoke:/opt/ocr-smoke" --property=User=65534 --property=Group=65534 --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=NoNewPrivileges=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group --property=LimitCORE=0 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+      - name: Compare exact reconstructed runtime and measure all protected directories
+        run: |
+          set -euo pipefail
+          python -c 'import json,sys; a,b=(json.load(open(p)) for p in sys.argv[1:]); fields=("identity","canonical_paragraphs","raw_sha256","worker_sha256","python_executable_sha256","visual_model_stage"); assert all(a[k]==b[k] for k in fields), "archive runtime identity or output changed"; print("verified archive preserves actual dependencies, interpreter, worker, F07 canonical output and F11 model observation")' "$RUNNER_TEMP/ocr-private-runtime-smoke.json" "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+          sudo du -sb "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/ocr-private-package/ocr-private-runtime.tar.gz"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile actual private-runtime Rust integration on hosted runner
+        run: cargo test --locked --test ocr_private_runtime --no-run --message-format=json > "$RUNNER_TEMP/ocr-private-rust-build.jsonl"
+      - name: Rust parser publication with verified private runtime and no host interpreter
+        run: |
+          set -euo pipefail
+          test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "ocr_private_runtime" and .executable != null) | .executable' "$RUNNER_TEMP/ocr-private-rust-build.jsonl")
+          test -x "$test_binary"
+          sudo env OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" OCR_TEST_RUNTIME_MANIFEST="$RUNNER_TEMP/ocr-private-package/runtime-manifest.json" "$test_binary" --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/ocr-private-rust-test.log"
+      - name: Capture native import backtrace in the same private root on failure
+        if: failure() && (steps.initial_private_smoke.conclusion == 'failure' || steps.archive_smoke.conclusion == 'failure')
+        env:
+          OCR_DEBUG_ROOT: ${{ runner.temp }}/${{ steps.archive_smoke.conclusion == 'failure' && 'verified-ocr-runtime' || 'ocr-private-runtime/rootfs' }}
+        run: |
+          set -euo pipefail
+          runtime_root="$OCR_DEBUG_ROOT"
+          test -d "$runtime_root/opt/ocr-python"
+          readlink "$runtime_root/opt/ocr-python/bin/python"
+          sudo apt-get install --no-install-recommends -y gdb
+          debug_unit="reading-mcp-ocr-import-debug-${GITHUB_RUN_ID}.service"
+          trap 'sudo systemctl stop "$debug_unit" >/dev/null 2>&1 || true; sudo systemctl reset-failed "$debug_unit" >/dev/null 2>&1 || true' EXIT
+          sudo systemd-run --quiet --unit="$debug_unit" --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=LimitCORE=0 --property=RuntimeMaxSec=30 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -c 'import time; time.sleep(5); import onnxruntime'
+          debug_pid=$(sudo systemctl show "$debug_unit" --property=MainPID --value)
+          test "$debug_pid" -gt 1
+          sudo timeout 20 gdb --quiet --nx --batch -ex "set sysroot $runtime_root" -ex 'set pagination off' -ex continue -ex 'bt 30' -p "$debug_pid" | tee "$RUNNER_TEMP/ocr-private-runtime-native-backtrace.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-private-runtime-candidate-evidence
+          path: |
+            ${{ runner.temp }}/ocr-private-runtime/manifest.json
+            ${{ runner.temp }}/ocr-private-runtime/apt-source-uris.txt
+            ${{ runner.temp }}/ocr-private-wheels/manifest.json
+            ${{ runner.temp }}/ocr-private-wheels/requirements.lock
+            ${{ runner.temp }}/ocr-layout-model-provenance/model-manifest.json
+            ${{ runner.temp }}/ocr-private-runtime-smoke.json
+            ${{ runner.temp }}/ocr-private-runtime-native-backtrace.txt
+            ${{ runner.temp }}/ocr-private-package-build.json
+            ${{ runner.temp }}/ocr-private-package-verify.json
+            ${{ runner.temp }}/ocr-private-archive-smoke.json
+            ${{ runner.temp }}/ocr-private-rust-test.log
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocr-private-runtime-verified-candidate
+          path: ${{ runner.temp }}/ocr-private-package/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+  offline-engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive corruption and path validation tests
+        run: python3 -m unittest tests/ocr/test_engine_component.py
+      - name: Resolve complete Debian closure without installed-package shortcuts
+        run: |
+          sudo apt-get update -qq
+          python3 scripts/ocr/package_engine_dependencies.py --output "$RUNNER_TEMP/ocr-engine-component"
+      - name: Archive and reconstruct from verified immutable inputs offline
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/ocr-engine-component.tar.gz"
+          tar -czf "$archive" -C "$RUNNER_TEMP/ocr-engine-component" debs manifest.json apt-source-uris.txt
+          sha256sum "$archive"
+          digest=$(sha256sum "$archive" | cut -d ' ' -f 1)
+          sudo unshare --net -- /usr/bin/python3 scripts/ocr/verify_engine_component.py \
+            --archive "$archive" --sha256 "$digest" --output "$RUNNER_TEMP/verified-ocr-engine"
+      - name: Start extracted engine without host libraries or network
+        run: |
+          set -euo pipefail
+          engine_root="$RUNNER_TEMP/verified-ocr-engine"
+          sudo mkdir -p "$engine_root/tmp"
+          sudo cp tests/fixtures/scanned_pdf/previews/F07-p1.png "$engine_root/tmp/public-F07.png"
+          sudo unshare --net -- chroot "$engine_root" /usr/bin/tesseract --version
+          sudo unshare --net -- chroot "$engine_root" /usr/bin/tesseract \
+            /tmp/public-F07.png stdout --tessdata-dir /usr/share/tesseract-ocr/5/tessdata \
+            -l chi_sim --oem 1 --psm 3 > "$RUNNER_TEMP/engine-offline-smoke.txt"
+          test -s "$RUNNER_TEMP/engine-offline-smoke.txt"
+          du -sb "$engine_root" "$RUNNER_TEMP/ocr-engine-component/debs"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-engine-component-candidate
+          path: |
+            ${{ runner.temp }}/ocr-engine-component/manifest.json
+            ${{ runner.temp }}/ocr-engine-component/apt-source-uris.txt
+            ${{ runner.temp }}/engine-offline-smoke.txt
+            ${{ runner.temp }}/ocr-engine-component.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+  offline-python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download and hash every pinned wheel, retain notices
+        run: python scripts/ocr/package_python_dependencies.py --output "$RUNNER_TEMP/ocr-python-component"
+      - name: Install in fresh environment with network namespace disabled
+        env:
+          HOST_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          python -m venv --without-pip "$RUNNER_TEMP/offline-ocr-python"
+          sudo unshare --net -- "$HOST_PYTHON" -m pip --python "$RUNNER_TEMP/offline-ocr-python/bin/python" install \
+            --no-index --no-cache-dir --require-hashes \
+            --find-links "$RUNNER_TEMP/ocr-python-component/wheels" \
+            -r "$RUNNER_TEMP/ocr-python-component/requirements.lock"
+          sudo unshare --net -- "$RUNNER_TEMP/offline-ocr-python/bin/python" -I -c \
+            'import pymupdf, pymupdf4llm, onnxruntime; pymupdf4llm.use_layout(True); print("offline pinned layout imports: ok")'
+          du -sb "$RUNNER_TEMP/offline-ocr-python" "$RUNNER_TEMP/ocr-python-component"
+      - name: Archive candidate component (not a release or deployment)
+        run: |
+          tar -czf "$RUNNER_TEMP/ocr-python-component.tar.gz" -C "$RUNNER_TEMP" ocr-python-component
+          sha256sum "$RUNNER_TEMP/ocr-python-component.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-python-component-candidate
+          path: |
+            ${{ runner.temp }}/ocr-python-component/manifest.json
+            ${{ runner.temp }}/ocr-python-component.tar.gz
+          if-no-files-found: warn
+          retention-days: 14

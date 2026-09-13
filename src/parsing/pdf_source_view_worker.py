@@ -45,7 +45,7 @@ def main():
             if doc.xref_is_stream(xref):
                 stream = doc.xref_stream(xref)
                 if stream is not None and len(stream) > max_stream:
-                    raise ValueError("decoded PDF stream exceeds configured limit")
+                    raise ValueError(f"decoded PDF stream exceeds configured limit ({len(stream)} > {max_stream})")
                 del stream
         pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
         if pixmap.width > max_width or pixmap.height > max_height or pixmap.width * pixmap.height > max_pixels:

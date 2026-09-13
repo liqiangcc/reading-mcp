@@ -2,12 +2,20 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::application::source_view::SourceViewLimits;
+use crate::domain::OcrConfig;
 use crate::infrastructure::ResourceBudget;
 use crate::retrieval::HttpRetrieverConfig;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub pdf_layout_python: Option<PathBuf>,
+    pub ocr_enabled: bool,
+    pub ocr_language: String,
+    pub ocr_revision: String,
+    pub ocr_engine: PathBuf,
+    pub ocr_tessdata: PathBuf,
+    pub ocr_runtime_root: Option<PathBuf>,
+    pub ocr_runtime_manifest: Option<PathBuf>,
     pub local_roots: Vec<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
@@ -26,6 +34,13 @@ impl Default for RuntimeConfig {
         };
         Self {
             pdf_layout_python: None,
+            ocr_enabled: false,
+            ocr_language: "eng+chi_sim".into(),
+            ocr_revision: "1".into(),
+            ocr_engine: PathBuf::from("/usr/bin/tesseract"),
+            ocr_tessdata: PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"),
+            ocr_runtime_root: None,
+            ocr_runtime_manifest: None,
             local_roots: vec![],
             state_dir: default_state_dir(),
             allow_http: false,
@@ -38,6 +53,20 @@ impl Default for RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    pub fn ocr_config(&self) -> OcrConfig {
+        OcrConfig {
+            enabled: self.ocr_enabled,
+            engine_path: self.ocr_engine.to_string_lossy().into(),
+            tessdata_path: self.ocr_tessdata.to_string_lossy().into(),
+            languages: self.ocr_language.split('+').map(str::to_owned).collect(),
+            operator_revision: self.ocr_revision.clone(),
+            dpi: 300,
+            oem: 1,
+            psm: 3,
+            detector_version: "pdf-layout/v1".into(),
+            protocol_version: "pdf-layout/v1".into(),
+        }
+    }
     pub fn from_env() -> Result<Self, String> {
         let local_roots = std::env::var_os("READING_MCP_LOCAL_ROOTS")
             .map(|value| std::env::split_paths(&value).collect())
@@ -63,6 +92,32 @@ impl RuntimeConfig {
             && !path.is_absolute()
         {
             return Err("READING_MCP_PDF_LAYOUT_PYTHON must be an absolute path".into());
+        }
+        config.ocr_enabled = env_bool("READING_MCP_OCR_ENABLED", false)?;
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_LANG") {
+            config.ocr_language = value.to_string_lossy().into_owned();
+        }
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_REVISION") {
+            config.ocr_revision = value.to_string_lossy().into_owned();
+        }
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_ENGINE") {
+            config.ocr_engine = PathBuf::from(value);
+        }
+        if let Some(value) = std::env::var_os("READING_MCP_OCR_TESSDATA") {
+            config.ocr_tessdata = PathBuf::from(value);
+        }
+        config.ocr_runtime_root =
+            std::env::var_os("READING_MCP_OCR_RUNTIME_ROOT").map(PathBuf::from);
+        config.ocr_runtime_manifest =
+            std::env::var_os("READING_MCP_OCR_RUNTIME_MANIFEST").map(PathBuf::from);
+        if config.ocr_runtime_root.is_some() != config.ocr_runtime_manifest.is_some()
+            || config
+                .ocr_runtime_root
+                .iter()
+                .chain(config.ocr_runtime_manifest.iter())
+                .any(|p| !p.is_absolute())
+        {
+            return Err("OCR runtime root and manifest require paired absolute paths".into());
         }
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;
@@ -159,6 +214,9 @@ impl RuntimeConfig {
 fn validate(config: &RuntimeConfig) -> Result<(), String> {
     if config.resource_budget.max_document_bytes == 0 {
         return Err("READING_MCP_MAX_DOCUMENT_BYTES must be greater than zero".into());
+    }
+    if config.ocr_language.trim().is_empty() || config.ocr_revision.trim().is_empty() {
+        return Err("OCR language and revision must not be empty".into());
     }
     if config.resource_budget.max_pdf_pages == 0 {
         return Err("READING_MCP_MAX_PDF_PAGES must be greater than zero".into());

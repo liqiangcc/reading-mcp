@@ -19,6 +19,7 @@ on:
       - 'src/parsing/layout_pdf.rs'
       - 'src/parsing/ocr_systemd.rs'
       - 'src/parsing/ocr_service_supervisor.py'
+      - 'src/parsing/ocr_service_result.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
   pull_request:
@@ -40,6 +41,7 @@ on:
       - 'src/parsing/layout_pdf.rs'
       - 'src/parsing/ocr_systemd.rs'
       - 'src/parsing/ocr_service_supervisor.py'
+      - 'src/parsing/ocr_service_result.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
 permissions:

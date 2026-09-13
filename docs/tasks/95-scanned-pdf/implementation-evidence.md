@@ -547,3 +547,24 @@ PDF parsed cache namespace 升级为 required-inspection/v1，旧解析结果不
 真实 MCP 测试配置 OCR disabled 和不存在的引擎/模型路径：F01/F03 正常发布，
 F02/F05/F12 返回 OCR_REQUIRED、无路径泄漏，已有两个 SQLite Document 原样保留。
 该测试由现有 hosted real-engine workflow 执行，未本机运行。
+
+### systemd 真实终止结果通道（本包待 hosted 验证）
+
+保留 `--collect` 与 owner-pipe 取消回收。新增短小可信 ExecStopPost callback，
+读取 systemd 自己设置的 SERVICE_RESULT/EXIT_CODE/EXIT_STATUS，通过另一个
+Rust 持有的 nonblocking FIFO 写单个不足 512 bytes 的定长上限记录。
+管道由设备号/inode/随机单元 token 绑定，PDF 子进程仍为 nobody、无 root 权限；
+callback 不读取正文、不写文件、不经 OCR stdout 返回，不留下失败单元等待查询。
+Rust 在 systemd-run --wait 结束后读结果，只有真实 oom-kill/timeout 映射
+OCR_RESOURCE_LIMIT/OCR_TIMEOUT；退出 137 或单独 SIGKILL 不推定 OOM，
+缺失/非法/未知控制记录不生成专用分类。普通引擎失败仍走严格 worker 协议。
+
+依据 systemd v255 官方 ExecStopPost 语义：
+https://raw.githubusercontent.com/systemd/systemd/v255/man/systemd.service.xml
+（官方 freedesktop 网页此时返回 403，读取官方 Git 仓库文档确认）。
+
+新增 hosted root 真故障测试经生产 command/WorkerProcess：850 MiB 分配触发
+768 MiB cgroup OOM；仅测试将 RuntimeMaxSec 缩短为 1s 触发真实 manager timeout；
+exit(137) 保持普通失败。逐例要求失败单元仍被自动回收；既有无 runtime 取消、
+晚启动 owner EOF、进程树回收与非特权隔离测试保持执行。生产60秒限制不变。
+本机仅 fmt/py_compile，所有故障执行与 Rust 构建均交 GitHub-hosted Actions。

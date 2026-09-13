@@ -7,6 +7,86 @@ pub(super) struct SystemdOcrUnit {
     // Dropping these also works when the Tokio cleanup task cannot run.
     _reader: std::fs::File,
     writer: Option<std::fs::File>,
+    result: ResultPipe,
+}
+
+struct ResultPipe {
+    reader: std::fs::File,
+    _writer: std::fs::File,
+    token: String,
+}
+
+impl ResultPipe {
+    #[cfg(target_os = "linux")]
+    fn new(token: &str) -> io::Result<(Self, Vec<String>)> {
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        let (reader, writer, _) = owner_pipe("")?;
+        let metadata = writer.metadata()?;
+        let arguments = vec![
+            format!("/proc/{}/fd/{}", std::process::id(), writer.as_raw_fd()),
+            metadata.dev().to_string(),
+            metadata.ino().to_string(),
+            token.into(),
+        ];
+        Ok((
+            Self {
+                reader,
+                _writer: writer,
+                token: token.into(),
+            },
+            arguments,
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn new(_: &str) -> io::Result<(Self, Vec<String>)> {
+        Err(io::Error::other("OCR result pipe requires Linux"))
+    }
+
+    fn read_error(&mut self) -> Option<crate::application::ports::ApplicationError> {
+        use std::io::Read;
+        let mut buffer = [0_u8; 512];
+        let count = self.reader.read(&mut buffer).ok()?;
+        classify_manager_result(&buffer[..count], &self.token)
+    }
+}
+
+fn classify_manager_result(
+    bytes: &[u8],
+    token: &str,
+) -> Option<crate::application::ports::ApplicationError> {
+    use crate::application::ports::ApplicationError;
+    let text = std::str::from_utf8(bytes).ok()?;
+    let fields: Vec<_> = text.split('\n').collect();
+    if fields.len() != 5
+        || fields[0] != token
+        || !fields[4].is_empty()
+        || fields[..4]
+            .iter()
+            .any(|field| field.len() > 64 || !field.is_ascii())
+    {
+        return None;
+    }
+    match fields[1] {
+        "oom-kill" => Some(ApplicationError::OcrResourceLimit),
+        "timeout" => Some(ApplicationError::OcrTimeout),
+        // An ordinary worker exit still uses its validated typed protocol.
+        // No mapping from numerical exit codes, signals or arbitrary strings.
+        _ => None,
+    }
+}
+
+fn unit_argument(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('%', "%%")
+            .replace('$', "$$")
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -129,10 +209,12 @@ impl SystemdOcrUnit {
             return Err(io::Error::other("invalid kernel unit identity"));
         }
         let (reader, writer, owner_arguments) = owner_pipe(token)?;
+        let (result, result_arguments) = ResultPipe::new(token)?;
         let unit = Self {
             name: format!("reading-mcp-ocr-{token}.service"),
             _reader: reader,
             writer: Some(writer),
+            result,
         };
         let mut command = Command::new("/usr/bin/systemd-run");
         let scratch = if manifest.is_some() {
@@ -169,6 +251,24 @@ impl SystemdOcrUnit {
                 "--property=UMask=0077",
             ])
             .arg(format!("--unit={}", unit.name));
+        let result_python = python
+            .to_str()
+            .ok_or_else(|| io::Error::other("invalid OCR Python path"))?;
+        let mut callback = vec![
+            result_python.to_string(),
+            "-I".into(),
+            "-c".into(),
+            include_str!("ocr_service_result.py").into(),
+        ];
+        callback.extend(result_arguments);
+        command.arg(format!(
+            "--property=ExecStopPost={}",
+            callback
+                .iter()
+                .map(|value| unit_argument(value))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         if collect_failed {
             command.arg("--collect");
         }
@@ -234,6 +334,12 @@ impl SystemdOcrUnit {
         self.writer = None;
     }
 
+    pub(super) fn termination_error(
+        &mut self,
+    ) -> Option<crate::application::ports::ApplicationError> {
+        self.result.read_error()
+    }
+
     pub(super) async fn stop(&mut self) -> io::Result<()> {
         // EOF independently stops the service even if this future is cancelled,
         // the runtime is destroyed, or systemctl itself cannot be started.
@@ -284,6 +390,96 @@ mod tests {
         io::{AsyncBufReadExt, BufReader},
         sync::Semaphore,
     };
+
+    #[test]
+    fn manager_result_requires_exact_control_record_and_never_guesses_from_exit_status() {
+        use crate::application::ports::ApplicationError;
+        assert_eq!(
+            classify_manager_result(b"token\noom-kill\nkilled\n9\n", "token"),
+            Some(ApplicationError::OcrResourceLimit)
+        );
+        assert_eq!(
+            classify_manager_result(b"token\ntimeout\nkilled\n15\n", "token"),
+            Some(ApplicationError::OcrTimeout)
+        );
+        for bytes in [
+            b"wrong\noom-kill\nkilled\n9\n".as_slice(),
+            b"token\nexit-code\nexited\n137\n",
+            b"token\nsignal\nkilled\n9\n",
+            b"token\noom-kill\nkilled\n9\nextra",
+            b"token\noom-kill\n",
+            b"token\nunknown\n\n\n",
+        ] {
+            assert_eq!(classify_manager_result(bytes, "token"), None);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires hosted root and systemd cgroup v2"]
+    async fn runtime_manager_result_survives_collection_and_distinguishes_oom_timeout_and_exit() {
+        use crate::application::ports::ApplicationError;
+        for (script, timeout, expected) in [
+            (
+                "data = bytearray(850 * 1024 * 1024)",
+                false,
+                Some(ApplicationError::OcrResourceLimit),
+            ),
+            (
+                "import time; time.sleep(10)",
+                true,
+                Some(ApplicationError::OcrTimeout),
+            ),
+            ("raise SystemExit(137)", false, None),
+        ] {
+            let (mut command, unit) =
+                SystemdOcrUnit::command(Path::new("/usr/bin/python3")).unwrap();
+            let name = unit.name.clone();
+            if timeout {
+                // Only the test shortens RuntimeMaxSec; production remains 60s.
+                // Properties must precede the existing command separator.
+                let arguments: Vec<_> = command
+                    .as_std()
+                    .get_args()
+                    .map(|arg| arg.to_os_string())
+                    .collect();
+                let mut replacement = Command::new("/usr/bin/systemd-run");
+                for argument in arguments {
+                    if argument == "--property=RuntimeMaxSec=60" {
+                        replacement.arg("--property=RuntimeMaxSec=1");
+                    } else {
+                        replacement.arg(argument);
+                    }
+                }
+                command = replacement;
+            }
+            let child = command
+                .args(["-I", "-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+            let mut process = WorkerProcess::new(child, permit).with_systemd_unit(Some(unit));
+            let status = tokio::time::timeout(Duration::from_secs(20), process.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!status.success());
+            assert_eq!(process.termination_error(), expected, "{script}");
+            let state = Command::new("/usr/bin/systemctl")
+                .args(["show", &name, "--property=LoadState", "--value"])
+                .output()
+                .await
+                .unwrap();
+            assert_eq!(
+                state.stdout, b"not-found\n",
+                "failed units must still auto-collect"
+            );
+        }
+    }
 
     #[test]
     fn private_root_rejects_host_root_relative_missing_and_symlink_paths() {

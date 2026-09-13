@@ -433,6 +433,9 @@ impl Parser for LayoutPdfParser {
             }
         })?;
         if !status.success() {
+            if ocr_enabled && let Some(error) = process.termination_error() {
+                return Err(error);
+            }
             if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {
                 return Err(ApplicationError::OcrRequired);
             }

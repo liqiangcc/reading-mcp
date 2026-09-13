@@ -11,6 +11,7 @@ pub(super) struct WorkerProcess {
     permit: Option<OwnedSemaphorePermit>,
     group: Option<u32>,
     unit: Option<SystemdOcrUnit>,
+    termination_error: Option<crate::application::ports::ApplicationError>,
 }
 
 impl WorkerProcess {
@@ -22,6 +23,7 @@ impl WorkerProcess {
             permit: Some(permit),
             group,
             unit: None,
+            termination_error: None,
         }
     }
 
@@ -34,6 +36,10 @@ impl WorkerProcess {
         self.child
             .as_mut()
             .expect("worker child retained until cleanup")
+    }
+
+    pub(super) fn termination_error(&self) -> Option<crate::application::ports::ApplicationError> {
+        self.termination_error.clone()
     }
 
     pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
@@ -71,6 +77,9 @@ impl WorkerProcess {
             signal_group(group, libc::SIGKILL);
         }
         let status = self.child_mut().wait().await?;
+        if let Some(unit) = &mut self.unit {
+            self.termination_error = unit.termination_error();
+        }
         self.group = None;
         // --wait returns after the unit has terminated; --collect removes the
         // completed unit and its private mounts, including on worker failure.

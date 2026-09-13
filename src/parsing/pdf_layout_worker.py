@@ -31,7 +31,7 @@ PAGE_DEADLINE = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
 INPUT_SHA256 = None
-INSPECTION_POLICY = "ocr-original-region-inspection/v2"
+INSPECTION_POLICY = "ocr-original-region-inspection/v3"
 
 
 class OcrRequired(RuntimeError):
@@ -339,6 +339,53 @@ def blank_raster_evidence(page, pixmap):
             "white_samples": len(samples), "glyph_spans": 0,
             "samples_sha256": hashlib.sha256(samples).hexdigest()}
 
+def native_raster_coverage(page, pixmap, regions):
+    # Exact white-background coverage, never an English length/confidence rule.
+    # Unsupported transforms do not prove coverage and therefore require OCR.
+    if not regions or page.rotation != 0 or pixmap.n != 3:
+        return None
+    samples = pixmap.samples
+    if len(samples) != pixmap.width * pixmap.height * 3:
+        raise ValueError('invalid coverage raster')
+    masked = bytearray(samples)
+    masks = []
+    scale = OCR_CONFIG['dpi'] / 72
+    compact = lambda text: ''.join(unicodedata.normalize('NFKC', text).split())
+    for span in page.get_texttrace():
+        page_time_remaining()
+        try:
+            text = ''.join(chr(character[0]) for character in span['chars'])
+            bbox = list(span['bbox'])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if (not compact(text) or '\ufffd' in text or '\0' in text or len(bbox) != 4
+                or not all(math.isfinite(value) for value in bbox)
+                or not (0 <= bbox[0] < bbox[2] <= page.rect.width
+                        and 0 <= bbox[1] < bbox[3] <= page.rect.height)):
+            continue
+        x, y = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+        candidates = [region for region in regions
+            if region['bbox'][0] <= x <= region['bbox'][2]
+            and region['bbox'][1] <= y <= region['bbox'][3]
+            and compact(text) in compact(region['text'])]
+        if len(candidates) != 1:
+            continue
+        pixel_bbox = [max(0, math.floor(bbox[0] * scale) - 2),
+                      max(0, math.floor(bbox[1] * scale) - 2),
+                      min(pixmap.width, math.ceil(bbox[2] * scale) + 2),
+                      min(pixmap.height, math.ceil(bbox[3] * scale) + 2)]
+        x0, y0, x1, y1 = pixel_bbox
+        for row in range(y0, y1):
+            start = (row * pixmap.width + x0) * 3
+            masked[start:start + (x1 - x0) * 3] = b'\xff' * ((x1 - x0) * 3)
+        masks.append({'source_box': candidates[0]['source_box'], 'text': text,
+                      'bbox': bbox, 'pixel_bbox': pixel_bbox})
+    return {'schema': 'ocr-native-raster-coverage/v1', 'width': pixmap.width,
+            'height': pixmap.height, 'padding_pixels': 2,
+            'source_samples_sha256': hashlib.sha256(samples).hexdigest(),
+            'masked_samples_sha256': hashlib.sha256(masked).hexdigest(),
+            'uncovered_samples': len(masked) - masked.count(255), 'masks': masks}
+
 def ocr_page(page, language=None, excluded_regions=()):
     """Run the deployer-selected local Tesseract and retain engine grouping."""
     config = OCR_CONFIG
@@ -493,7 +540,7 @@ def exclude_native_boxes(selected, evidence, regions):
     evidence["selection"] = selection
     return retained, evidence
 
-def _regional_ocr(page, excluded_regions=()):
+def _regional_ocr(page, excluded_regions=(), inspect_native=False):
     global PAGE_DEADLINE, PAGE_RASTER
     previous = PAGE_DEADLINE
     previous_raster = PAGE_RASTER
@@ -508,7 +555,16 @@ def _regional_ocr(page, excluded_regions=()):
                         "page_bounds": [0, 0, page.rect.width, page.rect.height],
                         "complete": True, "attempts": [], "selection": [], "components": [],
                         "blank_raster": blank}
+        coverage = native_raster_coverage(page, PAGE_RASTER, excluded_regions) if inspect_native else None
+        if coverage is not None and coverage['uncovered_samples'] == 0 and coverage['masks']:
+            page_time_remaining()
+            return [], {'schema': 'ocr-regional-observations/v3', 'page': page.number + 1,
+                        'page_bounds': [0, 0, page.rect.width, page.rect.height],
+                        'complete': True, 'attempts': [], 'selection': [], 'components': [],
+                        'native_regions': list(excluded_regions), 'native_coverage': coverage}
         selected, evidence = _regional_ocr_attempts(page)
+        if coverage is not None:
+            evidence['native_coverage'] = coverage
         result = exclude_native_boxes(selected, evidence, list(excluded_regions))
         page_time_remaining()
         return result
@@ -797,11 +853,12 @@ def main():
                 for page, page_layout in zip(doc, layout["pages"]):
                     has_body_text = any((box.get("textlines") or []) and box.get("boxclass") not in ("page-footer", "page-header")
                                         for box in page_layout["boxes"])
-                    has_image_region = any(box.get("boxclass") in ("image", "picture", "figure", "table")
-                                           for box in page_layout["boxes"])
+                    has_image_region = bool(page.get_image_info()) or any(
+                        box.get("boxclass") in ("image", "picture", "figure", "table")
+                        for box in page_layout["boxes"])
                     if not has_body_text or has_image_region:
                         excluded = native_text_regions(page_layout)
-                        selected, retry_diagnostic = _regional_ocr(page, excluded)
+                        selected, retry_diagnostic = _regional_ocr(page, excluded, inspect_native=has_body_text)
                         if selected:
                             page_layout["boxes"].extend(selected)
                         page_layout["ocr_retry_diagnostic"] = retry_diagnostic

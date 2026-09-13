@@ -583,3 +583,31 @@ selected/excluded 引用、CER/WER 分母和错误数公开输出日志/artifact
 诊断结果不重排 canonical，不用 expectation 引导算法，不以 workflow green
 冒称 mixed order 已支持。用真实观察决定是否能沿原引擎 source refs 合并 native
 锚点；不能从简单 y/x 排序或尚未证明的顺序关系捏造完整成功。
+
+### 实际图像与 native 栅格覆盖接线（待 hosted 验证）
+
+5a41962157bd41d8ba229faf85bf838fd8f5ee34 的完整 mixed-order.json 已实际读取，
+SHA256 2ebe17917b6ccc4152330726fd9eeba34e8ad5e5f6f76619cb91314bee2c45c8。
+六组 attempts 均为空：layout 只返回 native 框，没有返回实际存在的底层 image。
+全部漏掉两段扫描正文、WER22/44，不是排序成功或 OCR 准确率通过。
+
+本包 enabled 检查真实 page.get_image_info，不依赖 layout 是否分类出 image。
+对有 native 的图像页，在共享15秒页预算、16M/页和64M总栅格预分配门禁内，
+复用同一次原始300DPI RGB渲染；不改送给Tesseract的像素。只在副本上将可唯一
+绑定 native text+bbox 的真实 texttrace span bbox 遮白，记录原bbox和精确pixel矩形，
+向外2渲染像素且裁剪至原页边界。仅检查完后整个副本严格全白才复用native；
+任何剩余非白sample都要求OCR，不以字数、invisibility或confidence代替覆盖证据。
+旋转/无效文字/不唯一来源不能证明覆盖，不使用gold，未知内容不做字符过滤。
+
+新增 typed native_coverage：source/masked样本hash、尺寸、未覆盖sample数、
+native source_box、真实text/bbox与pixel transform。Rust拒绝来源/文本不匹配、
+变换篡改、非法hash/计数；零未知sample时重算全白masked digest。它不是“原页
+空白”证据，不能与blank_raster混用。已覆盖页存完整evidence但不声称engine调用。
+正向 parser→不可变store→Document derivation路径保持不变。
+
+inspection policy v2→v3 进入统一runtime identity/cache/hash；旧策略的OCR派生
+须显式reopen，不删除旧canonical/evidence，native normalization与#92不改。
+本包尚不宣称 mixed阅读顺序修复或OCR disabled同页native+image覆盖闭环。
+新增真实F03/F04-form/F04-flat Rust测试锁住零engine调用及coverage落盘；
+原正式CER/WER/页执行门禁、补充六组混合诊断继续跑。补充诊断完整raw留artifact，
+日志打印紧凑覆盖/原引擎顺序/排除来源，避免重复多MB输出，不删除原始观察。

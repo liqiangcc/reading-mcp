@@ -137,11 +137,112 @@ pub struct OcrPageObservations {
     #[serde(default)]
     pub blank_raster: Option<BlankRasterEvidence>,
     #[serde(default)]
+    pub native_coverage: Option<NativeRasterCoverage>,
+    #[serde(default)]
     pub native_regions: Vec<NativeTextRegion>,
     #[serde(default)]
     pub excluded_sources: Vec<OcrObservationReference>,
     #[serde(default)]
     pub projection_failure: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCoverageMask {
+    pub source_box: usize,
+    pub text: String,
+    pub bbox: [f64; 4],
+    pub pixel_bbox: [u32; 4],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRasterCoverage {
+    pub schema: String,
+    pub width: u32,
+    pub height: u32,
+    pub padding_pixels: u32,
+    pub source_samples_sha256: String,
+    pub masked_samples_sha256: String,
+    pub uncovered_samples: u64,
+    pub masks: Vec<NativeCoverageMask>,
+}
+
+impl NativeRasterCoverage {
+    fn validate(&self, page: &OcrPageObservations) -> Result<(), String> {
+        use unicode_normalization::UnicodeNormalization;
+        let compact = |text: &str| {
+            text.nfkc()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        };
+        let samples = u64::from(self.width) * u64::from(self.height) * 3;
+        if self.schema != "ocr-native-raster-coverage/v1"
+            || self.padding_pixels != 2
+            || samples == 0
+            || samples > 48_000_000
+            || self.uncovered_samples > samples
+            || f64::from(self.width) != (page.page_bounds[2] * 300.0 / 72.0).ceil()
+            || f64::from(self.height) != (page.page_bounds[3] * 300.0 / 72.0).ceil()
+            || [&self.source_samples_sha256, &self.masked_samples_sha256]
+                .iter()
+                .any(|hash| {
+                    hash.len() != 64
+                        || !hash
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+        {
+            return Err("invalid native raster coverage".into());
+        }
+        for mask in &self.masks {
+            let native = page
+                .native_regions
+                .iter()
+                .find(|region| region.source_box == mask.source_box)
+                .ok_or("coverage mask has no native source")?;
+            let text = compact(&mask.text);
+            let x = (mask.bbox[0] + mask.bbox[2]) / 2.0;
+            let y = (mask.bbox[1] + mask.bbox[3]) / 2.0;
+            if !within(mask.bbox, page.page_bounds)
+                || text.is_empty()
+                || mask.text.contains(['\0', '\u{fffd}'])
+                || !compact(&native.text).contains(&text)
+                || x < native.bbox[0]
+                || x > native.bbox[2]
+                || y < native.bbox[1]
+                || y > native.bbox[3]
+            {
+                return Err("unbound native coverage mask".into());
+            }
+            let scale = 300.0 / 72.0;
+            let expected = [
+                (mask.bbox[0] * scale).floor().max(2.0) as u32 - 2,
+                (mask.bbox[1] * scale).floor().max(2.0) as u32 - 2,
+                ((mask.bbox[2] * scale).ceil() as u32 + 2).min(self.width),
+                ((mask.bbox[3] * scale).ceil() as u32 + 2).min(self.height),
+            ];
+            if mask.pixel_bbox != expected {
+                return Err("native coverage raster transform mismatch".into());
+            }
+        }
+        if self.uncovered_samples == 0 {
+            if self.masks.is_empty() {
+                return Err("native reuse requires source masks".into());
+            }
+            // Recompute the exact all-white masked raster digest, not just its shape.
+            BlankRasterEvidence {
+                width: self.width,
+                height: self.height,
+                channels: 3,
+                white_samples: samples,
+                glyph_spans: 0,
+                samples_sha256: self.masked_samples_sha256.clone(),
+            }
+            .validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +306,22 @@ impl OcrPageObservations {
                 || !native_ids.insert(native.source_box)
             {
                 return Err("invalid native exclusion region".into());
+            }
+        }
+        if let Some(coverage) = &self.native_coverage {
+            coverage.validate(self)?;
+            if self.blank_raster.is_some() {
+                return Err("native reuse cannot claim a blank source raster".into());
+            }
+            if coverage.uncovered_samples == 0 {
+                if !self.attempts.is_empty()
+                    || !self.selection.is_empty()
+                    || !self.components.is_empty()
+                    || !self.excluded_sources.is_empty()
+                {
+                    return Err("covered native layer must not claim OCR attempts".into());
+                }
+                return Ok(vec![]);
             }
         }
         if let Some(blank) = &self.blank_raster {
@@ -428,6 +545,46 @@ impl OcrEvidenceBlob {
 mod blank_tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn native_coverage_binds_masks_transform_and_exact_white_digest_before_reuse() {
+        let value = serde_json::json!({
+            "schema":"ocr-regional-observations/v3", "page":1,"page_bounds":[0,0,0.96,0.96],
+            "complete":true,"attempts":[],"selection":[],"components":[],
+            "native_regions":[{"source_box":7,"source_class":"text","bbox":[0,0,0.96,0.96],"text":"X"}],
+            "native_coverage":{"schema":"ocr-native-raster-coverage/v1","width":4,"height":4,
+                "padding_pixels":2,"source_samples_sha256":format!("{:x}",Sha256::digest([0_u8;48])),
+                "masked_samples_sha256":format!("{:x}",Sha256::digest([255_u8;48])),"uncovered_samples":0,
+                "masks":[{"source_box":7,"text":"X","bbox":[0.24,0.24,0.48,0.48],"pixel_bbox":[0,0,4,4]}]}
+        });
+        let decode = |value| serde_json::from_value::<OcrPageObservations>(value).unwrap();
+        assert!(decode(value.clone()).validate(1).unwrap().is_empty());
+        for (pointer, replacement) in [
+            (
+                "/native_coverage/masked_samples_sha256",
+                serde_json::json!("a".repeat(64)),
+            ),
+            (
+                "/native_coverage/source_samples_sha256",
+                serde_json::json!("unknown"),
+            ),
+            ("/native_coverage/padding_pixels", serde_json::json!(3)),
+            ("/native_coverage/uncovered_samples", serde_json::json!(1)),
+            ("/native_coverage/masks/0/source_box", serde_json::json!(8)),
+            ("/native_coverage/masks/0/text", serde_json::json!("Y")),
+            (
+                "/native_coverage/masks/0/pixel_bbox",
+                serde_json::json!([1, 0, 4, 4]),
+            ),
+        ] {
+            let mut altered = value.clone();
+            *altered.pointer_mut(pointer).unwrap() = replacement;
+            assert!(decode(altered).validate(1).is_err(), "{pointer}");
+        }
+        let mut invalid = value;
+        invalid["native_coverage"]["uncovered_samples"] = serde_json::json!(-1);
+        assert!(serde_json::from_value::<OcrPageObservations>(invalid).is_err());
+    }
 
     #[test]
     fn blank_pixels_require_exact_white_digest_and_no_claimed_recognition() {

@@ -108,12 +108,21 @@ def main():
         report['cases'][path.stem] = item
     encoded = json.dumps(report, ensure_ascii=False, indent=2)
     args.output.write_text(encoded)
-    print(encoded)
+    # Keep full raw attempts in the artifact. Compact public logs avoid a second
+    # multi-megabyte copy while retaining order/coverage/exclusion diagnostics.
     for name, item in report['cases'].items():
         print('MIXED_ORDER_RESULT', json.dumps({'case': name,
             'returncode': item.get('returncode'), 'failure': item.get('failure'),
             'cer': item.get('cer'), 'wer': item.get('wer'),
-            'canonical_paragraphs': item.get('canonical_paragraphs')}, ensure_ascii=False))
+            'canonical_paragraphs': item.get('canonical_paragraphs'),
+            'observations': [{'page': page['page'], 'native_regions': page.get('native_regions', []),
+                'coverage_uncovered_samples': page.get('native_coverage', {}).get('uncovered_samples'),
+                'excluded_sources': page.get('excluded_sources', []),
+                'selected_sources': [s['source'] for s in page.get('selection', [])],
+                'engine_order': [{'id': attempt['id'], 'boxes': [
+                    {'bbox': box['bbox'], 'text': ' '.join(word['text'] for line in box['textlines'] for word in line['spans'])}
+                    for box in attempt['boxes']]} for attempt in page['attempts']]}
+                for page in item.get('worker_payload', {}).get('ocr_attempts', [])]}, ensure_ascii=False))
     # Known gaps remain visible; this diagnostic never changes official gates.
     print('SUPPLEMENTARY_MIXED_ORDER_NONEXACT', json.dumps([
         name for name, item in report['cases'].items() if not item.get('exact_ordered_text', False)]))

@@ -24,6 +24,65 @@ fn chinese_config() -> OcrConfig {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn existing_layers_have_persistent_native_coverage_without_engine_attempts() {
+    let directory = tempdir().unwrap();
+    let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
+    let mut config = chinese_config();
+    config.languages = vec!["eng".into()];
+    let identity = build_ocr_runtime_identity(config.clone()).unwrap();
+    let parser = LayoutPdfParser::new(
+        std::env::var("READING_MCP_PDF_LAYOUT_PYTHON")
+            .unwrap()
+            .into(),
+        reading_mcp::infrastructure::ResourceBudget::default(),
+    )
+    .with_ocr_config(config)
+    .with_ocr_identity(identity.clone())
+    .with_evidence_store(store.clone());
+    for case in ["F03", "F04-form", "F04-flat"] {
+        let source = DocumentSource(format!("file:///frozen/{case}.pdf"));
+        let bytes = std::fs::read(format!("tests/fixtures/scanned_pdf/pdf/{case}.pdf")).unwrap();
+        let raw_hash = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+        let document = parser
+            .parse(RetrievedResource {
+                source: source.clone(),
+                final_source: source,
+                media_type: MediaType("application/pdf".into()),
+                bytes,
+                etag: None,
+                last_modified: None,
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(document.content_hash.0, raw_hash);
+        assert_eq!(document.try_paragraph_text_units().unwrap().units.len(), 6);
+        document.validate_ocr_publication().unwrap();
+        let bytes = store
+            .get(&document.metadata["ocr_evidence_blob"])
+            .await
+            .unwrap()
+            .unwrap();
+        let blob: reading_mcp::domain::OcrEvidenceBlob = serde_json::from_slice(&bytes).unwrap();
+        blob.validate(1).unwrap();
+        assert_eq!(blob.runtime_identity, identity);
+        assert_eq!(blob.pages.len(), 1);
+        assert!(
+            blob.pages[0].attempts.is_empty(),
+            "{case} must reuse its existing text layer"
+        );
+        let coverage = blob.pages[0].native_coverage.as_ref().unwrap();
+        assert_eq!(coverage.uncovered_samples, 0);
+        assert!(!coverage.masks.is_empty());
+        assert_ne!(
+            coverage.source_samples_sha256,
+            coverage.masked_samples_sha256
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn real_f14_long_sentence_survives_sqlite_reopen_and_exact_read() {
     use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
     use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};

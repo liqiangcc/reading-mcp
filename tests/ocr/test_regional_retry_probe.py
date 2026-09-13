@@ -53,6 +53,28 @@ class RegionalGeometryTests(unittest.TestCase):
         page.get_texttrace = lambda: [{"type": 3}]
         self.assertIsNone(worker["blank_raster_evidence"](page, white))
 
+    def test_native_coverage_masks_only_bound_glyph_geometry_and_keeps_unknown_ink(self):
+        worker, _ = self.deadline_worker()
+        bbox = [0, .01, .1, .2]
+        page = SimpleNamespace(rotation=0, rect=SimpleNamespace(width=2.4, height=.24),
+            get_texttrace=lambda: [{'bbox':bbox, 'chars':[(ord('X'), 0, (0,0), bbox)]}])
+        samples = bytearray(b'\xff' * 30)
+        samples[0:3] = b'\0' * 3
+        samples[24:27] = b'\0' * 3
+        pix = SimpleNamespace(n=3, width=10, height=1, samples=bytes(samples))
+        regions = [{'source_box':7, 'source_class':'text', 'bbox':[0,0,.2,.24], 'text':'X'}]
+        result = worker['native_raster_coverage'](page, pix, regions)
+        self.assertEqual(result['uncovered_samples'], 3)
+        self.assertEqual(result['masks'][0]['source_box'], 7)
+        self.assertEqual(result['masks'][0]['pixel_bbox'], [0,0,3,1])
+        self.assertEqual(pix.samples, bytes(samples), 'inspection must not change the OCR image')
+        regions[0]['text'] = 'Y'
+        self.assertEqual(worker['native_raster_coverage'](page, pix, regions)['uncovered_samples'], 6)
+        regions[0]['text'] = 'X'
+        samples[24:27] = b'\xff' * 3
+        pix.samples = bytes(samples)
+        self.assertEqual(worker['native_raster_coverage'](page, pix, regions)['uncovered_samples'], 0)
+
     def test_exhausted_primary_never_starts_retry_and_restores_state(self):
         worker, clock = self.deadline_worker()
         calls = []

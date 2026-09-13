@@ -87,6 +87,52 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
     assert_eq!(evidence.runtime_identity, identity);
     assert_eq!(evidence.pages[0].attempts.len(), 2);
     assert_eq!(evidence.pages[0].selection.len(), 4);
+    assert_eq!(evidence.visual_attempts.len(), 1);
+    assert_eq!(evidence.visual_attempts[0].page, 1);
+    assert!(
+        evidence.visual_attempts[0]
+            .attempts
+            .iter()
+            .flat_map(|attempt| attempt.res.boxes.iter())
+            .any(|item| item.label == "text")
+    );
+
+    let f11_source = DocumentSource("file:///frozen/F11.pdf".into());
+    let f11 = parser
+        .parse(RetrievedResource {
+            source: f11_source.clone(),
+            final_source: f11_source,
+            media_type: MediaType("application/pdf".into()),
+            bytes: std::fs::read("tests/fixtures/scanned_pdf/pdf/F11.pdf").unwrap(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        })
+        .await
+        .unwrap();
+    let f11_paragraphs = f11.try_paragraph_text_units().unwrap().units;
+    assert_eq!(f11_paragraphs.len(), 6);
+    let f11_payload = store
+        .get(f11.metadata.get("ocr_evidence_blob").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let f11_evidence: OcrEvidenceBlob = serde_json::from_slice(&f11_payload).unwrap();
+    f11_evidence.validate(1).unwrap();
+    assert_eq!(f11_evidence.visual_attempts.len(), 1);
+    let labels: Vec<_> = f11_evidence.visual_attempts[0]
+        .attempts
+        .iter()
+        .flat_map(|attempt| attempt.res.boxes.iter().map(|item| item.label.as_str()))
+        .collect();
+    assert!(labels.contains(&"image") && labels.contains(&"formula"));
+    let visual_classes: Vec<_> = f11_evidence.visual_attempts[0]
+        .projection
+        .regions
+        .iter()
+        .map(|region| region.label.as_str())
+        .collect();
+    assert!(visual_classes.contains(&"image") && visual_classes.contains(&"formula"));
     let limited = LayoutPdfParser::new(
         "/opt/ocr-python/bin/python".into(),
         ResourceBudget {

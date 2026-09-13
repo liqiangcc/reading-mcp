@@ -116,6 +116,12 @@ pub enum ApplicationError {
     OcrFailed,
     #[error("local OCR found no supported prose projection; inspect the original source")]
     OcrNoSupportedProjection,
+    #[error("local OCR is busy; retry explicitly later")]
+    OcrBusy,
+    #[error("local OCR exceeded its shared time budget; retry explicitly later")]
+    OcrTimeout,
+    #[error("local OCR input or output exceeds the configured resource limit")]
+    OcrResourceLimit,
     #[error("resource limit exceeded: {0}")]
     ResourceLimitExceeded(String),
     #[error("authentication profile failed: {0}")]

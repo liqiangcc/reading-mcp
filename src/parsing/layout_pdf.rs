@@ -280,6 +280,9 @@ impl Parser for LayoutPdfParser {
         }
         let permit = self.permit.clone().acquire_owned().await.map_err(failed)?;
         if resource.bytes.len() > self.budget.max_document_bytes {
+            if ocr_enabled {
+                return Err(ApplicationError::OcrResourceLimit);
+            }
             return Err(ApplicationError::ResourceLimitExceeded(
                 "PDF byte limit exceeded".into(),
             ));
@@ -357,7 +360,14 @@ impl Parser for LayoutPdfParser {
             ),
             read_bounded(stderr, 64 * 1024),
             async { process.wait().await.map_err(failed) },
-        )?;
+        )
+        .map_err(|error| {
+            if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                ApplicationError::OcrResourceLimit
+            } else {
+                error
+            }
+        })?;
         if !status.success() {
             if ocr_enabled && let Some(identity) = &self.ocr_identity {
                 use sha2::{Digest, Sha256};
@@ -390,7 +400,13 @@ impl Parser for LayoutPdfParser {
             }
         }
         let page_count = payload.page_count;
-        let mut document = project(resource, payload, &self.budget)?;
+        let mut document = project(resource, payload, &self.budget).map_err(|error| {
+            if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                ApplicationError::OcrResourceLimit
+            } else {
+                error
+            }
+        })?;
         if !evidence.is_empty() || !attempts.is_empty() {
             let mut derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
             let identity = self

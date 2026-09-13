@@ -1047,6 +1047,9 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::ParseFailed(_)
         | ApplicationError::OcrFailed
         | ApplicationError::OcrNoSupportedProjection
+        | ApplicationError::OcrBusy
+        | ApplicationError::OcrTimeout
+        | ApplicationError::OcrResourceLimit
         | ApplicationError::SourceViewFailed(_)
         | ApplicationError::DocumentNotFound
         | ApplicationError::SectionNotFound => ErrorData::invalid_params(message, data),
@@ -1076,6 +1079,9 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::ParseFailed(_) => ("PARSE_FAILED", false),
         ApplicationError::OcrFailed => ("OCR_FAILED", false),
         ApplicationError::OcrNoSupportedProjection => ("OCR_NO_SUPPORTED_PROJECTION", false),
+        ApplicationError::OcrBusy => ("OCR_RESOURCE_LIMIT", true),
+        ApplicationError::OcrTimeout => ("OCR_TIMEOUT", true),
+        ApplicationError::OcrResourceLimit => ("OCR_RESOURCE_LIMIT", false),
         ApplicationError::SourceViewFailed(_) => ("SOURCE_VIEW_FAILED", false),
         ApplicationError::DocumentNotFound => ("DOCUMENT_NOT_FOUND", false),
         ApplicationError::SectionNotFound => ("SECTION_NOT_FOUND", false),
@@ -1087,12 +1093,26 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
 }
 
 #[cfg(test)]
+#[path = "ocr_error_tests.rs"]
+mod ocr_error_tests;
+
+#[cfg(test)]
 mod tests {
     use super::error_descriptor;
     use crate::application::ports::ApplicationError;
 
     #[test]
     fn error_taxonomy_is_stable_and_exposes_retryability() {
+        for (error, expected) in [
+            (ApplicationError::OcrBusy, ("OCR_RESOURCE_LIMIT", true)),
+            (
+                ApplicationError::OcrResourceLimit,
+                ("OCR_RESOURCE_LIMIT", false),
+            ),
+            (ApplicationError::OcrTimeout, ("OCR_TIMEOUT", true)),
+        ] {
+            assert_eq!(error_descriptor(&error), expected);
+        }
         assert_eq!(
             error_descriptor(&ApplicationError::OcrFailed),
             ("OCR_FAILED", false)

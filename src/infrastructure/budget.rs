@@ -108,13 +108,23 @@ impl Parser for BudgetedParser {
         let document = timeout(parse_timeout, self.inner.parse(resource))
             .await
             .map_err(|_| {
-                ApplicationError::ResourceLimitExceeded(format!(
-                    "parser exceeded {:?} timeout",
-                    parse_timeout
-                ))
+                if self.ocr_enabled && is_pdf {
+                    ApplicationError::OcrTimeout
+                } else {
+                    ApplicationError::ResourceLimitExceeded(format!(
+                        "parser exceeded {:?} timeout",
+                        parse_timeout
+                    ))
+                }
             })??;
 
-        validate_document_budget(&document, &self.budget)?;
+        validate_document_budget(&document, &self.budget).map_err(|error| {
+            if self.ocr_enabled && is_pdf {
+                ApplicationError::OcrResourceLimit
+            } else {
+                error
+            }
+        })?;
         Ok(document)
     }
 }

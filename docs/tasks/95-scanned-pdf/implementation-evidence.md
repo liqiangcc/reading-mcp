@@ -483,3 +483,25 @@ worker 读同一只读挂载清单并检查内部解释器与实际依赖；版�
 原页 renderer 仍使用原外部 layout Python，未宣称私有 OCR 测试替代 #92 验收。
 全套结果待 hosted。F11 正式分类、最终 Package/Deployment、存储扩容与实际
 生产验收仍未完成，不合并/部署。
+
+### OCR admission / deadline / Rust 输出上限错误（本提交待 hosted）
+
+按设计错误表修复已证实的 retryability 缺口：单飞队列满或 2 秒队列等待超时
+返回 typed OcrBusy → OCR_RESOURCE_LIMIT/retryable=true；共享解析/已知 PDF
+ingestion deadline 返回 OcrTimeout → OCR_TIMEOUT/true。已知 PDF 的 90 秒
+whole-open 同样正确映射；媒体类型尚未知或非 PDF 不冒充已开始 OCR，保留
+原通用超时语义。OCR 关闭与非 PDF 的 30 秒 parser budget 不变。
+Rust 侧已知 OCR byte/output/normalized-size caps 使用 OCR_RESOURCE_LIMIT/false。
+所有新增错误消息是静态有界文本，不从 stderr 解析类别，不泄露正文/路径。
+
+实际队列测试保留一个 active + 两个 queued、第三 waiting 拒绝、两个 waiting
+2 秒后不运行等断言，并精确断言 typed busy。新增 60 秒虚拟时间超时证明
+底层解析被取消、无缓存发布、许可恢复。既有 OpenDocument delayed-save 测试
+加强为精确 OCR_TIMEOUT，并保留不发布/不索引断言。
+真实 MCP transport 测试经实际 OpenDocument/BudgetedParser 产生 timeout/cap
+错误，检查公开 code/retryability、不回传 source 路径、repository.save 为零；
+busy 在该 transport 测试通过 Parser port 注入，实际 admission 产生路径由上述
+单飞测试覆盖，不伪称对正式引擎制造了并发 overload。
+
+尚不等于全错误表关闭：worker 的 typed failure 分类、systemd 真实终止原因、
+OCR_REQUIRED/OCR_UNAVAILABLE 和 F11/最终部署验收仍需后续处理。

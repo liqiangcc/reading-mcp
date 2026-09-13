@@ -129,10 +129,14 @@ async fn exercise(
         })
         .await;
     if let Err(error) = &result {
-        assert!(
-            matches!(error, ApplicationError::ResourceLimitExceeded(_)),
-            "unexpected failure: {error}"
-        );
+        if enabled && media.starts_with("application/pdf") {
+            assert_eq!(error, &ApplicationError::OcrTimeout);
+        } else {
+            assert!(
+                matches!(error, ApplicationError::ResourceLimitExceeded(_)),
+                "unexpected failure: {error}"
+            );
+        }
     }
     let saved = repository.saved.lock().unwrap().is_some();
     (

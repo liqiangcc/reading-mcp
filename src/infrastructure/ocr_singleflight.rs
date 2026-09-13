@@ -63,11 +63,11 @@ impl OcrSingleFlight {
                     },
                 )
             } else {
-                let capacity = self.capacity.clone().try_acquire_owned().map_err(|_| {
-                    ApplicationError::ResourceLimitExceeded(
-                        "OCR admission queue full (one active, two waiting keys)".into(),
-                    )
-                })?;
+                let capacity = self
+                    .capacity
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| ApplicationError::OcrBusy)?;
                 let (sender, receiver) = watch::channel(None);
                 let active = self.active.clone();
                 let task_key = key.clone();
@@ -78,11 +78,7 @@ impl OcrSingleFlight {
                         let _active =
                             tokio::time::timeout(Duration::from_secs(2), active.acquire_owned())
                                 .await
-                                .map_err(|_| {
-                                    ApplicationError::ResourceLimitExceeded(
-                                        "OCR admission exceeded 2 second queue budget".into(),
-                                    )
-                                })?
+                                .map_err(|_| ApplicationError::OcrBusy)?
                                 .map_err(|_| {
                                     ApplicationError::CacheFailed("OCR admission closed".into())
                                 })?;
@@ -103,11 +99,7 @@ impl OcrSingleFlight {
                     };
                     let outcome = tokio::time::timeout_at(deadline, operation)
                         .await
-                        .unwrap_or_else(|_| {
-                            Err(ApplicationError::ResourceLimitExceeded(
-                                "OCR shared parse exceeded 60 second deadline".into(),
-                            ))
-                        });
+                        .unwrap_or(Err(ApplicationError::OcrTimeout));
                     let _ = sender.send(Some(outcome));
                 });
                 let token = Arc::new(());
@@ -331,16 +323,32 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
-        assert!(error.to_string().contains("queue full"));
+        assert_eq!(error, ApplicationError::OcrBusy);
         for task in [second, third] {
             let error = task.await.unwrap().unwrap_err();
-            assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
-            assert!(error.to_string().contains("2 second"));
+            assert_eq!(error, ApplicationError::OcrBusy);
         }
         assert_eq!(parser.calls.load(Ordering::SeqCst), 1);
         first.abort();
         let _ = first.await;
         until(|| parser.cancelled.load(Ordering::SeqCst) == 1).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_deadline_returns_typed_timeout_and_cancels_without_cache_publication() {
+        let owner = Arc::new(OcrSingleFlight::default());
+        let parser = Arc::new(GateParser::default());
+        let cache = Arc::new(InMemoryParsedDocumentCache::default());
+        let started = tokio::time::Instant::now();
+        let error = request(owner.clone(), "timeout", parser.clone(), cache.clone())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error, ApplicationError::OcrTimeout);
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert_eq!(parser.cancelled.load(Ordering::SeqCst), 1);
+        assert!(cache.get(&input("timeout").0).await.unwrap().is_none());
+        assert!(owner.flights.lock().unwrap().is_empty());
+        assert_eq!(owner.capacity.available_permits(), 3);
     }
 }

@@ -99,16 +99,24 @@ impl OpenDocumentUseCase {
         command: OpenDocumentCommand,
     ) -> Result<OpenDocumentResult, ApplicationError> {
         if self.ocr_enabled {
+            let known_ocr_pdf = std::sync::atomic::AtomicBool::new(false);
             let deadline = Instant::now() + Duration::from_secs(90);
-            timeout_at(deadline, self.execute_inner(command, Some(deadline)))
-                .await
-                .map_err(|_| {
+            timeout_at(
+                deadline,
+                self.execute_inner(command, Some(deadline), Some(&known_ocr_pdf)),
+            )
+            .await
+            .map_err(|_| {
+                if known_ocr_pdf.load(std::sync::atomic::Ordering::Relaxed) {
+                    ApplicationError::OcrTimeout
+                } else {
                     ApplicationError::ResourceLimitExceeded(
                         "OCR whole-open exceeded 90 second deadline".into(),
                     )
-                })?
+                }
+            })?
         } else {
-            self.execute_inner(command, None).await
+            self.execute_inner(command, None, None).await
         }
     }
 
@@ -121,6 +129,7 @@ impl OpenDocumentUseCase {
         &self,
         command: OpenDocumentCommand,
         whole_deadline: Option<Instant>,
+        known_ocr_pdf: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<OpenDocumentResult, ApplicationError> {
         self.source_policy.validate(&command.source).await?;
 
@@ -136,15 +145,14 @@ impl OpenDocumentUseCase {
             .next()
             .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"));
         if self.ocr_enabled && is_pdf {
+            if let Some(known) = known_ocr_pdf {
+                known.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             let deadline = Instant::now() + Duration::from_secs(60);
             let deadline = whole_deadline.map_or(deadline, |whole| whole.min(deadline));
             timeout_at(deadline, self.ingest(resource, Some(deadline)))
                 .await
-                .map_err(|_| {
-                    ApplicationError::ResourceLimitExceeded(
-                        "OCR ingestion exceeded shared 60 second deadline".into(),
-                    )
-                })?
+                .map_err(|_| ApplicationError::OcrTimeout)?
         } else {
             self.ingest(resource, None).await
         }
@@ -156,9 +164,7 @@ impl OpenDocumentUseCase {
         deadline: Option<Instant>,
     ) -> Result<OpenDocumentResult, ApplicationError> {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(ApplicationError::ResourceLimitExceeded(
-                "OCR ingestion deadline exhausted before parsing".into(),
-            ));
+            return Err(ApplicationError::OcrTimeout);
         }
 
         let document = self.parser.parse(resource).await?;
@@ -203,9 +209,7 @@ impl OpenDocumentUseCase {
         // CPU-only projection/profile work may not yield to the timeout. Never
         // start publication after its deadline even in that case.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(ApplicationError::ResourceLimitExceeded(
-                "OCR ingestion deadline exhausted before publication".into(),
-            ));
+            return Err(ApplicationError::OcrTimeout);
         }
         self.repository.save(document.clone()).await?;
         if let Some(index) = &self.text_unit_index {

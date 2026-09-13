@@ -1,0 +1,154 @@
+name: Package OCR private runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable source tag, for example v0.4.0
+        required: true
+        type: string
+      expected_sha:
+        description: Exact frozen source commit SHA
+        required: true
+        type: string
+      publish_assets:
+        description: Upload verified OCR runtime assets to the existing GitHub Release
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ocr-runtime-package-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout packaging infrastructure
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: packaging
+
+      - name: Checkout immutable release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          path: source
+
+      - name: Verify source identity and version
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          actual_sha=$(git -C source rev-parse HEAD)
+          tag_sha=$(git -C source rev-parse "$RELEASE_TAG^{commit}")
+          [[ "$actual_sha" == "$EXPECTED_SHA" && "$tag_sha" == "$EXPECTED_SHA" ]]
+          [[ -z "$(git -C source status --porcelain)" ]]
+          grep -Eq '^version = "0\.4\.0"$' source/Cargo.toml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve pinned engine and interpreter closure on hosted runner
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          python3 source/scripts/ocr/package_engine_dependencies.py --python-runtime --output "$RUNNER_TEMP/ocr-private-runtime"
+          python3 source/scripts/ocr/package_python_dependencies.py --output "$RUNNER_TEMP/ocr-private-wheels"
+
+      - name: Stage reviewed layout model and public smoke inputs
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          python3 source/scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --prepare --model "$root/opt/ocr-layout-model" --output "$RUNNER_TEMP/ocr-layout-model-provenance"
+          mkdir -p "$root/opt/ocr-bootstrap" "$root/opt/ocr-smoke" "$root/tmp" "$root/run"
+          cp -R "$RUNNER_TEMP/ocr-private-wheels/." "$root/opt/ocr-bootstrap/"
+          cp source/src/parsing/pdf_layout_worker.py source/scripts/ocr/offline_runtime_smoke.py source/tests/fixtures/scanned_pdf/pdf/F07.pdf source/tests/fixtures/scanned_pdf/pdf/F11.pdf "$root/opt/ocr-smoke/"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/python3.12 -m venv /opt/ocr-python
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /opt/ocr-python/bin/python -m pip install --no-index --no-cache-dir --require-hashes --find-links /opt/ocr-bootstrap/wheels -r /opt/ocr-bootstrap/requirements.lock
+
+      - name: Run frozen OCR smoke in the staged private root
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
+
+      - name: Build and verify formal immutable runtime archive
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          notice="$root/usr/share/doc/reading-mcp-ocr"
+          mkdir -p "$notice"
+          cp "$RUNNER_TEMP/ocr-private-runtime/manifest.json" "$notice/engine-manifest.json"
+          cp "$RUNNER_TEMP/ocr-private-runtime/apt-source-uris.txt" "$notice/"
+          cp "$RUNNER_TEMP/ocr-private-wheels/manifest.json" "$notice/python-manifest.json"
+          cp "$RUNNER_TEMP/ocr-private-wheels/requirements.lock" "$notice/"
+          cp "$RUNNER_TEMP/ocr-layout-model-provenance/model-manifest.json" "$notice/"
+          cp -R "$RUNNER_TEMP/ocr-private-wheels/notices" "$notice/"
+          mkdir -p "$RUNNER_TEMP/ocr-private-package"
+          python3 source/scripts/ocr/runtime_archive.py build --root "$root" --source-sha "$EXPECTED_SHA" --status formal-v1 --output "$RUNNER_TEMP/ocr-private-package/build"
+          archive="$RUNNER_TEMP/ocr-private-package/build/ocr-private-runtime.tar.gz"
+          archive_sha=$(cut -d ' ' -f 1 "$RUNNER_TEMP/ocr-private-package/build/SHA256SUMS")
+          python3 source/scripts/ocr/runtime_archive.py unpack --archive "$archive" --sha256 "$archive_sha" --source-sha "$EXPECTED_SHA" --output "$RUNNER_TEMP/ocr-private-package/verified"
+          python3 - "$RUNNER_TEMP/ocr-private-package/build/runtime-manifest.json" "$RUNNER_TEMP/ocr-private-package/verification.json" "$archive" "$archive_sha" "$EXPECTED_SHA" <<'PY'
+          import hashlib, json, pathlib, sys
+          manifest, output, archive, archive_sha, source_sha = sys.argv[1:]
+          data = pathlib.Path(manifest).read_bytes()
+          report = {
+              'schema': 'reading-mcp-ocr-runtime-package-verification/v1',
+              'source_sha': source_sha,
+              'archive': pathlib.Path(archive).name,
+              'archive_sha256': archive_sha,
+              'archive_bytes': pathlib.Path(archive).stat().st_size,
+              'manifest': pathlib.Path(manifest).name,
+              'manifest_sha256': hashlib.sha256(data).hexdigest(),
+              'manifest_bytes': len(data),
+              'status': json.loads(data)['status'],
+              'verification': 'hosted-build-smoke-unpack-success',
+          }
+          pathlib.Path(output).write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+          PY
+          final="$RUNNER_TEMP/ocr-private-package/final"
+          mkdir -p "$final"
+          cp "$archive" "$final/ocr-private-runtime-v0.4.0-linux-x86_64.tar.gz"
+          cp "$RUNNER_TEMP/ocr-private-package/build/runtime-manifest.json" "$final/ocr-private-runtime-v0.4.0-runtime-manifest.json"
+          cp "$RUNNER_TEMP/ocr-private-package/verification.json" "$final/OCR-RUNTIME-VERIFICATION.json"
+          sha256sum "$final/ocr-private-runtime-v0.4.0-linux-x86_64.tar.gz" "$final/ocr-private-runtime-v0.4.0-runtime-manifest.json" "$final/OCR-RUNTIME-VERIFICATION.json" > "$final/OCR-RUNTIME-SHA256SUMS"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-private-runtime-v0.4.0-linux-x86_64
+          path: ${{ runner.temp }}/ocr-private-package/final
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Publish immutable OCR runtime assets to existing Release
+        if: ${{ inputs.publish_assets }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          for asset in "$RUNNER_TEMP/ocr-private-package/final"/*; do
+            name=$(basename "$asset")
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              echo "refusing to overwrite existing release asset: $name" >&2
+              exit 1
+            fi
+          done
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/ocr-private-package/final"/* --repo "$GITHUB_REPOSITORY"

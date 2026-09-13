@@ -135,11 +135,13 @@ def inventory(root):
     return sorted(entries, key=lambda item: item['path'])
 
 
-def build(root, output, source_sha):
+def build(root, output, source_sha, status='candidate'):
+    if status not in ('candidate', 'formal-v1'):
+        raise ValueError('unsupported runtime archive status')
     entries = inventory(root)
     indexed = {item['path']: item for item in entries}
     manifest = {'schema': SCHEMA, 'source_sha': source_sha,
-        'status': 'candidate private interpreter/engine root; not final classifier runtime or deployment',
+        'status': status,
         'entries': entries, 'regular_file_bytes': sum(item.get('bytes', 0) for item in entries),
         'provenance': {name: indexed[f'{NOTICE_ROOT}/{name}']['sha256'] for name in PROVENANCE}}
     validate(manifest)
@@ -306,9 +308,10 @@ def main():
     parser.add_argument('--sha256')
     parser.add_argument('--source-sha', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--status', choices=('candidate', 'formal-v1'), default='candidate')
     args = parser.parse_args()
     if args.operation == 'build':
-        result = build(args.root, args.output, args.source_sha)
+        result = build(args.root, args.output, args.source_sha, args.status)
     else:
         result = unpack(args.archive, args.sha256, args.output, args.source_sha)
     print(json.dumps(result, sort_keys=True), flush=True)

@@ -31,9 +31,9 @@ normalization v9 / segmentation v3 与线上候选一致；旧 v8 文档须显�
 
 Windows 上默认 state root 使用 `%USERPROFILE%\.reading-mcp`。
 
-## 本地 OCR 与私有运行包（#95 开发分支，尚未生产验收）
+## 本地 OCR 与私有运行包（#95，v0.4.0）
 
-OCR 默认关闭；部署者可显式配置 `READING_MCP_OCR_ENABLED=true`、
+OCR 默认关闭；完成 Package/Deployment Protocol 后，部署者可显式配置 `READING_MCP_OCR_ENABLED=true`、
 `READING_MCP_OCR_LANG=eng|chi_sim|eng+chi_sim`、`READING_MCP_OCR_REVISION`，
 以及绝对路径 `READING_MCP_OCR_ENGINE` / `READING_MCP_OCR_TESSDATA`。
 固定 DPI=300、OEM=1、primary PSM=3，几何冲突才使用已版本化的一次区域重试。

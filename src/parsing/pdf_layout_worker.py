@@ -31,6 +31,7 @@ PAGE_DEADLINE = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
 INPUT_SHA256 = None
+WORKER_SOURCE = None
 INSPECTION_POLICY = "ocr-original-region-inspection/v5"
 
 # Approved immutable local classifier. A model path is operator/package-owned;
@@ -1134,7 +1135,7 @@ def project(layout):
 
 
 def main():
-    global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256
+    global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256, WORKER_SOURCE
     protocol_stdout = sys.stdout
     if len(sys.argv) == 5 and sys.argv[1] == '--visual-model':
         visual_model_child(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
@@ -1156,6 +1157,8 @@ def main():
         EXPECTED_IDENTITY = json.loads(sys.argv[5])
         if EXPECTED_IDENTITY.get("config") != OCR_CONFIG:
             raise ValueError("OCR config does not match expected identity")
+    if len(sys.argv) > 6 and sys.argv[6]:
+        WORKER_SOURCE = sys.argv[6]
     actual_dependencies = None
     if OCR_CONFIG.get("enabled"):
         RASTER_BUDGET = OcrRasterBudget()
@@ -1181,6 +1184,8 @@ def main():
     visual_model_enabled = bool(OCR_CONFIG.get('enabled') and EXPECTED_IDENTITY
                                 and EXPECTED_IDENTITY.get('runtime_package') is not None)
     if visual_model_enabled:
+        if not WORKER_SOURCE:
+            raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model worker source is missing')
         # Render with the small PyMuPDF binding first, classify in a child, and
         # only then import pymupdf4llm. The child exits before layout/OCR work.
         import pymupdf
@@ -1196,7 +1201,7 @@ def main():
                     RASTER_BUDGET.reserve_raster(raster_pixel_count(visual_page, OCR_CONFIG['dpi']))
                 pixmap = visual_page.get_pixmap(dpi=OCR_CONFIG['dpi'], colorspace=pymupdf.csRGB, alpha=False)
                 child = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', '-c',
-                    WORKER, '--visual-model', '/opt/ocr-layout-model',
+                    WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
                     str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
                     capture_output=True, timeout=min(15, page_time_remaining()), check=False)
                 if child.returncode != 0 or len(child.stdout) > 4 * 1024 * 1024:

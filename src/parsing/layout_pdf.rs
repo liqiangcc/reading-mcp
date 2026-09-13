@@ -457,6 +457,7 @@ impl Parser for LayoutPdfParser {
                     .and_then(|i| serde_json::to_string(i).ok())
                     .unwrap_or_default(),
             )
+            .arg(WORKER)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

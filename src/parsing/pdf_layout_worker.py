@@ -968,12 +968,24 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
     unanchored = [region['prediction_index'] for region in regions if not region['box_sources']]
     def text_region(box):
         centers = [((word['bbox'][0] + word['bbox'][2]) / 2,
-                    (word['bbox'][1] + word['bbox'][3]) / 2)
+                   (word['bbox'][1] + word['bbox'][3]) / 2)
                    for line in box.get('textlines', []) for word in line['spans']]
-        matches = [region['prediction_index'] for region in text_regions if centers and
-                   all(region['bbox'][0] <= x <= region['bbox'][2] and
-                       region['bbox'][1] <= y <= region['bbox'][3] for x,y in centers)]
-        return matches[0] if len(matches) == 1 else None
+        if not centers:
+            return None
+        box_bounds = [box[key] for key in ('x0', 'y0', 'x1', 'y1')]
+        box_area = max(0.0, (box_bounds[2] - box_bounds[0]) * (box_bounds[3] - box_bounds[1]))
+        matches = []
+        for region in text_regions:
+            x0, y0, x1, y1 = region['bbox']
+            all_centers = all(x0 <= x <= x1 and y0 <= y <= y1 for x, y in centers)
+            overlap = max(0.0, min(box_bounds[2], x1) - max(box_bounds[0], x0)) * max(
+                0.0, min(box_bounds[3], y1) - max(box_bounds[1], y0))
+            box_center_inside = x0 <= (box_bounds[0] + box_bounds[2]) / 2 <= x1 and y0 <= (box_bounds[1] + box_bounds[3]) / 2 <= y1
+            if all_centers or (box_area > 0 and box_center_inside and overlap / box_area >= 0.75):
+                matches.append((region['prediction_index'], all_centers, overlap / box_area if box_area else 0.0))
+        if len(matches) != 1:
+            return None
+        return matches[0][0]
     ordered, source_groups, merges = [], [], []
     for index, box in enumerate(projected):
         model_ref = text_region(box)

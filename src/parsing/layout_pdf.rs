@@ -25,7 +25,7 @@ use crate::domain::{
 use crate::infrastructure::ResourceBudget;
 
 pub const PDF_LAYOUT_CACHE_NAMESPACE: &str =
-    "pdf-layout/v2:required-inspection/v1:pymupdf4llm-layout/1.28.2";
+    "pdf-layout/v2:required-inspection/v2:pymupdf4llm-layout/1.28.2";
 const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OCR_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;

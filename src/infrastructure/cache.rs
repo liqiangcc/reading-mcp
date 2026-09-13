@@ -206,8 +206,12 @@ mod tests {
         };
         for (namespace, expected) in [
             ("pdf-layout/v1:pymupdf4llm-layout/1.28.2", 1),
-            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 2),
-            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 2),
+            (
+                "pdf-layout/v2:required-inspection/v1:pymupdf4llm-layout/1.28.2",
+                2,
+            ),
+            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 3),
+            (crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE, 3),
         ] {
             CachingParser::new(
                 Arc::new(FakeParser {

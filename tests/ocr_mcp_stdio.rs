@@ -116,6 +116,22 @@ async fn mixed_native_order_survives_real_mcp_publication_and_restart() {
 #[ignore = "requires pinned hosted OCR dependencies"]
 async fn disabled_ocr_preserves_native_documents_and_rejects_incomplete_scans() {
     let directory = tempfile::tempdir().unwrap();
+    let inputs = std::path::PathBuf::from(std::env::var("READING_MCP_MIXED_ORDER_DIR").unwrap());
+    let mixed_cases = [
+        "scan_then_native",
+        "native_then_scan",
+        "alternating_vertical",
+        "scan_left_native_right",
+        "native_left_scan_right",
+        "alternating_columns",
+    ];
+    for case in mixed_cases {
+        std::fs::copy(
+            inputs.join(format!("{case}.pdf")),
+            directory.path().join(format!("{case}.pdf")),
+        )
+        .unwrap();
+    }
     for case in ["F01", "F02", "F03", "F05", "F12"] {
         std::fs::copy(
             format!("tests/fixtures/scanned_pdf/pdf/{case}.pdf"),
@@ -154,7 +170,7 @@ async fn disabled_ocr_preserves_native_documents_and_rejects_incomplete_scans() 
     }
     let before = published_documents(&state);
     assert_eq!(before.len(), 2);
-    for case in ["F02", "F05", "F12"] {
+    for case in ["F02", "F05", "F12"].into_iter().chain(mixed_cases) {
         let error = tokio::time::timeout(std::time::Duration::from_secs(30),
             client.call_tool(CallToolRequestParams::new("open_document").with_arguments(
                 arguments(json!({"source":directory.path().join(format!("{case}.pdf")), "force_refresh":true})),

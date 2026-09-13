@@ -323,12 +323,13 @@ def cjk(value):
     return value and ("\u3400" <= value <= "\u9fff" or "\uf900" <= value <= "\ufaff")
 
 
-def prepare_page_raster(page):
+def prepare_page_raster(page, dpi=None):
     import pymupdf
-    pixels = raster_pixel_count(page, OCR_CONFIG["dpi"])
+    dpi = OCR_CONFIG['dpi'] if dpi is None else dpi
+    pixels = raster_pixel_count(page, dpi)
     if RASTER_BUDGET is not None:
         RASTER_BUDGET.reserve_raster(pixels)
-    return page.get_pixmap(dpi=OCR_CONFIG["dpi"], colorspace=pymupdf.csRGB, alpha=False)
+    return page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
 
 def blank_raster_evidence(page, pixmap):
     samples = pixmap.samples
@@ -339,7 +340,7 @@ def blank_raster_evidence(page, pixmap):
             "white_samples": len(samples), "glyph_spans": 0,
             "samples_sha256": hashlib.sha256(samples).hexdigest()}
 
-def native_raster_coverage(page, pixmap, regions):
+def native_raster_coverage(page, pixmap, regions, dpi=None):
     # Exact white-background coverage, never an English length/confidence rule.
     # Unsupported transforms do not prove coverage and therefore require OCR.
     if not regions or page.rotation != 0 or pixmap.n != 3:
@@ -349,7 +350,7 @@ def native_raster_coverage(page, pixmap, regions):
         raise ValueError('invalid coverage raster')
     masked = bytearray(samples)
     masks = []
-    scale = OCR_CONFIG['dpi'] / 72
+    scale = (OCR_CONFIG['dpi'] if dpi is None else dpi) / 72
     compact = lambda text: ''.join(unicodedata.normalize('NFKC', text).split())
     for span in page.get_texttrace():
         page_time_remaining()
@@ -385,6 +386,53 @@ def native_raster_coverage(page, pixmap, regions):
             'source_samples_sha256': hashlib.sha256(samples).hexdigest(),
             'masked_samples_sha256': hashlib.sha256(masked).hexdigest(),
             'uncovered_samples': len(masked) - masked.count(255), 'masks': masks}
+
+def require_disabled_page_coverage(page, page_layout):
+    """Never publish a native subset while an unrepresented raster remains.
+
+    Existing layout visual regions retain their original-page evidence. This is
+    coverage inspection only: it does not classify an image as recognized text.
+    No OCR configuration, models, engine or subprocess is needed.
+    """
+    global PAGE_DEADLINE
+    if not page.get_image_info():
+        return
+    if not has_native_body(page_layout):
+        raise OcrRequired('image-only page requires local OCR inspection')
+    previous = PAGE_DEADLINE
+    PAGE_DEADLINE = time.monotonic() + 15
+    try:
+        pixmap = prepare_page_raster(page, dpi=300)
+        coverage = native_raster_coverage(page, pixmap, native_text_regions(page_layout), dpi=300)
+        if coverage is None or not coverage['masks']:
+            raise OcrRequired('native image coverage cannot be proven')
+        if coverage['uncovered_samples'] == 0:
+            return
+        masked = bytearray(pixmap.samples)
+        rectangles = [mask['pixel_bbox'] for mask in coverage['masks']]
+        for box in page_layout['boxes']:
+            if box.get('boxclass') not in ('image', 'picture', 'figure', 'table'):
+                continue
+            bbox = [box[key] for key in ('x0', 'y0', 'x1', 'y1')]
+            if (not all(math.isfinite(value) for value in bbox)
+                    or not (0 <= bbox[0] < bbox[2] <= page.rect.width
+                            and 0 <= bbox[1] < bbox[3] <= page.rect.height)):
+                raise OcrRequired('invalid original visual coverage')
+            # Use only the actual retained layout rectangle, without padding.
+            # Pixels crossing the boundary remain unknown instead of being erased.
+            scale = 300 / 72
+            rectangles.append([math.ceil(bbox[0] * scale), math.ceil(bbox[1] * scale),
+                               math.floor(bbox[2] * scale), math.floor(bbox[3] * scale)])
+        for x0, y0, x1, y1 in rectangles:
+            page_time_remaining()
+            for row in range(y0, y1):
+                start = (row * pixmap.width + x0) * 3
+                masked[start:start + max(0, x1 - x0) * 3] = b'\xff' * (max(0, x1 - x0) * 3)
+        page_time_remaining()
+        if masked.count(255) != len(masked):
+            raise OcrRequired('mixed page contains raster content without source coverage')
+    finally:
+        PAGE_DEADLINE = previous
 
 def ocr_page(page, language=None, excluded_regions=()):
     """Run the deployer-selected local Tesseract and retain engine grouping."""
@@ -904,12 +952,9 @@ def main():
                 raise ValueError("PDF exceeds page limit or has no pages")
             layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
             if not OCR_CONFIG.get('enabled', False):
-                # Do not publish only the native subset of a multi-page PDF.
-                # This is an inspection requirement, not a claim that images
-                # contain readable text. Native blank/vector pages are unchanged.
-                if any(not has_native_body(page_layout) and page.get_images(full=True)
-                       for page, page_layout in zip(doc, layout['pages'])):
-                    raise OcrRequired('image-only page requires local OCR inspection')
+                RASTER_BUDGET = OcrRasterBudget()
+                for page, page_layout in zip(doc, layout['pages']):
+                    require_disabled_page_coverage(page, page_layout)
             if OCR_CONFIG.get("enabled", False):
                 language = "+".join(OCR_CONFIG["languages"])
                 for page, page_layout in zip(doc, layout["pages"]):

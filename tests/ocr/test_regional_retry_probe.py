@@ -75,6 +75,41 @@ class RegionalGeometryTests(unittest.TestCase):
         pix.samples = bytes(samples)
         self.assertEqual(worker['native_raster_coverage'](page, pix, regions)['uncovered_samples'], 0)
 
+    def test_disabled_mixed_coverage_needs_no_engine_and_preserves_visual_regions(self):
+        worker, _ = self.deadline_worker()
+        worker['OCR_CONFIG'] = {'enabled': False}
+        bbox = [0, .01, .1, .2]
+        page = SimpleNamespace(rotation=0, rect=SimpleNamespace(width=2.4, height=.24),
+            get_image_info=lambda: [{}],
+            get_texttrace=lambda: [{'bbox':bbox, 'chars':[(ord('X'), 0, (0,0), bbox)]}])
+        pixels = bytearray(b'\xff' * 30)
+        pixels[0:3] = b'\0' * 3
+        pixels[24:27] = b'\0' * 3
+        pixmap = SimpleNamespace(n=3, width=10, height=1, samples=bytes(pixels))
+        worker['prepare_page_raster'] = lambda page, dpi: pixmap
+        worker['ocr_page'] = lambda *args, **kwargs: self.fail('disabled must not invoke OCR')
+        native = {'boxclass':'text', 'x0':0, 'y0':0, 'x1':.2, 'y1':.24,
+                  'textlines':[{'spans':[{'text':'X', 'bbox':bbox, 'size':12, 'flags':0}]}]}
+        layout = {'boxes':[native]}
+        with self.assertRaises(worker['OcrRequired']):
+            worker['require_disabled_page_coverage'](page, layout)
+        self.assertIsNone(worker['PAGE_DEADLINE'])
+        visual = {'boxclass':'picture', 'x0':1.68, 'y0':0, 'x1':2.4, 'y1':.24, 'textlines':[]}
+        layout['boxes'].append(visual)
+        original = copy.deepcopy(layout)
+        worker['require_disabled_page_coverage'](page, layout)
+        self.assertEqual(layout, original)
+        self.assertEqual(pixmap.samples, bytes(pixels))
+        # A region which misses the unknown pixel must not authorize publication.
+        visual['x0'] = 2.16
+        with self.assertRaises(worker['OcrRequired']):
+            worker['require_disabled_page_coverage'](page, layout)
+        layout['boxes'] = [native]
+        pixels[24:27] = b'\xff' * 3
+        pixmap.samples = bytes(pixels)
+        worker['require_disabled_page_coverage'](page, layout)
+        self.assertIsNone(worker['PAGE_DEADLINE'])
+
     def test_exhausted_primary_never_starts_retry_and_restores_state(self):
         worker, clock = self.deadline_worker()
         calls = []

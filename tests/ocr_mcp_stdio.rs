@@ -30,6 +30,116 @@ fn published_documents(state: &std::path::Path) -> Vec<String> {
 
 #[tokio::test]
 #[ignore = "requires pinned hosted OCR dependencies"]
+async fn frozen_four_page_cold_and_restarted_warm_open_budgets() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("public-F05.pdf");
+    let raw = std::fs::read("tests/fixtures/scanned_pdf/pdf/F05.pdf").unwrap();
+    std::fs::write(&path, &raw).unwrap();
+    let raw_hash = format!("sha256:{:x}", sha2::Sha256::digest(&raw));
+    let mut report = Vec::new();
+    for trial in 0..5 {
+        // Each cold run starts with a distinct absent persistent state. Warm
+        // runs restart the actual server, retaining only that trial's state.
+        let state = directory.path().join(format!("state-{trial}"));
+        assert!(!state.exists());
+        let mut cold_identity = None;
+        for warm in [false, true] {
+            let telemetry_path = directory.path().join(format!("telemetry-{trial}-{warm}"));
+            let telemetry = std::fs::File::create(&telemetry_path).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
+            command
+                .env(
+                    "READING_MCP_LOCAL_ROOTS",
+                    std::env::join_paths([directory.path()]).unwrap(),
+                )
+                .env("READING_MCP_STATE_DIR", &state)
+                .env("READING_MCP_TELEMETRY", "true")
+                .env(
+                    "READING_MCP_PDF_LAYOUT_PYTHON",
+                    std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
+                )
+                .env("READING_MCP_OCR_ENABLED", "true")
+                .env("READING_MCP_OCR_ENGINE", "/usr/bin/tesseract")
+                .env(
+                    "READING_MCP_OCR_TESSDATA",
+                    "/usr/share/tesseract-ocr/5/tessdata",
+                )
+                .env("READING_MCP_OCR_LANG", "eng")
+                .env("READING_MCP_OCR_REVISION", "1")
+                .kill_on_drop(true);
+            let budget = std::time::Duration::from_secs(if warm { 5 } else { 45 });
+            let started = tokio::time::Instant::now();
+            let deadline = started + budget;
+            let (transport, _) = TokioChildProcess::builder(command)
+                .stderr(telemetry)
+                .spawn()
+                .unwrap();
+            let client = tokio::time::timeout_at(deadline, ().serve(transport))
+                .await
+                .expect("server startup exceeded shared benchmark budget")
+                .unwrap();
+            let opened = tokio::time::timeout_at(
+                deadline,
+                client.call_tool(CallToolRequestParams::new("open_document").with_arguments(
+                    arguments(json!({
+                        "source":path, "force_refresh":true
+                    })),
+                )),
+            )
+            .await
+            .expect("open exceeded shared benchmark budget")
+            .unwrap()
+            .into_typed::<OpenDocumentResponse>()
+            .unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(opened.content_hash, raw_hash);
+            if let Some(identity) = &cold_identity {
+                assert_eq!(&opened.normalized_document_hash, identity);
+            } else {
+                cold_identity = Some(opened.normalized_document_hash.clone());
+            }
+            client.cancel().await.unwrap();
+            let events: Vec<Value> = std::fs::read_to_string(&telemetry_path)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            let cache_gets: Vec<_> = events
+                .iter()
+                .filter(|event| event["event"] == "parsed_cache_get")
+                .collect();
+            // Cold opens recheck after single-flight admission; warm hits return
+            // before admission and must have exactly one successful lookup.
+            assert_eq!(cache_gets.len(), if warm { 1 } else { 2 });
+            for event in cache_gets {
+                assert_eq!(event["success"], true);
+                assert_eq!(event["hit"], warm);
+            }
+            let cache_puts = events
+                .iter()
+                .filter(|event| event["event"] == "parsed_cache_put")
+                .count();
+            assert_eq!(cache_puts, usize::from(!warm));
+            // A successful hit returns before the inner Parser in CachingParser;
+            // this is a cache bypass proof, not a fabricated engine counter.
+            let record = json!({"trial":trial, "warm_after_restart":warm,
+                "startup_and_open_seconds":elapsed.as_secs_f64(), "limit_seconds":budget.as_secs(),
+                "parsed_cache_hit":warm, "parsed_cache_put_events":cache_puts,
+                "normalized_document_hash":opened.normalized_document_hash});
+            println!("frozen_F05_mcp_performance {}", record);
+            report.push(record);
+        }
+    }
+    println!(
+        "{}",
+        json!({"schema":"ocr-frozen-four-page-mcp-performance/v1",
+        "fixture":"F05", "scope":"hosted stdio; not production connector or private-paper acceptance",
+        "raw_sha256":raw_hash, "runs":report})
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let directory = tempfile::tempdir().unwrap();

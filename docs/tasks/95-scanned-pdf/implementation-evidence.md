@@ -343,3 +343,22 @@ reap 后复用 PID 的清理风险。只限制依赖发现，不改变 fingerpri
 持有输出管道的超时测试；后者证明无可执行后代/打开管道，孤儿 zombie 的
 最终 reap 仍由 init 负责，不把它当成完整 OCR cgroup 回收测试。Python 测试
 接入 hosted workflow，Rust 随全量 tests；本机仅 fmt/py_compile。
+
+`b80f93f4cf6728b89c594ae013d91d38d86e389f` 的 hosted
+[Rust run 34736375280](https://github.com/liqiangcc/reading-mcp/actions/runs/34736375280)
+已 success，包含 Format/Clippy/全量 Test、真实 PDF/layout 和 package smoke。
+[真实 OCR run 34736375290](https://github.com/liqiangcc/reading-mcp/actions/runs/34736375290)
+及 `34736374033` success；已读前者日志：Python 三个依赖进程故障测试
+0.215s，实际 stdio 15.58s、HTTP 8.13s、F07 systemd 5.08s、五项隔离故障
+1.83s。离线私有环境 `34736375237` 同样 success。此记录不借用旧 SHA 的
+结果，也不把各套测试累计耗时当作单次 ingestion 性能。
+
+后续新增冻结 F05 的真实 stdio 性能测试（待该测试提交的 hosted 结果）：
+五个独立空状态分别冷打开，逐轮重新启动 server 后暖打开。计时含启动/
+身份验证/initialize/open，不含之后的测试清理，分别要求 <=45s / <=5s。
+`force_refresh=true` 不跳过源重新获取；观察现有实际 parsed-cache telemetry，
+冷启动两次 miss（入队前/后）且一次 put，暖启动一次 hit、零 put，并要求
+raw/normalized identity 相同。成功 hit 在现有 CachingParser 中直接返回、
+不进入底层 OCR Parser；报告称 cache bypass 证据，不捏造额外的引擎计数器。
+此项仅是冻结四页混合 F05 的 hosted stdio 验收，不代替生产 connector 的
+真实 deadline、10 秒余量、私有原始四页论文或最终 package 的本机实测。

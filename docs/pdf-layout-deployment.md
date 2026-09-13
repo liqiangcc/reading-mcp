@@ -1,9 +1,9 @@
 # PDF layout 主线前置整合
 
-本次仅整合已在线上候选 `1569c68d6220d129beb1f3218cd22d57f26f331c`
-使用的 opt-in layout / original-page renderer，不发布或部署中间版本，不启用 OCR。
-后续 #95 按已批准设计实现和验收后，才走独立 Release / Package / Deployment。
-Cargo 版本保持当前 main 的 0.3.0；没有重写 v0.3.0 或 v0.4.0-rc.1 tag/asset。
+本页记录已发布的 v0.4.1：source `a9c811b5d9e11e6d6be9fef37f99dd8b6701cddd`。
+PDF layout / original-page renderer 与 #95 本地 OCR 均通过 hosted 构建、解包和真实引擎
+验证；OCR 仍是 opt-in，生产仅使用经过 manifest/hash 校验的私有 runtime Release 资产。
+历史 v0.3.0 与 v0.4.0-rc.1 tag/asset 保持不变，不覆盖旧版本。
 
 ## 依赖与启用
 
@@ -31,9 +31,10 @@ normalization v9、segmentation v3、normalized hash v2；PDF parsed cache names
 这不是后续 OCR v11/hash-v3 迁移。
 
 版面分类/平面章节是推断事实，不能宣称已重建全部目录。非正文保留 coarse/visual
-证据，模糊连字符保留；图像页/OCR 识别未启用。`integrity=valid` 只证明内部映射，
-不证明识别准确率、完整出版物覆盖或 #95 完成。保持 main #92 的方向/作用域完成契约。
-现有 worker timeout/kill 不视为未来 OCR 子进程树回收已经验证。
+证据，模糊连字符保留；图像页 OCR 仅在显式 enabled 且私有 runtime 完整校验后执行。
+`integrity=valid` 只证明内部映射；v0.4.1 的生产 E2E 已验证 F07 的 open、structure、
+sentence units、exact read、original source view，以及重启后的 cache/locator 复用。
+冻结质量报告中的 F07/F08 CER 仍按原门槛记录为失败，未修改 gold 或阈值。
 
 最终部署前保留已校验旧二进制、旧 Python 环境、service config/drop-ins 和一致性
 state snapshot；整体恢复原 tuple，不让旧 binary 读取不兼容 state。不 tar 活跃
@@ -47,5 +48,6 @@ SQLite/WAL 作为唯一一致性备份。不覆盖 tag/asset、不删除 canonic
 其中旧测试结果是历史证据，不能替代本 PR 精确 head 的 hosted CI。
 
 CI 执行 Format/Clippy/full Test、结构化投影 fixtures、真实 pinned engine 的原生
-PDF worker 和原页渲染/预算测试、package smoke。仅构造字典的测试不算真实 OCR
-验证；本 PR 没有 OCR 实现，也不对真实扫描论文作准确率或部署成功声明。
+PDF worker 和原页渲染/预算测试、package smoke，以及私有 runtime 的 hosted 离线
+重建/解包 smoke。生产部署使用 Release v0.4.1 的持久资产和不可变版本目录；不对
+私有论文上传或云 OCR，准确率门槛仍以冻结 synthetic 质量报告独立验收。

@@ -1,4 +1,4 @@
-# #95 实现证据（进行中，未发布/部署）
+# #95 实现证据（v0.4.1 已发布并部署；质量复核持续保留）
 
 Coordinator 在 [5644066400](https://github.com/liqiangcc/reading-mcp/issues/95#issuecomment-5644066400)
 冻结 fixture commit `7b68a6e7b1a518ef7276f8d3a0ac006639121117`，manifest SHA256
@@ -75,9 +75,16 @@ F14 CER 1/2102、WER 1/384。这是五例已接入质量门槛，非整个第 7 
 OriginalSourceBindingMap digest 填入 typed derivation；normalized hash v3 绑定这些字段。
 OpenDocument/缓存/仓库发布和加载路径拒绝坏 derivation 或 binding mismatch。
 
-本节新增代码须由当前 head Actions 验证。仍未完成：所有冻结 fixture 的完整 MCP
-质量/边界/locator 验收、混合页与 visual 分类闭环、共享预算/进程树隔离与取消、
-离线依赖包、生产资源和 connector 时限实测、最终主控审查及 release/package/deploy。
+本节新增代码须由当前 head Actions 验证。v0.4.1 已完成正式 release/package/deploy：
+source `a9c811b5d9e11e6d6be9fef37f99dd8b6701cddd`，hosted binary run
+`34773187052`、OCR runtime run `34773188727` 均成功。Release 资产与摘要见
+Issues [#100](https://github.com/liqiangcc/reading-mcp/issues/100)、
+[#101](https://github.com/liqiangcc/reading-mcp/issues/101)、
+[#102](https://github.com/liqiangcc/reading-mcp/issues/102)。生产安装保留不可变
+runtime root、manifest、binary rollback checkpoint；真实 MCP F07 E2E 已验证
+open→structure→sentence units→exact read→original source view，并在新进程重启后
+复用 normalized hash 与 locator。冻结质量报告中的 F07/F08 CER 失败仍原样保留，
+不把部署 smoke 当作准确率通过，也未修改 gold/阈值。
 
 ## 执行边界增量（2026-09-12，未部署）
 

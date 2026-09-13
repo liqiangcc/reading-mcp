@@ -113,9 +113,11 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
     let f11_units = f11.try_paragraph_text_units().unwrap().units;
     assert!(!f11_units.is_empty());
     let prose_paragraphs = f11
-        .root_sections
+        .normalized_block_map()
+        .unwrap()
+        .unwrap()
+        .blocks
         .iter()
-        .flat_map(|section| section.content.iter())
         .filter(|block| block.kind == reading_mcp::domain::NormalizedBlockKind::Paragraph)
         .count();
     assert_eq!(prose_paragraphs, 6);

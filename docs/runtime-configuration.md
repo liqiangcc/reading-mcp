@@ -20,20 +20,20 @@ Telemetry       = stderr JSON enabled
 
 Sentence enumeration 不需要 Sentence SQLite rows；它从 persisted canonical Document 确定性 materialize。
 
-## 可选 PDF layout（#95 主线前置整合）
+## 可选 PDF layout（#95 主线能力）
 
 `READING_MCP_PDF_LAYOUT_PYTHON` 必须为安装了固定 1.28.2 PDF 依赖的 Python
 解释器绝对路径；默认未配置，沿用默认 PDF backend。配置后同时启用 layout parser
-和原始 PDF 页 renderer，不启用 OCR。解析沿用 `READING_MCP_PARSE_TIMEOUT_SECS`
+和原始 PDF 页 renderer；OCR 仍需单独显式开启。解析沿用 `READING_MCP_PARSE_TIMEOUT_SECS`
 及既有字节/页数/字符预算；source-view 仍遵守自己的像素/输出/时限预算。
 normalization v9 / segmentation v3 与线上候选一致；旧 v8 文档须显式 reopen。
 依赖准备、缓存区分及回滚约束见 [PDF layout](pdf-layout-deployment.md)。
 
 Windows 上默认 state root 使用 `%USERPROFILE%\.reading-mcp`。
 
-## 本地 OCR 与私有运行包（#95，v0.4.0）
+## 本地 OCR 与私有运行包（#95，v0.4.1）
 
-OCR 默认关闭；完成 Package/Deployment Protocol 后，部署者可显式配置 `READING_MCP_OCR_ENABLED=true`、
+OCR 默认关闭；生产 v0.4.1 已完成 Package/Deployment Protocol，部署者仍须显式配置 `READING_MCP_OCR_ENABLED=true`、
 `READING_MCP_OCR_LANG=eng|chi_sim|eng+chi_sim`、`READING_MCP_OCR_REVISION`，
 以及绝对路径 `READING_MCP_OCR_ENGINE` / `READING_MCP_OCR_TESSDATA`。
 固定 DPI=300、OEM=1、primary PSM=3，几何冲突才使用已版本化的一次区域重试。

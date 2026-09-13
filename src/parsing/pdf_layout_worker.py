@@ -1134,6 +1134,28 @@ def project(layout):
     return {"schema_version": VERSION, "engine": ENGINE, "page_count": layout["page_count"], "pages_without_text": sum(not any((b.get("textlines") or []) for b in p["boxes"]) for p in layout["pages"]), "sections": sections, "regions": regions, "ocr_evidence": ocr_evidence, "preserved_ambiguous_hyphens": uncertain}
 
 
+def selected_ocr_evidence(observations):
+    """Reconstruct selected words in the immutable selection-reference order.
+
+    Visual projection may reorder layout boxes, but it must never change the
+    order or membership of typed OCR evidence selected by the page diagnostic.
+    """
+    evidence = []
+    for page in observations:
+        attempts = {attempt['id']: attempt for attempt in page['attempts']}
+        for selection in page['selection']:
+            source = selection['source']
+            attempt = attempts[source['attempt']]
+            box = attempt['boxes'][source['box']]
+            for line in box.get('textlines') or []:
+                for span in line.get('spans') or []:
+                    evidence.append({'page': page['page'], 'block': span.get('ocr_block'),
+                                     'paragraph': span.get('ocr_paragraph'),
+                                     'line': span.get('ocr_line'), 'text': span['text'],
+                                     'bbox': span['bbox'], 'confidence': span.get('confidence')})
+    return evidence
+
+
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256, WORKER_SOURCE
     protocol_stdout = sys.stdout
@@ -1297,6 +1319,8 @@ def main():
             raise ValueError("OCR geometric conflict remains unresolved")
         result = project(layout)
         result["ocr_attempts"] = observations
+        if OCR_CONFIG.get("enabled", False):
+            result["ocr_evidence"] = selected_ocr_evidence(observations)
         if visual_model_enabled:
             result["ocr_visual_attempts"] = [
                 dict(visual_results[index], projection=visual_projections[index])

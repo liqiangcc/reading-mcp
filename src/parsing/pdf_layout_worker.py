@@ -909,10 +909,49 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
         if len(sources) > 1:
             merges.append({'source_boxes':sources, 'prediction_index':text_region(box),
                            'bbox':box['bbox'], 'reason':'unfinished_same_region_adjacent_lines'})
+    # Tesseract may emit a lower-page figure while finishing the left column,
+    # before returning to upper right-column prose. Only move model-bound
+    # objects proven wholly below EVERY prose box. Preserve the entire prose
+    # permutation and the engine's order between coarse objects; never y/x sort.
+    bound_sources = {binding['source_box'] for binding in bindings}
+    prose_indices = [index for index, box in enumerate(ordered) if box['boxclass'] == 'text']
+    terminal = []
+    if prose_indices:
+        prose_bottom = max(ordered[index]['y1'] for index in prose_indices)
+        terminal = [index for index, (box, sources) in enumerate(zip(ordered, source_groups))
+                    if box['boxclass'] in ('image', 'formula', 'table')
+                    and all(source in bound_sources for source in sources)
+                    and box['y0'] >= prose_bottom]
+    terminal_set = set(terminal)
+    # Do not move a proven trailing object across some OTHER unproven coarse
+    # object. An overlapping/reversed terminal sequence is also unresolved.
+    unrelated = [index for index, box in enumerate(ordered)
+                 if box['boxclass'] != 'text' and index not in terminal_set]
+    ordering = {'schema':'ocr-terminal-visual-order/v1', 'moves':[],
+                'input_source_groups':copy.deepcopy(source_groups),
+                'output_group_indices':list(range(len(ordered)))}
+    if terminal and (any(index > terminal[0] for index in unrelated)
+                     or any(ordered[left]['y1'] > ordered[right]['y0']
+                            for left, right in zip(terminal, terminal[1:]))):
+        failures.append({'reason':'unproven_terminal_visual_order',
+                         'source_boxes':[source for index in terminal for source in source_groups[index]]})
+    elif terminal:
+        permutation = [index for index in range(len(ordered)) if index not in terminal_set] + terminal
+        for destination, index in enumerate(permutation):
+            if index in terminal_set and destination != index:
+                ordering['moves'].append({'source_boxes':list(source_groups[index]),
+                    'from_group':index, 'to_group':destination,
+                    'prose_source_boxes':[source for p in prose_indices for source in source_groups[p]],
+                    'prose_bottom':prose_bottom, 'visual_top':ordered[index]['y0'],
+                    'reason':'model_bound_wholly_below_all_prose'})
+        ordering['output_group_indices'] = permutation
+        ordered = [ordered[index] for index in permutation]
+        source_groups = [source_groups[index] for index in permutation]
     return ordered, {'schema':'ocr-visual-projection/v1', 'page':page_number,
         'page_bounds':list(page_rect), 'raster_size':list(raster_size),
         'regions':regions, 'bindings':bindings, 'failures':failures,
         'text_regions':text_regions, 'paragraph_merges':merges,
+        'terminal_visual_order':ordering,
         'projected_source_groups':source_groups,
         'unanchored_visual_regions':unanchored, 'complete':not failures and not unanchored}
 

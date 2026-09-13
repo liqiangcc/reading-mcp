@@ -47,3 +47,18 @@ main 的模型身份、typed evidence、Rust 原子发布或生产部署。
 日志修复只停止逐 case 输出巨大的 raw tensor/word 全量行，保留所有八个
 有界摘要以及 F11 canonical blocks。完整 raw 观察继续保存在各 case JSON
 及汇总 artifact，未删减评分、原始证据或正式门槛。
+
+## 完整粗块位置（待 hosted）
+
+design.md 第7节明确 F11 的 unsupported regions 在两栏正文之后。此前
+正文 order=1 不覆盖此要求；6187 实际粗块仍插在左右栏之间。新增有界规则
+只对模型已绑定且真实框完全低于所有正文的对象作末尾移动，保留正文顺序、
+粗块之间原引擎顺序及完整 input/output source-group permutation。不作全页
+x/y 排序，遇到粗块之间逆序/重叠或需越过其他未证明对象时明确失败。
+
+纯几何测试使用非 fixture 坐标覆盖双栏、正文不可按 y 排序、原观察不变、
+部分纵向重叠不得移到末尾，以及粗块逆序拒绝。实际 hosted 诊断在识别结束
+后才读取 gold，另报两个对象的原页/class/中心对应及是否在全部正文之后。
+此 coarse-block 评分不是 Rust Sentence/原页回看验收，也不要求覆盖 gold
+矩形内全部空白。默认运行时尚未启用模型；后续身份及发布接线必须绑定本
+投影策略和原始 model/retry/source-group 证据。

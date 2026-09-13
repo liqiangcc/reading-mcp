@@ -79,3 +79,38 @@ class VisualProjectionTests(unittest.TestCase):
         boxes[1] = self.box([10,50,40,60], 'its distant line.', 2)
         model[0]['coordinate'][3] = 700
         self.assertEqual(len(self.apply(boxes, model)[0]), 2, 'separate blocks must remain separate')
+
+    def test_bottom_visuals_follow_both_columns_without_sorting_prose(self):
+        boxes = [self.box([1,20,20,30], 'Left column.', 1),
+                 self.box([22,62,25,65], 'Real figure label', 2),
+                 self.box([52,82,65,85], 'Real formula', 3),
+                 self.box([50,1,80,10], 'Right column.', 4)]
+        model = [{'label':'image', 'score':.7, 'coordinate':[200,600,300,700]},
+                 {'label':'formula', 'score':.6, 'coordinate':[500,800,700,900]}]
+        original = copy.deepcopy(boxes)
+        result, evidence = self.apply(boxes, model)
+        self.assertTrue(evidence['complete'])
+        self.assertEqual(boxes, original)
+        self.assertEqual([box['ocr_block'] for box in result], [1,4,2,3])
+        self.assertEqual(evidence['projected_source_groups'], [[0],[3],[1],[2]])
+        order = evidence['terminal_visual_order']
+        self.assertEqual(order['input_source_groups'], [[0],[1],[2],[3]])
+        self.assertEqual(order['output_group_indices'], [0,3,1,2])
+        self.assertEqual(len(order['moves']), 2)
+        self.assertEqual([b['textlines'] for b in result], [boxes[i]['textlines'] for i in [0,3,1,2]])
+        # A model box overlapping prose is NOT evidence for a trailing move.
+        model[0]['coordinate'][1] = 100
+        result, evidence = self.apply(boxes, model)
+        self.assertEqual([box['ocr_block'] for box in result], [1,2,4,3])
+        self.assertEqual(evidence['terminal_visual_order']['moves'][0]['source_boxes'], [2])
+
+    def test_reversed_terminal_objects_fail_instead_of_coordinate_sort(self):
+        boxes = [self.box([1,1,10,10], 'Prose.', 1),
+                 self.box([52,82,65,85], 'Formula first in engine', 2),
+                 self.box([22,62,25,65], 'Figure later in engine', 3)]
+        model = [{'label':'image', 'score':.7, 'coordinate':[200,600,300,700]},
+                 {'label':'formula', 'score':.6, 'coordinate':[500,800,700,900]}]
+        result, evidence = self.apply(boxes, model)
+        self.assertFalse(evidence['complete'])
+        self.assertEqual([box['ocr_block'] for box in result], [1,2,3])
+        self.assertEqual(evidence['failures'][0]['reason'], 'unproven_terminal_visual_order')

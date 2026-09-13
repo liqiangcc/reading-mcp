@@ -213,11 +213,41 @@ def child(model, case, output, name, joint_pipeline=False):
         mapping, _ = alignment(reference_text, actual_text)
         paragraph_score = score(expected_ends, actual_ends, mapping)
         order = reading_order([p['text'] for p in gold['paragraphs']], paragraphs)
+        coarse_contract = None
+        if case == 'F11':
+            blocks = [block for section in canonical['sections'] for block in section['blocks']]
+            body_indices = [i for i, block in enumerate(blocks) if block['kind'] == 'paragraph']
+            expected_objects = []
+            for page in gold['pages']:
+                for expected in page.get('regions', []):
+                    kind = 'image' if expected['kind'] == 'chart' else expected['kind']
+                    bbox = expected['bbox']
+                    matches = []
+                    for index, block in enumerate(blocks):
+                        region = block.get('region') or {}
+                        actual_bbox = region.get('bbox')
+                        if (region.get('page') == page['page'] and region.get('class') == kind
+                                and block['kind'] in ('preformatted', 'table') and actual_bbox
+                                and bbox[0] <= (actual_bbox[0] + actual_bbox[2]) / 2 <= bbox[2]
+                                and bbox[1] <= (actual_bbox[1] + actual_bbox[3]) / 2 <= bbox[3]):
+                            matches.append(index)
+                    expected_objects.append({'page':page['page'], 'kind':expected['kind'],
+                        'expected':expected['expected'], 'matching_actual_blocks':matches})
+            unique = all(len(item['matching_actual_blocks']) == 1 for item in expected_objects)
+            object_indices = [item['matching_actual_blocks'][0] for item in expected_objects] if unique else []
+            coarse_contract = {'method':'original-page-kind-and-region-center/v1',
+                'objects':expected_objects, 'expected_count':len(expected_objects),
+                'retained_count':sum(len(item['matching_actual_blocks']) == 1 for item in expected_objects),
+                'after_both_prose_columns':bool(body_indices) and unique and
+                    len(set(object_indices)) == len(expected_objects) and
+                    all(index > max(body_indices) for index in object_indices),
+                'scope':'canonical coarse blocks only; Rust Sentence exclusion and source-view still require integration'}
         quality = {'cer':cer, 'english_wer':wer, 'paragraph_count':len(paragraphs),
             'ambiguous_mixed_paragraphs':ambiguous,
             'visual_mapping_complete':all(p['regional_observations']['complete'] and
                                       p['visual_projection']['complete'] for p in pages),
             'paragraph_boundary':paragraph_score, 'paragraph_order':order,
+            'f11_coarse_contract':coarse_contract,
             'paragraph_contract_met':paragraph_score['f1'] >= .95 and order['proven'] and order['score'] == 1,
             'text_thresholds_met':cer['rate'] is not None and cer['rate'] <= (.02 if case in ('F07','F08') else .01)
                 and not ambiguous and (wer is None or (wer['rate'] is not None and wer['rate'] <= .03)),

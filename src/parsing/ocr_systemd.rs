@@ -69,7 +69,29 @@ impl SystemdOcrUnit {
         Self::command_with_collection(python, true)
     }
 
+    pub(super) fn command_in_root(python: &Path, root: &Path) -> io::Result<(Command, Self)> {
+        // An operator-selected, already verified immutable runtime directory,
+        // never a document path or an implicit host-root fallback.
+        if !root.is_absolute()
+            || root == Path::new("/")
+            || !root.is_dir()
+            || root.canonicalize()? != root
+            || !python.is_absolute()
+        {
+            return Err(io::Error::other("invalid private OCR runtime path"));
+        }
+        Self::command_with_root(python, Some(root), true)
+    }
+
     fn command_with_collection(python: &Path, collect_failed: bool) -> io::Result<(Command, Self)> {
+        Self::command_with_root(python, None, collect_failed)
+    }
+
+    fn command_with_root(
+        python: &Path,
+        root: Option<&Path>,
+        collect_failed: bool,
+    ) -> io::Result<(Command, Self)> {
         Self::validate_host()?;
         // Kernel-generated identity, never an input document/operator unit name.
         let token = std::fs::read_to_string("/proc/sys/kernel/random/uuid")?;
@@ -115,6 +137,11 @@ impl SystemdOcrUnit {
             .arg(format!("--unit={}", unit.name));
         if collect_failed {
             command.arg("--collect");
+        }
+        if let Some(root) = root {
+            let mut property = std::ffi::OsString::from("--property=RootDirectory=");
+            property.push(root);
+            command.arg(property).arg("--property=MountAPIVFS=yes");
         }
         // The manager's environment is distinct from the client's. Explicitly
         // set the same allowlisted dependency-discovery environment in the unit.
@@ -218,6 +245,23 @@ mod tests {
         io::{AsyncBufReadExt, BufReader},
         sync::Semaphore,
     };
+
+    #[test]
+    fn private_root_rejects_host_root_relative_missing_and_symlink_paths() {
+        let python = Path::new("/opt/ocr-python/bin/python");
+        for root in [
+            Path::new("/"),
+            Path::new("relative"),
+            Path::new("/missing-ocr-test-root"),
+        ] {
+            assert!(SystemdOcrUnit::command_in_root(python, root).is_err());
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("alias");
+        std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+        assert!(SystemdOcrUnit::command_in_root(python, &link).is_err());
+        assert!(SystemdOcrUnit::command_in_root(Path::new("python"), directory.path()).is_err());
+    }
 
     #[tokio::test]
     #[ignore = "requires hosted root and systemd cgroup v2"]

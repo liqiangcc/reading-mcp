@@ -40,6 +40,7 @@ pub struct LayoutPdfParser {
     ocr_config: Option<OcrConfig>,
     ocr_identity: Option<OcrRuntimeIdentity>,
     systemd_ocr_sandbox: bool,
+    ocr_runtime_root: Option<PathBuf>,
 }
 
 impl LayoutPdfParser {
@@ -52,6 +53,7 @@ impl LayoutPdfParser {
             ocr_config: None,
             ocr_identity: None,
             systemd_ocr_sandbox: false,
+            ocr_runtime_root: None,
         }
     }
 
@@ -70,6 +72,14 @@ impl LayoutPdfParser {
 
     /// Explicit integration entrypoint; never changes native-only layout launch.
     pub fn with_systemd_ocr_sandbox(mut self) -> Self {
+        self.systemd_ocr_sandbox = true;
+        self
+    }
+
+    /// Uses an already verified private runtime; `python` is its internal path.
+    /// No host interpreter fallback. Native source-view keeps its own renderer.
+    pub fn with_ocr_runtime_root(mut self, root: PathBuf) -> Self {
+        self.ocr_runtime_root = Some(root);
         self.systemd_ocr_sandbox = true;
         self
     }
@@ -163,6 +173,9 @@ impl Parser for LayoutPdfParser {
             .ocr_config
             .as_ref()
             .is_some_and(|config| config.enabled);
+        if self.ocr_runtime_root.is_some() && !ocr_enabled {
+            return Err(failed("private OCR runtime requires enabled OCR"));
+        }
         let permit = self.permit.clone().acquire_owned().await.map_err(failed)?;
         if resource.bytes.len() > self.budget.max_document_bytes {
             return Err(ApplicationError::ResourceLimitExceeded(
@@ -170,7 +183,11 @@ impl Parser for LayoutPdfParser {
             ));
         }
         let (mut command, unit) = if ocr_enabled && self.systemd_ocr_sandbox {
-            let (command, unit) = SystemdOcrUnit::command(&self.python).map_err(failed)?;
+            let (command, unit) = match &self.ocr_runtime_root {
+                Some(root) => SystemdOcrUnit::command_in_root(&self.python, root),
+                None => SystemdOcrUnit::command(&self.python),
+            }
+            .map_err(failed)?;
             (command, Some(unit))
         } else {
             (Command::new(&self.python), None)

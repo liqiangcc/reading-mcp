@@ -435,3 +435,24 @@ effective/permitted/inheritable/ambient capabilities 都为零，无法恢复 UI
 可正常使用。原 OOM/PID/temp/network/取消/真实 stdio/HTTP/#92 测试不删除。
 归档重建后的 F07 同时改用无 capability 的非 root 用户执行，与原输出作
 严格比较；是否兼容真实库由 hosted 结果决定，不通过降门槛或回退 root 掩盖。
+
+### 私有归档接入真实 Rust Parser（本提交等待 hosted 验证）
+
+c0a5455a69c12aa7df55232155e8e67f2ab67a17 全部 checks 已通过；
+34739031437 六项 systemd 权限/资源/取消测试通过，34739029484 归档
+重组非 root F07 通过。后者内层归档 200838495 bytes，解包 regular files
+473153410 bytes，不是最终含分类模型的发布包。
+
+本包补齐 LayoutPdfParser 的显式 private-root 入口：使用同一个真实
+systemd launcher、owner pipe、降权与 cgroup 清理，只增加 RootDirectory /
+MountAPIVFS；Python 路径按根目录内部解释，绝不回退宿主解释器。拒绝
+非绝对、宿主根、非规范目录路径，以及未启用 OCR 的 private-root 请求。
+不更改 native source-view 的独立 Python 配置。
+
+离线 workflow 在已校验重组目录上编译并执行真实 Rust F07：内部 Python
+在宿主必须不存在；正文四段逐字等于归档 smoke、实际 raw hash、完整 typed
+derivation/evidence 均验证，并保存后重新打开 SQLite 比对 normalized identity
+和原页 map。身份由该归档内前序真实 smoke 提供并由 worker 重算验证；
+这不是任意环境 fingerprint。仅测试路径使用 report 注入，不新增生产环境
+捷径。RuntimeConfig 的最终包验证/启动前身份构造与完整 MCP 私有根目录
+接线仍需下一包，不能把本测试当作已经部署或完整 cache/package 验收。

@@ -9,6 +9,10 @@ on:
       - 'scripts/ocr/runtime_archive.py'
       - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
+      - 'tests/ocr_private_runtime.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_service_supervisor.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
   pull_request:
@@ -20,6 +24,10 @@ on:
       - 'scripts/ocr/runtime_archive.py'
       - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
+      - 'tests/ocr_private_runtime.rs'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/ocr_systemd.rs'
+      - 'src/parsing/ocr_service_supervisor.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
 permissions:
@@ -84,6 +92,16 @@ jobs:
           set -euo pipefail
           python -c 'import json,sys; a,b=(json.load(open(p)) for p in sys.argv[1:]); fields=("identity","canonical_paragraphs","raw_sha256","worker_sha256","python_executable_sha256"); assert all(a[k]==b[k] for k in fields), "archive runtime identity or output changed"; print("verified archive preserves actual dependencies, interpreter, worker and F07 canonical output")' "$RUNNER_TEMP/ocr-private-runtime-smoke.json" "$RUNNER_TEMP/ocr-private-archive-smoke.json"
           sudo du -sb "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/ocr-private-package/ocr-private-runtime.tar.gz"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile actual private-runtime Rust integration on hosted runner
+        run: cargo test --locked --test ocr_private_runtime --no-run --message-format=json > "$RUNNER_TEMP/ocr-private-rust-build.jsonl"
+      - name: Rust parser publication with verified private runtime and no host interpreter
+        run: |
+          set -euo pipefail
+          test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "ocr_private_runtime" and .executable != null) | .executable' "$RUNNER_TEMP/ocr-private-rust-build.jsonl")
+          test -x "$test_binary"
+          sudo env OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" "$test_binary" --ignored --nocapture | tee "$RUNNER_TEMP/ocr-private-rust-test.log"
       - name: Capture native import backtrace in the same private root on failure
         if: failure() && (steps.initial_private_smoke.conclusion == 'failure' || steps.archive_smoke.conclusion == 'failure')
         env:
@@ -114,6 +132,7 @@ jobs:
             ${{ runner.temp }}/ocr-private-package-build.json
             ${{ runner.temp }}/ocr-private-package-verify.json
             ${{ runner.temp }}/ocr-private-archive-smoke.json
+            ${{ runner.temp }}/ocr-private-rust-test.log
           retention-days: 14
       - uses: actions/upload-artifact@v4
         with:

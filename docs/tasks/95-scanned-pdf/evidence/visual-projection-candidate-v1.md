@@ -62,3 +62,25 @@ x/y 排序，遇到粗块之间逆序/重叠或需越过其他未证明对象时
 此 coarse-block 评分不是 Rust Sentence/原页回看验收，也不要求覆盖 gold
 矩形内全部空白。默认运行时尚未启用模型；后续身份及发布接线必须绑定本
 投影策略和原始 model/retry/source-group 证据。
+
+## 9f371d8 结果与串行分类准备
+
+[run 34753844592](https://github.com/liqiangcc/reading-mcp/actions/runs/34753844592)
+的完整八条摘要已从日志读取：F11 CER0/548、WER0/91、6段、paragraph F1=1、
+正文order=1，chart/formula 为实际块6/7（0-based），retained2/2，
+after_both_prose_columns=true。其余七项文字/段落门槛保持通过。
+但累计 cgroup peak 到达805306368bytes，即768MiB；不能因运行成功便宣称
+生产资源余量充足。
+
+后续改动将固定 ONNX 推理移入生产 worker 的可复用函数（尚未启用默认
+ingestion），诊断不再保留另一套推理代码。模型三份文件使用已实际下载
+报告里的 SHA256 和大小，流式校验、拒绝缺失/篡改/非普通文件及文件符号
+链接，再加载模型库。预处理保持同一RGB/800x800/INTER_CUBIC与固定0.5
+阈值，新增输出有限性和数量界限，不删词、不改模型/gold。
+
+hosted 诊断改用短生命周期分类子进程，明确 wait/reap 后才导入 layout；
+同一case的60秒外层限额不变、cgroup768MiB不变。两阶段独立渲染的原始
+hash、原页、尺寸、DPI与RGB像素hash必须完全相同，之后才复用真实模型
+输出；原始阶段报告和依赖hash完整留证据。比较串行资源实测与上述固定
+并驻结果，不能将新结果改写进旧报告。正式 runtime 的阶段调度、typed模型
+身份/证据和Rust发布仍须接线，不能把这个阶段实验冒充完成。

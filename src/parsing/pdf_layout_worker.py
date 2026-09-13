@@ -1,7 +1,7 @@
 """Isolated optional PDF layout worker; stdout is a versioned JSON protocol.
 
-Only source text spans are projected. No Markdown, OCR, generated descriptions,
-or remote model calls are used. Ambiguous printed hyphens are preserved.
+Native source spans or explicitly enabled local OCR words are projected. No
+generated descriptions or remote model calls. Ambiguous hyphens are preserved.
 """
 import contextlib
 import importlib.metadata
@@ -32,6 +32,89 @@ RASTER_BUDGET = None
 PAGE_RASTER = None
 INPUT_SHA256 = None
 INSPECTION_POLICY = "ocr-original-region-inspection/v5"
+
+# Approved immutable local classifier. A model path is operator/package-owned;
+# no network lookup, arbitrary replacement model or caller threshold is allowed.
+VISUAL_MODEL_FILES = {
+    'README.md': (1669, '91328b1af981a8992c803b6d4be88185b4407e09450650ec5f5a4941a8b99d99'),
+    'inference.yml': (1838, 'd60f782a16f96afb27e8280399899a94c3e9ffc694ffb2f913ea00af1c522f1e'),
+    'inference.onnx': (129736329, '77afb2caa74dd13240d087d2eced91d7fcd2caebd16006a0a66162fc8707ff0e'),
+}
+
+
+def fingerprint_visual_model(directory):
+    """Stream verified package inputs before loading any inference library."""
+    if not os.path.isabs(directory) or '\0' in directory:
+        raise ValueError('visual model directory must be absolute')
+    dependencies = []
+    for name, (size, expected) in sorted(VISUAL_MODEL_FILES.items()):
+        descriptor = os.open(os.path.join(directory, name), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, 'rb') as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != size:
+                raise ValueError('visual model file type/size mismatch')
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(65536), b''):
+                digest.update(chunk)
+            actual = digest.hexdigest()
+            if actual != expected:
+                raise ValueError('visual model digest mismatch')
+        dependencies.append({'name':'layout-model:' + name, 'sha256':actual})
+    return dependencies
+
+
+def visual_model_predictor(directory):
+    """Fixed RGB CPU inference, shared with hosted acceptance, no scripts import.
+
+    The owning stage must enforce the shared deadline/cgroup. This adapter does
+    not enable classification in normal ingestion on its own.
+    """
+    dependencies = fingerprint_visual_model(directory)
+    import cv2
+    import numpy as np
+    import onnxruntime as ort
+    import yaml
+    with open(os.path.join(directory, 'inference.yml')) as stream:
+        config = yaml.safe_load(stream)
+    expected = [
+        {'interp':2, 'keep_ratio':False, 'target_size':[800,800], 'type':'Resize'},
+        {'mean':[0.,0.,0.], 'norm_type':'none', 'std':[1.,1.,1.], 'type':'NormalizeImage'},
+        {'type':'Permute'}]
+    if config['Preprocess'] != expected or config['draw_threshold'] != .5:
+        raise ValueError('unsupported visual preprocessing')
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = options.inter_op_num_threads = 1
+    options.enable_cpu_mem_arena = False
+    session = ort.InferenceSession(os.path.join(directory, 'inference.onnx'), sess_options=options,
+                                   providers=['CPUExecutionProvider'])
+    names = {item.name for item in session.get_inputs()}
+    if not names <= {'image', 'im_shape', 'scale_factor'} or 'image' not in names:
+        raise ValueError('unexpected visual model inputs')
+
+    def predict(rgb_bytes, width, height):
+        if (type(width) is not int or type(height) is not int or width <= 0 or height <= 0
+                or width * height > 16_000_000 or len(rgb_bytes) != width * height * 3):
+            raise ValueError('invalid or oversized visual RGB raster')
+        image = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape(height, width, 3)
+        tensor = cv2.resize(image, (800,800), interpolation=cv2.INTER_CUBIC).astype(np.float32) / 255.0
+        values = {'image':tensor.transpose(2,0,1)[None],
+                  'im_shape':np.array([[800,800]], dtype=np.float32),
+                  'scale_factor':np.array([[800/height,800/width]], dtype=np.float32)}
+        outputs = session.run(None, {name:values[name] for name in names})
+        if (not outputs or outputs[0].ndim != 2 or outputs[0].shape[1] != 6 or len(outputs[0]) > 10000
+                or sum(value.size for value in outputs) > 100_000
+                or not all(np.isfinite(value).all() for value in outputs)):
+            raise ValueError('invalid or oversized visual model output')
+        boxes = []
+        for label, score, *bounds in outputs[0].tolist():
+            if score >= .5:
+                if label != int(label) or not 0 <= int(label) < len(config['label_list']) or score > 1:
+                    raise ValueError('invalid selected visual label/score')
+                boxes.append({'cls_id':int(label), 'label':config['label_list'][int(label)],
+                              'score':score, 'coordinate':bounds})
+        return [{'res':{'boxes':boxes}, 'raw_outputs':[value.tolist() for value in outputs],
+                 'postprocess':'pinned draw_threshold only; no layout NMS or gold selection'}]
+    return predict, dependencies
 
 
 class OcrRequired(RuntimeError):

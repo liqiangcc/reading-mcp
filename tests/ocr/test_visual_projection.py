@@ -1,7 +1,10 @@
 """Pure source geometry tests, no models or gold supplied to the adapter."""
 import copy
+import hashlib
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 class VisualProjectionTests(unittest.TestCase):
@@ -17,6 +20,30 @@ class VisualProjectionTests(unittest.TestCase):
 
     def apply(self, boxes, predictions):
         return self.worker['project_visual_observations'](1, [0,0,100,100], [1000,1000], boxes, predictions)
+
+    def test_pinned_model_fingerprints_reject_tampering_missing_and_symlink(self):
+        # Synthetic bytes test validation only, never replace the hosted model.
+        contents = {'inference.onnx':b'fixed model', 'inference.yml':b'fixed preprocessing'}
+        pins = {name:(len(raw), hashlib.sha256(raw).hexdigest()) for name,raw in contents.items()}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(self.worker['VISUAL_MODEL_FILES'], pins, clear=True):
+            root = Path(directory)
+            for name, raw in contents.items():
+                (root / name).write_bytes(raw)
+            fingerprint = self.worker['fingerprint_visual_model']
+            expected = [{'name':'layout-model:' + name, 'sha256':pins[name][1]} for name in sorted(pins)]
+            self.assertEqual(fingerprint(directory), expected)
+            self.assertEqual(fingerprint(directory), expected)
+            (root / 'inference.onnx').write_bytes(b'fixed Model')
+            with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+                fingerprint(directory)
+            (root / 'inference.onnx').unlink()
+            with self.assertRaises(OSError):
+                fingerprint(directory)
+            (root / 'inference.onnx').symlink_to(root / 'inference.yml')
+            with self.assertRaises(OSError):
+                fingerprint(directory)
+        with self.assertRaisesRegex(ValueError, 'absolute'):
+            self.worker['fingerprint_visual_model']('relative')
 
     def test_real_words_become_coarse_without_reordering_or_changing_raw_observations(self):
         boxes = [self.box([1,1,8,8], 'Source prose.', 1), self.box([22,22,25,25], '12', 2),

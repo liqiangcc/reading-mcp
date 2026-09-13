@@ -37,45 +37,11 @@ ONNX_FILES = {
 }
 
 
-def onnx_detector(model):
-    import cv2
-    import numpy as np
-    import onnxruntime as ort
-    import yaml
-    config = yaml.safe_load((model / "inference.yml").read_text())
-    assert config["Preprocess"] == [
-        {"interp": 2, "keep_ratio": False, "target_size": [800, 800], "type": "Resize"},
-        {"mean": [0., 0., 0.], "norm_type": "none", "std": [1., 1., 1.], "type": "NormalizeImage"},
-        {"type": "Permute"}]
-    options = ort.SessionOptions()
-    options.intra_op_num_threads = options.inter_op_num_threads = 1
-    options.enable_cpu_mem_arena = False
-    session = ort.InferenceSession(str(model / "inference.onnx"), sess_options=options,
-                                   providers=["CPUExecutionProvider"])
-    names = {item.name for item in session.get_inputs()}
-    assert names <= {"image", "im_shape", "scale_factor"} and "image" in names
-
-    def predict(path):
-        # Match pinned PaddleX Resize(interp=2), RGB, scale=1/255, zero mean/unit std.
-        image = cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
-        height, width = image.shape[:2]
-        tensor = cv2.resize(image, (800, 800), interpolation=cv2.INTER_CUBIC).astype(np.float32) / 255.0
-        values = {"image": tensor.transpose(2, 0, 1)[None],
-                  "im_shape": np.array([[800, 800]], dtype=np.float32),
-                  "scale_factor": np.array([[800 / height, 800 / width]], dtype=np.float32)}
-        outputs = session.run(None, {name: values[name] for name in names})
-        rows = outputs[0]
-        assert rows.ndim == 2 and rows.shape[1] == 6 and len(rows) <= 10000
-        boxes = []
-        for row in rows:
-            label, score, *bounds = row.tolist()
-            if score >= config["draw_threshold"]:
-                assert label == int(label) and 0 <= int(label) < len(config["label_list"])
-                boxes.append({"cls_id": int(label), "label": config["label_list"][int(label)],
-                              "score": score, "coordinate": bounds})
-        return [{"res": {"boxes": boxes}, "raw_outputs": [value.tolist() for value in outputs],
-                 "postprocess": "pinned draw_threshold only; no layout NMS or gold selection"}]
-    return predict
+def load_worker():
+    worker = types.ModuleType('joint_candidate_worker')
+    source = Path('src/parsing/pdf_layout_worker.py')
+    exec(compile(source.read_text(), str(source), 'exec'), worker.__dict__)
+    return worker
 
 
 def verify(path):
@@ -108,30 +74,43 @@ def mapped_dependencies():
     return result
 
 
-def child(model, case, output, name, joint_pipeline=False):
+def child(model, case, output, name, joint_pipeline=False, sequential_model=False):
     # Public diagnostic only. The enclosing systemd cgroup also bounds RSS/PIDs
     # and denies network. Do not mistake these exploratory limits for acceptance.
     resource.setrlimit(resource.RLIMIT_CPU, (45, 45))
     resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
     resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024,) * 2)
-    verify(model)
     started = time.monotonic()
+    verify(model)
     import pymupdf
+    model_stage = None
+    if sequential_model:
+        # Reap the classifier before importing native layout. The outer case
+        # still has ONE 60s timeout; this is not 60s per stage.
+        stage_output = output / f'{case}-model-stage'
+        stage_output.mkdir()
+        subprocess.run([sys.executable, str(Path(__file__).resolve()), '--model', str(model),
+            '--output', str(stage_output), '--case', case, '--candidate', name],
+            capture_output=True, check=True, timeout=max(.001, 60 - (time.monotonic() - started)))
+        model_stage = json.loads((stage_output / f'{case}.json').read_text())
+    model_reaped_seconds = time.monotonic() - started if model_stage is not None else None
     worker = None
     if joint_pipeline:
         import pymupdf4llm
         pymupdf4llm.use_layout(True)
-        worker = types.ModuleType('joint_candidate_worker')
-        source = Path('src/parsing/pdf_layout_worker.py')
-        exec(compile(source.read_text(), str(source), 'exec'), worker.__dict__)
+        worker = load_worker()
         worker.OCR_CONFIG = {'enabled': True, 'engine_path': '/usr/bin/tesseract',
             'tessdata_path': '/usr/share/tesseract-ocr/5/tessdata',
             'languages': ['chi_sim'] if case == 'F07' else ['eng', 'chi_sim'] if case == 'F08' else ['eng'],
             'operator_revision': '1', 'dpi': 300, 'oem': 1, 'psm': 3,
             'detector_version': 'pdf-layout/v1', 'protocol_version': 'pdf-layout/v1'}
         ocr_dependencies = worker.fingerprint_dependencies(worker.OCR_CONFIG)
-    if name.endswith("_onnx"):
-        predict = onnx_detector(model)
+    geometry_worker = worker or load_worker()
+    model_dependencies = None
+    if model_stage is not None:
+        model_dependencies = model_stage['visual_model_dependencies']
+    elif name.endswith("_onnx"):
+        predict, model_dependencies = geometry_worker.visual_model_predictor(str(model.resolve()))
     else:
         from paddlex import create_predictor
         from paddlex.inference.utils.pp_option import PaddlePredictorOption
@@ -141,17 +120,39 @@ def child(model, case, output, name, joint_pipeline=False):
             return [item.json for item in detector.predict(str(path), batch_size=1, layout_nms=True)]
     loaded = time.monotonic()
     raw = Path(f"tests/fixtures/scanned_pdf/pdf/{case}.pdf").read_bytes()
+    if model_stage is not None and model_stage['original_sha256'] != hashlib.sha256(raw).hexdigest():
+        raise ValueError('sequential stage original identity mismatch')
     pages = []
     canonical_pages = []
     with pymupdf.open(stream=raw, filetype="pdf") as document:
         native = json.loads(pymupdf4llm.to_json(document, use_ocr=False)) if joint_pipeline else None
+        if model_stage is not None and len(model_stage['pages']) != len(document):
+            raise ValueError('sequential stage page coverage mismatch')
+        raster_budget = geometry_worker.OcrRasterBudget()
         for page in document:
+            raster_budget.reserve_raster(geometry_worker.raster_pixel_count(page, 300))
             raster = page.get_pixmap(dpi=300, colorspace=pymupdf.csRGB, alpha=False)
-            image = output / f"{case}-{page.number + 1}.png"
-            raster.save(image)
             begin = time.monotonic()
-            result = predict(image)
-            inference_seconds = time.monotonic() - begin
+            raster_sha256 = hashlib.sha256(raster.samples).hexdigest()
+            if model_stage is not None:
+                observed = model_stage['pages'][page.number]
+                if (observed['page'] != page.number + 1 or observed['original_rect'] != list(page.rect)
+                        or observed['raster_size'] != [raster.width,raster.height]
+                        or observed['dpi'] != 300 or observed['raster_sha256'] != raster_sha256):
+                    raise ValueError('sequential stage raster/transform mismatch')
+                result = observed['raw_predictions']
+                inference_seconds = observed['inference_seconds']
+            elif name.endswith('_onnx'):
+                result = predict(raster.samples, raster.width, raster.height)
+                inference_seconds = time.monotonic() - begin
+            else:
+                image = output / f"{case}-{page.number + 1}.png"
+                raster.save(image)
+                try:
+                    result = predict(image)
+                finally:
+                    image.unlink()
+                inference_seconds = time.monotonic() - begin
             ocr_started = time.monotonic()
             raw_ocr = None
             regional = None
@@ -170,13 +171,12 @@ def child(model, case, output, name, joint_pipeline=False):
                 canonical_pages.append(dict(original, boxes=selected))
             pages.append({"page": page.number + 1, "original_rect": list(page.rect),
                           "raster_size": [raster.width, raster.height], "dpi": 300,
-                          "raster_sha256": hashlib.sha256(raster.samples).hexdigest(),
+                          "raster_sha256": raster_sha256,
                           "inference_seconds": inference_seconds,
                           "raw_predictions": result,
                           "joint_primary_ocr_seconds": time.monotonic() - ocr_started if worker is not None else None,
                           "joint_primary_ocr_boxes": raw_ocr,
                           "regional_observations":regional, "visual_projection":visual})
-            image.unlink()
     canonical = worker.project(dict(native, pages=canonical_pages)) if worker is not None else None
     pre_scoring_seconds = time.monotonic() - started
     quality = None
@@ -263,6 +263,9 @@ def child(model, case, output, name, joint_pipeline=False):
               "cgroup_cumulative_memory_peak_bytes": int((group / 'memory.peak').read_text()),
               "joint_native_layout": native,
               "joint_ocr_dependencies": ocr_dependencies if joint_pipeline else None,
+              "visual_model_dependencies":model_dependencies,
+              "sequential_model_stage":model_stage,
+              "model_reaped_before_layout_import_seconds":model_reaped_seconds,
               "candidate_canonical":canonical, "candidate_quality":quality,
               "pre_scoring_seconds":pre_scoring_seconds,
               "scope": "Candidate production geometry helper with raw model/regional attempts; not enabled in runtime" if joint_pipeline else "candidate only"}
@@ -276,9 +279,12 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--joint-pipeline", action="store_true")
+    parser.add_argument("--sequential-model", action="store_true")
     parser.add_argument("--candidate", choices=["PP-DocLayout-S", "PP-DocLayout-L", "PP-DocLayout_plus-L_onnx"], default="PP-DocLayout-S")
     parser.add_argument("--case", choices=["F02", "F06", "F07", "F08", "F11", "F12", "F13", "F14"])
     args = parser.parse_args()
+    if args.sequential_model and (not args.joint_pipeline or args.candidate != 'PP-DocLayout_plus-L_onnx'):
+        parser.error('--sequential-model requires the fixed ONNX joint pipeline')
     if args.candidate == "PP-DocLayout-L":
         REVISION, FILES = L_REVISION, L_FILES
     elif args.candidate == "PP-DocLayout_plus-L_onnx":
@@ -311,7 +317,7 @@ def main():
         print(json.dumps(manifest), flush=True)
         return
     if args.case:
-        child(args.model, args.case, args.output, args.candidate, args.joint_pipeline)
+        child(args.model, args.case, args.output, args.candidate, args.joint_pipeline, args.sequential_model)
         return
     report = {"schema": "layout-model-diagnostic/v1", "candidate": args.candidate, "model_files": verify(args.model),
               "scope": "raw candidate regions only; no gold input, no OCR/projection modification",
@@ -320,7 +326,8 @@ def main():
         try:
             process = subprocess.run([sys.executable, str(Path(__file__).resolve()),
                 "--model", str(args.model), "--output", str(args.output), "--case", case,
-                "--candidate", args.candidate] + (["--joint-pipeline"] if args.joint_pipeline else []),
+                "--candidate", args.candidate] + (["--joint-pipeline"] if args.joint_pipeline else [])
+                + (["--sequential-model"] if args.sequential_model else []),
                 capture_output=True, timeout=60, check=True)
             item = json.loads((args.output / f"{case}.json").read_text())
         except Exception as error:
@@ -330,7 +337,10 @@ def main():
         # observations can exceed the log service's per-line limit. Full bytes
         # remain in each case JSON and the all-case artifact, including failures.
         summary = {key: item.get(key) for key in ('error', 'total_seconds', 'peak_rss_kib',
-            'cgroup_cumulative_memory_peak_bytes', 'mapped_fingerprint_seconds')}
+            'cgroup_cumulative_memory_peak_bytes', 'mapped_fingerprint_seconds',
+            'model_reaped_before_layout_import_seconds', 'pre_scoring_seconds')}
+        if item.get('sequential_model_stage'):
+            summary['model_stage_peak_rss_kib'] = item['sequential_model_stage']['peak_rss_kib']
         summary['pages'] = [{'page': page['page'],
             'labels': [box['label'] for prediction in page['raw_predictions'] for box in prediction['res']['boxes']],
             'primary_ocr_boxes': len(page.get('joint_primary_ocr_boxes') or [])} for page in item.get('pages', [])]

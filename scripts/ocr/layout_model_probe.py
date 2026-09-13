@@ -178,11 +178,13 @@ def child(model, case, output, name, joint_pipeline=False):
                           "regional_observations":regional, "visual_projection":visual})
             image.unlink()
     canonical = worker.project(dict(native, pages=canonical_pages)) if worker is not None else None
+    pre_scoring_seconds = time.monotonic() - started
     quality = None
     if canonical is not None:
         # Only completed engine/projection output may be compared with gold.
         # No reference text/coordinates are passed to either production helper.
-        from canonical_quality import metric
+        from canonical_quality import metric, norm
+        from boundary_quality import alignment, score, reading_order
         gold = json.loads(Path(f'tests/fixtures/scanned_pdf/gold/{case}.json').read_text())
         paragraphs = [block['text'] for section in canonical['sections']
                       for block in section['blocks'] if block['kind'] == 'paragraph']
@@ -198,10 +200,25 @@ def child(model, case, output, name, joint_pipeline=False):
         else:
             wer = None if case == 'F07' else metric(gold['text'], actual, True)
         cer = metric(gold['text'], actual)
+        def paragraph_edges(values):
+            combined, ends = '', []
+            for value in values:
+                if combined:
+                    combined += ' '
+                combined += norm(value)
+                ends.append(len(combined))
+            return combined, ends
+        reference_text, expected_ends = paragraph_edges([p['text'] for p in gold['paragraphs']])
+        actual_text, actual_ends = paragraph_edges(paragraphs)
+        mapping, _ = alignment(reference_text, actual_text)
+        paragraph_score = score(expected_ends, actual_ends, mapping)
+        order = reading_order([p['text'] for p in gold['paragraphs']], paragraphs)
         quality = {'cer':cer, 'english_wer':wer, 'paragraph_count':len(paragraphs),
             'ambiguous_mixed_paragraphs':ambiguous,
-            'projection_complete':all(p['regional_observations']['complete'] and
+            'visual_mapping_complete':all(p['regional_observations']['complete'] and
                                       p['visual_projection']['complete'] for p in pages),
+            'paragraph_boundary':paragraph_score, 'paragraph_order':order,
+            'paragraph_contract_met':paragraph_score['f1'] >= .95 and order['proven'] and order['score'] == 1,
             'text_thresholds_met':cer['rate'] is not None and cer['rate'] <= (.02 if case in ('F07','F08') else .01)
                 and not ambiguous and (wer is None or (wer['rate'] is not None and wer['rate'] <= .03)),
             'scope':'candidate text only; not final F11 region-retention or Rust publication acceptance'}
@@ -217,6 +234,7 @@ def child(model, case, output, name, joint_pipeline=False):
               "joint_native_layout": native,
               "joint_ocr_dependencies": ocr_dependencies if joint_pipeline else None,
               "candidate_canonical":canonical, "candidate_quality":quality,
+              "pre_scoring_seconds":pre_scoring_seconds,
               "scope": "Candidate production geometry helper with raw model/regional attempts; not enabled in runtime" if joint_pipeline else "candidate only"}
     (output / f"{case}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
 

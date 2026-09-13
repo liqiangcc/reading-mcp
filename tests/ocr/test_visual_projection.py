@@ -12,7 +12,7 @@ class VisualProjectionTests(unittest.TestCase):
     def box(self, bounds, text, block):
         return {'boxclass':'text', 'bbox':bounds, 'x0':bounds[0], 'y0':bounds[1],
                 'x1':bounds[2], 'y1':bounds[3], 'ocr_block':block, 'ocr_paragraph':1,
-                'textlines':[{'spans':[{'text':text, 'bbox':bounds, 'flags':0,
+                'textlines':[{'bbox':bounds, 'spans':[{'text':text, 'bbox':bounds, 'flags':0,
                     'ocr_block':block, 'ocr_paragraph':1, 'ocr_line':1, 'confidence':71.25}]}]}
 
     def apply(self, boxes, predictions):
@@ -58,3 +58,24 @@ class VisualProjectionTests(unittest.TestCase):
                               ([0,0,20,20], float('nan')), ([0,0,20,20], 1.1)]:
             with self.assertRaises(ValueError):
                 self.apply([], [{'label':'image', 'score':score, 'coordinate':bounds}])
+
+    def test_only_corroborated_adjacent_unfinished_fragments_merge(self):
+        boxes = [self.box([10,10,40,20], 'A source continues to', 1),
+                 self.box([10,25,40,35], 'its next line.', 2)]
+        model = [{'label':'text', 'score':.9, 'coordinate':[50,50,450,400]}]
+        original = copy.deepcopy(boxes)
+        result, evidence = self.apply(boxes, model)
+        self.assertEqual(boxes, original)
+        self.assertEqual(len(result), 1)
+        self.assertEqual([line['spans'][0]['ocr_block'] for line in result[0]['textlines']], [1,2])
+        self.assertEqual(evidence['paragraph_merges'][0]['source_boxes'], [0,1])
+        self.assertEqual(evidence['projected_source_groups'], [[0,1]])
+        for text in ('A complete sentence.', 'A heading:'):
+            boxes[0]['textlines'][0]['spans'][0]['text'] = text
+            self.assertEqual(len(self.apply(boxes, model)[0]), 2)
+        boxes = copy.deepcopy(original)
+        self.assertEqual(len(self.apply(boxes, model * 2)[0]), 2, 'ambiguous region must not merge')
+        self.assertEqual(len(self.apply(boxes, [])[0]), 2, 'geometry alone is insufficient')
+        boxes[1] = self.box([10,50,40,60], 'its distant line.', 2)
+        model[0]['coordinate'][3] = 700
+        self.assertEqual(len(self.apply(boxes, model)[0]), 2, 'separate blocks must remain separate')

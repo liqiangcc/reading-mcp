@@ -9,3 +9,11 @@ hosted 候选使用既有 primary + 有界区域 retry，不再将 primary-only 
 资源诊断仍保留768MiB cgroup及原固定依赖。此前并驻模型峰值接近上限，本轮如果实测超限会明确失败，不能扩大阈值；后续按已提出的短生命周期分类子进程拆开驻留。
 
 单元测试覆盖原始观察不变、原序正文/粗块输出、并集保留边缘词、部分/多重覆盖拒绝、无文字对象不伪造、非法模型框/score。执行验证全部在 GitHub-hosted Actions，本机仅 py_compile/fmt。
+
+## c633d1f 原始结果与段落缺口
+
+固定 run34752668168/artifact10315867721 的完整 layout-model-report.json 已实际下载；SHA256 为 c8e93825fc2d807cd111996a921bf27d5f3d85a26e0a146ffd7c83647a516853。八个样本文字指标均在原门槛内；F11 CER0/548、WER0/91，实际却有7段prose和两个preformatted（真实 `12` 与 `x?+y?=2?`）。图表/公式不再进入prose，但一段被Tesseract拆为两个连续片段，不能以CER0宣布段落正确。最大cgroup累计峰值763998208bytes；并驻诊断不是最终服务预算验收。
+
+追加的候选修复只合并连续原序片段，并同时要求：两个片段全部word中心均唯一归属于同一真实模型text区域、前文未结束、后文为小写续文或CJK连续字符、行间距及左沿偏移不超过实际line高度中位数。不使用gold、固定行数或特定词；完整句/标题、远距离、没有模型支持或模型重叠都不合并。保留原始line/spans的全部block/par/line ID，另记source groups和paragraph_merges。
+
+候选评分增加既有独立对齐的paragraph boundary F1及非单调paragraph order计算，仍在识别完成后读取gold，避免文字分数隐藏多段/漏段。sentence与真正Rust发布仍待接线，不伪造sentence范围。原c633报告不改写。

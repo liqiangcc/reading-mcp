@@ -813,9 +813,9 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
             or page_rect[2] <= 0 or page_rect[3] <= 0
             or len(raster_size) != 2 or any(type(v) is not int or v <= 0 for v in raster_size)):
         raise ValueError('unsupported visual page transform')
-    regions = []
+    regions, text_regions = [], []
     for index, prediction in enumerate(predictions):
-        if prediction['label'] not in ('image', 'formula', 'table'):
+        if prediction['label'] not in ('image', 'formula', 'table', 'text'):
             continue
         bounds = prediction['coordinate']
         score = prediction['score']
@@ -828,7 +828,8 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
                 bounds[1] * page_rect[3] / raster_size[1],
                 bounds[2] * page_rect[2] / raster_size[0],
                 bounds[3] * page_rect[3] / raster_size[1]]
-        regions.append({'prediction_index':index, 'label':prediction['label'],
+        destination = text_regions if prediction['label'] == 'text' else regions
+        destination.append({'prediction_index':index, 'label':prediction['label'],
                         'model_score':score, 'pixel_bbox':list(bounds), 'bbox':bbox,
                         'box_sources':[]})
     projected = copy.deepcopy(boxes)
@@ -870,9 +871,49 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
         bindings.append({'source_box':index, 'prediction_index':region['prediction_index'],
                          'source_bbox':source_bbox, 'projected_bbox':bbox})
     unanchored = [region['prediction_index'] for region in regions if not region['box_sources']]
-    return projected, {'schema':'ocr-visual-projection/v1', 'page':page_number,
+    def text_region(box):
+        centers = [((word['bbox'][0] + word['bbox'][2]) / 2,
+                    (word['bbox'][1] + word['bbox'][3]) / 2)
+                   for line in box.get('textlines', []) for word in line['spans']]
+        matches = [region['prediction_index'] for region in text_regions if centers and
+                   all(region['bbox'][0] <= x <= region['bbox'][2] and
+                       region['bbox'][1] <= y <= region['bbox'][3] for x,y in centers)]
+        return matches[0] if len(matches) == 1 else None
+    ordered, source_groups, merges = [], [], []
+    for index, box in enumerate(projected):
+        model_ref = text_region(box)
+        if (ordered and box.get('ocr_block') is not None and ordered[-1].get('ocr_block') is not None
+                and box['boxclass'] == ordered[-1]['boxclass'] == 'text'
+                and model_ref is not None and model_ref == text_region(ordered[-1])):
+            before = ' '.join(line_text(line) for line in ordered[-1]['textlines']).strip()
+            after = ' '.join(line_text(line) for line in box['textlines']).strip()
+            heights = [line['bbox'][3] - line['bbox'][1]
+                       for item in (ordered[-1], box) for line in item['textlines']]
+            height = statistics.median(heights)
+            gap = box['y0'] - ordered[-1]['y1']
+            continuation = (before and after and before[-1] not in '.!?。！？:;；：“”"'
+                            and (after[0].islower() or (cjk(before[-1]) and cjk(after[0]))))
+            if continuation and 0 <= gap <= height and abs(box['x0'] - ordered[-1]['x0']) <= height:
+                previous = ordered[-1]
+                previous['textlines'].extend(box['textlines'])
+                for key in ('x0', 'y0'):
+                    previous[key] = min(previous[key], box[key])
+                for key in ('x1', 'y1'):
+                    previous[key] = max(previous[key], box[key])
+                previous['bbox'] = [previous[key] for key in ('x0','y0','x1','y1')]
+                source_groups[-1].append(index)
+                continue
+        ordered.append(box)
+        source_groups.append([index])
+    for box, sources in zip(ordered, source_groups):
+        if len(sources) > 1:
+            merges.append({'source_boxes':sources, 'prediction_index':text_region(box),
+                           'bbox':box['bbox'], 'reason':'unfinished_same_region_adjacent_lines'})
+    return ordered, {'schema':'ocr-visual-projection/v1', 'page':page_number,
         'page_bounds':list(page_rect), 'raster_size':list(raster_size),
         'regions':regions, 'bindings':bindings, 'failures':failures,
+        'text_regions':text_regions, 'paragraph_merges':merges,
+        'projected_source_groups':source_groups,
         'unanchored_visual_regions':unanchored, 'complete':not failures and not unanchored}
 
 def project(layout):

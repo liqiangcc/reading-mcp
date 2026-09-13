@@ -117,6 +117,17 @@ def visual_model_predictor(directory):
     return predict, dependencies
 
 
+def visual_model_child(model_directory, width, height):
+    """Protocol for the short-lived classifier child owned by this worker."""
+    raw = sys.stdin.buffer.read()
+    predictor, dependencies = visual_model_predictor(model_directory)
+    result = predictor(raw, width, height)
+    json.dump({'schema':'ocr-visual-model-attempt/v1', 'raster_size':[width, height],
+               'raster_sha256':hashlib.sha256(raw).hexdigest(),
+               'dependencies':dependencies, 'attempts':result}, sys.stdout,
+              ensure_ascii=False, separators=(',', ':'))
+
+
 class OcrRequired(RuntimeError):
     """Image-bearing pages without native body text need enabled inspection."""
 
@@ -1125,6 +1136,9 @@ def project(layout):
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256
     protocol_stdout = sys.stdout
+    if len(sys.argv) == 5 and sys.argv[1] == '--visual-model':
+        visual_model_child(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
+        return
     if len(sys.argv) == 4 and sys.argv[1] == '--verify-runtime':
         print(json.dumps(verify_runtime_package(sys.argv[2], sys.argv[3]), separators=(',', ':')))
         return
@@ -1162,6 +1176,40 @@ def main():
             raise
         except (OSError, ValueError, RuntimeError, KeyError) as error:
             raise OcrStageFailure('OCR_UNAVAILABLE', 'OCR dependencies unavailable or identity mismatch') from error
+    visual_results = {}
+    visual_projections = {}
+    visual_model_enabled = bool(OCR_CONFIG.get('enabled') and EXPECTED_IDENTITY
+                                and EXPECTED_IDENTITY.get('runtime_package') is not None)
+    if visual_model_enabled:
+        # Render with the small PyMuPDF binding first, classify in a child, and
+        # only then import pymupdf4llm. The child exits before layout/OCR work.
+        import pymupdf
+        raw_for_visual = sys.stdin.buffer.read(max_bytes + 1)
+        if len(raw_for_visual) > max_bytes:
+            raise OcrStageFailure('OCR_RESOURCE_LIMIT', 'PDF exceeds byte limit')
+        INPUT_SHA256 = hashlib.sha256(raw_for_visual).hexdigest()
+        with pymupdf.open(stream=raw_for_visual, filetype='pdf') as visual_doc:
+            if visual_doc.needs_pass or not 0 < len(visual_doc) <= max_pages:
+                raise OcrStageFailure('OCR_RESOURCE_LIMIT', 'invalid visual PDF page count')
+            for visual_page in visual_doc:
+                pixmap = visual_page.get_pixmap(dpi=OCR_CONFIG['dpi'], colorspace=pymupdf.csRGB, alpha=False)
+                child = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', '-c',
+                    WORKER, '--visual-model', '/opt/ocr-layout-model',
+                    str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
+                    capture_output=True, timeout=min(15, page_time_remaining()), check=False)
+                if child.returncode != 0 or len(child.stdout) > 4 * 1024 * 1024:
+                    raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model child failed')
+                observation = json.loads(child.stdout)
+                if (observation.get('schema') != 'ocr-visual-model-attempt/v1'
+                        or observation.get('raster_size') != [pixmap.width, pixmap.height]
+                        or observation.get('raster_sha256') != hashlib.sha256(pixmap.samples).hexdigest()):
+                    raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model raster identity mismatch')
+                visual_results[visual_page.number] = observation
+        # The bytes are retained as the canonical input for the normal parse;
+        # the stream is not readable a second time after the pre-classification.
+        visual_input = raw_for_visual
+    else:
+        visual_input = None
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):
         try:
             version = importlib.metadata.version(package)
@@ -1183,7 +1231,7 @@ def main():
                 raise OcrStageFailure('OCR_UNAVAILABLE', 'PDF native dependency import failed') from error
             raise
         pymupdf4llm.use_layout(True)
-        raw = sys.stdin.buffer.read(max_bytes + 1)
+        raw = visual_input if visual_input is not None else sys.stdin.buffer.read(max_bytes + 1)
         if len(raw) > max_bytes:
             raise ValueError("PDF exceeds byte limit")
         INPUT_SHA256 = hashlib.sha256(raw).hexdigest()
@@ -1214,6 +1262,22 @@ def main():
                         if projected_boxes:
                             page_layout["boxes"] = projected_boxes
                         page_layout["ocr_retry_diagnostic"] = retry_diagnostic
+                    if visual_model_enabled:
+                        observation = visual_results.get(page.number)
+                        if observation is None:
+                            raise OcrStageFailure('OCR_UNAVAILABLE', 'missing visual page observation')
+                        selected = page_layout['boxes']
+                        predictions = [attempt['res']['boxes'] for attempt in observation['attempts']]
+                        if len(predictions) != 1:
+                            raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model attempt count mismatch')
+                        selected, projection = project_visual_observations(
+                            page.number + 1, [0, 0, page.rect.width, page.rect.height],
+                            observation['raster_size'], selected, predictions[0])
+                        if not projection['complete']:
+                            raise ValueError('visual projection unresolved')
+                        page_layout['boxes'] = selected
+                        page_layout['ocr_visual_projection'] = projection
+                        visual_projections[page.number] = projection
         observations = [p["ocr_retry_diagnostic"] for p in layout["pages"]
                         if "ocr_retry_diagnostic" in p]
         if any(not observation["complete"] for observation in observations):
@@ -1225,6 +1289,10 @@ def main():
             raise ValueError("OCR geometric conflict remains unresolved")
         result = project(layout)
         result["ocr_attempts"] = observations
+        if visual_model_enabled:
+            result["ocr_visual_attempts"] = [
+                dict(visual_results[index], projection=visual_projections[index])
+                for index in sorted(visual_results)]
         if OCR_CONFIG.get("enabled", False):
             result["ocr_derivation"] = {"schema": "ocr-derivation/v3", "original_sha256": hashlib.sha256(raw).hexdigest(),
                 "inspection_policy": INSPECTION_POLICY,

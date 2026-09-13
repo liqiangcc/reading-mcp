@@ -84,3 +84,23 @@ hash、原页、尺寸、DPI与RGB像素hash必须完全相同，之后才复用
 输出；原始阶段报告和依赖hash完整留证据。比较串行资源实测与上述固定
 并驻结果，不能将新结果改写进旧报告。正式 runtime 的阶段调度、typed模型
 身份/证据和Rust发布仍须接线，不能把这个阶段实验冒充完成。
+
+## e7308e9 串行结果和离线组件接线
+
+准确 head `e7308e96a11f6e480bb51933a8466ad831e102dc` 的
+[run 34754207443](https://github.com/liqiangcc/reading-mcp/actions/runs/34754207443)
+已成功，八个样本文字/paragraph F1/order 均维持前次结果；F11两粗块仍为6/7，
+位于六段正文之后。累计 cgroup peak 最大643112960bytes（约613MiB），
+分类子进程RSS峰值569212..582052KiB，后续layout/OCR进程312476..347796KiB。
+这些是不同指标，不能把两个进程各自峰值直接相加当同时驻留。
+识别/投影结束、读取gold之前的时长分别为F02 7.286s、F06 5.561s、F07
+6.248s、F08 6.788s、F11 5.574s、F12 5.692s、F13 5.210s、F14 6.747s。
+这是单页公开诊断，不替代正式四页/MCP/connector预算验收。
+
+下一包将同一固定模型的README/YAML/ONNX和来源manifest纳入已有完整
+离线archive inventory，同时补入诊断一直使用的固定OpenCV wheel。私有
+RootDirectory smoke先在短生命周期子进程真实推理冻结F11，退出后再执行
+既有F07 worker；两个阶段共用原50秒smoke deadline，不扩容cgroup。解包
+前后必须对模型实物hash、原页/raster和完整raw模型输出逐项相等；既有Rust
+private runtime发布测试仍保留。没有生产下载/安装、没有正式启用classifier，
+新的解包大小和实入口结果须等hosted报告，不沿用旧包尺寸。

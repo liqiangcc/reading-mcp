@@ -2,6 +2,7 @@ name: OCR offline Python dependency component
 on:
   push:
     paths:
+      - 'scripts/ocr/layout_model_probe.py'
       - 'scripts/ocr/package_python_dependencies.py'
       - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/ocr/verify_engine_component.py'
@@ -24,6 +25,7 @@ on:
       - '.github/workflows/ocr-python-component.yml'
   pull_request:
     paths:
+      - 'scripts/ocr/layout_model_probe.py'
       - 'scripts/ocr/package_python_dependencies.py'
       - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/ocr/verify_engine_component.py'
@@ -62,13 +64,18 @@ jobs:
           sudo apt-get update -qq
           python scripts/ocr/package_engine_dependencies.py --python-runtime --output "$RUNNER_TEMP/ocr-private-runtime"
           python scripts/ocr/package_python_dependencies.py --output "$RUNNER_TEMP/ocr-private-wheels"
+      - name: Stage the approved immutable classifier and model provenance
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          python scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --prepare --model "$runtime_root/opt/ocr-layout-model" --output "$RUNNER_TEMP/ocr-layout-model-provenance"
       - name: Install hash-locked wheels using only the extracted interpreter offline
         run: |
           set -euo pipefail
           runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
           mkdir -p "$runtime_root/opt/ocr-bootstrap" "$runtime_root/opt/ocr-smoke" "$runtime_root/tmp" "$runtime_root/run"
           cp -R "$RUNNER_TEMP/ocr-private-wheels/." "$runtime_root/opt/ocr-bootstrap/"
-          cp src/parsing/pdf_layout_worker.py scripts/ocr/offline_runtime_smoke.py tests/fixtures/scanned_pdf/pdf/F07.pdf "$runtime_root/opt/ocr-smoke/"
+          cp src/parsing/pdf_layout_worker.py scripts/ocr/offline_runtime_smoke.py tests/fixtures/scanned_pdf/pdf/F07.pdf tests/fixtures/scanned_pdf/pdf/F11.pdf "$runtime_root/opt/ocr-smoke/"
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/python3.12 -m venv /opt/ocr-python
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /opt/ocr-python/bin/python -m pip install --no-index --no-cache-dir --require-hashes --find-links /opt/ocr-bootstrap/wheels -r /opt/ocr-bootstrap/requirements.lock
       - name: Actual frozen OCR with private interpreter libraries and network isolation
@@ -88,6 +95,7 @@ jobs:
           cp "$RUNNER_TEMP/ocr-private-runtime/apt-source-uris.txt" "$notice_root/"
           cp "$RUNNER_TEMP/ocr-private-wheels/manifest.json" "$notice_root/python-manifest.json"
           cp "$RUNNER_TEMP/ocr-private-wheels/requirements.lock" "$notice_root/"
+          cp "$RUNNER_TEMP/ocr-layout-model-provenance/model-manifest.json" "$notice_root/"
           cp -R "$RUNNER_TEMP/ocr-private-wheels/notices" "$notice_root/"
           runtime_source_sha=$(git rev-parse HEAD)
           sudo /usr/bin/python3 scripts/ocr/runtime_archive.py build --root "$runtime_root" --source-sha "$runtime_source_sha" --output "$RUNNER_TEMP/ocr-private-package" | tee "$RUNNER_TEMP/ocr-private-package-build.json"
@@ -104,7 +112,7 @@ jobs:
       - name: Compare exact reconstructed runtime and measure all protected directories
         run: |
           set -euo pipefail
-          python -c 'import json,sys; a,b=(json.load(open(p)) for p in sys.argv[1:]); fields=("identity","canonical_paragraphs","raw_sha256","worker_sha256","python_executable_sha256"); assert all(a[k]==b[k] for k in fields), "archive runtime identity or output changed"; print("verified archive preserves actual dependencies, interpreter, worker and F07 canonical output")' "$RUNNER_TEMP/ocr-private-runtime-smoke.json" "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+          python -c 'import json,sys; a,b=(json.load(open(p)) for p in sys.argv[1:]); fields=("identity","canonical_paragraphs","raw_sha256","worker_sha256","python_executable_sha256","visual_model_stage"); assert all(a[k]==b[k] for k in fields), "archive runtime identity or output changed"; print("verified archive preserves actual dependencies, interpreter, worker, F07 canonical output and F11 model observation")' "$RUNNER_TEMP/ocr-private-runtime-smoke.json" "$RUNNER_TEMP/ocr-private-archive-smoke.json"
           sudo du -sb "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/ocr-private-package/ocr-private-runtime.tar.gz"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -141,6 +149,7 @@ jobs:
             ${{ runner.temp }}/ocr-private-runtime/apt-source-uris.txt
             ${{ runner.temp }}/ocr-private-wheels/manifest.json
             ${{ runner.temp }}/ocr-private-wheels/requirements.lock
+            ${{ runner.temp }}/ocr-layout-model-provenance/model-manifest.json
             ${{ runner.temp }}/ocr-private-runtime-smoke.json
             ${{ runner.temp }}/ocr-private-runtime-native-backtrace.txt
             ${{ runner.temp }}/ocr-private-package-build.json

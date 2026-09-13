@@ -44,13 +44,21 @@ jobs:
 
       - name: Verify source identity and version
         env:
+          GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           actual_sha=$(git -C source rev-parse 'HEAD^{commit}')
-          tag_sha=$(git -C packaging ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 {print $1}')
+          tag_ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")
+          tag_object=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          tag_type=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["type"])')
+          if [[ "$tag_type" == tag ]]; then
+            tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" --jq .object.sha)
+          else
+            tag_sha="$tag_object"
+          fi
           source_status=$(git -C source status --porcelain --untracked-files=all)
           printf 'source_sha=%s tag_sha=%s status_bytes=%s\n' "$actual_sha" "$tag_sha" "${#source_status}"
           [[ "$actual_sha" == "$EXPECTED_SHA" && "$tag_sha" == "$EXPECTED_SHA" ]]

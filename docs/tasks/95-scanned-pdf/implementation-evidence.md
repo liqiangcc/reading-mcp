@@ -362,3 +362,38 @@ raw/normalized identity 相同。成功 hit 在现有 CachingParser 中直接返
 不进入底层 OCR Parser；报告称 cache bypass 证据，不捏造额外的引擎计数器。
 此项仅是冻结四页混合 F05 的 hosted stdio 验收，不代替生产 connector 的
 真实 deadline、10 秒余量、私有原始四页论文或最终 package 的本机实测。
+
+### 可重放的私有 runtime 归档（当前提交待 hosted 验证）
+
+此前私有解释器验证使用刚安装的工作目录，不能据此证明可交付归档。
+新增 `scripts/ocr/runtime_archive.py` 的 build/unpack 链路，当前 scope 是
+已安装的解释器、engine/models/libraries 与 hash-locked Python 环境；F11
+额外分类模型和 Rust runtime RootDirectory 配置尚未完成，不称最终 companion。
+
+归档以 `ocr-private-runtime-archive/v1` 保存实际 checkout SHA、每个 regular
+file 的 bytes/SHA256/mode、目录 mode、symlink 原始 target 及四份来源清单
+摘要。完整 Debian notices、wheel dist-info notices、单独冻结的 flatbuffers
+notice、原始 engine/Python manifests、requirements.lock 和 apt-source-uris
+保留在运行树中。bootstrap wheels 不重复交付；tmp/dev/proc/sys 和公开测试
+挂载点保留为空目录，测试 PDF/脚本不混作运行依赖。gzip/tar 的 uid/gid/mtime
+固定；同一输入树的重复打包须字节相同，不外推成跨时间重新安装也必然相同。
+
+解包先以单一 regular-file FD 核验外部归档摘要，再对实际消耗的压缩字节
+二次核验，避免预检后文件替换/更改绕过授权。只在自有 0700 staging 下写入，
+禁止重复/越界路径、hardlink/special file、symlink 祖先写入、清单外成员、
+错误 source SHA/类型/mode/内容摘要。symlink 最后创建，绝对路径只保留
+RootDirectory 内部语义，绝不在宿主跟随它来读写验证。文件 sync、目录 sync
+后使用 Linux renameat2(RENAME_NOREPLACE) 发布新目录；已有目录（包括空目录）
+和并发抢先创建均不能被覆盖。失败清理仅限本次所有的 staging；不切服务、
+不改 canonical state、不移 tag、不上传 Release asset。
+
+防御性解包上限为 compressed/regular total 各 1 GiB、单文件 256 MiB、
+manifest 32 MiB/50000 entries；这些是输入上限，不是生产容量准入结论。
+生产仍需基于实际归档/解包/备份/回滚同时占用和安全余量计算容量。
+
+Hosted workflow 增加 deterministic roundtrip、payload 单字节篡改、外摘要/
+source 不符、预检后输入变化、路径/链接拒绝、已有目标与原子发布竞争测试。
+随后实际打包安装树、解包至全新 root，在 network-disabled RootDirectory
+内通过只读挂载的公开 F07 再跑真实 worker，要求解释器/worker/dependencies
+身份和四段 canonical 文本与打包前一致。只在这些步骤全部成功后上传 verified
+candidate archive；执行结果尚待该 head，不以 py_compile 代替测试。

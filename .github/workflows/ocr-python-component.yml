@@ -6,6 +6,8 @@ on:
       - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/ocr/verify_engine_component.py'
       - 'scripts/ocr/offline_runtime_smoke.py'
+      - 'scripts/ocr/runtime_archive.py'
+      - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
@@ -15,6 +17,8 @@ on:
       - 'scripts/ocr/package_engine_dependencies.py'
       - 'scripts/ocr/verify_engine_component.py'
       - 'scripts/ocr/offline_runtime_smoke.py'
+      - 'scripts/ocr/runtime_archive.py'
+      - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
       - 'scripts/pdf-layout/requirements.txt'
       - '.github/workflows/ocr-python-component.yml'
@@ -29,6 +33,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Private runtime archive corruption and publication tests
+        run: python -m unittest tests/ocr/test_runtime_archive.py
       - name: Resolve private interpreter and engine without host package installation
         run: |
           sudo apt-get update -qq
@@ -49,6 +55,30 @@ jobs:
           runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
           du -sb "$runtime_root" "$runtime_root/opt/ocr-python" "$runtime_root/opt/ocr-bootstrap"
+      - name: Archive the installed private runtime and verify into a new root
+        run: |
+          set -euo pipefail
+          runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
+          notice_root="$runtime_root/usr/share/doc/reading-mcp-ocr"
+          mkdir -p "$notice_root"
+          cp "$RUNNER_TEMP/ocr-private-runtime/manifest.json" "$notice_root/engine-manifest.json"
+          cp "$RUNNER_TEMP/ocr-private-runtime/apt-source-uris.txt" "$notice_root/"
+          cp "$RUNNER_TEMP/ocr-private-wheels/manifest.json" "$notice_root/python-manifest.json"
+          cp "$RUNNER_TEMP/ocr-private-wheels/requirements.lock" "$notice_root/"
+          cp -R "$RUNNER_TEMP/ocr-private-wheels/notices" "$notice_root/"
+          runtime_source_sha=$(git rev-parse HEAD)
+          sudo /usr/bin/python3 scripts/ocr/runtime_archive.py build --root "$runtime_root" --source-sha "$runtime_source_sha" --output "$RUNNER_TEMP/ocr-private-package" | tee "$RUNNER_TEMP/ocr-private-package-build.json"
+          runtime_archive_sha=$(cut -d ' ' -f 1 "$RUNNER_TEMP/ocr-private-package/SHA256SUMS")
+          sudo /usr/bin/python3 scripts/ocr/runtime_archive.py unpack --archive "$RUNNER_TEMP/ocr-private-package/ocr-private-runtime.tar.gz" --sha256 "$runtime_archive_sha" --source-sha "$runtime_source_sha" --output "$RUNNER_TEMP/verified-ocr-runtime" | tee "$RUNNER_TEMP/ocr-private-package-verify.json"
+      - name: Execute frozen OCR from the verified archive without network or host interpreter
+        run: |
+          set -euo pipefail
+          verified_root="$RUNNER_TEMP/verified-ocr-runtime"
+          public_smoke="$RUNNER_TEMP/ocr-private-runtime/rootfs/opt/ocr-smoke"
+          test ! -e "$verified_root/opt/ocr-bootstrap"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$verified_root" --property="BindReadOnlyPaths=$public_smoke:/opt/ocr-smoke" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=NoNewPrivileges=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group --property=LimitCORE=0 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+          python -c 'import json,sys; a,b=(json.load(open(p)) for p in sys.argv[1:]); fields=("identity","canonical_paragraphs","raw_sha256","worker_sha256","python_executable_sha256"); assert all(a[k]==b[k] for k in fields), "archive runtime identity or output changed"; print("verified archive preserves actual dependencies, interpreter, worker and F07 canonical output")' "$RUNNER_TEMP/ocr-private-runtime-smoke.json" "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+          du -sb "$verified_root" "$RUNNER_TEMP/ocr-private-package/ocr-private-runtime.tar.gz"
       - name: Capture native import backtrace in the same private root on failure
         if: failure()
         run: |
@@ -74,6 +104,16 @@ jobs:
             ${{ runner.temp }}/ocr-private-wheels/requirements.lock
             ${{ runner.temp }}/ocr-private-runtime-smoke.json
             ${{ runner.temp }}/ocr-private-runtime-native-backtrace.txt
+            ${{ runner.temp }}/ocr-private-package-build.json
+            ${{ runner.temp }}/ocr-private-package-verify.json
+            ${{ runner.temp }}/ocr-private-archive-smoke.json
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocr-private-runtime-verified-candidate
+          path: ${{ runner.temp }}/ocr-private-package/
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 14
   offline-engine:
     runs-on: ubuntu-24.04

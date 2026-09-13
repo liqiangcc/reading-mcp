@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Immutable source tag, for example v0.4.0
+        description: Immutable source tag, for example v0.4.1
         required: true
         type: string
       expected_sha:
@@ -63,7 +63,8 @@ jobs:
           printf 'source_sha=%s tag_sha=%s status_bytes=%s\n' "$actual_sha" "$tag_sha" "${#source_status}"
           [[ "$actual_sha" == "$EXPECTED_SHA" && "$tag_sha" == "$EXPECTED_SHA" ]]
           [[ -z "$source_status" ]]
-          grep -Eq '^version = "0\.4\.0"$' source/Cargo.toml
+          version="${RELEASE_TAG#v}"
+          grep -Eq "^version = \"${version//./\\.}\"$" source/Cargo.toml
 
       - uses: actions/setup-python@v5
         with:
@@ -132,15 +133,16 @@ jobs:
           PY
           final="$RUNNER_TEMP/ocr-private-package/final"
           mkdir -p "$final"
-          cp "$archive" "$final/ocr-private-runtime-v0.4.0-linux-x86_64.tar.gz"
-          cp "$RUNNER_TEMP/ocr-private-package/build/runtime-manifest.json" "$final/ocr-private-runtime-v0.4.0-runtime-manifest.json"
+          version="${{ inputs.tag }}"
+          cp "$archive" "$final/ocr-private-runtime-${version}-linux-x86_64.tar.gz"
+          cp "$RUNNER_TEMP/ocr-private-package/build/runtime-manifest.json" "$final/ocr-private-runtime-${version}-runtime-manifest.json"
           cp "$RUNNER_TEMP/ocr-private-package/verification.json" "$final/OCR-RUNTIME-VERIFICATION.json"
-          sha256sum "$final/ocr-private-runtime-v0.4.0-linux-x86_64.tar.gz" "$final/ocr-private-runtime-v0.4.0-runtime-manifest.json" "$final/OCR-RUNTIME-VERIFICATION.json" > "$final/OCR-RUNTIME-SHA256SUMS"
+          sha256sum "$final/ocr-private-runtime-${version}-linux-x86_64.tar.gz" "$final/ocr-private-runtime-${version}-runtime-manifest.json" "$final/OCR-RUNTIME-VERIFICATION.json" > "$final/OCR-RUNTIME-SHA256SUMS"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ocr-private-runtime-v0.4.0-linux-x86_64
+          name: ocr-private-runtime-${{ inputs.tag }}-linux-x86_64
           path: ${{ runner.temp }}/ocr-private-package/final
           if-no-files-found: error
           compression-level: 0

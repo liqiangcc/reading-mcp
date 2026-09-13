@@ -62,7 +62,7 @@ pub fn inspect_private_ocr_runtime(
     {
         return Err(failed("private OCR runtime requires a real run directory"));
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut verify = std::process::Command::new(verifier_python);
     verify
         .env_clear()

@@ -48,4 +48,7 @@ Path(os.environ.get("RUNNER_TEMP", "."), "ocr-first-probe", "f07-canonical.json"
 bad = json.loads(json.dumps(identity)); model = next(d for d in bad["dependencies"] if d["name"].startswith("model:")); model["sha256"] = "0" * 64
 failed = subprocess.run(cmd[:-1] + [json.dumps(bad)], input=pdf.read_bytes(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 assert failed.returncode != 0 and b"identity mismatch" in failed.stderr
+failure = json.loads(failed.stdout)
+assert failure == {'schema':'ocr-worker-failure/v2', 'stage':'dependency',
+    'original_sha256':None, 'runtime_identity_sha256':bad['sha256'], 'error':'OCR_UNAVAILABLE'}
 print("worker identity and tamper rejection passed")

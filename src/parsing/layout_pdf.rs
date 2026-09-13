@@ -212,11 +212,57 @@ struct OcrWorkerFailure {
     ocr_attempts: Vec<OcrPageObservations>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OcrFailureStage {
+    Dependency,
+    Ingestion,
+}
+
+#[derive(Deserialize)]
+enum OcrFailureCode {
+    #[serde(rename = "OCR_UNAVAILABLE")]
+    Unavailable,
+    #[serde(rename = "OCR_TIMEOUT")]
+    Timeout,
+    #[serde(rename = "OCR_RESOURCE_LIMIT")]
+    ResourceLimit,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OcrWorkerStageFailure {
+    schema: String,
+    stage: OcrFailureStage,
+    original_sha256: Option<String>,
+    runtime_identity_sha256: String,
+    error: OcrFailureCode,
+}
+
 fn validated_worker_failure(
     output: &[u8],
     original_sha256: &str,
     identity_sha256: &str,
 ) -> ApplicationError {
+    if let Ok(failure) = serde_json::from_slice::<OcrWorkerStageFailure>(output) {
+        let source_matches = match failure.stage {
+            OcrFailureStage::Dependency => failure.original_sha256.is_none(),
+            OcrFailureStage::Ingestion => {
+                failure.original_sha256.as_deref() == Some(original_sha256)
+            }
+        };
+        if failure.schema != "ocr-worker-failure/v2"
+            || failure.runtime_identity_sha256 != identity_sha256
+            || !source_matches
+        {
+            return ApplicationError::OcrFailed;
+        }
+        return match failure.error {
+            OcrFailureCode::Unavailable => ApplicationError::OcrUnavailable,
+            OcrFailureCode::Timeout => ApplicationError::OcrTimeout,
+            OcrFailureCode::ResourceLimit => ApplicationError::OcrResourceLimit,
+        };
+    }
     let Ok(failure) = serde_json::from_slice::<OcrWorkerFailure>(output) else {
         return ApplicationError::OcrFailed;
     };
@@ -806,6 +852,46 @@ mod tests {
             validated_worker_failure(b"invalid JSON", &raw, &identity),
             ApplicationError::OcrFailed
         ));
+    }
+
+    #[test]
+    fn stage_failure_protocol_rejects_unknown_codes_and_false_source_claims() {
+        use serde_json::json;
+        let source = "a".repeat(64);
+        let identity = format!("sha256:{}", "b".repeat(64));
+        let base = json!({"schema":"ocr-worker-failure/v2", "stage":"ingestion",
+            "original_sha256":source,"runtime_identity_sha256":identity,"error":"OCR_TIMEOUT"});
+        let check = |value: &serde_json::Value| {
+            validated_worker_failure(&serde_json::to_vec(value).unwrap(), &source, &identity)
+        };
+        for (code, expected) in [
+            ("OCR_TIMEOUT", ApplicationError::OcrTimeout),
+            ("OCR_RESOURCE_LIMIT", ApplicationError::OcrResourceLimit),
+            ("OCR_UNAVAILABLE", ApplicationError::OcrUnavailable),
+        ] {
+            let mut valid = base.clone();
+            valid["error"] = json!(code);
+            assert_eq!(check(&valid), expected);
+            valid["stage"] = json!("dependency");
+            valid["original_sha256"] = serde_json::Value::Null;
+            assert_eq!(check(&valid), expected);
+        }
+        for (field, value) in [
+            ("schema", json!("unknown")),
+            ("stage", json!("other")),
+            ("original_sha256", json!("c".repeat(64))),
+            ("original_sha256", serde_json::Value::Null),
+            ("runtime_identity_sha256", json!("changed")),
+            ("error", json!("OCR_REQUIRED")),
+            ("private_diagnostic", json!("must not be accepted")),
+        ] {
+            let mut invalid = base.clone();
+            invalid[field] = value;
+            assert_eq!(check(&invalid), ApplicationError::OcrFailed);
+        }
+        let mut invalid = base.clone();
+        invalid["stage"] = json!("dependency");
+        assert_eq!(check(&invalid), ApplicationError::OcrFailed);
     }
 
     #[test]

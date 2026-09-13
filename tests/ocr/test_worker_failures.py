@@ -1,0 +1,66 @@
+import contextlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('failure_worker', Path(__file__).parents[2] / 'src/parsing/pdf_layout_worker.py')
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+
+
+class WorkerFailureTests(unittest.TestCase):
+    def setUp(self):
+        worker.OCR_CONFIG = {'enabled': True}
+        worker.EXPECTED_IDENTITY = {'config': worker.OCR_CONFIG, 'sha256': 'sha256:' + 'a' * 64}
+        worker.INPUT_SHA256 = None
+
+    def test_dependency_failure_before_input_has_no_invented_source_or_private_details(self):
+        args = ['worker', '100', '100000', '100000', json.dumps(worker.OCR_CONFIG), json.dumps(worker.EXPECTED_IDENTITY)]
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(worker.sys, 'argv', args), patch.object(worker, 'fingerprint_dependencies',
+                side_effect=FileNotFoundError('private path /secret/model')), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            self.assertEqual(worker.run(), 1)
+        self.assertEqual(json.loads(output.getvalue()), {'schema':'ocr-worker-failure/v2',
+            'stage':'dependency','original_sha256':None,'runtime_identity_sha256':worker.EXPECTED_IDENTITY['sha256'],
+            'error':'OCR_UNAVAILABLE'})
+        self.assertNotIn('/secret', errors.getvalue())
+
+    def test_ingestion_timeout_envelope_binds_complete_input_hash(self):
+        worker.INPUT_SHA256 = 'b' * 64
+        failure = worker.OcrStageFailure('OCR_TIMEOUT', 'local OCR page exceeded shared 15 second budget')
+        output = io.StringIO()
+        with patch.object(worker, 'main', side_effect=failure), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(worker.run(), 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['stage'], 'ingestion')
+        self.assertEqual(result['original_sha256'], 'b' * 64)
+        self.assertEqual(result['error'], 'OCR_TIMEOUT')
+
+    def test_real_budget_producers_assign_resource_and_timeout_types(self):
+        budget = worker.OcrRasterBudget()
+        with self.assertRaises(worker.OcrStageFailure) as caught:
+            budget.reserve_raster(64_000_001)
+        self.assertEqual(caught.exception.code, 'OCR_RESOURCE_LIMIT')
+        for page in range(8):
+            budget.require_page(page)
+        with self.assertRaises(worker.OcrStageFailure) as caught:
+            budget.require_page(8)
+        self.assertEqual(caught.exception.code, 'OCR_RESOURCE_LIMIT')
+        with patch.object(worker, 'PAGE_DEADLINE', 0):
+            with self.assertRaises(worker.OcrStageFailure) as caught:
+                worker.page_time_remaining()
+        self.assertEqual(caught.exception.code, 'OCR_TIMEOUT')
+
+    def test_unclassified_failure_is_not_promoted_to_a_retryable_error(self):
+        output = io.StringIO()
+        with (patch.object(worker, 'main', side_effect=RuntimeError('unclassified failure')),
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO())):
+            self.assertEqual(worker.run(), 1)
+        self.assertEqual(output.getvalue(), '')
+
+
+if __name__ == '__main__':
+    unittest.main()

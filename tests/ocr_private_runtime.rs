@@ -42,7 +42,7 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
     let parser = LayoutPdfParser::new(python, ResourceBudget::default())
-        .with_ocr_runtime_package(root, manifest)
+        .with_ocr_runtime_package(root.clone(), manifest.clone())
         .with_ocr_config(identity.config.clone())
         .with_ocr_identity(identity.clone())
         .with_evidence_store(store.clone());
@@ -87,6 +87,36 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
     assert_eq!(evidence.runtime_identity, identity);
     assert_eq!(evidence.pages[0].attempts.len(), 2);
     assert_eq!(evidence.pages[0].selection.len(), 4);
+    let limited = LayoutPdfParser::new(
+        "/opt/ocr-python/bin/python".into(),
+        ResourceBudget {
+            max_normalized_chars: 1,
+            ..ResourceBudget::default()
+        },
+    )
+    .with_ocr_runtime_package(root, manifest)
+    .with_ocr_config(identity.config.clone())
+    .with_ocr_identity(identity)
+    .with_evidence_store(store.clone());
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        limited.parse(RetrievedResource {
+            source: document.source.clone(),
+            final_source: document.source.clone(),
+            media_type: MediaType("application/pdf".into()),
+            bytes: std::fs::read("tests/fixtures/scanned_pdf/pdf/F07.pdf").unwrap(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(
+        error,
+        reading_mcp::application::ports::ApplicationError::OcrResourceLimit
+    );
     let database = directory.path().join("documents.sqlite");
     {
         let repository = SqliteDocumentRepository::open(&database).unwrap();

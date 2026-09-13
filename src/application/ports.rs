@@ -114,6 +114,8 @@ pub enum ApplicationError {
     ParseFailed(String),
     #[error("local OCR worker failed; no parsed document was published")]
     OcrFailed,
+    #[error("local OCR dependencies are unavailable or changed; operator repair is required")]
+    OcrUnavailable,
     #[error("local OCR found no supported prose projection; inspect the original source")]
     OcrNoSupportedProjection,
     #[error("local OCR is busy; retry explicitly later")]

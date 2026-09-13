@@ -30,7 +30,17 @@ EXPECTED_IDENTITY = None
 PAGE_DEADLINE = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
+INPUT_SHA256 = None
 INSPECTION_POLICY = "ocr-original-region-inspection/v2"
+
+
+class OcrStageFailure(RuntimeError):
+    """Only explicit engine/budget producers assign these public categories."""
+    def __init__(self, code, reason):
+        super().__init__(reason)
+        if code not in ('OCR_UNAVAILABLE', 'OCR_TIMEOUT', 'OCR_RESOURCE_LIMIT'):
+            raise ValueError('unsupported OCR failure category')
+        self.code = code
 
 class OcrRasterBudget:
     """Allocation accounting is separate from the count of required OCR pages."""
@@ -40,18 +50,18 @@ class OcrRasterBudget:
 
     def reserve_raster(self, pixels):
         if self.pixels + pixels > 64_000_000:
-            raise RuntimeError("OCR exceeds 64 million total raster pixel limit")
+            raise OcrStageFailure('OCR_RESOURCE_LIMIT', "OCR exceeds 64 million total raster pixel limit")
         self.pixels += pixels
 
     def require_page(self, page_number):
         if page_number not in self.pages and len(self.pages) >= 8:
-            raise RuntimeError("OCR exceeds 8 required page limit")
+            raise OcrStageFailure('OCR_RESOURCE_LIMIT', "OCR exceeds 8 required page limit")
         self.pages.add(page_number)
 
 def page_time_remaining():
     remaining = 15.0 if PAGE_DEADLINE is None else PAGE_DEADLINE - time.monotonic()
     if remaining <= 0:
-        raise RuntimeError("local OCR page exceeded shared 15 second budget")
+        raise OcrStageFailure('OCR_TIMEOUT', "local OCR page exceeded shared 15 second budget")
     return remaining
 
 def raster_pixel_count(page, dpi):
@@ -65,7 +75,7 @@ def raster_pixel_count(page, dpi):
     width = math.ceil(rect.x1 * scale) - math.floor(rect.x0 * scale)
     height = math.ceil(rect.y1 * scale) - math.floor(rect.y0 * scale)
     if width <= 0 or height <= 0 or width * height > 16_000_000:
-        raise RuntimeError("OCR raster exceeds 16 million pixel page limit")
+        raise OcrStageFailure('OCR_RESOURCE_LIMIT', "OCR raster exceeds 16 million pixel page limit")
     return width * height
 RETRY_POLICY = {"version": "ocr-regional-retry/v1", "primary_psm": 3,
                 "retry_psm": 6, "max_retries_per_page": 1, "overlap_percent": 90,
@@ -264,13 +274,13 @@ def dependency_command_output(command, timeout=5.0):
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise RuntimeError("OCR dependency discovery timed out")
+                    raise OcrStageFailure('OCR_TIMEOUT', "OCR dependency discovery timed out")
                 for key, _ in selector.select(min(remaining, .01)):
                     chunk = os.read(key.fd, 8192)
                     if not chunk:
                         selector.unregister(key.fileobj)
                     elif len(streams[key.data]) + len(chunk) > 64 * 1024:
-                        raise RuntimeError("OCR dependency output limit exceeded")
+                        raise OcrStageFailure('OCR_RESOURCE_LIMIT', "OCR dependency output limit exceeded")
                     else:
                         streams[key.data].extend(chunk)
                 # Reserve PID/group until cleanup; poll()/wait() here would reap it.
@@ -343,9 +353,9 @@ def ocr_page(page, language=None, excluded_regions=()):
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
                            stderr=subprocess.PIPE, timeout=page_time_remaining(), env=OCR_PROCESS_ENV)
         except FileNotFoundError as error:
-            raise RuntimeError("local OCR engine is not installed") from error
+            raise OcrStageFailure('OCR_UNAVAILABLE', "local OCR engine is not installed") from error
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError("local OCR page exceeded 15 second budget") from error
+            raise OcrStageFailure('OCR_TIMEOUT', "local OCR page exceeded 15 second budget") from error
         rows = []
         with open(output + ".tsv", encoding="utf-8", newline="") as stream:
             for row in csv.DictReader(stream, delimiter="\t"):
@@ -692,14 +702,14 @@ def project(layout):
 
 
 def main():
-    global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET
+    global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256
     protocol_stdout = sys.stdout
     if len(sys.argv) == 4 and sys.argv[1] == '--verify-runtime':
         print(json.dumps(verify_runtime_package(sys.argv[2], sys.argv[3]), separators=(',', ':')))
         return
     if len(sys.argv) == 4 and sys.argv[1] == '--runtime-identity':
         config, expected_package = json.loads(sys.argv[2]), json.loads(sys.argv[3])
-        _, actual_package = runtime_manifest('/run/reading-mcp-ocr-package.json')
+        actual_package = runtime_manifest('/run/reading-mcp-ocr-package.json')[1]
         if actual_package != expected_package or sys.executable != actual_package['python_path']:
             raise ValueError('OCR runtime package identity mismatch')
         print(json.dumps(runtime_identity(config, fingerprint_dependencies(config), actual_package), ensure_ascii=False, separators=(',', ':')))
@@ -715,30 +725,52 @@ def main():
     if OCR_CONFIG.get("enabled"):
         RASTER_BUDGET = OcrRasterBudget()
         if EXPECTED_IDENTITY is None: raise ValueError("OCR expected identity is required")
-        actual_dependencies = fingerprint_dependencies(OCR_CONFIG)
-        if EXPECTED_IDENTITY.get("dependencies") != actual_dependencies: raise ValueError("OCR dependency identity mismatch")
-        package = EXPECTED_IDENTITY.get('runtime_package')
-        if package is not None:
-            _, actual_package = runtime_manifest('/run/reading-mcp-ocr-package.json')
-            if package != actual_package or sys.executable != package['python_path']:
-                raise ValueError('OCR runtime package identity mismatch')
-        actual_identity = runtime_identity(OCR_CONFIG, actual_dependencies, package)
-        if EXPECTED_IDENTITY != actual_identity:
-            raise ValueError("OCR policy/runtime identity mismatch")
+        try:
+            actual_dependencies = fingerprint_dependencies(OCR_CONFIG)
+            if EXPECTED_IDENTITY.get("dependencies") != actual_dependencies:
+                raise ValueError("OCR dependency identity mismatch")
+            package = EXPECTED_IDENTITY.get('runtime_package')
+            if package is not None:
+                actual_package = runtime_manifest('/run/reading-mcp-ocr-package.json')[1]
+                if package != actual_package or sys.executable != package['python_path']:
+                    raise ValueError('OCR runtime package identity mismatch')
+            actual_identity = runtime_identity(OCR_CONFIG, actual_dependencies, package)
+            if EXPECTED_IDENTITY != actual_identity:
+                raise ValueError("OCR policy/runtime identity mismatch")
+        except OcrStageFailure:
+            raise
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            raise OcrStageFailure('OCR_UNAVAILABLE', 'OCR dependencies unavailable or identity mismatch') from error
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):
-        if importlib.metadata.version(package) != "1.28.2":
+        try:
+            version = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError as error:
+            if OCR_CONFIG.get('enabled'):
+                raise OcrStageFailure('OCR_UNAVAILABLE', 'pinned PDF dependencies unavailable') from error
+            raise
+        if version != "1.28.2":
+            if OCR_CONFIG.get('enabled'):
+                raise OcrStageFailure('OCR_UNAVAILABLE', 'pinned PDF dependency version mismatch')
             raise ValueError(f"{package} must be version 1.28.2; run setup-pdf-layout.sh")
     # Libraries may print status messages; reserve stdout for protocol output.
     with contextlib.redirect_stdout(sys.stderr):
-        import pymupdf
-        import pymupdf4llm
+        try:
+            import pymupdf
+            import pymupdf4llm
+        except (ImportError, OSError) as error:
+            if OCR_CONFIG.get('enabled'):
+                raise OcrStageFailure('OCR_UNAVAILABLE', 'PDF native dependency import failed') from error
+            raise
         pymupdf4llm.use_layout(True)
         raw = sys.stdin.buffer.read(max_bytes + 1)
         if len(raw) > max_bytes:
             raise ValueError("PDF exceeds byte limit")
+        INPUT_SHA256 = hashlib.sha256(raw).hexdigest()
         with pymupdf.open(stream=raw, filetype="pdf") as doc:
             if doc.needs_pass:
                 raise ValueError("encrypted PDF requires a password")
+            if len(doc) > max_pages and OCR_CONFIG.get('enabled'):
+                raise OcrStageFailure('OCR_RESOURCE_LIMIT', 'PDF exceeds page limit')
             if not 0 < len(doc) <= max_pages:
                 raise ValueError("PDF exceeds page limit or has no pages")
             layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
@@ -767,14 +799,6 @@ def main():
         result = project(layout)
         result["ocr_attempts"] = observations
         if OCR_CONFIG.get("enabled", False):
-            engine = OCR_CONFIG["engine_path"]
-            tessdata = OCR_CONFIG["tessdata_path"]
-            def sha(path):
-                digest = hashlib.sha256()
-                with open(path, "rb") as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
-                return digest.hexdigest()
-            language = "+".join(OCR_CONFIG["languages"])
             result["ocr_derivation"] = {"schema": "ocr-derivation/v3", "original_sha256": hashlib.sha256(raw).hexdigest(),
                 "inspection_policy": INSPECTION_POLICY,
                 "retry_policy": RETRY_POLICY, "runtime_identity_sha256": actual_identity["sha256"],
@@ -792,13 +816,31 @@ def main():
                 raise ValueError("no supported prose text in inspected original pages")
             raise ValueError("no supported prose text; scanned/image-only PDFs need OCR (not enabled)")
         if sum(len(b["text"]) for s in result["sections"] for b in s["blocks"]) > max_chars:
+            if OCR_CONFIG.get('enabled'):
+                raise OcrStageFailure('OCR_RESOURCE_LIMIT', 'PDF exceeds normalized text limit')
             raise ValueError("PDF exceeds normalized text limit")
     json.dump(result, sys.stdout, ensure_ascii=False, separators=(",", ":"))
 
 
-if __name__ == "__main__":
+def run():
     try:
         main()
+        return 0
+    except OcrStageFailure as error:
+        if OCR_CONFIG.get('enabled') and EXPECTED_IDENTITY is not None:
+            # Before input is consumed there is deliberately no source-hash
+            # claim. Ingestion failures bind the actual complete input bytes.
+            json.dump({'schema': 'ocr-worker-failure/v2',
+                'stage': 'dependency' if INPUT_SHA256 is None else 'ingestion',
+                'original_sha256': INPUT_SHA256,
+                'runtime_identity_sha256': EXPECTED_IDENTITY['sha256'],
+                'error': error.code}, sys.stdout, separators=(',', ':'))
+        print(f"PDF layout failed: {error}", file=sys.stderr)
+        return 1
     except Exception as error:
         print(f"PDF layout failed: {error}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(run())

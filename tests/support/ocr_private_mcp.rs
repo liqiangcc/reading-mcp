@@ -158,6 +158,42 @@ async fn startup_cache_identity_and_corruption_rejection() {
     );
     assert!(String::from_utf8_lossy(&result.stderr).contains("inventory verification failed"));
     drop(restore);
+    // A separate fresh revision misses cache after successful startup. Drift
+    // introduced only then must be rejected by the actual worker before OCR.
+    // Do not claim cache hits rescan an operator-owned immutable install tree.
+    let (transport, _) = TokioChildProcess::builder(make_command("3", &alternate_manifest))
+        .spawn()
+        .unwrap();
+    let client = tokio::time::timeout(std::time::Duration::from_secs(10), ().serve(transport))
+        .await
+        .unwrap()
+        .unwrap();
+    let restore = RestoreFile(model.clone(), std::fs::read(&model).unwrap());
+    let mut changed = restore.1.clone();
+    changed[0] ^= 1;
+    std::fs::write(&model, changed).unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.call_tool(
+            CallToolRequestParams::new("open_document").with_arguments(
+                json!({"source":source,"force_refresh":true})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        ),
+    )
+    .await
+    .unwrap()
+    .expect_err("worker must reject changed actual model after startup");
+    assert!(error.to_string().contains("OCR_UNAVAILABLE"));
+    assert!(error.to_string().contains("\"retryable\":false"));
+    assert!(!error.to_string().contains("traineddata"));
+    client.cancel().await.unwrap();
+    drop(restore);
+    println!(
+        "private runtime MCP rejects post-startup model drift as OCR_UNAVAILABLE without publication"
+    );
     let previous = last_document.unwrap();
     let repository = SqliteDocumentRepository::open(state.join("reading-mcp.sqlite")).unwrap();
     let retained = repository.get(&previous.id).await.unwrap().unwrap();

@@ -505,3 +505,29 @@ busy 在该 transport 测试通过 Parser port 注入，实际 admission 产生�
 
 尚不等于全错误表关闭：worker 的 typed failure 分类、systemd 真实终止原因、
 OCR_REQUIRED/OCR_UNAVAILABLE 和 F11/最终部署验收仍需后续处理。
+
+### Worker typed failure 到真实 MCP（本提交待 hosted）
+
+98cf5749002fcfe43df7129512e32593439122d3 全 checks success，34741863303
+日志已确认真实 MCP error transport、60 秒单飞取消、2 秒 admission 和
+OpenDocument shared-deadline 测试成功。此包继续补 worker，而非仅新增错误名。
+
+新增 `ocr-worker-failure/v2`，仅显式异常生产点可给出 OCR_UNAVAILABLE /
+OCR_TIMEOUT / OCR_RESOURCE_LIMIT。Dependency 阶段必须无原文 hash 声明；
+ingestion 阶段必须匹配 Rust 实际完整输入 hash；两阶段均匹配本次 expected
+runtime identity，未知 schema/stage/code/额外字段或不一致声明退为 OCR_FAILED。
+旧 v1 无支持正文/未解决几何观察协议不改。明确 page/raster/text/依赖输出上限、
+实际 subprocess timeout、依赖缺失/变化/import 失败接入 typed 分类；无根据的
+普通异常不升级为“可重试”或猜成 OOM。错误公开文本保持静态，隐藏 OSError 路径。
+
+Hosted 新增四个 Python 协议/真实预算生产点测试、Rust 篡改/空 hash 负例；
+原真实 model-tamper probe 增加完整 v2 envelope 断言。私有运行包测试额外实际
+执行 F07 字符上限失败，Rust 必须收到 OcrResourceLimit；真实 MCP 在正确启动
+后、一个全新 revision 的 cache miss 前故障注入实际模型变化，必须返回
+OCR_UNAVAILABLE/retryable=false，保存前失败，旧 SQLite Document 保留。
+故障仅作用于 disposable hosted root、RAII 恢复，不改原归档或冻结输入/gold。
+不声称每次 cache hit 检查运行中被管理员热改的包；版本目录仍须不可变。
+
+顺手去掉 worker 已验证 dependencies 之后的无用 engine/tessdata/sha 定义，
+以及持有整份 manifest 到 OCR 结束的 `_` 引用；不改实际正向识别/投影结果。
+仍未关闭 OCR_REQUIRED、真实 systemd 终止分类、F11 与最终发布/生产验收。

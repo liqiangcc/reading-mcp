@@ -255,6 +255,7 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::RetrievalFailed(_) => "retrieval_failed",
         ApplicationError::ParseFailed(_) => "parse_failed",
         ApplicationError::OcrFailed => "ocr_failed",
+        ApplicationError::OcrUnavailable => "ocr_unavailable",
         ApplicationError::OcrBusy => "ocr_busy",
         ApplicationError::OcrTimeout => "ocr_timeout",
         ApplicationError::OcrResourceLimit => "ocr_resource_limit",

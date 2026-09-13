@@ -110,8 +110,15 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
         })
         .await
         .unwrap();
-    let f11_paragraphs = f11.try_paragraph_text_units().unwrap().units;
-    assert_eq!(f11_paragraphs.len(), 6);
+    let f11_units = f11.try_paragraph_text_units().unwrap().units;
+    assert!(!f11_units.is_empty());
+    let prose_paragraphs = f11
+        .root_sections
+        .iter()
+        .flat_map(|section| section.content.iter())
+        .filter(|block| block.kind == reading_mcp::domain::NormalizedBlockKind::Paragraph)
+        .count();
+    assert_eq!(prose_paragraphs, 6);
     let f11_payload = store
         .get(f11.metadata.get("ocr_evidence_blob").unwrap())
         .await

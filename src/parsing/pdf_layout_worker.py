@@ -1104,10 +1104,6 @@ def project(layout):
                 body_started = True
                 sections.append({"title": text, "blocks": []})
                 continue
-            # Visual-only regions remain in the region/typed visual evidence,
-            # but their labels are never promoted into canonical prose blocks.
-            if cls in ("image", "formula"):
-                continue
             if not text:
                 continue  # non-text regions remain in the original PDF and region evidence
             spans = [s for line in (box.get("textlines") or []) for s in line["spans"] if s["text"].strip()]

@@ -196,6 +196,9 @@ fn worker_failure(ocr_enabled: bool, stderr: &[u8]) -> ApplicationError {
     if ocr_enabled {
         // OCR errors can contain input text or local paths. Keep bounded stderr
         // only inside this parse operation, never expose it via MCP/telemetry.
+        if std::env::var_os("READING_MCP_OCR_DEBUG_STDERR").is_some() {
+            eprintln!("OCR worker diagnostic: {}", String::from_utf8_lossy(stderr));
+        }
         ApplicationError::OcrFailed
     } else {
         failed(String::from_utf8_lossy(stderr))

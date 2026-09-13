@@ -1192,6 +1192,8 @@ def main():
             if visual_doc.needs_pass or not 0 < len(visual_doc) <= max_pages:
                 raise OcrStageFailure('OCR_RESOURCE_LIMIT', 'invalid visual PDF page count')
             for visual_page in visual_doc:
+                if RASTER_BUDGET is not None:
+                    RASTER_BUDGET.reserve_raster(raster_pixel_count(visual_page, OCR_CONFIG['dpi']))
                 pixmap = visual_page.get_pixmap(dpi=OCR_CONFIG['dpi'], colorspace=pymupdf.csRGB, alpha=False)
                 child = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', '-c',
                     WORKER, '--visual-model', '/opt/ocr-layout-model',

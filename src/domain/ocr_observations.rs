@@ -792,7 +792,7 @@ impl OcrEvidenceBlob {
                 || visual.page == 0
                 || visual.page > max_page
                 || !visual_pages.insert(visual.page)
-                || visual.raster_size.iter().any(|value| *value == 0)
+                || visual.raster_size.contains(&0)
                 || !super::ocr::valid_sha256(&visual.raster_sha256)
                 || visual.attempts.len() != 1
                 || visual.projection.schema != "ocr-visual-projection/v1"

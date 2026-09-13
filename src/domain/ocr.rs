@@ -80,20 +80,59 @@ impl Default for OcrRetryPolicy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OcrRuntimePackageIdentity {
+    pub schema: String,
+    pub manifest_sha256: String,
+    pub source_sha: String,
+    pub python_path: String,
+}
+
+impl OcrRuntimePackageIdentity {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != "ocr-private-runtime-archive/v1"
+            || !valid_sha256(&self.manifest_sha256)
+            || self.source_sha.len() != 40
+            || !self
+                .source_sha
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || self.python_path != "/opt/ocr-python/bin/python"
+        {
+            return Err("invalid OCR runtime package identity".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OcrRuntimeIdentity {
     pub config: OcrConfig,
     pub retry_policy: OcrRetryPolicy,
     pub inspection_policy: String,
     pub dependencies: Vec<DependencyFingerprint>,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_package: Option<OcrRuntimePackageIdentity>,
 }
 
 impl OcrRuntimeIdentity {
     pub fn build(
         config: OcrConfig,
+        dependencies: Vec<DependencyFingerprint>,
+    ) -> Result<Self, String> {
+        Self::build_with_package(config, dependencies, None)
+    }
+
+    pub fn build_with_package(
+        config: OcrConfig,
         mut dependencies: Vec<DependencyFingerprint>,
+        runtime_package: Option<OcrRuntimePackageIdentity>,
     ) -> Result<Self, String> {
         config.validate()?;
+        if let Some(package) = &runtime_package {
+            package.validate()?;
+        }
         if dependencies.is_empty() {
             return Err("missing OCR dependencies".into());
         }
@@ -121,12 +160,19 @@ impl OcrRuntimeIdentity {
         }
         let retry_policy = OcrRetryPolicy::default();
         let inspection_policy = "ocr-original-region-inspection/v2".to_owned();
-        let bytes = serde_json::to_vec(&(
-            config.clone(),
-            &retry_policy,
-            &inspection_policy,
-            dependencies.clone(),
-        ))
+        // Retain the accepted non-package identity byte encoding. A verified
+        // private package adds a typed fifth component, not an env fingerprint.
+        let bytes = if let Some(package) = &runtime_package {
+            serde_json::to_vec(&(
+                &config,
+                &retry_policy,
+                &inspection_policy,
+                &dependencies,
+                package,
+            ))
+        } else {
+            serde_json::to_vec(&(&config, &retry_policy, &inspection_policy, &dependencies))
+        }
         .map_err(|e| e.to_string())?;
         use sha2::{Digest, Sha256};
         Ok(Self {
@@ -135,6 +181,7 @@ impl OcrRuntimeIdentity {
             inspection_policy,
             dependencies,
             sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+            runtime_package,
         })
     }
 }
@@ -318,6 +365,62 @@ mod tests {
                 },
             ],
             sha256: "x".into(),
+            runtime_package: None,
+        }
+    }
+    #[test]
+    fn verified_package_binds_identity_without_changing_legacy_encoding() {
+        let seed = identity();
+        let legacy =
+            OcrRuntimeIdentity::build(seed.config.clone(), seed.dependencies.clone()).unwrap();
+        assert_eq!(
+            legacy,
+            OcrRuntimeIdentity::build_with_package(
+                seed.config.clone(),
+                seed.dependencies.clone(),
+                None
+            )
+            .unwrap()
+        );
+        let package = OcrRuntimePackageIdentity {
+            schema: "ocr-private-runtime-archive/v1".into(),
+            manifest_sha256: "a".repeat(64),
+            source_sha: "b".repeat(40),
+            python_path: "/opt/ocr-python/bin/python".into(),
+        };
+        let first = OcrRuntimeIdentity::build_with_package(
+            seed.config.clone(),
+            seed.dependencies.clone(),
+            Some(package.clone()),
+        )
+        .unwrap();
+        assert_ne!(first.sha256, legacy.sha256);
+        let roundtrip: OcrRuntimeIdentity =
+            serde_json::from_slice(&serde_json::to_vec(&first).unwrap()).unwrap();
+        assert_eq!(roundtrip, first);
+        let mut changed = package.clone();
+        changed.manifest_sha256 = "c".repeat(64);
+        assert_ne!(
+            first.sha256,
+            OcrRuntimeIdentity::build_with_package(
+                seed.config.clone(),
+                seed.dependencies.clone(),
+                Some(changed)
+            )
+            .unwrap()
+            .sha256
+        );
+        for invalid in ["", "unknown", &"A".repeat(64)] {
+            let mut broken = package.clone();
+            broken.manifest_sha256 = invalid.into();
+            assert!(
+                OcrRuntimeIdentity::build_with_package(
+                    seed.config.clone(),
+                    seed.dependencies.clone(),
+                    Some(broken)
+                )
+                .is_err()
+            );
         }
     }
     #[test]

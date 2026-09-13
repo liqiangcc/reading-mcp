@@ -70,6 +70,11 @@ impl SystemdOcrUnit {
     }
 
     pub(super) fn command_in_root(python: &Path, root: &Path) -> io::Result<(Command, Self)> {
+        Self::validate_runtime_root(python, root)?;
+        Self::command_with_root(python, Some(root), None, true)
+    }
+
+    fn validate_runtime_root(python: &Path, root: &Path) -> io::Result<()> {
         // An operator-selected, already verified immutable runtime directory,
         // never a document path or an implicit host-root fallback.
         if !root.is_absolute()
@@ -80,16 +85,40 @@ impl SystemdOcrUnit {
         {
             return Err(io::Error::other("invalid private OCR runtime path"));
         }
-        Self::command_with_root(python, Some(root), true)
+        Ok(())
+    }
+
+    pub(super) fn command_in_package(
+        python: &Path,
+        root: &Path,
+        manifest: &Path,
+    ) -> io::Result<(Command, Self)> {
+        // BindReadOnlyPaths uses systemd's path-list syntax, not shell quoting.
+        // Refuse ambiguous/specifier-bearing operator paths instead of guessing.
+        let path = manifest
+            .to_str()
+            .ok_or_else(|| io::Error::other("invalid OCR manifest path"))?;
+        if !manifest.is_absolute()
+            || manifest.canonicalize()? != manifest
+            || !manifest.is_file()
+            || path
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, ':' | '%' | '\\' | '\'' | '"'))
+        {
+            return Err(io::Error::other("invalid OCR manifest path"));
+        }
+        Self::validate_runtime_root(python, root)?;
+        Self::command_with_root(python, Some(root), Some(path), true)
     }
 
     fn command_with_collection(python: &Path, collect_failed: bool) -> io::Result<(Command, Self)> {
-        Self::command_with_root(python, None, collect_failed)
+        Self::command_with_root(python, None, None, collect_failed)
     }
 
     fn command_with_root(
         python: &Path,
         root: Option<&Path>,
+        manifest: Option<&str>,
         collect_failed: bool,
     ) -> io::Result<(Command, Self)> {
         Self::validate_host()?;
@@ -106,6 +135,11 @@ impl SystemdOcrUnit {
             writer: Some(writer),
         };
         let mut command = Command::new("/usr/bin/systemd-run");
+        let scratch = if manifest.is_some() {
+            "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 /run:rw,size=1M,mode=0755"
+        } else {
+            "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534"
+        };
         command
             .args([
                 "--quiet",
@@ -115,7 +149,7 @@ impl SystemdOcrUnit {
                 "--property=MemorySwapMax=0",
                 "--property=TasksMax=64",
                 "--property=PrivateNetwork=yes",
-                "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534",
+                scratch,
                 "--property=ProtectHome=tmpfs",
                 "--property=ProtectSystem=strict",
                 "--property=PrivateDevices=yes",
@@ -142,6 +176,11 @@ impl SystemdOcrUnit {
             let mut property = std::ffi::OsString::from("--property=RootDirectory=");
             property.push(root);
             command.arg(property).arg("--property=MountAPIVFS=yes");
+        }
+        if let Some(manifest) = manifest {
+            command.arg(format!(
+                "--property=BindReadOnlyPaths={manifest}:/run/reading-mcp-ocr-package.json"
+            ));
         }
         // The manager's environment is distinct from the client's. Explicitly
         // set the same allowlisted dependency-discovery environment in the unit.

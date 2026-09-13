@@ -14,6 +14,8 @@ pub struct RuntimeConfig {
     pub ocr_revision: String,
     pub ocr_engine: PathBuf,
     pub ocr_tessdata: PathBuf,
+    pub ocr_runtime_root: Option<PathBuf>,
+    pub ocr_runtime_manifest: Option<PathBuf>,
     pub local_roots: Vec<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
@@ -37,6 +39,8 @@ impl Default for RuntimeConfig {
             ocr_revision: "1".into(),
             ocr_engine: PathBuf::from("/usr/bin/tesseract"),
             ocr_tessdata: PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"),
+            ocr_runtime_root: None,
+            ocr_runtime_manifest: None,
             local_roots: vec![],
             state_dir: default_state_dir(),
             allow_http: false,
@@ -101,6 +105,19 @@ impl RuntimeConfig {
         }
         if let Some(value) = std::env::var_os("READING_MCP_OCR_TESSDATA") {
             config.ocr_tessdata = PathBuf::from(value);
+        }
+        config.ocr_runtime_root =
+            std::env::var_os("READING_MCP_OCR_RUNTIME_ROOT").map(PathBuf::from);
+        config.ocr_runtime_manifest =
+            std::env::var_os("READING_MCP_OCR_RUNTIME_MANIFEST").map(PathBuf::from);
+        if config.ocr_runtime_root.is_some() != config.ocr_runtime_manifest.is_some()
+            || config
+                .ocr_runtime_root
+                .iter()
+                .chain(config.ocr_runtime_manifest.iter())
+                .any(|p| !p.is_absolute())
+        {
+            return Err("OCR runtime root and manifest require paired absolute paths".into());
         }
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;

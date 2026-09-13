@@ -10,6 +10,12 @@ on:
       - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
       - 'tests/ocr_private_runtime.rs'
+      - 'tests/support/ocr_private_mcp.rs'
+      - 'tests/ocr/test_runtime_inventory.py'
+      - 'src/runtime/**'
+      - 'src/domain/ocr*.rs'
+      - 'src/parsing/pdf_layout_worker.py'
+      - 'src/infrastructure/ocr_identity_process.rs'
       - 'src/parsing/layout_pdf.rs'
       - 'src/parsing/ocr_systemd.rs'
       - 'src/parsing/ocr_service_supervisor.py'
@@ -25,6 +31,12 @@ on:
       - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
       - 'tests/ocr_private_runtime.rs'
+      - 'tests/support/ocr_private_mcp.rs'
+      - 'tests/ocr/test_runtime_inventory.py'
+      - 'src/runtime/**'
+      - 'src/domain/ocr*.rs'
+      - 'src/parsing/pdf_layout_worker.py'
+      - 'src/infrastructure/ocr_identity_process.rs'
       - 'src/parsing/layout_pdf.rs'
       - 'src/parsing/ocr_systemd.rs'
       - 'src/parsing/ocr_service_supervisor.py'
@@ -42,7 +54,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Private runtime archive corruption and publication tests
-        run: python -m unittest tests/ocr/test_runtime_archive.py
+        run: python -m unittest tests/ocr/test_runtime_archive.py tests/ocr/test_runtime_inventory.py
       - name: Resolve private interpreter and engine without host package installation
         run: |
           sudo apt-get update -qq
@@ -52,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
-          mkdir -p "$runtime_root/opt/ocr-bootstrap" "$runtime_root/opt/ocr-smoke" "$runtime_root/tmp"
+          mkdir -p "$runtime_root/opt/ocr-bootstrap" "$runtime_root/opt/ocr-smoke" "$runtime_root/tmp" "$runtime_root/run"
           cp -R "$RUNNER_TEMP/ocr-private-wheels/." "$runtime_root/opt/ocr-bootstrap/"
           cp src/parsing/pdf_layout_worker.py scripts/ocr/offline_runtime_smoke.py tests/fixtures/scanned_pdf/pdf/F07.pdf "$runtime_root/opt/ocr-smoke/"
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/python3.12 -m venv /opt/ocr-python
@@ -101,7 +113,7 @@ jobs:
           set -euo pipefail
           test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "ocr_private_runtime" and .executable != null) | .executable' "$RUNNER_TEMP/ocr-private-rust-build.jsonl")
           test -x "$test_binary"
-          sudo env OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" "$test_binary" --ignored --nocapture | tee "$RUNNER_TEMP/ocr-private-rust-test.log"
+          sudo env OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" OCR_TEST_RUNTIME_MANIFEST="$RUNNER_TEMP/ocr-private-package/runtime-manifest.json" "$test_binary" --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/ocr-private-rust-test.log"
       - name: Capture native import backtrace in the same private root on failure
         if: failure() && (steps.initial_private_smoke.conclusion == 'failure' || steps.archive_smoke.conclusion == 'failure')
         env:

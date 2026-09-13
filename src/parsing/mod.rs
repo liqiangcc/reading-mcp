@@ -33,7 +33,10 @@ pub use epub_validator::{
     validate_epub_document,
 };
 pub use html::HtmlParser;
-pub use layout_pdf::{LayoutPdfParser, PDF_LAYOUT_CACHE_NAMESPACE, require_systemd_ocr_support};
+pub use layout_pdf::{
+    LayoutPdfParser, PDF_LAYOUT_CACHE_NAMESPACE, inspect_private_ocr_runtime,
+    require_systemd_ocr_support,
+};
 pub use limited_pdf::LimitedPdfParser;
 pub use markdown::MarkdownParser;
 pub use openapi::OpenApiParser;

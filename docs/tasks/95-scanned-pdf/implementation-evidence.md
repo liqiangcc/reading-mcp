@@ -456,3 +456,30 @@ derivation/evidence 均验证，并保存后重新打开 SQLite 比对 normalize
 这不是任意环境 fingerprint。仅测试路径使用 report 注入，不新增生产环境
 捷径。RuntimeConfig 的最终包验证/启动前身份构造与完整 MCP 私有根目录
 接线仍需下一包，不能把本测试当作已经部署或完整 cache/package 验收。
+
+### 启动包校验 → runtime/cache → worker → Document（本提交待 hosted）
+
+92826a2cb5f1dd2d8d68e0fa918dc01b21b1be7a 所有 checks success；
+34739785623 真实归档 Rust F07 / evidence / SQLite reopen 为 1 passed，3.59s。
+本包继续接通 RuntimeConfig 的 root + manifest 成对路径，不新增任意 fingerprint
+环境变量。配置先校验，再使用可信既有解释器的标准库逐项核验完整安装清单，
+所有文件流式 SHA256/mode/size、目录、symlink 和额外/缺失项都必须匹配。
+os.open 的目录 fd + NOFOLLOW 保持读取不穿过包内 symlink 到宿主。
+随后同一 systemd launcher 在私有根内获取真实 engine/model/library 集合；
+启动发现共用 5 秒有界子进程预算，owner pipe 关闭处理超时/延迟启动。
+
+新增 typed OcrRuntimePackageIdentity，其真实清单摘要绑定所有包内 Python、
+wheel、模型和库文件及 header/version；与配置/依赖集合共同计算身份。
+非 package 编码仍为原四元组；有 package 为明确第五 typed 分量，原历史
+evidence 可反序列化验证，不静默改已有 normalized hash。新 identity 实际进入
+CachingParser、worker expected identity、证据 blob 与 Document derivation。
+worker 读同一只读挂载清单并检查内部解释器与实际依赖；版本目录按部署契约
+不可原地热修改。完整字节校验发生在启动前，不伪称每次 cache hit 重扫文件。
+
+新测试包括库存内容/权限/链接/路径/FIFO/额外模块失败，以及实际 MCP 的同包
+重启 cache hit、revision 变化 miss、合法新清单身份变化 miss、真实模型损坏时
+启动失败且旧 SQLite Document 保留。使用独立 hosted 解包目录，模型损坏注入
+有 RAII 恢复并串行测试；冻结资产与原归档不动。保留 45s cold / 5s warm 门槛。
+原页 renderer 仍使用原外部 layout Python，未宣称私有 OCR 测试替代 #92 验收。
+全套结果待 hosted。F11 正式分类、最终 Package/Deployment、存储扩容与实际
+生产验收仍未完成，不合并/部署。

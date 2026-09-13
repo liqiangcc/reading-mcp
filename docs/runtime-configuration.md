@@ -31,6 +31,37 @@ normalization v9 / segmentation v3 与线上候选一致；旧 v8 文档须显�
 
 Windows 上默认 state root 使用 `%USERPROFILE%\.reading-mcp`。
 
+## 本地 OCR 与私有运行包（#95 开发分支，尚未生产验收）
+
+OCR 默认关闭；部署者可显式配置 `READING_MCP_OCR_ENABLED=true`、
+`READING_MCP_OCR_LANG=eng|chi_sim|eng+chi_sim`、`READING_MCP_OCR_REVISION`，
+以及绝对路径 `READING_MCP_OCR_ENGINE` / `READING_MCP_OCR_TESSDATA`。
+固定 DPI=300、OEM=1、primary PSM=3，几何冲突才使用已版本化的一次区域重试。
+OCR enabled 必须有 layout backend 与 Linux root/systemd/cgroup-v2 隔离。
+
+私有运行包配置必须同时提供：
+
+- `READING_MCP_OCR_RUNTIME_ROOT`：已验证解包的独立、版本化 rootfs 绝对路径，
+  不能是宿主 `/` 或符号链接路径；不下载、不安装、不自动切换版本。
+- `READING_MCP_OCR_RUNTIME_MANIFEST`：对应 `runtime-manifest.json` 的独立绝对路径。
+  文件在 rootfs 外，按只读 bind mount 提供给 OCR unit；不支持含 systemd 路径列表
+  分隔符/转义符的文件名。不是调用方可提供的摘要或命令。
+
+启动在打开 SQLite/查询 parsed cache 之前完成：用既有可信 layout Python 的
+标准库核验完整清单和实际文件 bytes/SHA256/mode/link、拒绝缺失/额外文件；
+再在私有 root 内发现实际 engine/所选模型/ldd libraries。两阶段共享 5 秒发现预算。
+清单实际 SHA256/source SHA/内部解释器路径作为 typed package identity 纳入
+OCR identity、parsed key、持久化 evidence 和 normalized hash v3 的 derivation。
+采用私有包时 inference 固定执行内部 `/opt/ocr-python/bin/python`，不回退宿主。
+worker 重验同一清单摘要与实际 engine/model/ldd dependencies；发布者须保持已安装
+版本不可变，更新通过新目录与重启，不允许原地热修改。清单不是签名，真实性仍由
+正式 Package/Deployment 的受审归档 hash 验证保证，不能跳过安装验证。
+
+`READING_MCP_PDF_LAYOUT_PYTHON` 继续用于可信启动核验和独立 source-view renderer，
+必须保留已有固定依赖；不把它改成只在 chroot 内存在的路径。OCR 关闭不读取私有包
+或 Tesseract 文件。`force_refresh` 仍仅保持既有源刷新语义，主动重新派生使用
+operator revision。v11/hash-v3 迁移须显式 reopen，保留旧数据与旧版本回滚状态。
+
 如果不希望保留状态：
 
 ```bash

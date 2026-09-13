@@ -1,4 +1,8 @@
-use std::{path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -31,6 +35,84 @@ pub fn require_systemd_ocr_support() -> Result<(), ApplicationError> {
     SystemdOcrUnit::validate_host().map_err(failed)
 }
 
+/// Verify installed bytes using the existing trusted layout interpreter, then
+/// discover engine dependencies inside that verified root before cache lookup.
+/// No PDF processing and no externally supplied fingerprint is involved.
+pub fn inspect_private_ocr_runtime(
+    config: OcrConfig,
+    verifier_python: &Path,
+    root: &Path,
+    manifest: &Path,
+) -> Result<OcrRuntimeIdentity, ApplicationError> {
+    config.validate().map_err(failed)?;
+    require_systemd_ocr_support()?;
+    if !verifier_python.is_absolute()
+        || !root.is_absolute()
+        || root == Path::new("/")
+        || root.canonicalize().map_err(failed)? != root
+    {
+        return Err(failed("invalid private runtime verification paths"));
+    }
+    if !root
+        .join("run")
+        .symlink_metadata()
+        .map_err(failed)?
+        .is_dir()
+    {
+        return Err(failed("private OCR runtime requires a real run directory"));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut verify = std::process::Command::new(verifier_python);
+    verify
+        .env_clear()
+        .envs(crate::infrastructure::OCR_PROCESS_ENV)
+        .args(["-I", "-c", WORKER, "--verify-runtime"])
+        .arg(root)
+        .arg(manifest);
+    let output = crate::infrastructure::dependency_output(
+        &mut verify,
+        deadline.saturating_duration_since(std::time::Instant::now()),
+    )
+    .map_err(failed)?;
+    if !output.status.success() {
+        return Err(failed("private OCR runtime inventory verification failed"));
+    }
+    let package: crate::domain::OcrRuntimePackageIdentity =
+        serde_json::from_slice(&output.stdout).map_err(failed)?;
+    package.validate().map_err(failed)?;
+    let (mut command, unit) =
+        SystemdOcrUnit::command_in_package(Path::new(&package.python_path), root, manifest)
+            .map_err(failed)?;
+    command
+        .env_clear()
+        .envs(crate::infrastructure::OCR_PROCESS_ENV)
+        .args(["-I", "-c", WORKER, "--runtime-identity"])
+        .arg(serde_json::to_string(&config).map_err(failed)?)
+        .arg(serde_json::to_string(&package).map_err(failed)?);
+    let output = crate::infrastructure::dependency_output(
+        &mut command.into_std(),
+        deadline.saturating_duration_since(std::time::Instant::now()),
+    );
+    // Synchronous owner close also terminates late-starting service children if
+    // bounded discovery failed. No Tokio cleanup future is required at startup.
+    drop(unit);
+    let output = output.map_err(failed)?;
+    if !output.status.success() {
+        return Err(failed("private OCR runtime dependency verification failed"));
+    }
+    let observed: OcrRuntimeIdentity = serde_json::from_slice(&output.stdout).map_err(failed)?;
+    let identity = OcrRuntimeIdentity::build_with_package(
+        config,
+        observed.dependencies.clone(),
+        Some(package),
+    )
+    .map_err(failed)?;
+    if observed != identity {
+        return Err(failed("private OCR runtime identity mismatch"));
+    }
+    Ok(identity)
+}
+
 /// Optional layout engine, isolated from the server and bounded by the outer parse timeout.
 pub struct LayoutPdfParser {
     python: PathBuf,
@@ -41,6 +123,7 @@ pub struct LayoutPdfParser {
     ocr_identity: Option<OcrRuntimeIdentity>,
     systemd_ocr_sandbox: bool,
     ocr_runtime_root: Option<PathBuf>,
+    ocr_runtime_manifest: Option<PathBuf>,
 }
 
 impl LayoutPdfParser {
@@ -54,6 +137,7 @@ impl LayoutPdfParser {
             ocr_identity: None,
             systemd_ocr_sandbox: false,
             ocr_runtime_root: None,
+            ocr_runtime_manifest: None,
         }
     }
 
@@ -80,6 +164,13 @@ impl LayoutPdfParser {
     /// No host interpreter fallback. Native source-view keeps its own renderer.
     pub fn with_ocr_runtime_root(mut self, root: PathBuf) -> Self {
         self.ocr_runtime_root = Some(root);
+        self.systemd_ocr_sandbox = true;
+        self
+    }
+
+    pub fn with_ocr_runtime_package(mut self, root: PathBuf, manifest: PathBuf) -> Self {
+        self.ocr_runtime_root = Some(root);
+        self.ocr_runtime_manifest = Some(manifest);
         self.systemd_ocr_sandbox = true;
         self
     }
@@ -176,6 +267,17 @@ impl Parser for LayoutPdfParser {
         if self.ocr_runtime_root.is_some() && !ocr_enabled {
             return Err(failed("private OCR runtime requires enabled OCR"));
         }
+        if self
+            .ocr_identity
+            .as_ref()
+            .and_then(|i| i.runtime_package.as_ref())
+            .is_some()
+            != self.ocr_runtime_manifest.is_some()
+        {
+            return Err(failed(
+                "OCR runtime package identity/manifest configuration mismatch",
+            ));
+        }
         let permit = self.permit.clone().acquire_owned().await.map_err(failed)?;
         if resource.bytes.len() > self.budget.max_document_bytes {
             return Err(ApplicationError::ResourceLimitExceeded(
@@ -183,9 +285,12 @@ impl Parser for LayoutPdfParser {
             ));
         }
         let (mut command, unit) = if ocr_enabled && self.systemd_ocr_sandbox {
-            let (command, unit) = match &self.ocr_runtime_root {
-                Some(root) => SystemdOcrUnit::command_in_root(&self.python, root),
-                None => SystemdOcrUnit::command(&self.python),
+            let (command, unit) = match (&self.ocr_runtime_root, &self.ocr_runtime_manifest) {
+                (Some(root), Some(manifest)) => {
+                    SystemdOcrUnit::command_in_package(&self.python, root, manifest)
+                }
+                (Some(root), None) => SystemdOcrUnit::command_in_root(&self.python, root),
+                _ => SystemdOcrUnit::command(&self.python),
             }
             .map_err(failed)?;
             (command, Some(unit))

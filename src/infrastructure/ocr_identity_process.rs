@@ -3,12 +3,12 @@ use std::process::{Command, Output};
 use std::time::Duration;
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn dependency_output(_: &mut Command, _: Duration) -> Result<Output, String> {
+pub(crate) fn dependency_output(_: &mut Command, _: Duration) -> Result<Output, String> {
     Err("OCR dependency discovery requires Linux".into())
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn dependency_output(command: &mut Command, budget: Duration) -> Result<Output, String> {
+pub(crate) fn dependency_output(command: &mut Command, budget: Duration) -> Result<Output, String> {
     use std::io::{ErrorKind, Read};
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;

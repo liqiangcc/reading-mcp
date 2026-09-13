@@ -21,7 +21,7 @@ pub use normalized_text::{
 };
 pub use ocr::{
     DependencyFingerprint, OcrConfig, OcrDerivation, OcrEvidenceRecord, OcrPageBinding,
-    OcrRetryPolicy, OcrRuntimeIdentity,
+    OcrRetryPolicy, OcrRuntimeIdentity, OcrRuntimePackageIdentity,
 };
 pub use ocr_observations::{OcrEvidenceBlob, OcrPageObservations};
 pub use original_source::{

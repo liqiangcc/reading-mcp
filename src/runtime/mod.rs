@@ -58,6 +58,8 @@ impl RuntimeComponents {
 pub fn build_server(
     config: RuntimeConfig,
 ) -> Result<ReadingMcpServer, crate::application::ports::ApplicationError> {
+    // Validate/discover once, before opening persistent state or querying caches.
+    let identity = build_ocr_identity(&config)?;
     let http_policy = Arc::new(if config.allow_http {
         PublicHttpAccessPolicy::allow_http()
     } else {
@@ -106,33 +108,31 @@ pub fn build_server(
         max_entry_bytes: config.resource_budget.max_archive_entry_bytes,
         max_total_bytes: config.resource_budget.max_archive_total_bytes,
     };
-    if config.ocr_enabled && config.pdf_layout_python.is_none() {
-        return Err(crate::application::ports::ApplicationError::ParseFailed(
-            "OCR requires PDF layout backend".into(),
-        ));
-    }
-    let identity = if config.ocr_enabled {
-        let ocr_config = config.ocr_config();
-        ocr_config
-            .validate()
-            .map_err(crate::application::ports::ApplicationError::ParseFailed)?;
-        crate::parsing::require_systemd_ocr_support()?;
-        Some(
-            crate::infrastructure::build_ocr_runtime_identity(ocr_config)
-                .map_err(crate::application::ports::ApplicationError::ParseFailed)?,
-        )
-    } else {
-        None
-    };
     let mut router = ParserRouter::release(config.resource_budget.max_pdf_pages, archive_limits);
     if let Some(python) = &config.pdf_layout_python {
+        let parser_python = identity
+            .as_ref()
+            .and_then(|i| i.runtime_package.as_ref())
+            .map(|p| std::path::PathBuf::from(&p.python_path))
+            .unwrap_or_else(|| python.clone());
         let parser =
-            crate::parsing::LayoutPdfParser::new(python.clone(), config.resource_budget.clone());
+            crate::parsing::LayoutPdfParser::new(parser_python, config.resource_budget.clone());
         let parser = if let Some(identity) = &identity {
             parser
                 .with_ocr_config(config.ocr_config())
                 .with_ocr_identity(identity.clone())
                 .with_systemd_ocr_sandbox()
+        } else {
+            parser
+        };
+        let parser = if config.ocr_enabled {
+            if let (Some(root), Some(manifest)) =
+                (&config.ocr_runtime_root, &config.ocr_runtime_manifest)
+            {
+                parser.with_ocr_runtime_package(root.clone(), manifest.clone())
+            } else {
+                parser
+            }
         } else {
             parser
         };
@@ -215,6 +215,39 @@ pub fn build_server(
     ))
 }
 
+fn build_ocr_identity(
+    config: &RuntimeConfig,
+) -> Result<Option<crate::domain::OcrRuntimeIdentity>, crate::application::ports::ApplicationError>
+{
+    use crate::application::ports::ApplicationError;
+    if !config.ocr_enabled {
+        return Ok(None);
+    }
+    let python = config
+        .pdf_layout_python
+        .as_ref()
+        .ok_or_else(|| ApplicationError::ParseFailed("OCR requires PDF layout backend".into()))?;
+    let ocr_config = config.ocr_config();
+    ocr_config
+        .validate()
+        .map_err(ApplicationError::ParseFailed)?;
+    match (&config.ocr_runtime_root, &config.ocr_runtime_manifest) {
+        (Some(root), Some(manifest)) => {
+            crate::parsing::inspect_private_ocr_runtime(ocr_config, python, root, manifest)
+                .map(Some)
+        }
+        (None, None) => {
+            crate::parsing::require_systemd_ocr_support()?;
+            crate::infrastructure::build_ocr_runtime_identity(ocr_config)
+                .map(Some)
+                .map_err(ApplicationError::ParseFailed)
+        }
+        _ => Err(ApplicationError::ParseFailed(
+            "OCR runtime root and manifest must be configured together".into(),
+        )),
+    }
+}
+
 fn build_state_components(
     config: &RuntimeConfig,
 ) -> Result<RuntimeComponents, crate::application::ports::ApplicationError> {
@@ -243,5 +276,38 @@ fn build_state_components(
             text_unit_index: Arc::new(InMemoryTextUnitIndex::default()),
             search_index: Arc::new(InMemorySearchIndex::default()),
         }),
+    }
+}
+
+#[cfg(test)]
+mod ocr_startup_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_ocr_does_not_inspect_missing_private_package() {
+        let config = RuntimeConfig {
+            ocr_runtime_root: Some("/missing-test-ocr-root".into()),
+            ocr_runtime_manifest: Some("/missing-test-ocr-manifest".into()),
+            pdf_layout_python: Some("/missing-test-layout-python".into()),
+            ..RuntimeConfig::default()
+        };
+        assert!(build_ocr_identity(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_ocr_configuration_cannot_create_persistent_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("must-not-be-created");
+        let config = RuntimeConfig {
+            ocr_enabled: true,
+            ocr_language: "../invalid".into(),
+            pdf_layout_python: Some("/missing-test-layout-python".into()),
+            state_dir: Some(state.clone()),
+            ..RuntimeConfig::default()
+        };
+        assert!(
+            matches!(build_server(config), Err(crate::application::ports::ApplicationError::ParseFailed(message)) if message == "invalid OCR languages")
+        );
+        assert!(!state.exists());
     }
 }

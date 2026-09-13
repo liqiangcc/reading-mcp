@@ -71,17 +71,174 @@ RETRY_POLICY = {"version": "ocr-regional-retry/v1", "primary_psm": 3,
                 "retry_psm": 6, "max_retries_per_page": 1, "overlap_percent": 90,
                 "vertical_overlap_percent": 50, "roi_padding_pixels": 2}
 
-def runtime_identity(config, dependencies):
+def runtime_identity(config, dependencies, runtime_package=None):
     # Match Rust struct field order and serde_json's compact UTF-8 encoding.
     fields = ("enabled", "engine_path", "tessdata_path", "languages", "operator_revision",
               "dpi", "oem", "psm", "detector_version", "protocol_version")
     ordered_config = {key: config[key] for key in fields}
     dependencies = sorted(dependencies, key=lambda d: d["name"])
-    encoded = json.dumps([ordered_config, RETRY_POLICY, INSPECTION_POLICY, dependencies],
+    components = [ordered_config, RETRY_POLICY, INSPECTION_POLICY, dependencies]
+    if runtime_package is not None:
+        runtime_package = {key: runtime_package[key] for key in
+                           ('schema', 'manifest_sha256', 'source_sha', 'python_path')}
+        components.append(runtime_package)
+    encoded = json.dumps(components,
                          ensure_ascii=False, separators=(",", ":")).encode()
-    return {"config": ordered_config, "retry_policy": RETRY_POLICY,
+    result = {"config": ordered_config, "retry_policy": RETRY_POLICY,
             "inspection_policy": INSPECTION_POLICY,
             "dependencies": dependencies, "sha256": "sha256:" + hashlib.sha256(encoded).hexdigest()}
+    if runtime_package is not None:
+        result['runtime_package'] = runtime_package
+    return result
+
+
+def runtime_manifest(path):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate runtime manifest field')
+            result[key] = value
+        return result
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 32 * 1024 * 1024:
+            raise ValueError('runtime manifest must be a bounded regular file')
+        encoded = stream.read(32 * 1024 * 1024 + 1)
+        if len(encoded) != info.st_size:
+            raise ValueError('runtime manifest changed or exceeded limit')
+    manifest = json.loads(encoded, object_pairs_hook=unique)
+    if (manifest.get('schema') != 'ocr-private-runtime-archive/v1'
+            or not re.fullmatch('[0-9a-f]{40}', manifest.get('source_sha', ''))):
+        raise ValueError('invalid runtime manifest identity')
+    return manifest, {'schema': manifest['schema'],
+        'manifest_sha256': hashlib.sha256(encoded).hexdigest(),
+        'source_sha': manifest['source_sha'], 'python_path': '/opt/ocr-python/bin/python'}
+
+
+def verify_runtime_package(root, manifest_path):
+    """Startup only, before trusting the installed interpreter or a parsed-cache hit.
+
+    Read each inventory entry relative to an owned directory fd. Archive symlinks
+    are compared, never followed into the host. The caller supplies a five-second
+    process budget; no document bytes are read by this mode.
+    """
+    from pathlib import PurePosixPath
+    manifest, identity = runtime_manifest(manifest_path)
+    entries = manifest.get('entries')
+    if not isinstance(entries, list) or not 0 < len(entries) <= 50000:
+        raise ValueError('invalid runtime inventory count')
+    indexed = {}
+    total = 0
+    for item in entries:
+        name = item.get('path')
+        if (not isinstance(name, str) or not name or len(name.encode()) > 4096
+                or '\0' in name or PurePosixPath(name).is_absolute()
+                or '..' in PurePosixPath(name).parts or str(PurePosixPath(name)) != name
+                or name == '.' or name in indexed):
+            raise ValueError('invalid runtime inventory path')
+        indexed[name] = item
+        kind = item.get('kind')
+        fields = {'path', 'kind'}
+        if kind in ('file', 'directory'):
+            fields.add('mode')
+            if type(item.get('mode')) is not int or not 0 <= item['mode'] <= 0o7777:
+                raise ValueError('invalid runtime inventory mode')
+        if kind == 'file':
+            fields |= {'bytes', 'sha256'}
+            if (type(item.get('bytes')) is not int or not 0 <= item['bytes'] <= 256 * 1024 * 1024
+                    or not re.fullmatch('[0-9a-f]{64}', item.get('sha256', ''))):
+                raise ValueError('invalid runtime inventory file')
+            total += item['bytes']
+        elif kind == 'symlink':
+            fields.add('target')
+            target = item.get('target')
+            if not isinstance(target, str) or not target or '\0' in target or len(target.encode()) > 4096:
+                raise ValueError('invalid runtime inventory symlink')
+            components = [] if target.startswith('/') else list(PurePosixPath(name).parent.parts)
+            for part in PurePosixPath(target).parts:
+                if part in ('/', '.'):
+                    continue
+                if part == '..':
+                    if not components:
+                        raise ValueError('runtime symlink escapes root')
+                    components.pop()
+                else:
+                    components.append(part)
+        elif kind != 'directory':
+            raise ValueError('invalid runtime inventory kind')
+        if set(item) != fields:
+            raise ValueError('unexpected runtime inventory fields')
+    if (list(indexed) != sorted(indexed) or total > 1024 * 1024 * 1024
+            or type(manifest.get('regular_file_bytes')) is not int
+            or manifest['regular_file_bytes'] != total):
+        raise ValueError('runtime inventory size/order mismatch')
+    for name in indexed:
+        for parent in PurePosixPath(name).parents:
+            if str(parent) != '.' and indexed.get(str(parent), {}).get('kind') != 'directory':
+                raise ValueError('runtime inventory non-directory ancestor')
+    provenance = {}
+    for name in ('engine-manifest.json', 'python-manifest.json', 'requirements.lock', 'apt-source-uris.txt'):
+        record = indexed.get('usr/share/doc/reading-mcp-ocr/' + name, {})
+        if record.get('kind') != 'file':
+            raise ValueError('runtime provenance missing')
+        provenance[name] = record['sha256']
+    if manifest.get('provenance') != provenance:
+        raise ValueError('runtime provenance mismatch')
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        for name, item in indexed.items():
+            parent = os.dup(root_fd)
+            try:
+                parts = name.split('/')
+                for part in parts[:-1]:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+                    os.close(parent)
+                    parent = child
+                info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if item['kind'] == 'symlink':
+                    if not stat.S_ISLNK(info.st_mode) or os.readlink(parts[-1], dir_fd=parent) != item['target']:
+                        raise ValueError('runtime symlink mismatch')
+                    continue
+                if stat.S_IMODE(info.st_mode) != item['mode']:
+                    raise ValueError('runtime mode mismatch')
+                if item['kind'] == 'directory':
+                    if not stat.S_ISDIR(info.st_mode):
+                        raise ValueError('runtime directory mismatch')
+                    continue
+                descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+                with os.fdopen(descriptor, 'rb') as stream:
+                    current = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(current.st_mode) or current.st_size != item['bytes']
+                            or stat.S_IMODE(current.st_mode) != item['mode']):
+                        raise ValueError('runtime file type/size/mode mismatch')
+                    digest, size = hashlib.sha256(), 0
+                    for chunk in iter(lambda: stream.read(65536), b''):
+                        size += len(chunk)
+                        if size > item['bytes']:
+                            raise ValueError('runtime file grew during verification')
+                        digest.update(chunk)
+                    if size != item['bytes'] or digest.hexdigest() != item['sha256']:
+                        raise ValueError('runtime file digest mismatch')
+            finally:
+                os.close(parent)
+        # Extra modules/libraries must not silently enter the installed runtime.
+        observed = set()
+        def walk_error(error):
+            raise error
+        for directory, dirs, files, _ in os.fwalk('.', dir_fd=root_fd, follow_symlinks=False, onerror=walk_error):
+            prefix = '' if directory == '.' else directory[2:] + '/'
+            for leaf in dirs + files:
+                name = prefix + leaf
+                if name not in indexed:
+                    raise ValueError('unlisted runtime entry')
+                observed.add(name)
+        if observed != set(indexed):
+            raise ValueError('missing runtime entry')
+    finally:
+        os.close(root_fd)
+    return identity
 
 def dependency_sha256(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -537,6 +694,16 @@ def project(layout):
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET
     protocol_stdout = sys.stdout
+    if len(sys.argv) == 4 and sys.argv[1] == '--verify-runtime':
+        print(json.dumps(verify_runtime_package(sys.argv[2], sys.argv[3]), separators=(',', ':')))
+        return
+    if len(sys.argv) == 4 and sys.argv[1] == '--runtime-identity':
+        config, expected_package = json.loads(sys.argv[2]), json.loads(sys.argv[3])
+        _, actual_package = runtime_manifest('/run/reading-mcp-ocr-package.json')
+        if actual_package != expected_package or sys.executable != actual_package['python_path']:
+            raise ValueError('OCR runtime package identity mismatch')
+        print(json.dumps(runtime_identity(config, fingerprint_dependencies(config), actual_package), ensure_ascii=False, separators=(',', ':')))
+        return
     max_pages, max_bytes, max_chars = map(int, sys.argv[1:4])
     if len(sys.argv) > 4 and sys.argv[4]:
         OCR_CONFIG = json.loads(sys.argv[4])
@@ -550,7 +717,12 @@ def main():
         if EXPECTED_IDENTITY is None: raise ValueError("OCR expected identity is required")
         actual_dependencies = fingerprint_dependencies(OCR_CONFIG)
         if EXPECTED_IDENTITY.get("dependencies") != actual_dependencies: raise ValueError("OCR dependency identity mismatch")
-        actual_identity = runtime_identity(OCR_CONFIG, actual_dependencies)
+        package = EXPECTED_IDENTITY.get('runtime_package')
+        if package is not None:
+            _, actual_package = runtime_manifest('/run/reading-mcp-ocr-package.json')
+            if package != actual_package or sys.executable != package['python_path']:
+                raise ValueError('OCR runtime package identity mismatch')
+        actual_identity = runtime_identity(OCR_CONFIG, actual_dependencies, package)
         if EXPECTED_IDENTITY != actual_identity:
             raise ValueError("OCR policy/runtime identity mismatch")
     for package in ("pymupdf", "pymupdf4llm", "pymupdf-layout"):

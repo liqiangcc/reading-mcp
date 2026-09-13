@@ -9,6 +9,9 @@ use reading_mcp::parsing::LayoutPdfParser;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+#[path = "support/ocr_private_mcp.rs"]
+mod private_mcp;
+
 #[tokio::test]
 #[ignore = "requires hosted root and verified offline runtime archive"]
 async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
@@ -17,11 +20,16 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
         &std::fs::read(std::env::var("OCR_TEST_ARCHIVE_REPORT").unwrap()).unwrap(),
     )
     .unwrap();
-    let identity: OcrRuntimeIdentity = serde_json::from_value(report["identity"].clone()).unwrap();
-    assert_eq!(
-        OcrRuntimeIdentity::build(identity.config.clone(), identity.dependencies.clone()).unwrap(),
-        identity
-    );
+    let baseline: OcrRuntimeIdentity = serde_json::from_value(report["identity"].clone()).unwrap();
+    let manifest = std::path::PathBuf::from(std::env::var("OCR_TEST_RUNTIME_MANIFEST").unwrap());
+    let identity = reading_mcp::parsing::inspect_private_ocr_runtime(
+        baseline.config,
+        std::path::Path::new("/usr/bin/python3"),
+        &root,
+        &manifest,
+    )
+    .unwrap();
+    assert!(identity.runtime_package.is_some());
     let expected: Vec<String> =
         serde_json::from_value(report["canonical_paragraphs"].clone()).unwrap();
     assert_eq!(expected.len(), 4);
@@ -34,7 +42,7 @@ async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
     let parser = LayoutPdfParser::new(python, ResourceBudget::default())
-        .with_ocr_runtime_root(root)
+        .with_ocr_runtime_package(root, manifest)
         .with_ocr_config(identity.config.clone())
         .with_ocr_identity(identity.clone())
         .with_evidence_store(store.clone());

@@ -401,9 +401,10 @@ impl OcrEvidenceBlob {
             return Err("missing/version-mismatched OCR observations".into());
         }
         if !super::ocr::valid_sha256(&self.original_sha256)
-            || OcrRuntimeIdentity::build(
+            || OcrRuntimeIdentity::build_with_package(
                 self.runtime_identity.config.clone(),
                 self.runtime_identity.dependencies.clone(),
+                self.runtime_identity.runtime_package.clone(),
             )? != self.runtime_identity
         {
             return Err("invalid OCR evidence source/runtime identity".into());

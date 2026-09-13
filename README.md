@@ -54,10 +54,11 @@ MkDocs / Docusaurus / GitBook   → HTML
 
 通过 `READING_MCP_PDF_LAYOUT_PYTHON` 显式启用本地结构化版面解析及原页渲染，
 依赖 Python 3.12+ 与 PyMuPDF/PyMuPDF4LLM/Layout 1.28.2。未配置时保留默认 PDF
-路径；内部 OCR 仍未启用。layout 是推断结果，不保证所有论文准确或完整。
+路径；OCR 默认关闭。layout 是推断结果，不保证所有论文准确或完整。
 本次主线整合保持线上 normalization v9 / segmentation v3；从 v8 升级须显式
 reopen 并重新取得 locator/cursor，保留已有数据。详见
-[依赖、身份与回滚边界](docs/pdf-layout-deployment.md)。#95 OCR 将在后续独立实现。
+[依赖、身份与回滚边界](docs/pdf-layout-deployment.md)。OCR 的固定依赖、身份、
+私有运行包和回滚要求见 [runtime configuration](docs/runtime-configuration.md)。
 
 ## 核心阅读流程
 
@@ -392,11 +393,10 @@ cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
 
 云端 runner 是临时环境，无法读取部署服务器 `/root` 下的本地文档；`local_roots` 只能填写该临时 runner 中的目录。最终本机部署使用 `/root/.env` 和 systemd，不依赖 GitHub runner。
 
-## 明确非目标
+## 当前非目标
 
-v0.1.0 不包含：
+当前版本不包含：
 
-- OCR / 扫描 PDF 全面支持；
 - 浏览器式完整 PDF UI、PDF 编辑或标注；
 - 任意多页批量截图或用视觉结果替代 canonical normalized source；
 - JavaScript-heavy 页面浏览器渲染；

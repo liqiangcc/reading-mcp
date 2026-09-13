@@ -138,10 +138,16 @@ jobs:
           READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
           READING_MCP_MIXED_ORDER_DIR: ${{ runner.temp }}/ocr-first-probe/supplementary-mixed-order
         run: |
+          benchmark_test=frozen_four_page_cold_and_restarted_warm_open_budgets
           for mcp_target in ocr_mcp_stdio ocr_mcp_http; do
             mcp_test=$(cargo test --locked --test "$mcp_target" --no-run --message-format=json | jq -sr --arg target "$mcp_target" '[.[] | select(.reason == "compiler-artifact" and .target.name == $target and .profile.test) | .executable][0]')
             test -x "$mcp_test"
-            sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" READING_MCP_MIXED_ORDER_DIR="$READING_MCP_MIXED_ORDER_DIR" "$mcp_test" --ignored --nocapture
+            sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" READING_MCP_MIXED_ORDER_DIR="$READING_MCP_MIXED_ORDER_DIR" "$mcp_test" --ignored --nocapture --skip "$benchmark_test"
+            if [ "$mcp_target" = ocr_mcp_stdio ]; then
+              # Measure the single-service 45s/5s profile without other tests
+              # starting independent servers. Dedicated queue/race tests remain.
+              sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" "$mcp_test" --ignored --nocapture --exact "$benchmark_test"
+            fi
           done
       - name: Rust OCR systemd launch and cancellation integration (hosted root only)
         env:

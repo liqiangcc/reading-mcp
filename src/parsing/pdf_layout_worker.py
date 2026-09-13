@@ -408,11 +408,15 @@ def require_disabled_page_coverage(page, page_layout):
             raise OcrRequired('native image coverage cannot be proven')
         if coverage['uncovered_samples'] == 0:
             return
+        visual_boxes = [box for box in page_layout['boxes']
+                        if box.get('boxclass') in ('image', 'picture', 'figure', 'table')]
+        if not visual_boxes:
+            # Coverage already counted unknown samples. No visual source can
+            # explain them, so avoid allocating and rescanning a second copy.
+            raise OcrRequired('mixed page contains raster content without source coverage')
         masked = bytearray(pixmap.samples)
         rectangles = [mask['pixel_bbox'] for mask in coverage['masks']]
-        for box in page_layout['boxes']:
-            if box.get('boxclass') not in ('image', 'picture', 'figure', 'table'):
-                continue
+        for box in visual_boxes:
             bbox = [box[key] for key in ('x0', 'y0', 'x1', 'y1')]
             if (not all(math.isfinite(value) for value in bbox)
                     or not (0 <= bbox[0] < bbox[2] <= page.rect.width

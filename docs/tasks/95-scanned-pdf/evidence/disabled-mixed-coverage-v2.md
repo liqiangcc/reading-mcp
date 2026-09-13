@@ -7,3 +7,9 @@
 不修改 enabled OCR policy、冻结资产、质量标准或 F11 分类，也不宣称此检查实现新的图表识别。parsed cache namespace 的 required-inspection/v1 升为 v2，旧部分文档缓存不能跳过检查；不删除旧数据。缓存测试覆盖原始 namespace、v1、v2 之间 miss 和 v2 hit。
 
 新增 hosted 单元测试覆盖未知像素拒绝、现有视觉区域保留、边界外像素不可忽略、native 全覆盖、无 engine 配置与原输入不变。真实 MCP disabled 测试保留不存在的 engine/model 路径、F01/F03 成功，并要求六种公开补充混合页均 OCR_REQUIRED、旧 SQLite Document 集合不变。提交时所有执行验证尚待 Actions。
+
+## 首轮真实失败与测量范围
+
+7af49710ea2159239c0f2d214b798ca12a8df97b 的 PR run 34751069729 成功；push run 34751068359 的三个功能测试成功（含新增 disabled 六样本拒绝），F05 benchmark 失败：cold 16.112497495 秒通过45秒，但紧接的 restarted warm 在初始化阶段耗尽共享5秒。日志同时显示另外三个独立测试进程在执行解析/渲染。保留该失败，不能声称这种额外多服务负载下符合5秒。
+
+后续将同一 benchmark 按精确测试名独立执行，其他功能测试仍执行且保留其并行性；每个 trial 的完整 startup+open、五次 cold/restart-warm、force_refresh、真实缓存命中/写入断言和45/5秒阈值均不变。此 gate 明确证明单服务基准，不替代生产负载测试或已有专门的队列/取消并发测试。另在没有任何 visual region 时直接消费已算出的 unknown sample 结论拒绝，避免无意义的第二份 raster 副本分配/扫描，不改变分类结果。

@@ -506,6 +506,14 @@ impl Parser for LayoutPdfParser {
             }
         })?;
         if !status.success() {
+            if ocr_enabled && std::env::var_os("READING_MCP_OCR_DEBUG_STDERR").is_some() {
+                eprintln!(
+                    "OCR worker status={} stdout={} stderr={}",
+                    status,
+                    String::from_utf8_lossy(&output),
+                    String::from_utf8_lossy(&errors)
+                );
+            }
             if ocr_enabled && let Some(error) = process.termination_error() {
                 return Err(error);
             }

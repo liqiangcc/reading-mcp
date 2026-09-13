@@ -17,3 +17,33 @@ hosted 候选使用既有 primary + 有界区域 retry，不再将 primary-only 
 追加的候选修复只合并连续原序片段，并同时要求：两个片段全部word中心均唯一归属于同一真实模型text区域、前文未结束、后文为小写续文或CJK连续字符、行间距及左沿偏移不超过实际line高度中位数。不使用gold、固定行数或特定词；完整句/标题、远距离、没有模型支持或模型重叠都不合并。保留原始line/spans的全部block/par/line ID，另记source groups和paragraph_merges。
 
 候选评分增加既有独立对齐的paragraph boundary F1及非单调paragraph order计算，仍在识别完成后读取gold，避免文字分数隐藏多段/漏段。sentence与真正Rust发布仍待接线，不伪造sentence范围。原c633报告不改写。
+
+## 6187a60 已下载结果
+
+准确 head `6187a60a8a9d9be5326adcead22bb645d1803013`，
+[hosted run 34753118571](https://github.com/liqiangcc/reading-mcp/actions/runs/34753118571)，
+artifact `10316113862`。实际下载的完整 `layout-model-report.json` SHA256：
+`bf224d25622cb7d33c5a6686a568925319fd1bd6a6b3719d0b970686ce3b6e9f`。
+以下为原始报告的人工摘要，不伪称完整报告字节。
+
+| 样本 | CER errors/denominator | English WER errors/denominator | 正文段数 |
+| --- | --- | --- | --- |
+| F02 | 0/548 | 0/91 | 6 |
+| F06 | 0/548 | 0/91 | 6 |
+| F07 | 1/110 | not applicable | 4 |
+| F08 | 0/217 | 0/26 | 4 |
+| F11 | 0/548 | 0/91 | 6 |
+| F12 | 0/548 | 0/91 | 6 |
+| F13 | 0/81 | 0/12 | 1 |
+| F14 | 1/2102 | 1/384 | 1 |
+
+八个样本 paragraph boundary F1=1、独立正文 order score=1，F08 无 mixed
+段。F11 前次七段缺口已在候选闭合。该 head 九项 checks 全部 success（Rust
+34753119964/34753118566、真实 OCR 34753119943/34753118576、离线包
+34753119953/34753118560、fixture 34753119945、raft 34753119954、模型上述
+run）。正文顺序分数不证明粗块与正文之间的完整交错顺序，也不证明尚未接入
+main 的模型身份、typed evidence、Rust 原子发布或生产部署。
+
+日志修复只停止逐 case 输出巨大的 raw tensor/word 全量行，保留所有八个
+有界摘要以及 F11 canonical blocks。完整 raw 观察继续保存在各 case JSON
+及汇总 artifact，未删减评分、原始证据或正式门槛。

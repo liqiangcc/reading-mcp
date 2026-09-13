@@ -308,7 +308,10 @@ def main():
         if case == 'F11' and item.get('candidate_canonical'):
             summary['actual_blocks'] = [block for section in item['candidate_canonical']['sections'] for block in section['blocks']]
         print(json.dumps({'layout_model_summary': case, 'result': summary}, ensure_ascii=True), flush=True)
-        print(json.dumps({"layout_model_case": case, "result": item}, ensure_ascii=False), flush=True)
+        # Full raw tensors/words remain in the artifact. Printing them here can
+        # exhaust the job log limit before subsequent case summaries appear.
+        print(json.dumps({"layout_model_case_artifact": case,
+                          "path": f"{case}.json"}), flush=True)
     (args.output / "layout-model-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     if any("error" in item for item in report["cases"].values()):
         raise SystemExit("candidate diagnostic failed; see all-case report")

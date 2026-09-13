@@ -26,12 +26,15 @@ pub fn build_ocr_runtime_identity(config: OcrConfig) -> Result<OcrRuntimeIdentit
             sha256: hash_file(Path::new(&path))?,
         });
     }
-    let output = Command::new("ldd")
+    let mut command = Command::new("/usr/bin/ldd");
+    command
         .env_clear()
         .envs(OCR_PROCESS_ENV)
-        .arg(&config.engine_path)
-        .output()
-        .map_err(|e| e.to_string())?;
+        .arg(&config.engine_path);
+    let output = super::ocr_identity_process::dependency_output(
+        &mut command,
+        std::time::Duration::from_secs(5),
+    )?;
     if !output.status.success() {
         return Err("ldd failed for OCR engine".into());
     }

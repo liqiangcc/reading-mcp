@@ -9,6 +9,7 @@ mod noop_index;
 mod observability;
 mod ocr_evidence;
 mod ocr_identity;
+mod ocr_identity_process;
 mod ocr_singleflight;
 mod sqlite;
 mod sqlite_search_index;

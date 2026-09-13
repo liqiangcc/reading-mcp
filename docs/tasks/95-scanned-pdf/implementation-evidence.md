@@ -329,3 +329,17 @@ bootstrap wheels/测试材料；正式包还要处理冻结分类模型、namesp
 也不能未经裁决把“每个语义区域均保留并可回看原页”与“覆盖整个标注矩形
 （含空白）”混为同一指标。问题已发到 PR99 comment `5647122033` 和当前会话；
 没有改 gold、门槛或正式 F11 gate，也未宣称 F11 已通过。
+
+### 依赖发现的启动限额补齐（待当前 head hosted 验证）
+
+此前 Rust 缓存查询前与 Python PDF 处理前的 `ldd` 均使用无界 output/capture。
+现改为固定 `/usr/bin/ldd`、原有清空后的允许环境、5 秒发现时限和 stdout /
+stderr 各 64 KiB 上限；非零状态与 missing-library 检查仍明确拒绝。两端均
+建立独立进程组，先终止所拥有的组再 reap，使用 WNOWAIT 观察退出，避免提前
+reap 后复用 PID 的清理风险。只限制依赖发现，不改变 fingerprint 编码、OCR
+参数、缓存身份或质量阈值，也不代替正式 OCR systemd 隔离。
+
+新增 Rust/Python 的双流/非零状态、两种输出溢出和退出父进程后仍由子进程
+持有输出管道的超时测试；后者证明无可执行后代/打开管道，孤儿 zombie 的
+最终 reap 仍由 init 负责，不把它当成完整 OCR cgroup 回收测试。Python 测试
+接入 hosted workflow，Rust 随全量 tests；本机仅 fmt/py_compile。

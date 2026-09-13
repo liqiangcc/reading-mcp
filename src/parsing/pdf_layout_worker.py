@@ -17,6 +17,8 @@ import hashlib
 import statistics
 import stat
 import time
+import selectors
+import signal
 
 OCR_PROCESS_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"}
 import math
@@ -91,10 +93,49 @@ def dependency_sha256(path):
             digest.update(chunk)
         return digest.hexdigest()
 
+def dependency_command_output(command, timeout=5.0):
+    """Bound dependency discovery before PDF processing, without buffering arbitrary output."""
+    deadline = time.monotonic() + timeout
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, env=OCR_PROCESS_ENV, start_new_session=True)
+    streams = [bytearray(), bytearray()]
+    try:
+        with selectors.DefaultSelector() as selector:
+            for index, stream in enumerate((process.stdout, process.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, index)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("OCR dependency discovery timed out")
+                for key, _ in selector.select(min(remaining, .01)):
+                    chunk = os.read(key.fd, 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    elif len(streams[key.data]) + len(chunk) > 64 * 1024:
+                        raise RuntimeError("OCR dependency output limit exceeded")
+                    else:
+                        streams[key.data].extend(chunk)
+                # Reserve PID/group until cleanup; poll()/wait() here would reap it.
+                exited = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if exited is not None and not selector.get_map():
+                    break
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+    return subprocess.CompletedProcess(command, process.returncode,
+                                       bytes(streams[0]).decode("utf-8", "strict"),
+                                       bytes(streams[1]).decode("utf-8", "strict"))
+
 def fingerprint_dependencies(config):
     sha = dependency_sha256
     paths = [("engine", config["engine_path"])] + [(f"model:{lang}", os.path.join(config["tessdata_path"], lang + ".traineddata")) for lang in config["languages"]]
-    output = subprocess.run(["ldd", config["engine_path"]], text=True, capture_output=True, env=OCR_PROCESS_ENV)
+    output = dependency_command_output(["/usr/bin/ldd", config["engine_path"]])
     if output.returncode != 0 or "not found" in output.stdout or "not found" in output.stderr: raise RuntimeError("OCR dependency ldd failure")
     libraries = sorted({token for token in output.stdout.split() if token.startswith("/")})
     paths += [("library:" + path, path) for path in libraries]

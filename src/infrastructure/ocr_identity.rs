@@ -4,10 +4,11 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-pub(crate) const OCR_PROCESS_ENV: [(&str, &str); 3] = [
+pub(crate) const OCR_PROCESS_ENV: [(&str, &str); 4] = [
     ("PATH", "/usr/bin:/bin"),
     ("LANG", "C.UTF-8"),
     ("OMP_THREAD_LIMIT", "1"),
+    ("PYTHONDONTWRITEBYTECODE", "1"),
 ];
 
 pub fn build_ocr_runtime_identity(config: OcrConfig) -> Result<OcrRuntimeIdentity, String> {

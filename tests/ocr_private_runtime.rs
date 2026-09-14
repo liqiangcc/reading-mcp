@@ -315,13 +315,23 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
     // Attempt C: a restarted parser resumes only the remaining pages and
     // publishes the canonical document.
     let store_c = Arc::new(FileOcrCheckpointStore::new(&checkpoint_dir));
-    let document = tokio::time::timeout(
-        Duration::from_secs(300),
-        parser_for(240.0, None, store_c).parse(resource()),
-    )
-    .await
-    .expect("attempt C exceeded the hard per-invocation bound")
-    .unwrap_or_else(|error| panic!("resume attempt failed: {error:?}"));
+    let parser_c = parser_for(240.0, None, store_c.clone());
+    let outcome = tokio::time::timeout(Duration::from_secs(300), parser_c.parse(resource()))
+        .await
+        .expect("attempt C exceeded the hard per-invocation bound");
+    let document = match outcome {
+        Ok(document) => document,
+        Err(error) => {
+            // Structural diagnostics only: which bound fired plus the durable
+            // checkpoint state the failing invocation observed.
+            let load = store_c.load(&key, &meta).await.unwrap();
+            let stored: BTreeSet<u32> = load.pages.keys().copied().collect();
+            panic!(
+                "resume attempt failed: {error:?} origin={:?} required={required:?} stored={stored:?}",
+                parser_c.ocr_resource_limit_origin(),
+            );
+        }
+    };
     let resume: serde_json::Value = serde_json::from_str(
         document
             .metadata

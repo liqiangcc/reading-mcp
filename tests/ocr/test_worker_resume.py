@@ -118,7 +118,7 @@ class CheckpointBindingTests(unittest.TestCase):
             self.assertLessEqual(worker.page_time_remaining(), 5)
         with patch.object(worker, 'PAGE_DEADLINE', None), \
                 patch.object(worker, 'INVOCATION_DEADLINE', None):
-            self.assertEqual(worker.page_time_remaining(), 15.0)
+            self.assertEqual(worker.page_time_remaining(), worker.PAGE_UNIT_SECONDS)
 
 
 if __name__ == '__main__':

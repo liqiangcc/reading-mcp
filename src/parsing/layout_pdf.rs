@@ -136,6 +136,10 @@ pub struct LayoutPdfParser {
     // A cancelled parse detaches the output drain so completed page
     // checkpoints still land; the next call awaits it before resuming.
     drain: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    // Diagnostic only: labels which bound produced the last OCR resource
+    // limit so hosted resume tests can attribute a flaky limit without
+    // widening any of them. Never read by production error paths.
+    resource_limit_origin: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl LayoutPdfParser {
@@ -154,6 +158,7 @@ impl LayoutPdfParser {
             ocr_invocation_budget: None,
             ocr_invocation_page_limit: None,
             drain: Arc::new(std::sync::Mutex::new(None)),
+            resource_limit_origin: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -214,6 +219,15 @@ impl LayoutPdfParser {
     pub fn with_ocr_invocation_page_limit(mut self, pages: u32) -> Self {
         self.ocr_invocation_page_limit = Some(pages);
         self
+    }
+
+    /// Test diagnostics: which bound produced the last `OcrResourceLimit` —
+    /// `document-bytes`, `worker-capture: …` (stdout/stderr over limit),
+    /// `project-budget: …`, or `worker-typed: …` (stderr tail carrying the
+    /// worker's own reason). Error semantics are unchanged.
+    #[doc(hidden)]
+    pub fn ocr_resource_limit_origin(&self) -> Option<String> {
+        self.resource_limit_origin.lock().unwrap().clone()
     }
 }
 
@@ -581,6 +595,7 @@ impl Parser for LayoutPdfParser {
         }
         if resource.bytes.len() > self.budget.max_document_bytes {
             if ocr_enabled {
+                *self.resource_limit_origin.lock().unwrap() = Some("document-bytes".into());
                 return Err(ApplicationError::OcrResourceLimit);
             }
             return Err(ApplicationError::ResourceLimitExceeded(
@@ -731,30 +746,47 @@ impl Parser for LayoutPdfParser {
         };
         // IO/spawn/output failures follow the same retention rule as worker
         // outcomes: only retryable timeout/busy keeps durable progress.
-        let (write_result, drained, errors, status) =
-            match tokio::try_join!(write, output, read_bounded(stderr, 64 * 1024), async {
-                process.wait().await.map_err(failed)
-            },)
-            .map_err(|error| {
-                if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
-                    ApplicationError::OcrResourceLimit
-                } else {
-                    error
+        let (write_result, drained, errors, status) = match tokio::try_join!(
+            write,
+            output,
+            async move {
+                read_bounded(stderr, 64 * 1024)
+                    .await
+                    .map_err(|error| match error {
+                        // A distinct message keeps the stderr bound separable
+                        // from the stdout bound at the shared join below.
+                        ApplicationError::ResourceLimitExceeded(_) => {
+                            ApplicationError::ResourceLimitExceeded(
+                                "PDF layout worker stderr limit exceeded".into(),
+                            )
+                        }
+                        other => other,
+                    })
+            },
+            async { process.wait().await.map_err(failed) },
+        )
+        .map_err(|error| {
+            if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                *self.resource_limit_origin.lock().unwrap() =
+                    Some(format!("worker-capture: {error}"));
+                ApplicationError::OcrResourceLimit
+            } else {
+                error
+            }
+        }) {
+            Ok(values) => values,
+            Err(error) => {
+                if let Some((store, key, _, _)) = &checkpoint
+                    && !matches!(
+                        error,
+                        ApplicationError::OcrTimeout | ApplicationError::OcrBusy
+                    )
+                {
+                    let _ = store.remove(key).await;
                 }
-            }) {
-                Ok(values) => values,
-                Err(error) => {
-                    if let Some((store, key, _, _)) = &checkpoint
-                        && !matches!(
-                            error,
-                            ApplicationError::OcrTimeout | ApplicationError::OcrBusy
-                        )
-                    {
-                        let _ = store.remove(key).await;
-                    }
-                    return Err(error);
-                }
-            };
+                return Err(error);
+            }
+        };
         let WorkerDrain {
             payload: output,
             computed_pages,
@@ -763,6 +795,10 @@ impl Parser for LayoutPdfParser {
         let outcome: Result<Document, ApplicationError> = async move {
             if !status.success() {
                 if ocr_enabled && let Some(error) = process.termination_error() {
+                    if matches!(error, ApplicationError::OcrResourceLimit) {
+                        *self.resource_limit_origin.lock().unwrap() =
+                            Some("sandbox-oom-kill".into());
+                    }
                     return Err(error);
                 }
                 if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {
@@ -770,11 +806,26 @@ impl Parser for LayoutPdfParser {
                 }
                 if ocr_enabled && let Some(identity) = &self.ocr_identity {
                     use sha2::{Digest, Sha256};
-                    return Err(validated_worker_failure(
+                    let error = validated_worker_failure(
                         &output,
                         &format!("{:x}", Sha256::digest(&resource.bytes)),
                         &identity.sha256,
-                    ));
+                    );
+                    if matches!(error, ApplicationError::OcrResourceLimit) {
+                        // The typed record carries only the code; the bounded
+                        // stderr tail still names the worker's own reason.
+                        let tail: String = String::from_utf8_lossy(&errors)
+                            .chars()
+                            .rev()
+                            .take(512)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        *self.resource_limit_origin.lock().unwrap() =
+                            Some(format!("worker-typed: {}", tail.trim_end()));
+                    }
+                    return Err(error);
                 }
                 return Err(worker_failure(ocr_enabled, &errors));
             }
@@ -803,6 +854,8 @@ impl Parser for LayoutPdfParser {
             let page_count = payload.page_count;
             let mut document = project(resource, payload, &self.budget).map_err(|error| {
                 if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                    *self.resource_limit_origin.lock().unwrap() =
+                        Some(format!("project-budget: {error}"));
                     ApplicationError::OcrResourceLimit
                 } else {
                     error

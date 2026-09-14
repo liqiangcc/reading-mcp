@@ -30,7 +30,7 @@ class RegionalGeometryTests(unittest.TestCase):
             return primary if len(remaining) == 1 else [self.box([10,10,20,20], "retry", 1)]
         worker["ocr_page"] = observe
         worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
-        self.assertEqual(remaining, [15, 1])
+        self.assertEqual(remaining, [worker['PAGE_UNIT_SECONDS'], worker['PAGE_UNIT_SECONDS'] - 14])
         self.assertIsNone(worker["PAGE_DEADLINE"])
         self.assertIs(rasters[0], rasters[1])
         self.assertIsNone(worker["PAGE_RASTER"])
@@ -111,7 +111,7 @@ class RegionalGeometryTests(unittest.TestCase):
         self.assertIsNone(worker['PAGE_DEADLINE'])
 
     def test_disabled_covered_native_return_cannot_escape_page_deadline(self):
-        for previous, elapsed in [(None, 15), (104., 4)]:
+        for previous, elapsed in [(None, 60), (104., 4)]:
             worker, clock = self.deadline_worker()
             worker['OCR_CONFIG'] = {'enabled':False}
             worker['PAGE_DEADLINE'] = previous
@@ -122,7 +122,7 @@ class RegionalGeometryTests(unittest.TestCase):
                 clock[0] += elapsed
                 return {'uncovered_samples':0, 'masks':[{}]}
             worker['native_raster_coverage'] = covered
-            with self.assertRaisesRegex(RuntimeError, 'shared 15 second budget'):
+            with self.assertRaisesRegex(RuntimeError, 'shared %d second budget' % worker['PAGE_UNIT_SECONDS']):
                 worker['require_disabled_page_coverage'](SimpleNamespace(get_image_info=lambda:[{}]), {})
             self.assertEqual(worker['PAGE_DEADLINE'], previous)
 
@@ -131,11 +131,11 @@ class RegionalGeometryTests(unittest.TestCase):
         calls = []
         def observe(page, excluded_regions=()):
             calls.append(worker["OCR_CONFIG"]["psm"])
-            clock[0] += 15
+            clock[0] += worker['PAGE_UNIT_SECONDS'] + 1
             return [self.box([10,10,20,20], "primary", 1),
                     self.box([12,12,14,14], "overlap", 2)]
         worker["ocr_page"] = observe
-        with self.assertRaisesRegex(RuntimeError, "shared 15 second budget"):
+        with self.assertRaisesRegex(RuntimeError, 'shared %d second budget' % worker['PAGE_UNIT_SECONDS']):
             worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
         self.assertEqual(calls, [3])
         self.assertEqual(worker["OCR_CONFIG"]["psm"], 3)
@@ -189,6 +189,36 @@ class RegionalGeometryTests(unittest.TestCase):
             budget.require_page(page)
         with self.assertRaisesRegex(RuntimeError, "8 required page"):
             budget.require_page(8)
+
+    def test_regional_retry_slice_is_not_a_new_raster_allocation(self):
+        worker, _ = self.deadline_worker()
+        budget = worker["OcrRasterBudget"]()
+        worker["RASTER_BUDGET"] = budget
+        worker["OCR_CONFIG"] = {"enabled": True, "psm": 3, "dpi": 300}
+        # A page raster the size of a real 300dpi A4 scan, already charged.
+        raster = SimpleNamespace(n=3, width=2480, height=3509,
+                                 samples=b"\xff" * (2480 * 3509 * 3))
+        worker["PAGE_RASTER"] = raster
+        budget.reserve_raster(2480 * 3509)
+        engine_calls = []
+        def engine(pixmap, origin, scale_x, scale_y, psm, pnm=None):
+            engine_calls.append((origin, len(pnm or b"")))
+            return []
+        worker["_run_engine"] = engine
+        page = SimpleNamespace(number=0, rect=SimpleNamespace(width=595, height=842))
+        # Eight regional passes — the per-page cap — each slicing a large ROI
+        # must not touch the page-raster budget that already charged the raster.
+        for _ in range(8):
+            result = worker["_regional_retry_boxes"](page, [0, 0, 595, 842])
+            self.assertIsNotNone(result)
+        self.assertEqual(budget.pixels, 2480 * 3509)
+        self.assertEqual(len(engine_calls), 8)
+        self.assertGreater(engine_calls[0][1], 0)
+        # A genuinely new page raster is still a real allocation and the
+        # 64M total limit still applies.
+        budget.reserve_raster(2480 * 3509)
+        with self.assertRaisesRegex(RuntimeError, "64 million"):
+            budget.reserve_raster(64_000_000)
 
     def run_worker_retry(self, primary, retry):
         worker = {}
@@ -267,7 +297,7 @@ class RegionalGeometryTests(unittest.TestCase):
     def test_mixed_order_uses_remaining_page_deadline(self):
         worker, clock, original, selected, evidence = self.mixed_example()
         worker['PAGE_DEADLINE'] = clock[0]
-        with self.assertRaisesRegex(RuntimeError, 'shared 15 second budget'):
+        with self.assertRaisesRegex(RuntimeError, 'shared %d second budget' % worker['PAGE_UNIT_SECONDS']):
             worker['merge_native_order'](original, selected, evidence)
 
     def test_production_uncovered_component_is_incomplete(self):

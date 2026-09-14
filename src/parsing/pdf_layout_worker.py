@@ -31,6 +31,10 @@ EXPECTED_IDENTITY = None
 PAGE_DEADLINE = None
 INVOCATION_DEADLINE = None
 INVOCATION_PAGE_LIMIT = None
+# One page's bounded unit (model + engine work) stays strictly inside the
+# invocation budget: with durable checkpoints the invocation deadline is the
+# real work bound and this bound only kills a genuinely pathological page.
+PAGE_UNIT_SECONDS = 45
 RASTER_BUDGET = None
 PAGE_RASTER = None
 PAGE_RASTER_SHA256 = None
@@ -202,7 +206,7 @@ class OcrRasterBudget:
         self.pages.add(page_number)
 
 def page_time_remaining():
-    remaining = 15.0 if PAGE_DEADLINE is None else PAGE_DEADLINE - time.monotonic()
+    remaining = PAGE_UNIT_SECONDS if PAGE_DEADLINE is None else PAGE_DEADLINE - time.monotonic()
     # The optional owner-supplied invocation bound stops work between bounded
     # units and shrinks in-flight engine deadlines; it never extends a page.
     if INVOCATION_DEADLINE is not None:
@@ -211,7 +215,8 @@ def page_time_remaining():
             raise OcrStageFailure('OCR_TIMEOUT', "local OCR invocation budget exhausted")
         remaining = min(remaining, invocation)
     if remaining <= 0:
-        raise OcrStageFailure('OCR_TIMEOUT', "local OCR page exceeded shared 15 second budget")
+        raise OcrStageFailure('OCR_TIMEOUT',
+            "local OCR page exceeded shared %d second budget" % PAGE_UNIT_SECONDS)
     return remaining
 
 def raster_pixel_count(page, dpi):
@@ -539,7 +544,7 @@ def require_disabled_page_coverage(page, page_layout):
     if not has_native_body(page_layout):
         raise OcrRequired('image-only page requires local OCR inspection')
     previous = PAGE_DEADLINE
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + PAGE_UNIT_SECONDS
     PAGE_DEADLINE = deadline if previous is None else min(previous, deadline)
     try:
         pixmap = prepare_page_raster(page, dpi=300)
@@ -579,34 +584,36 @@ def require_disabled_page_coverage(page, page_layout):
     finally:
         PAGE_DEADLINE = previous
 
-def ocr_page(page, language=None, excluded_regions=()):
-    """Run the deployer-selected local Tesseract and retain engine grouping."""
+def _run_engine(pixmap, origin, scale_x, scale_y, psm, pnm=None):
+    """Run the deployer-selected local Tesseract on one raster observation.
+
+    ``origin``/``scale`` map the raster's pixel grid back into page points, so
+    a regional re-observation keeps the same page-coordinate evidence shape as
+    a whole-page attempt.  ``pnm`` carries pre-encoded PNM bytes when the
+    observation is a slice of the verified page raster rather than a pixmap.
+    Returns engine-grouped boxes or None for no text.
+    """
     config = OCR_CONFIG
-    if excluded_regions:
-        raise ValueError("native exclusions require the observation-preserving wrapper")
-    if not config.get("enabled", False):
-        return None
     language = "+".join(config["languages"])
-    page_time_remaining()
-    pixmap = PAGE_RASTER if PAGE_RASTER is not None else prepare_page_raster(page)
-    if RASTER_BUDGET is not None:
-        RASTER_BUDGET.require_page(page.number)
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
-        image = os.path.join(directory, "page.png")
+        image = os.path.join(directory, "page.ppm" if pnm is not None else "page.png")
         output = os.path.join(directory, "words")
-        scale_x = pixmap.width / page.rect.width
-        scale_y = pixmap.height / page.rect.height
-        pixmap.save(image)
+        if pnm is not None:
+            with open(image, "wb") as stream:
+                stream.write(pnm)
+        else:
+            pixmap.save(image)
         command = [config["engine_path"], image, output,
                    "--tessdata-dir", config["tessdata_path"],
-                   "-l", language, "--oem", str(config["oem"]), "--psm", str(config["psm"]), "--dpi", str(config["dpi"]), "tsv"]
+                   "-l", language, "--oem", str(config["oem"]), "--psm", str(psm), "--dpi", str(config["dpi"]), "tsv"]
         try:
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
                            stderr=subprocess.PIPE, timeout=page_time_remaining(), env=OCR_PROCESS_ENV)
         except FileNotFoundError as error:
             raise OcrStageFailure('OCR_UNAVAILABLE', "local OCR engine is not installed") from error
         except subprocess.TimeoutExpired as error:
-            raise OcrStageFailure('OCR_TIMEOUT', "local OCR page exceeded 15 second budget") from error
+            raise OcrStageFailure('OCR_TIMEOUT',
+                "local OCR page exceeded %d second budget" % PAGE_UNIT_SECONDS) from error
         rows = []
         with open(output + ".tsv", encoding="utf-8", newline="") as stream:
             for row in csv.DictReader(stream, delimiter="\t"):
@@ -625,15 +632,15 @@ def ocr_page(page, language=None, excluded_regions=()):
                 if text and not (cjk(text[-1]) and cjk(token[0])):
                     text += " "
                 text += token
-            left = min(int(item["left"]) for item in words) / scale_x
-            top = min(int(item["top"]) for item in words) / scale_y
-            right = max(int(item["left"]) + int(item["width"]) for item in words) / scale_x
-            bottom = max(int(item["top"]) + int(item["height"]) for item in words) / scale_y
+            left = origin[0] + min(int(item["left"]) for item in words) / scale_x
+            top = origin[1] + min(int(item["top"]) for item in words) / scale_y
+            right = origin[0] + max(int(item["left"]) + int(item["width"]) for item in words) / scale_x
+            bottom = origin[1] + max(int(item["top"]) + int(item["height"]) for item in words) / scale_y
             textlines.append({"text": text, "bbox": [left, top, right, bottom],
-                              "spans": [{"text": item["text"], "bbox": [int(item["left"]) / scale_x,
-                              int(item["top"]) / scale_y,
-                              (int(item["left"]) + int(item["width"])) / scale_x,
-                              (int(item["top"]) + int(item["height"])) / scale_y],
+                              "spans": [{"text": item["text"], "bbox": [origin[0] + int(item["left"]) / scale_x,
+                              origin[1] + int(item["top"]) / scale_y,
+                              origin[0] + (int(item["left"]) + int(item["width"])) / scale_x,
+                              origin[1] + (int(item["top"]) + int(item["height"])) / scale_y],
                               "flags": 0, "ocr_block": key[0], "ocr_paragraph": key[1],
                               "ocr_line": key[2], "confidence": float(item["conf"])} for item in words]})
         if not textlines:
@@ -650,6 +657,73 @@ def ocr_page(page, language=None, excluded_regions=()):
                          "textlines": block_lines,
                          "ocr_block": block, "ocr_paragraph": paragraph})
         return boxes
+
+def ocr_page(page, language=None, excluded_regions=()):
+    """Run the deployer-selected local Tesseract and retain engine grouping."""
+    config = OCR_CONFIG
+    if excluded_regions:
+        raise ValueError("native exclusions require the observation-preserving wrapper")
+    if not config.get("enabled", False):
+        return None
+    page_time_remaining()
+    pixmap = PAGE_RASTER if PAGE_RASTER is not None else prepare_page_raster(page)
+    if RASTER_BUDGET is not None:
+        RASTER_BUDGET.require_page(page.number)
+    return _run_engine(pixmap, (0.0, 0.0), pixmap.width / page.rect.width,
+                       pixmap.height / page.rect.height, config["psm"])
+
+def _regional_retry_boxes(page, region):
+    """Focused psm-6 re-observation of one conflicted region.
+
+    A whole-page retry can merge the conflict region into a page-spanning
+    block, leaving zero candidates inside the region of interest.  Feeding
+    the engine only the region's slice of the verified page raster gives it
+    a bounded observation; its boxes are contained in the returned searched
+    rectangle by construction.  The pixels are the exact samples the page
+    unit already verified — no second render and no raster identity drift.
+    The search stays inside the same page unit: the engine subprocess keeps
+    the shared page deadline and the slice is charged to the pixel budget.
+    Returns (searched_page_rect, boxes) or None when the region is degenerate
+    or the raster cannot be sliced.
+    """
+    raster = PAGE_RASTER
+    if raster is None or raster.n != 3:
+        return None
+    dpi = OCR_CONFIG['dpi']
+    scale = dpi / 72
+    x0 = max(0, int(math.floor(region[0] * scale)))
+    y0 = max(0, int(math.floor(region[1] * scale)))
+    x1 = min(raster.width, int(math.ceil(region[2] * scale)))
+    y1 = min(raster.height, int(math.ceil(region[3] * scale)))
+    width, height = x1 - x0, y1 - y0
+    if width < 8 or height < 8:
+        return None
+    samples = raster.samples
+    if len(samples) != raster.width * raster.height * 3:
+        return None
+    # The slice is a bounded copy of bytes the page raster already paid for,
+    # not a new raster allocation: it stays off the 64M raster budget.  Its
+    # own bounds are the raster size itself, the per-page retry cap, and the
+    # shared page deadline below.
+    page_time_remaining()
+    rows = bytearray(width * height * 3)
+    stride = raster.width * 3
+    for row in range(height):
+        start = ((y0 + row) * raster.width + x0) * 3
+        rows[row * width * 3:(row + 1) * width * 3] = samples[start:start + width * 3]
+    pnm = b"P6\n%d %d\n255\n" % (width, height) + bytes(rows)
+    boxes = _run_engine(None, (x0 / scale, y0 / scale), scale, scale, 6, pnm=pnm) or []
+    # The searched rect is the quantized slice, clamped to the original page
+    # bounds; drop any box that landed outside the page.
+    bounds = [0.0, 0.0, page.rect.width, page.rect.height]
+    searched = [x0 / scale, y0 / scale,
+                min(x1 / scale, page.rect.width),
+                min(y1 / scale, page.rect.height)]
+    boxes = [box for box in boxes
+             if box["ocr_block"] != 0 and box["ocr_paragraph"] != 0
+             and all(box["bbox"][k] >= bounds[k] for k in (0, 1))
+             and all(box["bbox"][k] <= bounds[k] for k in (2, 3))]
+    return searched, boxes
 
 def _bbox_area(box):
     b=box["bbox"]; return max(0,b[2]-b[0])*max(0,b[3]-b[1])
@@ -797,10 +871,13 @@ def _regional_ocr(page, excluded_regions=(), inspect_native=False, original_boxe
     global PAGE_DEADLINE, PAGE_RASTER, PAGE_RASTER_SHA256
     previous = PAGE_DEADLINE
     previous_raster = PAGE_RASTER
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + PAGE_UNIT_SECONDS
     PAGE_DEADLINE = deadline if previous is None else min(previous, deadline)
     try:
-        PAGE_RASTER = prepare_page_raster(page)
+        # A caller that already rasterized this page (the page unit feeds the
+        # model child from the same pixels) hands it in through PAGE_RASTER;
+        # pixels are reserved once per actual rasterization.
+        PAGE_RASTER = PAGE_RASTER if PAGE_RASTER is not None else prepare_page_raster(page)
         PAGE_RASTER_SHA256 = hashlib.sha256(PAGE_RASTER.samples).hexdigest()
         blank = blank_raster_evidence(page, PAGE_RASTER)
         if blank is not None:
@@ -864,13 +941,19 @@ def _regional_ocr_attempts(page, excluded_regions=()):
     try: retry=ocr_page(page, excluded_regions=excluded_regions) or []
     finally: OCR_CONFIG=saved
     tolerance=2*72/saved["dpi"]; rect=[0,0,page.rect.width,page.rect.height]; replacements=[]; diagnostics=[]
+    def component_centers(component):
+        return [((s["bbox"][0]+s["bbox"][2])/2,(s["bbox"][1]+s["bbox"][3])/2)
+                for i in component for l in original[i].get("textlines",[]) for s in l.get("spans",[])]
+    def covering(candidates, centers):
+        return all(any(l["bbox"][0]<=x<=l["bbox"][2] and l["bbox"][1]<=y<=l["bbox"][3]
+                       for b in candidates for l in b.get("textlines",[])) for x,y in centers)
     for component in components:
         raw=[min(original[i]["bbox"][k] for i in component) for k in (0,1)]+[max(original[i]["bbox"][k] for i in component) for k in (2,3)]
         roi=[max(rect[0],raw[0]-tolerance),max(rect[1],raw[1]-tolerance),min(rect[2],raw[2]+tolerance),min(rect[3],raw[3]+tolerance)]
         candidate_indices=[i for i,b in enumerate(retry) if all(b["bbox"][k]>=roi[k] for k in (0,1)) and all(b["bbox"][k]<=roi[k] for k in (2,3))]
         candidates=[retry[i] for i in candidate_indices]
-        centers=[((s["bbox"][0]+s["bbox"][2])/2,(s["bbox"][1]+s["bbox"][3])/2) for i in component for l in original[i].get("textlines",[]) for s in l.get("spans",[])]
-        covered=all(any(l["bbox"][0]<=x<=l["bbox"][2] and l["bbox"][1]<=y<=l["bbox"][3] for b in candidates for l in b.get("textlines",[])) for x,y in centers)
+        centers=component_centers(component)
+        covered=covering(candidates, centers)
         resolved=bool(candidates) and covered
         diagnostics.append({"indices":sorted(component),"roi":raw,"effective_roi":roi,
                             "candidate_count":len(candidates),"resolved":resolved,
@@ -879,6 +962,42 @@ def _regional_ocr_attempts(page, excluded_regions=()):
                             "candidate_refs":[_attempt_reference(page_number,"retry",i) for i in candidate_indices],
                             "replaced_refs":[_attempt_reference(page_number,"primary",i) for i in sorted(component)] if resolved else []})
         if resolved: replacements.append((min(component),set(component),candidates))
+    # A whole-page retry can merge a conflict region into a page-spanning
+    # block, leaving zero contained candidates.  Give each still-unresolved
+    # component one bounded regional re-observation inside the same page unit.
+    # The same coverage rule decides; an unresolved region keeps its failure.
+    claimed={ref["box"] for diagnostic in diagnostics if diagnostic["resolved"]
+             for ref in diagnostic["candidate_refs"]}
+    regional_left=8
+    for component, diagnostic in zip(components, diagnostics):
+        if diagnostic["resolved"] or regional_left <= 0:
+            continue
+        regional_left -= 1
+        page_time_remaining()
+        outcome = _regional_retry_boxes(page, diagnostic["effective_roi"])
+        if outcome is None:
+            continue
+        searched, regional_boxes = outcome
+        if not regional_boxes:
+            continue
+        retry.extend(regional_boxes)
+        diagnostic["effective_roi"] = searched
+        roi = searched
+        candidate_indices=[i for i,b in enumerate(retry)
+                           if i not in claimed
+                           and all(b["bbox"][k]>=roi[k] for k in (0,1))
+                           and all(b["bbox"][k]<=roi[k] for k in (2,3))]
+        candidates=[retry[i] for i in candidate_indices]
+        covered=covering(candidates, component_centers(component))
+        resolved=bool(candidates) and covered
+        diagnostic["candidate_count"]=len(candidates)
+        diagnostic["resolved"]=resolved
+        diagnostic["candidate_refs"]=[_attempt_reference(page_number,"retry",i) for i in candidate_indices]
+        claimed.update(candidate_indices)
+        if resolved:
+            diagnostic["failure"]=None
+            diagnostic["replaced_refs"]=[_attempt_reference(page_number,"primary",i) for i in sorted(component)]
+            replacements.append((min(component),set(component),candidates))
     members=set().union(*(m for _,m,_ in replacements)) if replacements else set(); selected=[]
     by_first={i:c for i,_,c in replacements}
     for i,box in enumerate(original):
@@ -1308,7 +1427,8 @@ def visual_page_observation(page, pixmap=None):
         child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler',
             '-c', WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
             str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
-            capture_output=True, timeout=min(15, page_time_remaining()), check=False)
+            capture_output=True, timeout=min(PAGE_UNIT_SECONDS, page_time_remaining()),
+            check=False)
     except subprocess.TimeoutExpired as error:
         raise OcrStageFailure('OCR_TIMEOUT',
                               'visual model child exceeded shared budget') from error
@@ -1325,7 +1445,8 @@ def visual_page_observation(page, pixmap=None):
 
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256, WORKER_SOURCE
-    global INVOCATION_DEADLINE, INVOCATION_PAGE_LIMIT, PAGE_RASTER_SHA256
+    global INVOCATION_DEADLINE, INVOCATION_PAGE_LIMIT, PAGE_RASTER_SHA256, PAGE_DEADLINE
+    global PAGE_RASTER
     protocol_stdout = sys.stdout
     if len(sys.argv) == 5 and sys.argv[1] == '--visual-model':
         visual_model_child(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
@@ -1405,6 +1526,9 @@ def main():
         # Read and bound the input with the small PyMuPDF binding first; the
         # per-page model child runs inside each page's bounded unit later, so
         # a resumed invocation only pays model cost for pages it completes.
+        # Raster pixels are reserved once per actual rasterization inside the
+        # page unit — reserving them here as well would double-count every
+        # page against the 64M total.
         import pymupdf
         raw_for_visual = sys.stdin.buffer.read(max_bytes + 1)
         if len(raw_for_visual) > max_bytes:
@@ -1413,9 +1537,6 @@ def main():
         with pymupdf.open(stream=raw_for_visual, filetype='pdf') as visual_doc:
             if visual_doc.needs_pass or not 0 < len(visual_doc) <= max_pages:
                 raise OcrStageFailure('OCR_RESOURCE_LIMIT', 'invalid visual PDF page count')
-            for visual_page in visual_doc:
-                if RASTER_BUDGET is not None:
-                    RASTER_BUDGET.reserve_raster(raster_pixel_count(visual_page, OCR_CONFIG['dpi']))
         # The bytes are retained as the canonical input for the normal parse;
         # the stream is not readable a second time after the pre-classification.
         visual_input = raw_for_visual
@@ -1516,9 +1637,18 @@ def main():
                             # Model classification is part of this page's
                             # bounded unit, so a resumed invocation never
                             # pays model cost for pages it does not reach.
+                            # The unit deadline covers model + engine work,
+                            # and one rasterization serves both stages.  A
+                            # verification raster already made for a rejected
+                            # checkpoint is the identical current raster —
+                            # reuse it instead of allocating a second one.
+                            PAGE_DEADLINE = time.monotonic() + PAGE_UNIT_SECONDS
+                            if page_pixmap is None:
+                                page_pixmap = prepare_page_raster(page)
                             if visual_model_enabled:
-                                observation = visual_page_observation(page)
+                                observation = visual_page_observation(page, page_pixmap)
                             excluded = native_text_regions(page_layout)
+                            PAGE_RASTER = page_pixmap
                             projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
                                 inspect_native=has_body_text, original_boxes=page_layout['boxes'])
                             computed_ocr_pages += 1
@@ -1538,6 +1668,7 @@ def main():
                             # A replayed page whose stored observation is
                             # absent or no longer bound still runs the child
                             # on the identical raster before projection.
+                            PAGE_DEADLINE = time.monotonic() + PAGE_UNIT_SECONDS
                             observation = visual_page_observation(page, page_pixmap)
                         visual_results[page.number] = observation
                         selected = page_layout['boxes']

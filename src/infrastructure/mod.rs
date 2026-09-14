@@ -7,6 +7,7 @@ mod memory_repository;
 mod memory_text_unit_index;
 mod noop_index;
 mod observability;
+mod ocr_checkpoint;
 mod ocr_evidence;
 mod ocr_identity;
 mod ocr_identity_process;
@@ -14,7 +15,7 @@ mod ocr_singleflight;
 mod sqlite;
 mod sqlite_search_index;
 
-pub use budget::{BudgetedParser, BudgetedRetriever, ResourceBudget};
+pub use budget::{BudgetedParser, BudgetedRetriever, OCR_PARSE_TIMEOUT, ResourceBudget};
 pub use cache::{
     CachingParser, CachingRetriever, InMemoryParsedDocumentCache, InMemoryRawResourceCache,
 };
@@ -27,6 +28,7 @@ pub use observability::{
     ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
     ObservedSearchIndex,
 };
+pub use ocr_checkpoint::{FileOcrCheckpointStore, MetaIdentity, checkpoint_key};
 pub use ocr_evidence::FileOcrEvidenceStore;
 pub use ocr_identity::build_ocr_runtime_identity;
 pub(crate) use ocr_identity::{OCR_INTERPRETER_ARGS, OCR_PROCESS_ENV};

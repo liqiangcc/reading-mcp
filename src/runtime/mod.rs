@@ -140,7 +140,18 @@ pub fn build_server(
             let store = Arc::new(crate::infrastructure::FileOcrEvidenceStore::new(
                 state.join("ocr-evidence"),
             ));
-            parser.with_evidence_store(store)
+            let parser = parser.with_evidence_store(store);
+            // Durable per-page progress survives the hard 60s open deadline;
+            // the soft bound lets the worker stop at a bounded unit and report
+            // a typed retryable OCR_TIMEOUT instead of being killed mid-page.
+            let checkpoints = Arc::new(crate::infrastructure::FileOcrCheckpointStore::new(
+                state.join("ocr-checkpoints"),
+            ));
+            parser
+                .with_checkpoint_store(checkpoints)
+                .with_ocr_invocation_budget(
+                    crate::infrastructure::OCR_PARSE_TIMEOUT - std::time::Duration::from_secs(10),
+                )
         } else {
             parser
         };

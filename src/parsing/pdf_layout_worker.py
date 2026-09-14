@@ -1337,8 +1337,10 @@ def main():
         # Real PDFs start with '%', so raw-stream callers are unchanged; the
         # line only exists because the owner opts into progress/checkpointing.
         if sys.stdin.buffer.peek(1)[:1] == b'{':
-            header_line = sys.stdin.buffer.readline(8 * 1024 * 1024 + 1)
-            if len(header_line) > 8 * 1024 * 1024:
+            # The header carries up to the 8-page resume cap of checkpoint
+            # payloads (boxes, retry diagnostic, visual observation).
+            header_line = sys.stdin.buffer.readline(64 * 1024 * 1024 + 1)
+            if len(header_line) > 64 * 1024 * 1024:
                 raise OcrStageFailure('OCR_RESOURCE_LIMIT',
                                       'worker input header exceeds byte limit')
             budget, resume_pages = parse_worker_input(header_line)

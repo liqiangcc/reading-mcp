@@ -29,7 +29,9 @@ pub const PDF_LAYOUT_CACHE_NAMESPACE: &str =
     "pdf-layout/v2:required-inspection/v2:pymupdf4llm-layout/1.28.2";
 const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_OCR_OUTPUT_BYTES: u64 = 32 * 1024 * 1024;
+// Progress records duplicate the heaviest result fields (per-page visual
+// observations), so the bounded ceiling covers checkpoint lines + result.
+const MAX_OCR_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Runtime preflight before cache lookup. Direct parser probes may explicitly
 /// exercise the unsandboxed adapter, but the MCP runtime has no such fallback.

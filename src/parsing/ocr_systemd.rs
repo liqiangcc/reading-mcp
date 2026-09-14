@@ -212,6 +212,9 @@ impl SystemdOcrUnit {
             "--property=TasksMax=64",
             "--property=PrivateNetwork=yes",
             Self::scratch_property(with_run),
+            // The unit's cwd is the writable tmpfs so cwd-relative runtime
+            // caches (e.g. onnxruntime telemetry) cannot land on the rootfs.
+            "--property=WorkingDirectory=/tmp",
             "--property=ProtectHome=tmpfs",
             "--property=ProtectSystem=strict",
             "--property=PrivateDevices=yes",
@@ -815,6 +818,10 @@ while True: time.sleep(1)
         assert!(
             properties.contains(&"--property=ProtectSystem=strict"),
             "private OCR runtime rootfs must stay read-only"
+        );
+        assert!(
+            properties.contains(&"--property=WorkingDirectory=/tmp"),
+            "unit cwd must be the /tmp tmpfs so cwd-relative writes stay off the rootfs"
         );
         let scratch: Vec<_> = properties
             .iter()

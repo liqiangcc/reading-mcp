@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
-          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=WorkingDirectory=/tmp --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
           du -sb "$runtime_root" "$runtime_root/opt/ocr-python" "$runtime_root/opt/ocr-bootstrap"
       - name: Worker execution must not alter the runtime inventory
         run: |
@@ -133,7 +133,7 @@ jobs:
           verified_root="$RUNNER_TEMP/verified-ocr-runtime"
           public_smoke="$RUNNER_TEMP/ocr-private-runtime/rootfs/opt/ocr-smoke"
           test ! -e "$verified_root/opt/ocr-bootstrap"
-          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$verified_root" --property="BindReadOnlyPaths=$public_smoke:/opt/ocr-smoke" --property=User=65534 --property=Group=65534 --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=NoNewPrivileges=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group --property=LimitCORE=0 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$verified_root" --property="BindReadOnlyPaths=$public_smoke:/opt/ocr-smoke" --property=User=65534 --property=Group=65534 --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=NoNewPrivileges=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 --property=WorkingDirectory=/tmp --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group --property=LimitCORE=0 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-archive-smoke.json"
           sudo /usr/bin/python3 - <<'PY' "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/verified-inventory-before.json"
           import json, sys
           sys.path.insert(0, "scripts/ocr")
@@ -175,7 +175,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y gdb
           debug_unit="reading-mcp-ocr-import-debug-${GITHUB_RUN_ID}.service"
           trap 'sudo systemctl stop "$debug_unit" >/dev/null 2>&1 || true; sudo systemctl reset-failed "$debug_unit" >/dev/null 2>&1 || true' EXIT
-          sudo systemd-run --quiet --unit="$debug_unit" --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=LimitCORE=0 --property=RuntimeMaxSec=30 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B -c 'import time; time.sleep(5); import onnxruntime'
+          sudo systemd-run --quiet --unit="$debug_unit" --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=WorkingDirectory=/tmp --property=LimitCORE=0 --property=RuntimeMaxSec=30 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B -c 'import time; time.sleep(5); import onnxruntime'
           debug_pid=$(sudo systemctl show "$debug_unit" --property=MainPID --value)
           test "$debug_pid" -gt 1
           sudo timeout 20 gdb --quiet --nx --batch -ex "set sysroot $runtime_root" -ex 'set pagination off' -ex continue -ex 'bt 30' -p "$debug_pid" | tee "$RUNNER_TEMP/ocr-private-runtime-native-backtrace.txt"

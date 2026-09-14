@@ -30,7 +30,7 @@ class RegionalGeometryTests(unittest.TestCase):
             return primary if len(remaining) == 1 else [self.box([10,10,20,20], "retry", 1)]
         worker["ocr_page"] = observe
         worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
-        self.assertEqual(remaining, [15, 1])
+        self.assertEqual(remaining, [worker['PAGE_UNIT_SECONDS'], worker['PAGE_UNIT_SECONDS'] - 14])
         self.assertIsNone(worker["PAGE_DEADLINE"])
         self.assertIs(rasters[0], rasters[1])
         self.assertIsNone(worker["PAGE_RASTER"])
@@ -111,7 +111,7 @@ class RegionalGeometryTests(unittest.TestCase):
         self.assertIsNone(worker['PAGE_DEADLINE'])
 
     def test_disabled_covered_native_return_cannot_escape_page_deadline(self):
-        for previous, elapsed in [(None, 15), (104., 4)]:
+        for previous, elapsed in [(None, 60), (104., 4)]:
             worker, clock = self.deadline_worker()
             worker['OCR_CONFIG'] = {'enabled':False}
             worker['PAGE_DEADLINE'] = previous
@@ -122,7 +122,7 @@ class RegionalGeometryTests(unittest.TestCase):
                 clock[0] += elapsed
                 return {'uncovered_samples':0, 'masks':[{}]}
             worker['native_raster_coverage'] = covered
-            with self.assertRaisesRegex(RuntimeError, 'shared 15 second budget'):
+            with self.assertRaisesRegex(RuntimeError, 'shared %d second budget' % worker['PAGE_UNIT_SECONDS']):
                 worker['require_disabled_page_coverage'](SimpleNamespace(get_image_info=lambda:[{}]), {})
             self.assertEqual(worker['PAGE_DEADLINE'], previous)
 
@@ -131,11 +131,11 @@ class RegionalGeometryTests(unittest.TestCase):
         calls = []
         def observe(page, excluded_regions=()):
             calls.append(worker["OCR_CONFIG"]["psm"])
-            clock[0] += 15
+            clock[0] += worker['PAGE_UNIT_SECONDS'] + 1
             return [self.box([10,10,20,20], "primary", 1),
                     self.box([12,12,14,14], "overlap", 2)]
         worker["ocr_page"] = observe
-        with self.assertRaisesRegex(RuntimeError, "shared 15 second budget"):
+        with self.assertRaisesRegex(RuntimeError, 'shared %d second budget' % worker['PAGE_UNIT_SECONDS']):
             worker["_regional_ocr"](SimpleNamespace(number=0, rect=SimpleNamespace(width=100, height=100)))
         self.assertEqual(calls, [3])
         self.assertEqual(worker["OCR_CONFIG"]["psm"], 3)
@@ -267,7 +267,7 @@ class RegionalGeometryTests(unittest.TestCase):
     def test_mixed_order_uses_remaining_page_deadline(self):
         worker, clock, original, selected, evidence = self.mixed_example()
         worker['PAGE_DEADLINE'] = clock[0]
-        with self.assertRaisesRegex(RuntimeError, 'shared 15 second budget'):
+        with self.assertRaisesRegex(RuntimeError, 'shared %d second budget' % worker['PAGE_UNIT_SECONDS']):
             worker['merge_native_order'](original, selected, evidence)
 
     def test_production_uncovered_component_is_incomplete(self):

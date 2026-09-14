@@ -90,7 +90,7 @@ class WorkerFailureTests(unittest.TestCase):
 
     def test_ingestion_timeout_envelope_binds_complete_input_hash(self):
         worker.INPUT_SHA256 = 'b' * 64
-        failure = worker.OcrStageFailure('OCR_TIMEOUT', 'local OCR page exceeded shared 15 second budget')
+        failure = worker.OcrStageFailure('OCR_TIMEOUT', 'local OCR page exceeded shared %d second budget' % worker.PAGE_UNIT_SECONDS)
         output = io.StringIO()
         with patch.object(worker, 'main', side_effect=failure), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(worker.run(), 1)

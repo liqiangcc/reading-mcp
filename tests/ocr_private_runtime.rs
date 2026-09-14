@@ -247,9 +247,10 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
         last_modified: None,
         metadata: Default::default(),
     };
-    // Calibrate against the real single-shot cost on this runner: an
-    // accumulation bound below ~40% of it cannot finish all four pages, and
-    // is widened (still below the total) until at least one page persists.
+    // Calibrate against the real single-shot cost on this runner. The
+    // accumulation bound starts below the total and widens until at least
+    // one page persists; the cap stays below the full cost so a capture
+    // attempt cannot normally finish the whole document unresumed.
     let probe = LayoutPdfParser::new(python.clone(), ResourceBudget::default())
         .with_ocr_runtime_package(root.clone(), manifest.clone())
         .with_ocr_config(identity.config.clone())
@@ -296,9 +297,11 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
                     "a finishing attempt must leave at least one new completed page"
                 );
                 if now.is_empty() {
-                    // The bound was too tight for even one page; widen it but
-                    // stay below the measured single-shot total.
-                    accumulation = (accumulation * 1.5).min(single_shot * 0.6);
+                    // Widen asymptotically toward the single-shot cost so the
+                    // bound eventually lands inside the partial window
+                    // (past the first page, before the last) whatever its
+                    // position, without reaching the full-document cost.
+                    accumulation += (single_shot - accumulation) * 0.5;
                 }
                 if !now.is_empty() {
                     // Source/runtime identity drift must fail closed.
@@ -317,6 +320,10 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
         }
     }
     let document = document.expect("resumable OCR did not converge on F05");
+    assert!(
+        !stored.is_empty(),
+        "F05 converged without a persisted partial checkpoint: resume was not exercised"
+    );
     let resume: serde_json::Value = serde_json::from_str(
         document
             .metadata

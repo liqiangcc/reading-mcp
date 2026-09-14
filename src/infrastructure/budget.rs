@@ -38,6 +38,12 @@ impl Default for ResourceBudget {
     }
 }
 
+/// Hard per-invocation bound for OCR-enabled PDF ingestion. The worker's
+/// optional soft deadline (`budget_seconds`) runs strictly inside this; the
+/// soft bound only ever stops work earlier so it can report a typed,
+/// resumable OCR_TIMEOUT instead of being killed mid-page.
+pub const OCR_PARSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct BudgetedRetriever {
     inner: Arc<dyn Retriever>,
     max_document_bytes: usize,
@@ -101,7 +107,7 @@ impl Parser for BudgetedParser {
             .next()
             .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"));
         let parse_timeout = if self.ocr_enabled && is_pdf {
-            Duration::from_secs(60)
+            OCR_PARSE_TIMEOUT
         } else {
             self.budget.parse_timeout
         };

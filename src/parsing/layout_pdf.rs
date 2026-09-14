@@ -2,6 +2,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -22,7 +23,7 @@ use crate::domain::{
     OcrEvidenceRecord, OcrPageObservations, OcrRuntimeIdentity, OcrVisualAttempt,
     OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
-use crate::infrastructure::ResourceBudget;
+use crate::infrastructure::{FileOcrCheckpointStore, MetaIdentity, ResourceBudget, checkpoint_key};
 
 pub const PDF_LAYOUT_CACHE_NAMESPACE: &str =
     "pdf-layout/v2:required-inspection/v2:pymupdf4llm-layout/1.28.2";
@@ -127,6 +128,11 @@ pub struct LayoutPdfParser {
     systemd_ocr_sandbox: bool,
     ocr_runtime_root: Option<PathBuf>,
     ocr_runtime_manifest: Option<PathBuf>,
+    checkpoint_store: Option<Arc<FileOcrCheckpointStore>>,
+    ocr_invocation_budget: Option<Duration>,
+    // A cancelled parse detaches the output drain so completed page
+    // checkpoints still land; the next call awaits it before resuming.
+    drain: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl LayoutPdfParser {
@@ -141,6 +147,9 @@ impl LayoutPdfParser {
             systemd_ocr_sandbox: false,
             ocr_runtime_root: None,
             ocr_runtime_manifest: None,
+            checkpoint_store: None,
+            ocr_invocation_budget: None,
+            drain: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -175,6 +184,22 @@ impl LayoutPdfParser {
         self.ocr_runtime_root = Some(root);
         self.ocr_runtime_manifest = Some(manifest);
         self.systemd_ocr_sandbox = true;
+        self
+    }
+
+    /// Durable per-page OCR checkpoint store: enables the resumable worker
+    /// protocol (input header + streamed page progress). Without it the
+    /// raw-byte protocol and single-shot semantics are unchanged.
+    pub fn with_checkpoint_store(mut self, store: Arc<FileOcrCheckpointStore>) -> Self {
+        self.checkpoint_store = Some(store);
+        self
+    }
+
+    /// Optional soft invocation bound handed to the worker so it stops at a
+    /// bounded unit with a typed OCR_TIMEOUT before the outer hard deadline
+    /// kills the sandbox. It only ever shortens work.
+    pub fn with_ocr_invocation_budget(mut self, budget: Duration) -> Self {
+        self.ocr_invocation_budget = Some(budget);
         self
     }
 }
@@ -323,6 +348,125 @@ async fn read_bounded(
     Ok(bytes)
 }
 
+#[derive(Debug, Default)]
+struct WorkerDrain {
+    /// The last non-progress line: the worker's result or failure payload.
+    payload: Vec<u8>,
+    computed_pages: Vec<u32>,
+    resumed_pages: Vec<u32>,
+}
+
+struct DrainCheckpoint {
+    store: Arc<FileOcrCheckpointStore>,
+    key: String,
+    meta: MetaIdentity,
+    required_pages: Option<Vec<u32>>,
+}
+
+/// Line-framed worker output for the negotiated checkpoint protocol. Each
+/// completed-page record is persisted as it arrives, so a caller cancelled at
+/// the hard deadline still keeps durable progress; a store failure only
+/// disables further persistence, never the parse itself.
+async fn drain_worker_stdout(
+    stdout: impl AsyncRead + Unpin,
+    limit: u64,
+    checkpoint: Option<DrainCheckpoint>,
+) -> Result<WorkerDrain, ApplicationError> {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut total: u64 = 0;
+    let mut drain = WorkerDrain::default();
+    let mut checkpoint = checkpoint;
+    while let Some(line) = lines.next_line().await.map_err(failed)? {
+        total += line.len() as u64 + 1;
+        if total > limit {
+            return Err(ApplicationError::ResourceLimitExceeded(
+                "PDF layout worker output limit exceeded".into(),
+            ));
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            drain.payload = line.into_bytes();
+            continue;
+        };
+        let Some(schema) = value.get("schema").and_then(|v| v.as_str()) else {
+            drain.payload = line.into_bytes();
+            continue;
+        };
+        match schema {
+            "ocr-page-checkpoint/v1" => {
+                let page = value
+                    .get("page")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|p| u32::try_from(p).ok());
+                if value.get("resumed") == Some(&serde_json::Value::Bool(true)) {
+                    if let Some(page) = page {
+                        drain.resumed_pages.push(page);
+                    }
+                    continue;
+                }
+                let Some(page) = page.filter(|p| *p > 0) else {
+                    continue;
+                };
+                let Some(ctx) = checkpoint.as_mut() else {
+                    continue;
+                };
+                let bound = value.get("original_sha256").and_then(|v| v.as_str())
+                    == Some(ctx.meta.original_sha256.as_str())
+                    && value
+                        .get("runtime_identity_sha256")
+                        .and_then(|v| v.as_str())
+                        == Some(ctx.meta.runtime_identity_sha256.as_str())
+                    && value
+                        .get("page_raster_sha256")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.len() == 64)
+                    && value.get("boxes").is_some_and(|v| v.is_array())
+                    && value
+                        .get("ocr_retry_diagnostic")
+                        .is_some_and(|v| v.is_object());
+                if !bound {
+                    continue;
+                }
+                if ctx
+                    .store
+                    .put_page(&ctx.key, &ctx.meta, ctx.required_pages.as_deref(), &value)
+                    .await
+                    .is_err()
+                {
+                    checkpoint = None;
+                    continue;
+                }
+                drain.computed_pages.push(page);
+            }
+            "ocr-required-pages/v1" => {
+                let pages: Option<Vec<u32>> =
+                    value.get("pages").and_then(|v| v.as_array()).map(|items| {
+                        items
+                            .iter()
+                            .filter_map(serde_json::Value::as_u64)
+                            .filter_map(|p| u32::try_from(p).ok())
+                            .collect()
+                    });
+                if let (Some(ctx), Some(pages)) = (checkpoint.as_mut(), pages) {
+                    ctx.required_pages = Some(pages.clone());
+                    if ctx
+                        .store
+                        .record_required(&ctx.key, &ctx.meta, &pages)
+                        .await
+                        .is_err()
+                    {
+                        checkpoint = None;
+                    }
+                }
+            }
+            _ => {
+                drain.payload = line.into_bytes();
+            }
+        }
+    }
+    Ok(drain)
+}
+
 fn validate_mixed_projection(
     regions: &serde_json::Value,
     page: &OcrPageObservations,
@@ -415,6 +559,13 @@ impl Parser for LayoutPdfParser {
             ));
         }
         let permit = self.permit.clone().acquire_owned().await.map_err(failed)?;
+        // A cancelled previous call detaches its output drain; awaiting it
+        // before resume means every page completed before the kill is visible.
+        // The guard is dropped before the await so the parse stays `Send`.
+        let pending = self.drain.lock().unwrap().take();
+        if let Some(handle) = pending {
+            let _ = handle.await;
+        }
         if resource.bytes.len() > self.budget.max_document_bytes {
             if ocr_enabled {
                 return Err(ApplicationError::OcrResourceLimit);
@@ -423,6 +574,28 @@ impl Parser for LayoutPdfParser {
                 "PDF byte limit exceeded".into(),
             ));
         }
+        // Resume is bound to (raw source, runtime identity, layout namespace):
+        // any source/config/model/projection change selects a different key,
+        // so incompatible progress is never loaded.
+        let checkpoint = if ocr_enabled
+            && let (Some(store), Some(identity)) = (&self.checkpoint_store, &self.ocr_identity)
+        {
+            use sha2::{Digest, Sha256};
+            let meta = MetaIdentity {
+                original_sha256: format!("{:x}", Sha256::digest(&resource.bytes)),
+                runtime_identity_sha256: identity.sha256.clone(),
+                layout_namespace: PDF_LAYOUT_CACHE_NAMESPACE.into(),
+            };
+            let key = checkpoint_key(
+                &meta.original_sha256,
+                &meta.runtime_identity_sha256,
+                &meta.layout_namespace,
+            );
+            let loaded = store.load(&key, &meta).await?;
+            Some((store.clone(), key, meta, loaded.pages))
+        } else {
+            None
+        };
         let (mut command, unit) = if ocr_enabled && self.systemd_ocr_sandbox {
             let (command, unit) = match (&self.ocr_runtime_root, &self.ocr_runtime_manifest) {
                 (Some(root), Some(manifest)) => {
@@ -479,150 +652,242 @@ impl Parser for LayoutPdfParser {
             .stderr
             .take()
             .ok_or_else(|| failed("missing stderr"))?;
+        // The negotiated header opts the worker into progress emission and
+        // carries verified prior page results; absent a checkpoint store the
+        // wire format stays raw PDF bytes.
+        let header = checkpoint.as_ref().map(|(_, _, _, pages)| {
+            let mut value = serde_json::json!({
+                "schema": "ocr-worker-input/v1",
+                "pages": pages
+                    .iter()
+                    .map(|(page, payload)| (page.to_string(), payload.clone()))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            });
+            if let Some(budget) = self.ocr_invocation_budget {
+                value["budget_seconds"] = serde_json::json!(budget.as_secs_f64());
+            }
+            value.to_string()
+        });
         let write = async {
             // A worker may reject dependencies before consuming input. Its exit
             // status/stderr is more useful than a resulting broken pipe.
-            let result = stdin.write_all(&resource.bytes).await;
+            let result = async {
+                if let Some(header) = &header {
+                    stdin.write_all(header.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                }
+                stdin.write_all(&resource.bytes).await
+            }
+            .await;
             drop(stdin);
             Ok::<_, ApplicationError>(result)
         };
-        let (write_result, output, errors, status) = tokio::try_join!(
-            write,
-            read_bounded(
-                stdout,
-                if ocr_enabled {
-                    MAX_OCR_OUTPUT_BYTES
+        let output_limit = if ocr_enabled {
+            MAX_OCR_OUTPUT_BYTES
+        } else {
+            MAX_OUTPUT_BYTES
+        };
+        let output: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<WorkerDrain, ApplicationError>> + Send>,
+        > = if let Some((store, key, meta, _)) = checkpoint.clone() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let ctx = DrainCheckpoint {
+                store,
+                key,
+                meta,
+                required_pages: None,
+            };
+            let handle = tokio::spawn(async move {
+                let result = drain_worker_stdout(stdout, output_limit, Some(ctx)).await;
+                let _ = tx.send(result);
+            });
+            *self.drain.lock().unwrap() = Some(handle);
+            Box::pin(async move { rx.await.map_err(|_| failed("worker output drain lost"))? })
+        } else {
+            Box::pin(async move {
+                read_bounded(stdout, output_limit)
+                    .await
+                    .map(|payload| WorkerDrain {
+                        payload,
+                        ..WorkerDrain::default()
+                    })
+            })
+        };
+        // IO/spawn/output failures follow the same retention rule as worker
+        // outcomes: only retryable timeout/busy keeps durable progress.
+        let (write_result, drained, errors, status) =
+            match tokio::try_join!(write, output, read_bounded(stderr, 64 * 1024), async {
+                process.wait().await.map_err(failed)
+            },)
+            .map_err(|error| {
+                if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                    ApplicationError::OcrResourceLimit
                 } else {
-                    MAX_OUTPUT_BYTES
+                    error
                 }
-            ),
-            read_bounded(stderr, 64 * 1024),
-            async { process.wait().await.map_err(failed) },
-        )
-        .map_err(|error| {
-            if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
-                ApplicationError::OcrResourceLimit
-            } else {
-                error
-            }
-        })?;
-        if !status.success() {
-            if ocr_enabled && let Some(error) = process.termination_error() {
-                return Err(error);
-            }
-            if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {
-                return Err(ApplicationError::OcrRequired);
-            }
-            if ocr_enabled && let Some(identity) = &self.ocr_identity {
-                use sha2::{Digest, Sha256};
-                return Err(validated_worker_failure(
-                    &output,
-                    &format!("{:x}", Sha256::digest(&resource.bytes)),
-                    &identity.sha256,
-                ));
-            }
-            return Err(worker_failure(ocr_enabled, &errors));
-        }
-        write_result.map_err(failed)?;
-        let payload: LayoutResult = serde_json::from_slice(&output).map_err(failed)?;
-        let evidence = payload.ocr_evidence.clone();
-        let derivation = payload.ocr_derivation.clone();
-        let attempts = payload.ocr_attempts.clone();
-        let visual_attempts = payload.ocr_visual_attempts.clone();
-        for page in &attempts {
-            validate_mixed_projection(&payload.regions, page)?;
-            for native in &page.native_regions {
-                let expected = serde_json::json!({"page":page.page,"box":native.source_box,
-                    "bbox":native.bbox,"class":native.source_class});
-                if !payload
-                    .regions
-                    .as_array()
-                    .is_some_and(|regions| regions.contains(&expected))
-                {
-                    return Err(failed(
-                        "native exclusion has no matching original layout region",
+            }) {
+                Ok(values) => values,
+                Err(error) => {
+                    if let Some((store, key, _, _)) = &checkpoint
+                        && !matches!(
+                            error,
+                            ApplicationError::OcrTimeout | ApplicationError::OcrBusy
+                        )
+                    {
+                        let _ = store.remove(key).await;
+                    }
+                    return Err(error);
+                }
+            };
+        let WorkerDrain {
+            payload: output,
+            computed_pages,
+            resumed_pages,
+        } = drained;
+        let outcome: Result<Document, ApplicationError> = async move {
+            if !status.success() {
+                if ocr_enabled && let Some(error) = process.termination_error() {
+                    return Err(error);
+                }
+                if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {
+                    return Err(ApplicationError::OcrRequired);
+                }
+                if ocr_enabled && let Some(identity) = &self.ocr_identity {
+                    use sha2::{Digest, Sha256};
+                    return Err(validated_worker_failure(
+                        &output,
+                        &format!("{:x}", Sha256::digest(&resource.bytes)),
+                        &identity.sha256,
                     ));
                 }
+                return Err(worker_failure(ocr_enabled, &errors));
             }
-        }
-        let page_count = payload.page_count;
-        let mut document = project(resource, payload, &self.budget).map_err(|error| {
-            if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
-                ApplicationError::OcrResourceLimit
-            } else {
-                error
+            write_result.map_err(failed)?;
+            let payload: LayoutResult = serde_json::from_slice(&output).map_err(failed)?;
+            let evidence = payload.ocr_evidence.clone();
+            let derivation = payload.ocr_derivation.clone();
+            let attempts = payload.ocr_attempts.clone();
+            let visual_attempts = payload.ocr_visual_attempts.clone();
+            for page in &attempts {
+                validate_mixed_projection(&payload.regions, page)?;
+                for native in &page.native_regions {
+                    let expected = serde_json::json!({"page":page.page,"box":native.source_box,
+                    "bbox":native.bbox,"class":native.source_class});
+                    if !payload
+                        .regions
+                        .as_array()
+                        .is_some_and(|regions| regions.contains(&expected))
+                    {
+                        return Err(failed(
+                            "native exclusion has no matching original layout region",
+                        ));
+                    }
+                }
             }
-        })?;
-        if !evidence.is_empty() || !attempts.is_empty() {
-            let mut derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
-            let identity = self
-                .ocr_identity
-                .as_ref()
-                .ok_or_else(|| failed("OCR expected identity missing"))?;
-            derivation
-                .validate_against(
-                    identity,
-                    document.content_hash.0.trim_start_matches("sha256:"),
-                )
-                .map_err(failed)?;
-            if derivation.original_sha256 != document.content_hash.0.trim_start_matches("sha256:")
-                || derivation.engine_sha256.len() != 64
-                || derivation.model_sha256.is_empty()
-                || derivation.library_sha256.is_empty()
-                || derivation
-                    .model_sha256
-                    .iter()
-                    .chain(derivation.library_sha256.iter())
-                    .any(|v| v.len() != 64)
-            {
-                return Err(failed("invalid OCR derivation fingerprint"));
-            }
-            validate_ocr_evidence(
-                &evidence,
+            let page_count = payload.page_count;
+            let mut document = project(resource, payload, &self.budget).map_err(|error| {
+                if ocr_enabled && matches!(error, ApplicationError::ResourceLimitExceeded(_)) {
+                    ApplicationError::OcrResourceLimit
+                } else {
+                    error
+                }
+            })?;
+            if !evidence.is_empty() || !attempts.is_empty() {
+                let mut derivation = derivation.ok_or_else(|| failed("OCR derivation missing"))?;
+                let identity = self
+                    .ocr_identity
+                    .as_ref()
+                    .ok_or_else(|| failed("OCR expected identity missing"))?;
+                derivation
+                    .validate_against(
+                        identity,
+                        document.content_hash.0.trim_start_matches("sha256:"),
+                    )
+                    .map_err(failed)?;
+                if derivation.original_sha256
+                    != document.content_hash.0.trim_start_matches("sha256:")
+                    || derivation.engine_sha256.len() != 64
+                    || derivation.model_sha256.is_empty()
+                    || derivation.library_sha256.is_empty()
+                    || derivation
+                        .model_sha256
+                        .iter()
+                        .chain(derivation.library_sha256.iter())
+                        .any(|v| v.len() != 64)
+                {
+                    return Err(failed("invalid OCR derivation fingerprint"));
+                }
+                validate_ocr_evidence(
+                    &evidence,
+                    document
+                        .metadata
+                        .get("pdf_pages")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(u32::MAX),
+                )?;
+                let blob = OcrEvidenceBlob {
+                    schema: "ocr-evidence/v3".into(),
+                    original_sha256: derivation.original_sha256.clone(),
+                    runtime_identity: identity.clone(),
+                    pages: attempts,
+                    selected_words: evidence,
+                    visual_attempts,
+                };
+                blob.validate(page_count).map_err(failed)?;
+                derivation.selected_word_count = Some(blob.selected_words.len() as u64);
+                let bytes = serde_json::to_vec(&blob).map_err(failed)?;
+                let store = self
+                    .evidence_store
+                    .as_ref()
+                    .ok_or_else(|| failed("OCR evidence store is not configured"))?;
+                let identity = document.content_hash.0.clone();
+                let digest = store.put_immutable(&identity, &bytes).await?;
                 document
                     .metadata
-                    .get("pdf_pages")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(u32::MAX),
-            )?;
-            let blob = OcrEvidenceBlob {
-                schema: "ocr-evidence/v3".into(),
-                original_sha256: derivation.original_sha256.clone(),
-                runtime_identity: identity.clone(),
-                pages: attempts,
-                selected_words: evidence,
-                visual_attempts,
-            };
-            blob.validate(page_count).map_err(failed)?;
-            derivation.selected_word_count = Some(blob.selected_words.len() as u64);
-            let bytes = serde_json::to_vec(&blob).map_err(failed)?;
-            let store = self
-                .evidence_store
-                .as_ref()
-                .ok_or_else(|| failed("OCR evidence store is not configured"))?;
-            let identity = document.content_hash.0.clone();
-            let digest = store.put_immutable(&identity, &bytes).await?;
-            document
-                .metadata
-                .insert("ocr_evidence_blob".into(), digest.clone());
-            derivation.evidence_blob = Some(digest);
-            let map = document
-                .original_source_binding_map()
-                .map_err(failed)?
-                .ok_or_else(|| failed("missing binding map"))?;
-            let map_bytes = serde_json::to_vec(&map).map_err(failed)?;
-            use sha2::{Digest, Sha256};
-            let binding_digest = format!("sha256:{:x}", Sha256::digest(map_bytes));
-            derivation.binding_map_sha256 = Some(binding_digest.clone());
-            document
-                .metadata
-                .insert("original_binding_map_digest".into(), binding_digest);
+                    .insert("ocr_evidence_blob".into(), digest.clone());
+                derivation.evidence_blob = Some(digest);
+                let map = document
+                    .original_source_binding_map()
+                    .map_err(failed)?
+                    .ok_or_else(|| failed("missing binding map"))?;
+                let map_bytes = serde_json::to_vec(&map).map_err(failed)?;
+                use sha2::{Digest, Sha256};
+                let binding_digest = format!("sha256:{:x}", Sha256::digest(map_bytes));
+                derivation.binding_map_sha256 = Some(binding_digest.clone());
+                document
+                    .metadata
+                    .insert("original_binding_map_digest".into(), binding_digest);
+                document.metadata.insert(
+                    "ocr_derivation".into(),
+                    serde_json::to_string(&derivation).map_err(failed)?,
+                );
+            }
+            document.validate_ocr_publication().map_err(failed)?;
+            Ok(document)
+        }
+        .await;
+        if let Some((store, key, _, _)) = &checkpoint {
+            // Only retryable outcomes keep durable progress; success and every
+            // definitive failure discard it so it is never mistaken for a
+            // resumable document.
+            match &outcome {
+                Err(ApplicationError::OcrTimeout | ApplicationError::OcrBusy) => {}
+                _ => {
+                    let _ = store.remove(key).await;
+                }
+            }
+        }
+        let mut document = outcome?;
+        if !resumed_pages.is_empty() {
             document.metadata.insert(
-                "ocr_derivation".into(),
-                serde_json::to_string(&derivation).map_err(failed)?,
+                "ocr_resume".into(),
+                serde_json::json!({
+                    "computed": computed_pages,
+                    "resumed": resumed_pages,
+                })
+                .to_string(),
             );
         }
-        document.validate_ocr_publication().map_err(failed)?;
         Ok(document)
     }
 }

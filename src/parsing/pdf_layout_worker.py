@@ -29,8 +29,10 @@ ENGINE = "pymupdf4llm-layout/1.28.2"
 OCR_CONFIG = {"enabled": False}
 EXPECTED_IDENTITY = None
 PAGE_DEADLINE = None
+INVOCATION_DEADLINE = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
+PAGE_RASTER_SHA256 = None
 INPUT_SHA256 = None
 WORKER_SOURCE = None
 INSPECTION_POLICY = "ocr-original-region-inspection/v5"
@@ -200,6 +202,13 @@ class OcrRasterBudget:
 
 def page_time_remaining():
     remaining = 15.0 if PAGE_DEADLINE is None else PAGE_DEADLINE - time.monotonic()
+    # The optional owner-supplied invocation bound stops work between bounded
+    # units and shrinks in-flight engine deadlines; it never extends a page.
+    if INVOCATION_DEADLINE is not None:
+        invocation = INVOCATION_DEADLINE - time.monotonic()
+        if invocation <= 0:
+            raise OcrStageFailure('OCR_TIMEOUT', "local OCR invocation budget exhausted")
+        remaining = min(remaining, invocation)
     if remaining <= 0:
         raise OcrStageFailure('OCR_TIMEOUT', "local OCR page exceeded shared 15 second budget")
     return remaining
@@ -784,13 +793,14 @@ def merge_native_order(original, selected, evidence):
     return prefix + ordered
 
 def _regional_ocr(page, excluded_regions=(), inspect_native=False, original_boxes=None):
-    global PAGE_DEADLINE, PAGE_RASTER
+    global PAGE_DEADLINE, PAGE_RASTER, PAGE_RASTER_SHA256
     previous = PAGE_DEADLINE
     previous_raster = PAGE_RASTER
     deadline = time.monotonic() + 15
     PAGE_DEADLINE = deadline if previous is None else min(previous, deadline)
     try:
         PAGE_RASTER = prepare_page_raster(page)
+        PAGE_RASTER_SHA256 = hashlib.sha256(PAGE_RASTER.samples).hexdigest()
         blank = blank_raster_evidence(page, PAGE_RASTER)
         if blank is not None:
             page_time_remaining()
@@ -1225,8 +1235,58 @@ def selected_ocr_evidence(observations):
     return evidence
 
 
+def parse_worker_input(line):
+    """Validate the negotiated owner header; returns (budget_seconds, resume map).
+
+    Real PDFs begin with '%', so this line only exists when the owner opts in.
+    A checkpoint entry's shape is checked here; its source/runtime/raster
+    binding is checked at use against the actual input.
+    """
+    try:
+        header = json.loads(line)
+    except ValueError as error:
+        raise ValueError('invalid worker input header') from error
+    if header.get('schema') != 'ocr-worker-input/v1':
+        raise ValueError('unsupported worker input header')
+    budget = header.get('budget_seconds')
+    if budget is not None:
+        if (not isinstance(budget, (int, float)) or isinstance(budget, bool)
+                or not 0 < budget <= 300):
+            raise ValueError('invalid worker invocation budget')
+    pages = header.get('pages')
+    if not isinstance(pages, dict):
+        raise ValueError('invalid worker resume payload')
+    resume = {}
+    for key, entry in pages.items():
+        if (not isinstance(key, str) or not key.isdigit()
+                or not isinstance(entry, dict)
+                or entry.get('schema') != 'ocr-page-checkpoint/v1'
+                or entry.get('page') != int(key)
+                or not isinstance(entry.get('original_sha256'), str)
+                or len(entry['original_sha256']) != 64
+                or not isinstance(entry.get('runtime_identity_sha256'), str)
+                or not isinstance(entry.get('page_raster_sha256'), str)
+                or len(entry['page_raster_sha256']) != 64
+                or not isinstance(entry.get('boxes'), list)
+                or not isinstance(entry.get('ocr_retry_diagnostic'), dict)
+                or (entry.get('observation') is not None
+                    and not isinstance(entry['observation'], dict))):
+            raise ValueError('invalid OCR page checkpoint entry')
+        resume[int(key)] = entry
+    return budget, resume
+
+
+def bound_checkpoint(entry, original_sha256, runtime_identity_sha256):
+    """A checkpoint is usable only for the identical source and runtime."""
+    if (entry['original_sha256'] != original_sha256
+            or entry['runtime_identity_sha256'] != runtime_identity_sha256):
+        return None
+    return entry
+
+
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256, WORKER_SOURCE
+    global INVOCATION_DEADLINE, PAGE_RASTER_SHA256
     protocol_stdout = sys.stdout
     if len(sys.argv) == 5 and sys.argv[1] == '--visual-model':
         visual_model_child(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
@@ -1270,6 +1330,29 @@ def main():
             raise
         except (OSError, ValueError, RuntimeError, KeyError) as error:
             raise OcrStageFailure('OCR_UNAVAILABLE', 'OCR dependencies unavailable or identity mismatch') from error
+    resume_pages = {}
+    progress_output = False
+    if OCR_CONFIG.get('enabled'):
+        # Negotiated owner header: a schema'd JSON line precedes the PDF bytes.
+        # Real PDFs start with '%', so raw-stream callers are unchanged; the
+        # line only exists because the owner opts into progress/checkpointing.
+        if sys.stdin.buffer.peek(1)[:1] == b'{':
+            header_line = sys.stdin.buffer.readline(8 * 1024 * 1024 + 1)
+            if len(header_line) > 8 * 1024 * 1024:
+                raise OcrStageFailure('OCR_RESOURCE_LIMIT',
+                                      'worker input header exceeds byte limit')
+            budget, resume_pages = parse_worker_input(header_line)
+            progress_output = True
+            if budget is not None:
+                INVOCATION_DEADLINE = time.monotonic() + budget
+
+    def checkpoint_for(page_number):
+        # Identity binding is checked at use, after the input hash exists.
+        entry = resume_pages.get(page_number)
+        if entry is None or INPUT_SHA256 is None:
+            return None
+        return bound_checkpoint(entry, INPUT_SHA256, actual_identity['sha256'])
+
     visual_results = {}
     visual_projections = {}
     visual_model_enabled = bool(OCR_CONFIG.get('enabled') and EXPECTED_IDENTITY
@@ -1291,17 +1374,28 @@ def main():
                 if RASTER_BUDGET is not None:
                     RASTER_BUDGET.reserve_raster(raster_pixel_count(visual_page, OCR_CONFIG['dpi']))
                 pixmap = visual_page.get_pixmap(dpi=OCR_CONFIG['dpi'], colorspace=pymupdf.csRGB, alpha=False)
-                child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler', '-c',
-                    WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
-                    str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
-                    capture_output=True, timeout=min(15, page_time_remaining()), check=False)
-                if child.returncode != 0 or len(child.stdout) > 4 * 1024 * 1024:
-                    raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model child failed')
-                observation = json.loads(child.stdout)
-                if (observation.get('schema') != 'ocr-visual-model-attempt/v1'
-                        or observation.get('raster_size') != [pixmap.width, pixmap.height]
-                        or observation.get('raster_sha256') != hashlib.sha256(pixmap.samples).hexdigest()):
-                    raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model raster identity mismatch')
+                raster_sha256 = hashlib.sha256(pixmap.samples).hexdigest()
+                checkpoint = checkpoint_for(visual_page.number + 1)
+                stored = checkpoint.get('observation') if checkpoint is not None else None
+                if (isinstance(stored, dict)
+                        and stored.get('schema') == 'ocr-visual-model-attempt/v1'
+                        and stored.get('raster_size') == [pixmap.width, pixmap.height]
+                        and stored.get('raster_sha256') == raster_sha256):
+                    # A checkpointed observation binds the identical raster;
+                    # the model child is not re-run for completed pages.
+                    observation = stored
+                else:
+                    child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler', '-c',
+                        WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
+                        str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
+                        capture_output=True, timeout=min(15, page_time_remaining()), check=False)
+                    if child.returncode != 0 or len(child.stdout) > 4 * 1024 * 1024:
+                        raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model child failed')
+                    observation = json.loads(child.stdout)
+                    if (observation.get('schema') != 'ocr-visual-model-attempt/v1'
+                            or observation.get('raster_size') != [pixmap.width, pixmap.height]
+                            or observation.get('raster_sha256') != raster_sha256):
+                        raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model raster identity mismatch')
                 observation['page'] = visual_page.number + 1
                 visual_results[visual_page.number] = observation
         # The bytes are retained as the canonical input for the normal parse;
@@ -1342,6 +1436,12 @@ def main():
             if not 0 < len(doc) <= max_pages:
                 raise ValueError("PDF exceeds page limit or has no pages")
             layout = json.loads(pymupdf4llm.to_json(doc, use_ocr=False))
+            if progress_output:
+                required = [page.number + 1 for page, page_layout in zip(doc, layout["pages"])
+                            if page_requires_ocr(page_layout, page)]
+                protocol_stdout.write(json.dumps({'schema': 'ocr-required-pages/v1',
+                    'pages': required}, separators=(',', ':')) + '\n')
+                protocol_stdout.flush()
             if not OCR_CONFIG.get('enabled', False):
                 RASTER_BUDGET = OcrRasterBudget()
                 for page, page_layout in zip(doc, layout['pages']):
@@ -1357,13 +1457,35 @@ def main():
                     # footer-only scanned page) still take the OCR path, so
                     # scan/native mixed fixtures retain their body coverage.
                     requires_ocr = page_requires_ocr(page_layout, page)
+                    resumed_page = False
                     if requires_ocr:
-                        excluded = native_text_regions(page_layout)
-                        projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
-                            inspect_native=has_body_text, original_boxes=page_layout['boxes'])
-                        if projected_boxes:
-                            page_layout["boxes"] = projected_boxes
-                        page_layout["ocr_retry_diagnostic"] = retry_diagnostic
+                        checkpoint = checkpoint_for(page.number + 1)
+                        if checkpoint is not None:
+                            # Replay is bound to the identical page raster and
+                            # still counts toward the required-page limit; the
+                            # projection step below re-runs on the stored
+                            # observation rather than trusting stored results.
+                            pixmap = prepare_page_raster(page)
+                            RASTER_BUDGET.require_page(page.number)
+                            if hashlib.sha256(pixmap.samples).hexdigest() \
+                                    == checkpoint['page_raster_sha256']:
+                                page_layout['boxes'] = checkpoint['boxes']
+                                page_layout['ocr_retry_diagnostic'] = \
+                                    checkpoint['ocr_retry_diagnostic']
+                                resumed_page = True
+                            else:
+                                checkpoint = None
+                        if checkpoint is None:
+                            excluded = native_text_regions(page_layout)
+                            projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
+                                inspect_native=has_body_text, original_boxes=page_layout['boxes'])
+                            if projected_boxes:
+                                page_layout["boxes"] = projected_boxes
+                            page_layout["ocr_retry_diagnostic"] = retry_diagnostic
+                        # The checkpoint stores pre-projection boxes: replay
+                        # recomputes the projection step rather than trusting
+                        # a stored result.
+                        page_ocr_boxes = page_layout['boxes']
                     # The visual model binds OCR-derived boxes to predicted
                     # regions.  A native-authoritative page has no OCR boxes to
                     # bind, so its unanchored regions must not fail the page and
@@ -1391,6 +1513,22 @@ def main():
                             # retained visual-class box covering the region
                             # already stands for those pixels.
                             raise ValueError('visual projection unresolved')
+                    if requires_ocr and progress_output:
+                        if resumed_page:
+                            progress_record = {'schema': 'ocr-page-checkpoint/v1',
+                                'page': page.number + 1, 'resumed': True}
+                        else:
+                            progress_record = {'schema': 'ocr-page-checkpoint/v1',
+                                'page': page.number + 1,
+                                'original_sha256': INPUT_SHA256,
+                                'runtime_identity_sha256': actual_identity['sha256'],
+                                'page_raster_sha256': PAGE_RASTER_SHA256,
+                                'boxes': page_ocr_boxes,
+                                'ocr_retry_diagnostic': page_layout['ocr_retry_diagnostic'],
+                                'observation': visual_results.get(page.number)}
+                        protocol_stdout.write(json.dumps(progress_record,
+                            separators=(',', ':')) + '\n')
+                        protocol_stdout.flush()
         observations = [p["ocr_retry_diagnostic"] for p in layout["pages"]
                         if "ocr_retry_diagnostic" in p]
         if any(not observation["complete"] for observation in observations):

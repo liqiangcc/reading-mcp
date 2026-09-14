@@ -28,8 +28,8 @@ pub use observability::{
     ObservedSearchIndex,
 };
 pub use ocr_evidence::FileOcrEvidenceStore;
-pub(crate) use ocr_identity::OCR_PROCESS_ENV;
 pub use ocr_identity::build_ocr_runtime_identity;
+pub(crate) use ocr_identity::{OCR_INTERPRETER_ARGS, OCR_PROCESS_ENV};
 pub(crate) use ocr_identity_process::dependency_output;
 #[doc(hidden)]
 pub use sqlite::SqliteSearchIndex as LegacySqliteSearchIndex;

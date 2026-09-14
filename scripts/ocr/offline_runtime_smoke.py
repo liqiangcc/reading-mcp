@@ -47,7 +47,7 @@ def main():
     identity = worker.runtime_identity(config, dependencies)
     raw = Path('/opt/ocr-smoke/F07.pdf').read_bytes()
     deadline = time.monotonic() + 50
-    classifier = subprocess.run([sys.executable, '-I', '-X', 'faulthandler',
+    classifier = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler',
         str(Path(__file__).resolve()), '--visual-model-stage'], capture_output=True,
         timeout=max(.1, min(15, deadline - time.monotonic())))
     if classifier.returncode:
@@ -61,7 +61,7 @@ def main():
                          ('onnxruntime', 'import onnxruntime'),
                          ('layout', 'import pymupdf4llm; pymupdf4llm.use_layout(True)')]:
         try:
-            probe = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', '-c', code],
+            probe = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler', '-c', code],
                 capture_output=True, timeout=max(.1, min(15, deadline - time.monotonic())))
             record = {'module': module, 'returncode': probe.returncode,
                       'stderr': probe.stderr.decode(errors='replace')[-8192:]}
@@ -71,7 +71,7 @@ def main():
         probes.append(record)
         print(json.dumps({'private_runtime_import_probe': record}), file=sys.stderr, flush=True)
     try:
-        result = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', str(source), '1000', str(64 * 1024 * 1024),
+        result = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler', str(source), '1000', str(64 * 1024 * 1024),
         str(4 * 1024 * 1024), json.dumps(config), json.dumps(identity)], input=raw,
             capture_output=True, timeout=max(.1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as error:

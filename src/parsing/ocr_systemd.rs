@@ -195,6 +195,46 @@ impl SystemdOcrUnit {
         Self::command_with_root(python, None, None, collect_failed)
     }
 
+    /// Only `/tmp` (and `/run` when a package manifest is bind-mounted) get a
+    /// writable tmpfs; the runtime rootfs itself stays under ProtectSystem.
+    fn scratch_property(with_run: bool) -> &'static str {
+        if with_run {
+            "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 /run:rw,size=1M,mode=0755"
+        } else {
+            "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534"
+        }
+    }
+
+    fn isolation_properties(with_run: bool) -> Vec<&'static str> {
+        vec![
+            "--property=MemoryMax=768M",
+            "--property=MemorySwapMax=0",
+            "--property=TasksMax=64",
+            "--property=PrivateNetwork=yes",
+            Self::scratch_property(with_run),
+            // The unit's cwd is the writable tmpfs so cwd-relative runtime
+            // caches (e.g. onnxruntime telemetry) cannot land on the rootfs.
+            "--property=WorkingDirectory=/tmp",
+            "--property=ProtectHome=tmpfs",
+            "--property=ProtectSystem=strict",
+            "--property=PrivateDevices=yes",
+            "--property=ProtectControlGroups=yes",
+            "--property=ProtectKernelTunables=yes",
+            "--property=RestrictNamespaces=yes",
+            "--property=ReadOnlyPaths=-/dev/shm",
+            "--property=CapabilityBoundingSet=CAP_SYS_PTRACE CAP_SETUID CAP_SETGID",
+            "--property=AmbientCapabilities=",
+            "--property=RuntimeMaxSec=60",
+            "--property=TimeoutStopSec=1",
+            "--property=KillMode=control-group",
+            "--property=LimitNOFILE=256",
+            "--property=LimitFSIZE=536870912",
+            "--property=LimitCORE=0",
+            "--property=NoNewPrivileges=yes",
+            "--property=UMask=0077",
+        ]
+    }
+
     fn command_with_root(
         python: &Path,
         root: Option<&Path>,
@@ -217,49 +257,20 @@ impl SystemdOcrUnit {
             result,
         };
         let mut command = Command::new("/usr/bin/systemd-run");
-        let scratch = if manifest.is_some() {
-            "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 /run:rw,size=1M,mode=0755"
-        } else {
-            "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534"
-        };
         command
-            .args([
-                "--quiet",
-                "--wait",
-                "--pipe",
-                "--property=MemoryMax=768M",
-                "--property=MemorySwapMax=0",
-                "--property=TasksMax=64",
-                "--property=PrivateNetwork=yes",
-                scratch,
-                "--property=ProtectHome=tmpfs",
-                "--property=ProtectSystem=strict",
-                "--property=PrivateDevices=yes",
-                "--property=ProtectControlGroups=yes",
-                "--property=ProtectKernelTunables=yes",
-                "--property=RestrictNamespaces=yes",
-                "--property=ReadOnlyPaths=-/dev/shm",
-                "--property=CapabilityBoundingSet=CAP_SYS_PTRACE CAP_SETUID CAP_SETGID",
-                "--property=AmbientCapabilities=",
-                "--property=RuntimeMaxSec=60",
-                "--property=TimeoutStopSec=1",
-                "--property=KillMode=control-group",
-                "--property=LimitNOFILE=256",
-                "--property=LimitFSIZE=536870912",
-                "--property=LimitCORE=0",
-                "--property=NoNewPrivileges=yes",
-                "--property=UMask=0077",
-            ])
+            .args(["--quiet", "--wait", "--pipe"])
+            .args(Self::isolation_properties(manifest.is_some()))
             .arg(format!("--unit={}", unit.name));
         let result_python = python
             .to_str()
             .ok_or_else(|| io::Error::other("invalid OCR Python path"))?;
-        let mut callback = vec![
-            result_python.to_string(),
-            "-I".into(),
-            "-c".into(),
-            include_str!("ocr_service_result.py").into(),
-        ];
+        let mut callback: Vec<String> = crate::infrastructure::OCR_INTERPRETER_ARGS
+            .iter()
+            .map(|argument| (*argument).into())
+            .collect();
+        callback.insert(0, result_python.to_string());
+        callback.push("-c".into());
+        callback.push(include_str!("ocr_service_result.py").into());
         callback.extend(result_arguments);
         command.arg(format!(
             "--property=ExecStopPost={}",
@@ -294,7 +305,8 @@ impl SystemdOcrUnit {
         }
         command
             .arg(python)
-            .args(["-I", "-c", include_str!("ocr_service_supervisor.py")])
+            .args(crate::infrastructure::OCR_INTERPRETER_ARGS)
+            .args(["-c", include_str!("ocr_service_supervisor.py")])
             .args(owner_arguments)
             .arg(python);
         Ok((command, unit))
@@ -796,5 +808,39 @@ while True: time.sleep(1)
             );
         }
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn private_runtime_unit_keeps_rootfs_read_only_and_scratch_tmpfs() {
+        // The package-manifest variant must expose a writable /run for the
+        // bind-mounted package identity while the rootfs stays read-only.
+        let properties = SystemdOcrUnit::isolation_properties(true);
+        assert!(
+            properties.contains(&"--property=ProtectSystem=strict"),
+            "private OCR runtime rootfs must stay read-only"
+        );
+        assert!(
+            properties.contains(&"--property=WorkingDirectory=/tmp"),
+            "unit cwd must be the /tmp tmpfs so cwd-relative writes stay off the rootfs"
+        );
+        let scratch: Vec<_> = properties
+            .iter()
+            .filter(|argument| argument.starts_with("--property=TemporaryFileSystem="))
+            .collect();
+        assert_eq!(scratch.len(), 1);
+        assert!(
+            scratch[0].contains("/tmp:rw") && scratch[0].contains("/run:rw"),
+            "only /tmp and /run may be writable: {scratch:?}"
+        );
+        let without_manifest = SystemdOcrUnit::isolation_properties(false);
+        let scratch: Vec<_> = without_manifest
+            .iter()
+            .filter(|argument| argument.starts_with("--property=TemporaryFileSystem="))
+            .collect();
+        assert_eq!(scratch.len(), 1);
+        assert!(scratch[0].contains("/tmp:rw") && !scratch[0].contains("/run"));
+        // Every interpreter launched inside the private runtime disables
+        // bytecode writes: -I already ignores PYTHONDONTWRITEBYTECODE.
+        assert_eq!(crate::infrastructure::OCR_INTERPRETER_ARGS, ["-I", "-B"]);
     }
 }

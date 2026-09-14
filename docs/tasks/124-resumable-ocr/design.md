@@ -6,9 +6,13 @@ Parent tracking: #95. Baseline: v0.4.4 / merge `4ae68f2`.
 ## Problem
 
 `open_document` wraps PDF ingestion in a 60s deadline (90s whole-open).
-The worker processes the whole document in one invocation: per-page visual
-classification, layout parse, then per-required-page regional OCR at a
-per-page 15s bound. A multi-page scanned PDF whose per-page OCR cost ×
+The worker processes the whole document in one invocation: layout parse,
+then per-required-page work at a per-page 15s bound. Each required page is
+one bounded unit — raster, visual-model classification, regional OCR,
+projection, checkpoint — so a resumed invocation only ever pays model cost
+for the pages it completes that round (an upfront whole-document model pass
+would burn the retry budget before the first unfinished page and stall
+progress forever). A multi-page scanned PDF whose per-page OCR cost ×
 required pages exceeds 60s fails with typed retryable `OCR_TIMEOUT` and all
 completed page work is discarded — the next call restarts from zero. Real
 `naturebp.pdf` (4 scanned pages) exceeds the budget on current host

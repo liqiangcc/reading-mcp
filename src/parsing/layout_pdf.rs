@@ -795,6 +795,10 @@ impl Parser for LayoutPdfParser {
         let outcome: Result<Document, ApplicationError> = async move {
             if !status.success() {
                 if ocr_enabled && let Some(error) = process.termination_error() {
+                    if matches!(error, ApplicationError::OcrResourceLimit) {
+                        *self.resource_limit_origin.lock().unwrap() =
+                            Some("sandbox-oom-kill".into());
+                    }
                     return Err(error);
                 }
                 if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {

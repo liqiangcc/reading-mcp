@@ -207,7 +207,11 @@ impl SystemdOcrUnit {
 
     fn isolation_properties(with_run: bool) -> Vec<&'static str> {
         vec![
-            "--property=MemoryMax=768M",
+            // Sized for the real workload peak: the worker plus its OCR
+            // engine/model children measured ~900MiB on a 4-page scanned
+            // document, and tmpfs page cache also charges this cgroup.
+            // 768M made legitimate pages flaky under runner memory pressure.
+            "--property=MemoryMax=1536M",
             "--property=MemorySwapMax=0",
             "--property=TasksMax=64",
             "--property=PrivateNetwork=yes",
@@ -611,7 +615,7 @@ print(json.dumps({'uid': os.getuid(), 'gid': os.getgid(), 'capabilities': caps,
                     "{}",
                     String::from_utf8_lossy(&result.stderr)
                 );
-                assert_eq!(value["memory_max"], 768 * 1024 * 1024);
+                assert_eq!(value["memory_max"], 1536 * 1024 * 1024);
                 assert_eq!(value["tmp_capacity"], 512 * 1024 * 1024);
                 assert_eq!(value["tmp_written"], 512 * 1024 * 1024);
                 assert_eq!(value["pids_max"], 64);
@@ -760,7 +764,7 @@ import os, signal, time, json, resource
 from pathlib import Path
 assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
 group = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().split('::', 1)[1].strip().lstrip('/')
-assert int((group / 'memory.max').read_text()) == 768 * 1024 * 1024
+assert int((group / 'memory.max').read_text()) == 1536 * 1024 * 1024
 assert int((group / 'pids.max').read_text()) == 64
 assert sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo']
 assert os.statvfs('/tmp').f_blocks * os.statvfs('/tmp').f_frsize == 512 * 1024 * 1024

@@ -32,6 +32,8 @@ class WorkerFailureTests(unittest.TestCase):
         self.assertFalse(worker.page_requires_ocr({'boxes':[box('text', 'Native prose.')]}))
         native_with_figure = {'boxes': [box('text', 'Native prose.'), {'boxclass': 'figure', 'textlines': []}]}
         self.assertFalse(worker.page_requires_ocr(native_with_figure))
+        for body_class in ('section-header', 'title', 'list-item', 'table'):
+            self.assertTrue(worker.has_native_body({'boxes':[box(body_class, 'Native prose.')]}))
 
         class Rect:
             width = 100
@@ -48,6 +50,20 @@ class WorkerFailureTests(unittest.TestCase):
 
         self.assertFalse(worker.page_requires_ocr(native_with_figure, Page([5, 5, 25, 25])))
         self.assertTrue(worker.page_requires_ocr(native_with_figure, Page([0, 0, 100, 100])))
+
+    def test_non_body_text_layer_does_not_prove_native_body(self):
+        # A scanned page whose embedded text layer sits inside a picture box
+        # (plus a page-footer) is raster content, not authoritative prose:
+        # the page must still take the OCR path.
+        def box(kind, text):
+            return {'boxclass':kind,'textlines':[{'spans':[{'text':text}]}]}
+        for non_body_class in ('picture', 'figure', 'page-footer', 'page-header',
+                               'caption', 'footnote', 'formula'):
+            layout = {'boxes':[box(non_body_class, 'Embedded text layer.'), box('text', ' ')]}
+            self.assertFalse(worker.has_native_body(layout), non_body_class)
+            self.assertTrue(worker.page_requires_ocr(layout), non_body_class)
+        self.assertTrue(worker.page_requires_ocr(
+            {'boxes':[box('picture', 'Embedded text layer.'), box('page-footer', 'Page 1')]}))
 
     def test_production_unit_pins_source_view_decoded_stream_budget(self):
         template = Path(__file__).parents[2] / 'deploy/systemd/reading-mcp-tunnel.service'

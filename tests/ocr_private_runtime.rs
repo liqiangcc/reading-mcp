@@ -247,15 +247,26 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
         last_modified: None,
         metadata: Default::default(),
     };
+    // Calibrate against the real single-shot cost on this runner: an
+    // accumulation bound below ~40% of it cannot finish all four pages, and
+    // is widened (still below the total) until at least one page persists.
+    let probe = LayoutPdfParser::new(python.clone(), ResourceBudget::default())
+        .with_ocr_runtime_package(root.clone(), manifest.clone())
+        .with_ocr_config(identity.config.clone())
+        .with_ocr_identity(identity.clone())
+        .with_evidence_store(evidence.clone());
+    let started = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(300), probe.parse(resource()))
+        .await
+        .expect("baseline parse exceeded the bound")
+        .unwrap_or_else(|error| panic!("baseline F05 parse failed: {error:?}"));
+    let single_shot = started.elapsed().as_secs_f64();
+    let mut accumulation = (single_shot * 0.35).clamp(2.0, 60.0);
     let mut stored = BTreeSet::new();
     let mut document = None;
-    // Small bounds cannot finish four scanned pages and leave durable partial
-    // progress; once any page is stored, a large bound finishes the remainder.
-    // Each page is bounded by the existing 15s engine + 15s model-child limits,
-    // so a 240s invocation always completes any unfinished work.
-    for attempt in 0..8u32 {
-        let seconds = if stored.is_empty() && attempt < 4 {
-            15.0_f64
+    for _ in 0..10u32 {
+        let seconds = if stored.is_empty() {
+            accumulation
         } else {
             240.0
         };
@@ -281,9 +292,14 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
                 let now: BTreeSet<u32> = load.pages.keys().copied().collect();
                 assert!(stored.is_subset(&now), "durable page progress regressed");
                 assert!(
-                    seconds <= 15.0 || now.len() > stored.len(),
-                    "a bounded attempt must leave at least one new completed page"
+                    seconds <= accumulation || now.len() > stored.len(),
+                    "a finishing attempt must leave at least one new completed page"
                 );
+                if now.is_empty() {
+                    // The bound was too tight for even one page; widen it but
+                    // stay below the measured single-shot total.
+                    accumulation = (accumulation * 1.5).min(single_shot * 0.6);
+                }
                 if !now.is_empty() {
                     // Source/runtime identity drift must fail closed.
                     let drifted = MetaIdentity {

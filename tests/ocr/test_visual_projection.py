@@ -80,6 +80,17 @@ class VisualProjectionTests(unittest.TestCase):
         self.assertFalse(evidence['complete'])
         self.assertEqual(evidence['regions'][0]['bbox'], [0,0,30,30])
 
+    def test_unanchored_regions_represented_only_by_covering_visual_box(self):
+        represented = self.worker['unanchored_regions_represented']
+        _, evidence = self.apply([], [{'label':'image', 'score':.7, 'coordinate':[0,0,300,300]}])
+        covering = {'boxclass':'picture', 'x0':0, 'y0':0, 'x1':40, 'y1':40}
+        partial = {'boxclass':'picture', 'x0':0, 'y0':0, 'x1':20, 'y1':40}
+        text = {'boxclass':'text', 'x0':0, 'y0':0, 'x1':40, 'y1':40}
+        self.assertTrue(represented(evidence, [covering]))
+        self.assertFalse(represented(evidence, [partial]))
+        self.assertFalse(represented(evidence, [text]))
+        self.assertFalse(represented(evidence, []))
+
     def test_invalid_bounds_and_model_scores_are_rejected(self):
         for bounds, score in [([-1,0,20,20], .7), ([20,0,10,20], .7), ([0,0,2000,20], .7),
                               ([0,0,20,20], float('nan')), ([0,0,20,20], 1.1)]:

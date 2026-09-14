@@ -134,10 +134,19 @@ class OcrRequired(RuntimeError):
     """Image-bearing pages without native body text need enabled inspection."""
 
 
+NATIVE_BODY_BOXCLASSES = frozenset(
+    {'text', 'section-header', 'title', 'list-item', 'table'})
+NATIVE_VISUAL_BOXCLASSES = frozenset({'image', 'picture', 'figure'})
+
+
 def has_native_body(page_layout):
+    # Only classes the projection turns into body stream blocks count as an
+    # authoritative native body. A picture/figure/footer box may still carry a
+    # hidden text layer; that embedded layer is not prose evidence and must not
+    # keep the page's raster out of OCR.
     return any(any(span.get('text', '').strip() for line in box.get('textlines', [])
                    for span in line.get('spans', []))
-               and box.get('boxclass') not in ('page-footer', 'page-header')
+               and box.get('boxclass') in NATIVE_BODY_BOXCLASSES
                for box in page_layout['boxes'])
 
 
@@ -799,7 +808,12 @@ def _regional_ocr(page, excluded_regions=(), inspect_native=False, original_boxe
         selected, evidence = _regional_ocr_attempts(page)
         if coverage is not None:
             evidence['native_coverage'] = coverage
-        result = exclude_native_boxes(selected, evidence, list(excluded_regions))
+        # Text embedded inside a visual-class box is a hidden layer over raster,
+        # not authoritative prose: it cannot suppress OCR of its own pixels.
+        # Auxiliary and body text regions keep their exclude/anchor semantics.
+        suppressible = [region for region in excluded_regions
+                        if region['source_class'] not in NATIVE_VISUAL_BOXCLASSES]
+        result = exclude_native_boxes(selected, evidence, suppressible)
         if original_boxes is not None:
             result = (merge_native_order(original_boxes, result[0], result[1]), result[1])
         page_time_remaining()
@@ -1089,6 +1103,22 @@ def project_visual_observations(page_number, page_rect, raster_size, boxes, pred
         'projected_source_groups':source_groups,
         'unanchored_visual_regions':unanchored, 'complete':not failures and not unanchored}
 
+def unanchored_regions_represented(projection, boxes):
+    """Whether every unbound predicted visual region is already covered.
+
+    A retained visual-class box that fully contains the region's page bounds
+    stands for those pixels; without one the raster would go unrepresented.
+    """
+    unanchored = set(projection['unanchored_visual_regions'])
+    return all(any(
+            box.get('boxclass') in ('image', 'picture', 'figure', 'table')
+            and box['x0'] <= region['bbox'][0] and box['y0'] <= region['bbox'][1]
+            and box['x1'] >= region['bbox'][2] and box['y1'] >= region['bbox'][3]
+            for box in boxes)
+            for region in projection['regions']
+            if region['prediction_index'] in unanchored)
+
+
 def project(layout):
     vocabulary = set()
     for page in layout["pages"]:
@@ -1326,14 +1356,19 @@ def main():
                     # OCR.  Pages without native body text (including a
                     # footer-only scanned page) still take the OCR path, so
                     # scan/native mixed fixtures retain their body coverage.
-                    if page_requires_ocr(page_layout, page):
+                    requires_ocr = page_requires_ocr(page_layout, page)
+                    if requires_ocr:
                         excluded = native_text_regions(page_layout)
                         projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
                             inspect_native=has_body_text, original_boxes=page_layout['boxes'])
                         if projected_boxes:
                             page_layout["boxes"] = projected_boxes
                         page_layout["ocr_retry_diagnostic"] = retry_diagnostic
-                    if visual_model_enabled:
+                    # The visual model binds OCR-derived boxes to predicted
+                    # regions.  A native-authoritative page has no OCR boxes to
+                    # bind, so its unanchored regions must not fail the page and
+                    # its attempt is not published as visual evidence.
+                    if visual_model_enabled and requires_ocr:
                         observation = visual_results.get(page.number)
                         if observation is None:
                             raise OcrStageFailure('OCR_UNAVAILABLE', 'missing visual page observation')
@@ -1344,11 +1379,18 @@ def main():
                         selected, projection = project_visual_observations(
                             page.number + 1, [0, 0, page.rect.width, page.rect.height],
                             observation['raster_size'], selected, predictions[0])
-                        if not projection['complete']:
+                        if projection['complete']:
+                            page_layout['boxes'] = selected
+                            page_layout['ocr_visual_projection'] = projection
+                            visual_projections[page.number] = projection
+                        elif not unanchored_regions_represented(
+                                projection, page_layout['boxes']):
+                            # An unverifiable model claim is never published.
+                            # It is fatal only when a predicted visual region's
+                            # raster would otherwise be unrepresented; a
+                            # retained visual-class box covering the region
+                            # already stands for those pixels.
                             raise ValueError('visual projection unresolved')
-                        page_layout['boxes'] = selected
-                        page_layout['ocr_visual_projection'] = projection
-                        visual_projections[page.number] = projection
         observations = [p["ocr_retry_diagnostic"] for p in layout["pages"]
                         if "ocr_retry_diagnostic" in p]
         if any(not observation["complete"] for observation in observations):
@@ -1365,7 +1407,7 @@ def main():
         if visual_model_enabled:
             result["ocr_visual_attempts"] = [
                 dict(visual_results[index], projection=visual_projections[index])
-                for index in sorted(visual_results)]
+                for index in sorted(visual_projections)]
         if OCR_CONFIG.get("enabled", False):
             result["ocr_derivation"] = {"schema": "ocr-derivation/v3", "original_sha256": hashlib.sha256(raw).hexdigest(),
                 "inspection_policy": INSPECTION_POLICY,

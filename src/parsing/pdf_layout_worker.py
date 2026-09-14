@@ -141,6 +141,16 @@ def has_native_body(page_layout):
                for box in page_layout['boxes'])
 
 
+def page_requires_ocr(page_layout):
+    """Return whether the page lacks a usable native prose body.
+
+    Images and figures on a native page are visual evidence, not a reason to
+    rerun OCR over already-authoritative text. A footer-only layer remains
+    OCR-eligible while a native prose body is reused unchanged.
+    """
+    return not has_native_body(page_layout)
+
+
 class OcrStageFailure(RuntimeError):
     """Only explicit engine/budget producers assign these public categories."""
     def __init__(self, code, reason):
@@ -1295,12 +1305,14 @@ def main():
             if OCR_CONFIG.get("enabled", False):
                 language = "+".join(OCR_CONFIG["languages"])
                 for page, page_layout in zip(doc, layout["pages"]):
-                    has_body_text = any((box.get("textlines") or []) and box.get("boxclass") not in ("page-footer", "page-header")
-                                        for box in page_layout["boxes"])
-                    has_image_region = bool(page.get_image_info()) or any(
-                        box.get("boxclass") in ("image", "picture", "figure", "table")
-                        for box in page_layout["boxes"])
-                    if not has_body_text or has_image_region:
+                    has_body_text = has_native_body(page_layout)
+                    # A trustworthy native body remains the source of truth on
+                    # native/illustrated PDFs.  An image on such a page is a
+                    # visual region, not evidence that the whole page needs
+                    # OCR.  Pages without native body text (including a
+                    # footer-only scanned page) still take the OCR path, so
+                    # scan/native mixed fixtures retain their body coverage.
+                    if page_requires_ocr(page_layout):
                         excluded = native_text_regions(page_layout)
                         projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
                             inspect_native=has_body_text, original_boxes=page_layout['boxes'])

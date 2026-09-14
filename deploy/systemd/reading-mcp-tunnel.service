@@ -9,6 +9,10 @@ User=__SERVICE_USER__
 Group=__SERVICE_GROUP__
 WorkingDirectory=__WORKING_DIRECTORY__
 EnvironmentFile=__ENV_FILE__
+# Keep the production source-view stream budget explicit in the service
+# environment.  EnvironmentFile may override this deliberately, but an
+# omitted variable must not silently fall back to the 16 MiB library default.
+Environment=READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES=33554432
 ExecStart=__TUNNEL_CLIENT__ run --profile-dir __TUNNEL_PROFILE_DIR__ --profile __TUNNEL_PROFILE__
 Restart=always
 RestartSec=5s

@@ -28,6 +28,17 @@ class WorkerFailureTests(unittest.TestCase):
             return {'boxclass':kind,'textlines':[{'spans':[{'text':text}]}]}
         self.assertFalse(worker.has_native_body({'boxes':[box('page-footer', 'Page 1'), box('text', ' ')]}))
         self.assertTrue(worker.has_native_body({'boxes':[box('text', 'Native prose.')]}))
+        self.assertTrue(worker.page_requires_ocr({'boxes':[box('page-footer', 'Page 1')]}))
+        self.assertFalse(worker.page_requires_ocr({'boxes':[box('text', 'Native prose.')]}))
+        native_with_figure = {'boxes': [box('text', 'Native prose.'), {'boxclass': 'figure', 'textlines': []}]}
+        self.assertFalse(worker.page_requires_ocr(native_with_figure))
+
+    def test_production_unit_pins_source_view_decoded_stream_budget(self):
+        template = Path(__file__).parents[2] / 'deploy/systemd/reading-mcp-tunnel.service'
+        self.assertIn(
+            'Environment=READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES=33554432',
+            template.read_text(encoding='utf-8'),
+        )
 
     def setUp(self):
         worker.OCR_CONFIG = {'enabled': True}

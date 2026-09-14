@@ -584,19 +584,25 @@ def require_disabled_page_coverage(page, page_layout):
     finally:
         PAGE_DEADLINE = previous
 
-def _run_engine(pixmap, origin, scale_x, scale_y, psm):
+def _run_engine(pixmap, origin, scale_x, scale_y, psm, pnm=None):
     """Run the deployer-selected local Tesseract on one raster observation.
 
     ``origin``/``scale`` map the raster's pixel grid back into page points, so
     a regional re-observation keeps the same page-coordinate evidence shape as
-    a whole-page attempt.  Returns engine-grouped boxes or None for no text.
+    a whole-page attempt.  ``pnm`` carries pre-encoded PNM bytes when the
+    observation is a slice of the verified page raster rather than a pixmap.
+    Returns engine-grouped boxes or None for no text.
     """
     config = OCR_CONFIG
     language = "+".join(config["languages"])
     with tempfile.TemporaryDirectory(prefix="reading-mcp-ocr-") as directory:
-        image = os.path.join(directory, "page.png")
+        image = os.path.join(directory, "page.ppm" if pnm is not None else "page.png")
         output = os.path.join(directory, "words")
-        pixmap.save(image)
+        if pnm is not None:
+            with open(image, "wb") as stream:
+                stream.write(pnm)
+        else:
+            pixmap.save(image)
         command = [config["engine_path"], image, output,
                    "--tessdata-dir", config["tessdata_path"],
                    "-l", language, "--oem", str(config["oem"]), "--psm", str(psm), "--dpi", str(config["dpi"]), "tsv"]
@@ -670,41 +676,47 @@ def _regional_retry_boxes(page, region):
     """Focused psm-6 re-observation of one conflicted region.
 
     A whole-page retry can merge the conflict region into a page-spanning
-    block, leaving zero candidates inside the region of interest.  Rendering
-    only the region gives the engine a bounded observation; its boxes are
-    contained in the returned searched rectangle by construction.  The search
-    stays inside the same page unit: the engine subprocess keeps the shared
-    page deadline and the clipped raster is charged to the pixel budget.
+    block, leaving zero candidates inside the region of interest.  Feeding
+    the engine only the region's slice of the verified page raster gives it
+    a bounded observation; its boxes are contained in the returned searched
+    rectangle by construction.  The pixels are the exact samples the page
+    unit already verified — no second render and no raster identity drift.
+    The search stays inside the same page unit: the engine subprocess keeps
+    the shared page deadline and the slice is charged to the pixel budget.
     Returns (searched_page_rect, boxes) or None when the region is degenerate
-    or no focused observation can be rendered.
+    or the raster cannot be sliced.
     """
-    if PAGE_RASTER is None:
-        return None
-    try:
-        import pymupdf
-    except ImportError:
+    raster = PAGE_RASTER
+    if raster is None or raster.n != 3:
         return None
     dpi = OCR_CONFIG['dpi']
     scale = dpi / 72
     x0 = max(0, int(math.floor(region[0] * scale)))
     y0 = max(0, int(math.floor(region[1] * scale)))
-    x1 = min(PAGE_RASTER.width, int(math.ceil(region[2] * scale)))
-    y1 = min(PAGE_RASTER.height, int(math.ceil(region[3] * scale)))
-    if x1 - x0 < 8 or y1 - y0 < 8:
+    x1 = min(raster.width, int(math.ceil(region[2] * scale)))
+    y1 = min(raster.height, int(math.ceil(region[3] * scale)))
+    width, height = x1 - x0, y1 - y0
+    if width < 8 or height < 8:
+        return None
+    samples = raster.samples
+    if len(samples) != raster.width * raster.height * 3:
         return None
     if RASTER_BUDGET is not None:
-        RASTER_BUDGET.reserve_raster((x1 - x0) * (y1 - y0))
+        RASTER_BUDGET.reserve_raster(width * height)
     page_time_remaining()
-    clip = pymupdf.Rect(x0 / scale, y0 / scale, x1 / scale, y1 / scale)
-    crop = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False, clip=clip)
-    boxes = _run_engine(crop, (clip.x0, clip.y0), scale, scale, 6) or []
-    # The searched rect must stay inside the original page bounds: the rendered
-    # crop can round up to one pixel beyond the clip, so clamp it back and drop
-    # any box that landed outside the page.
+    rows = bytearray(width * height * 3)
+    stride = raster.width * 3
+    for row in range(height):
+        start = ((y0 + row) * raster.width + x0) * 3
+        rows[row * width * 3:(row + 1) * width * 3] = samples[start:start + width * 3]
+    pnm = b"P6\n%d %d\n255\n" % (width, height) + bytes(rows)
+    boxes = _run_engine(None, (x0 / scale, y0 / scale), scale, scale, 6, pnm=pnm) or []
+    # The searched rect is the quantized slice, clamped to the original page
+    # bounds; drop any box that landed outside the page.
     bounds = [0.0, 0.0, page.rect.width, page.rect.height]
-    searched = [clip.x0, clip.y0,
-                min(clip.x0 + crop.width / scale, page.rect.width),
-                min(clip.y0 + crop.height / scale, page.rect.height)]
+    searched = [x0 / scale, y0 / scale,
+                min(x1 / scale, page.rect.width),
+                min(y1 / scale, page.rect.height)]
     boxes = [box for box in boxes
              if box["ocr_block"] != 0 and box["ocr_paragraph"] != 0
              and all(box["bbox"][k] >= bounds[k] for k in (0, 1))

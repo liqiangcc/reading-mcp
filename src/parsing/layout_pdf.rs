@@ -67,7 +67,8 @@ pub fn inspect_private_ocr_runtime(
     verify
         .env_clear()
         .envs(crate::infrastructure::OCR_PROCESS_ENV)
-        .args(["-I", "-B", "-c", WORKER, "--verify-runtime"])
+        .args(crate::infrastructure::OCR_INTERPRETER_ARGS)
+        .args(["-c", WORKER, "--verify-runtime"])
         .arg(root)
         .arg(manifest);
     let output = crate::infrastructure::dependency_output(
@@ -87,7 +88,8 @@ pub fn inspect_private_ocr_runtime(
     command
         .env_clear()
         .envs(crate::infrastructure::OCR_PROCESS_ENV)
-        .args(["-I", "-B", "-c", WORKER, "--runtime-identity"])
+        .args(crate::infrastructure::OCR_INTERPRETER_ARGS)
+        .args(["-c", WORKER, "--runtime-identity"])
         .arg(serde_json::to_string(&config).map_err(failed)?)
         .arg(serde_json::to_string(&package).map_err(failed)?);
     let output = crate::infrastructure::dependency_output(
@@ -438,7 +440,8 @@ impl Parser for LayoutPdfParser {
         #[cfg(unix)]
         command.process_group(0);
         let child = command
-            .args(["-I", "-B", "-c", WORKER])
+            .args(crate::infrastructure::OCR_INTERPRETER_ARGS)
+            .args(["-c", WORKER])
             .arg(self.budget.max_pdf_pages.to_string())
             .arg(self.budget.max_document_bytes.to_string())
             .arg(self.budget.max_normalized_chars.to_string())

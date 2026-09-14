@@ -92,7 +92,23 @@ jobs:
       - name: Worker execution must not alter the runtime inventory
         run: |
           set -euo pipefail
-          sudo /usr/bin/python3 -c 'import json,sys; sys.path.insert(0,"scripts/ocr"); import runtime_archive; before=json.load(open(sys.argv[2])); after=runtime_archive.inventory(sys.argv[1]); assert before == after, "worker execution changed the runtime inventory (lost -B isolation)"; print("runtime inventory unchanged across worker execution: %d entries" % len(after))' "$RUNNER_TEMP/ocr-private-runtime/rootfs" "$RUNNER_TEMP/runtime-inventory-before.json"
+          sudo /usr/bin/python3 - <<'PY' "$RUNNER_TEMP/ocr-private-runtime/rootfs" "$RUNNER_TEMP/runtime-inventory-before.json"
+          import json, sys
+          sys.path.insert(0, "scripts/ocr")
+          import runtime_archive
+          before = {e["path"]: e for e in json.load(open(sys.argv[2]))}
+          after = {e["path"]: e for e in runtime_archive.inventory(sys.argv[1])}
+          added = sorted(set(after) - set(before))
+          removed = sorted(set(before) - set(after))
+          changed = sorted(p for p in set(before) & set(after) if before[p] != after[p])
+          for p in (added + removed + changed)[:20]:
+              b, a = before.get(p), after.get(p)
+              kind = (a or b).get("kind")
+              detail = {k: (b or {}).get(k, None) for k in ("bytes", "mode", "sha256", "target")} if b else {k: a.get(k) for k in ("bytes", "mode", "sha256", "target") if k in a}
+              print(("added" if p in added else "removed" if p in removed else "changed"), kind, p, detail)
+          assert not (added or removed or changed), "worker execution changed the runtime inventory (lost -B isolation): %d added %d removed %d changed" % (len(added), len(removed), len(changed))
+          print("runtime inventory unchanged across worker execution: %d entries" % len(after))
+          PY
       - name: Archive the installed private runtime and verify into a new root
         run: |
           set -euo pipefail
@@ -118,7 +134,20 @@ jobs:
           public_smoke="$RUNNER_TEMP/ocr-private-runtime/rootfs/opt/ocr-smoke"
           test ! -e "$verified_root/opt/ocr-bootstrap"
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$verified_root" --property="BindReadOnlyPaths=$public_smoke:/opt/ocr-smoke" --property=User=65534 --property=Group=65534 --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=NoNewPrivileges=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group --property=LimitCORE=0 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-archive-smoke.json"
-          sudo /usr/bin/python3 -c 'import json,sys; sys.path.insert(0,"scripts/ocr"); import runtime_archive; before=json.load(open(sys.argv[2])); after=runtime_archive.inventory(sys.argv[1]); assert before == after, "verified runtime inventory changed during execution"; print("verified runtime inventory unchanged: %d entries" % len(after))' "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/verified-inventory-before.json"
+          sudo /usr/bin/python3 - <<'PY' "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/verified-inventory-before.json"
+          import json, sys
+          sys.path.insert(0, "scripts/ocr")
+          import runtime_archive
+          before = {e["path"]: e for e in json.load(open(sys.argv[2]))}
+          after = {e["path"]: e for e in runtime_archive.inventory(sys.argv[1])}
+          added = sorted(set(after) - set(before))
+          removed = sorted(set(before) - set(after))
+          changed = sorted(p for p in set(before) & set(after) if before[p] != after[p])
+          for p in (added + removed + changed)[:20]:
+              print(("added" if p in added else "removed" if p in removed else "changed"), p)
+          assert not (added or removed or changed), "verified runtime inventory changed during execution: %d added %d removed %d changed" % (len(added), len(removed), len(changed))
+          print("verified runtime inventory unchanged: %d entries" % len(after))
+          PY
       - name: Compare exact reconstructed runtime and measure all protected directories
         run: |
           set -euo pipefail

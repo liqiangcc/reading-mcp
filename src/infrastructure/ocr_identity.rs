@@ -11,6 +11,11 @@ pub(crate) const OCR_PROCESS_ENV: [(&str, &str); 4] = [
     ("PYTHONDONTWRITEBYTECODE", "1"),
 ];
 
+// `-I` ignores every PYTHON* variable, including PYTHONDONTWRITEBYTECODE, so
+// the explicit `-B` is the only guarantee that no interpreter launched inside
+// the private runtime rootfs can alter the verified inventory with .pyc files.
+pub(crate) const OCR_INTERPRETER_ARGS: [&str; 2] = ["-I", "-B"];
+
 pub fn build_ocr_runtime_identity(config: OcrConfig) -> Result<OcrRuntimeIdentity, String> {
     config.validate()?;
     let mut deps = Vec::new();

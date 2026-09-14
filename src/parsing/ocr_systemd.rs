@@ -436,7 +436,7 @@ mod tests {
         use crate::application::ports::ApplicationError;
         for (script, timeout, expected) in [
             (
-                "data = bytearray(850 * 1024 * 1024)",
+                "data = bytearray(1800 * 1024 * 1024)",
                 false,
                 Some(ApplicationError::OcrResourceLimit),
             ),
@@ -624,7 +624,7 @@ print(json.dumps({'uid': os.getuid(), 'gid': os.getgid(), 'capabilities': caps,
                 // exit or an assumption that systemd forwards child exit codes.
                 assert!(!result.status.success());
                 assert_eq!(reason.as_deref(), Some("oom-kill"));
-                assert_eq!(value["attempted_bytes"], 850 * 1024 * 1024);
+                assert_eq!(value["attempted_bytes"], 1800 * 1024 * 1024);
             }
             drop(unit);
         }

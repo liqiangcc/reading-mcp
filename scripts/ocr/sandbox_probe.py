@@ -19,7 +19,7 @@ def child(case):
         group = Path("/sys/fs/cgroup") / Path("/proc/self/cgroup").read_text().split("::", 1)[1].strip().lstrip("/")
         memory = int((group / "memory.max").read_text())
         pids = int((group / "pids.max").read_text())
-        assert memory == 768 * 1024 * 1024 and pids == 64
+        assert memory == 1536 * 1024 * 1024 and pids == 64
         assert sorted(path.name for path in Path("/sys/class/net").iterdir()) == ["lo"]
         with socket.socket() as sock:
             sock.settimeout(1)
@@ -43,8 +43,8 @@ def child(case):
                           "tmp_capacity": capacity, "tmp_written": written,
                           "net_namespace": os.readlink("/proc/self/ns/net")}), flush=True)
     elif case == "memory":
-        print(json.dumps({"pid": os.getpid(), "attempted_bytes": 850 * 1024 * 1024}), flush=True)
-        allocation = bytearray(850 * 1024 * 1024)
+        print(json.dumps({"pid": os.getpid(), "attempted_bytes": 1800 * 1024 * 1024}), flush=True)
+        allocation = bytearray(1800 * 1024 * 1024)
         raise AssertionError(f"memory cap failed: allocated {len(allocation)}")
     elif case == "cancel":
         parent = os.getpid()
@@ -66,7 +66,7 @@ def run(output):
     for case in ("bounds", "memory", "cancel"):
         unit = "reading-mcp-ocr-probe-" + uuid.uuid4().hex + ".service"
         command = ["systemd-run", "--quiet", "--wait", "--pipe", "--unit=" + unit,
-                   "--property=MemoryMax=768M", "--property=MemorySwapMax=0",
+                   "--property=MemoryMax=1536M", "--property=MemorySwapMax=0",
                    "--property=TasksMax=64", "--property=PrivateNetwork=yes",
                    "--property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700",
                    "--property=RuntimeMaxSec=20", "--property=TimeoutStopSec=1",

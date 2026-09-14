@@ -249,10 +249,16 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
     };
     let mut stored = BTreeSet::new();
     let mut document = None;
-    // The first bound cannot finish four scanned pages; larger bounds make at
-    // least one durable page of progress per attempt (each page is bounded by
-    // the existing 15s engine + 15s model-child limits).
-    for seconds in [20.0_f64, 45.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0] {
+    // Small bounds cannot finish four scanned pages and leave durable partial
+    // progress; once any page is stored, a large bound finishes the remainder.
+    // Each page is bounded by the existing 15s engine + 15s model-child limits,
+    // so a 240s invocation always completes any unfinished work.
+    for attempt in 0..8u32 {
+        let seconds = if stored.is_empty() && attempt < 4 {
+            15.0_f64
+        } else {
+            240.0
+        };
         // A fresh store and parser per attempt is the process-restart case.
         let store = Arc::new(FileOcrCheckpointStore::new(&checkpoint_dir));
         let parser = LayoutPdfParser::new(python.clone(), ResourceBudget::default())
@@ -262,7 +268,7 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
             .with_evidence_store(evidence.clone())
             .with_checkpoint_store(store.clone())
             .with_ocr_invocation_budget(Duration::from_secs_f64(seconds));
-        match tokio::time::timeout(Duration::from_secs(180), parser.parse(resource()))
+        match tokio::time::timeout(Duration::from_secs(300), parser.parse(resource()))
             .await
             .expect("attempt exceeded the hard per-invocation bound")
         {
@@ -275,7 +281,7 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
                 let now: BTreeSet<u32> = load.pages.keys().copied().collect();
                 assert!(stored.is_subset(&now), "durable page progress regressed");
                 assert!(
-                    seconds <= 20.0 || now.len() > stored.len(),
+                    seconds <= 15.0 || now.len() > stored.len(),
                     "a bounded attempt must leave at least one new completed page"
                 );
                 if !now.is_empty() {

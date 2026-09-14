@@ -152,6 +152,11 @@ impl FileOcrCheckpointStore {
                 || page.original_sha256 != expected.original_sha256
                 || page.runtime_identity_sha256 != expected.runtime_identity_sha256
                 || page.page_raster_sha256.len() != 64
+                || !page.ocr_retry_diagnostic.is_object()
+                || page
+                    .observation
+                    .as_ref()
+                    .is_some_and(|value| !value.is_object())
             {
                 continue;
             }

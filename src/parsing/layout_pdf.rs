@@ -132,6 +132,7 @@ pub struct LayoutPdfParser {
     ocr_runtime_manifest: Option<PathBuf>,
     checkpoint_store: Option<Arc<FileOcrCheckpointStore>>,
     ocr_invocation_budget: Option<Duration>,
+    ocr_invocation_page_limit: Option<u32>,
     // A cancelled parse detaches the output drain so completed page
     // checkpoints still land; the next call awaits it before resuming.
     drain: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -151,6 +152,7 @@ impl LayoutPdfParser {
             ocr_runtime_manifest: None,
             checkpoint_store: None,
             ocr_invocation_budget: None,
+            ocr_invocation_page_limit: None,
             drain: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -202,6 +204,15 @@ impl LayoutPdfParser {
     /// kills the sandbox. It only ever shortens work.
     pub fn with_ocr_invocation_budget(mut self, budget: Duration) -> Self {
         self.ocr_invocation_budget = Some(budget);
+        self
+    }
+
+    /// Optional per-invocation OCR page quota: the worker stops after this
+    /// many newly computed pages with a typed OCR_TIMEOUT, so partial
+    /// progress is deterministic rather than wall-clock dependent. Replayed
+    /// checkpoint pages do not consume the quota.
+    pub fn with_ocr_invocation_page_limit(mut self, pages: u32) -> Self {
+        self.ocr_invocation_page_limit = Some(pages);
         self
     }
 }
@@ -667,6 +678,9 @@ impl Parser for LayoutPdfParser {
             });
             if let Some(budget) = self.ocr_invocation_budget {
                 value["budget_seconds"] = serde_json::json!(budget.as_secs_f64());
+            }
+            if let Some(pages) = self.ocr_invocation_page_limit {
+                value["max_pages"] = serde_json::json!(pages);
             }
             value.to_string()
         });

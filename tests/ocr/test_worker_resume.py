@@ -35,12 +35,15 @@ def header(**fields):
 
 class WorkerInputHeaderTests(unittest.TestCase):
     def test_valid_header_parses_budget_and_pages(self):
-        budget, pages = worker.parse_worker_input(header(budget_seconds=42.5, pages={}))
+        budget, limit, pages = worker.parse_worker_input(
+            header(budget_seconds=42.5, max_pages=1, pages={}))
         self.assertEqual(budget, 42.5)
+        self.assertEqual(limit, 1)
         self.assertEqual(pages, {})
-        budget, pages = worker.parse_worker_input(
+        budget, limit, pages = worker.parse_worker_input(
             header(pages={'2': entry(2), '4': entry(4)}))
         self.assertIsNone(budget)
+        self.assertIsNone(limit)
         self.assertEqual(sorted(pages), [2, 4])
 
     def test_non_json_and_wrong_schema_rejected(self):
@@ -55,8 +58,20 @@ class WorkerInputHeaderTests(unittest.TestCase):
                 worker.parse_worker_input(header(budget_seconds=budget, pages={}))
         # Boundary and fractional budgets are valid.
         for budget in (0.001, 1, 300):
-            parsed, _ = worker.parse_worker_input(header(budget_seconds=budget, pages={}))
+            parsed, _, _ = worker.parse_worker_input(header(budget_seconds=budget, pages={}))
             self.assertEqual(parsed, budget)
+
+    def test_invalid_page_limit_values_rejected(self):
+        for limit in (True, 0, -1, 65, 1.5, '1', [1]):
+            with self.assertRaises(ValueError, msg=repr(limit)):
+                worker.parse_worker_input(header(max_pages=limit, pages={}))
+        # Absent or explicit-null means "no page quota".
+        for raw in (header(pages={}), header(max_pages=None, pages={})):
+            _, parsed, _ = worker.parse_worker_input(raw)
+            self.assertIsNone(parsed)
+        for limit in (1, 8, 64):
+            _, parsed, _ = worker.parse_worker_input(header(max_pages=limit, pages={}))
+            self.assertEqual(parsed, limit)
 
     def test_pages_must_be_a_map_of_checked_entries(self):
         for pages in ([], 'x', 5, None):
@@ -77,7 +92,7 @@ class WorkerInputHeaderTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=repr(pages)):
                 worker.parse_worker_input(header(pages=pages))
         # A structured observation is accepted.
-        _, parsed = worker.parse_worker_input(
+        _, _, parsed = worker.parse_worker_input(
             header(pages={'1': entry(1, observation={'schema': 'ocr-visual-model-attempt/v1'})}))
         self.assertIn(1, parsed)
 

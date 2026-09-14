@@ -36,6 +36,11 @@ unchanged. Header schema `ocr-worker-input/v1`:
   `OCR_TIMEOUT` *between/inside* page work — a clean typed failure rather
   than a mid-write kill. The hard Rust deadline/cgroup kill remains the
   backstop; nothing ever continues after it.
+- `max_pages`: optional per-invocation quota of *newly computed* OCR pages.
+  Reaching it raises the same typed `OCR_TIMEOUT` after the last completed
+  page's checkpoint is emitted. Replayed pages are nearly free and do not
+  consume the quota; it makes partial progress deterministic (no wall-clock
+  calibration) and is what the hosted F05 resume test uses.
 
 When (and only when) a valid header is present, the worker emits flushed
 single-line JSON records on stdout before the final result line:

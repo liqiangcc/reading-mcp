@@ -247,83 +247,81 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
         last_modified: None,
         metadata: Default::default(),
     };
-    // Calibrate against the real single-shot cost on this runner. The
-    // accumulation bound starts below the total and widens until at least
-    // one page persists; the cap stays below the full cost so a capture
-    // attempt cannot normally finish the whole document unresumed.
-    let probe = LayoutPdfParser::new(python.clone(), ResourceBudget::default())
-        .with_ocr_runtime_package(root.clone(), manifest.clone())
-        .with_ocr_config(identity.config.clone())
-        .with_ocr_identity(identity.clone())
-        .with_evidence_store(evidence.clone());
-    let started = std::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(300), probe.parse(resource()))
-        .await
-        .expect("baseline parse exceeded the bound")
-        .unwrap_or_else(|error| panic!("baseline F05 parse failed: {error:?}"));
-    let single_shot = started.elapsed().as_secs_f64();
-    let mut accumulation = (single_shot * 0.35).clamp(2.0, 60.0);
-    let mut stored = BTreeSet::new();
-    let mut document = None;
-    for _ in 0..10u32 {
-        let seconds = if stored.is_empty() {
-            accumulation
-        } else {
-            240.0
-        };
-        // A fresh store and parser per attempt is the process-restart case.
-        let store = Arc::new(FileOcrCheckpointStore::new(&checkpoint_dir));
+    // A fresh store and parser per attempt is the process-restart case.
+    let parser_for = |budget: f64, page_limit: Option<u32>, store: Arc<FileOcrCheckpointStore>| {
         let parser = LayoutPdfParser::new(python.clone(), ResourceBudget::default())
             .with_ocr_runtime_package(root.clone(), manifest.clone())
             .with_ocr_config(identity.config.clone())
             .with_ocr_identity(identity.clone())
             .with_evidence_store(evidence.clone())
-            .with_checkpoint_store(store.clone())
-            .with_ocr_invocation_budget(Duration::from_secs_f64(seconds));
-        match tokio::time::timeout(Duration::from_secs(300), parser.parse(resource()))
-            .await
-            .expect("attempt exceeded the hard per-invocation bound")
-        {
-            Ok(done) => {
-                document = Some(done);
-                break;
-            }
-            Err(ApplicationError::OcrTimeout) => {
-                let load = store.load(&key, &meta).await.unwrap();
-                let now: BTreeSet<u32> = load.pages.keys().copied().collect();
-                assert!(stored.is_subset(&now), "durable page progress regressed");
-                assert!(
-                    seconds <= accumulation || now.len() > stored.len(),
-                    "a finishing attempt must leave at least one new completed page"
-                );
-                if now.is_empty() {
-                    // Widen asymptotically toward the single-shot cost so the
-                    // bound eventually lands inside the partial window
-                    // (past the first page, before the last) whatever its
-                    // position, without reaching the full-document cost.
-                    accumulation += (single_shot - accumulation) * 0.5;
-                }
-                if !now.is_empty() {
-                    // Source/runtime identity drift must fail closed.
-                    let drifted = MetaIdentity {
-                        original_sha256: "0".repeat(64),
-                        ..meta.clone()
-                    };
-                    assert!(
-                        store.load(&key, &drifted).await.unwrap().pages.is_empty(),
-                        "identity drift leaked a resumable checkpoint"
-                    );
-                }
-                stored = now;
-            }
-            Err(other) => panic!("non-retryable failure during resume: {other:?}"),
+            .with_checkpoint_store(store)
+            .with_ocr_invocation_budget(Duration::from_secs_f64(budget));
+        match page_limit {
+            Some(pages) => parser.with_ocr_invocation_page_limit(pages),
+            None => parser,
         }
-    }
-    let document = document.expect("resumable OCR did not converge on F05");
+    };
+    // Attempt A: a wall-clock bound far below one page's work fails retryably
+    // and leaves the canonical document unpublished.
+    let store_a = Arc::new(FileOcrCheckpointStore::new(&checkpoint_dir));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(300),
+        parser_for(1.0, None, store_a).parse(resource()),
+    )
+    .await
+    .expect("attempt A exceeded the hard per-invocation bound");
     assert!(
-        !stored.is_empty(),
-        "F05 converged without a persisted partial checkpoint: resume was not exercised"
+        matches!(outcome, Err(ApplicationError::OcrTimeout)),
+        "wall-bound attempt must fail retryably: {outcome:?}"
     );
+    // Attempt B: a one-page quota deterministically persists exactly the
+    // first required page, then fails retryably — no timing dependence.
+    let store_b = Arc::new(FileOcrCheckpointStore::new(&checkpoint_dir));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(300),
+        parser_for(240.0, Some(1), store_b.clone()).parse(resource()),
+    )
+    .await
+    .expect("attempt B exceeded the hard per-invocation bound");
+    assert!(
+        matches!(outcome, Err(ApplicationError::OcrTimeout)),
+        "page-quota attempt must fail retryably: {outcome:?}"
+    );
+    let load = store_b.load(&key, &meta).await.unwrap();
+    let required: BTreeSet<u32> = load
+        .required_pages
+        .expect("required pages were not recorded")
+        .into_iter()
+        .collect();
+    let stored: BTreeSet<u32> = load.pages.keys().copied().collect();
+    assert_eq!(
+        stored.len(),
+        1,
+        "the one-page quota must persist exactly one page: {stored:?}"
+    );
+    assert!(
+        stored.is_subset(&required) && required.len() > stored.len(),
+        "partial progress {stored:?} is not a strict subset of required {required:?}"
+    );
+    // Source/runtime identity drift must fail closed.
+    let drifted = MetaIdentity {
+        original_sha256: "0".repeat(64),
+        ..meta.clone()
+    };
+    assert!(
+        store_b.load(&key, &drifted).await.unwrap().pages.is_empty(),
+        "identity drift leaked a resumable checkpoint"
+    );
+    // Attempt C: a restarted parser resumes only the remaining pages and
+    // publishes the canonical document.
+    let store_c = Arc::new(FileOcrCheckpointStore::new(&checkpoint_dir));
+    let document = tokio::time::timeout(
+        Duration::from_secs(300),
+        parser_for(240.0, None, store_c).parse(resource()),
+    )
+    .await
+    .expect("attempt C exceeded the hard per-invocation bound")
+    .unwrap_or_else(|error| panic!("resume attempt failed: {error:?}"));
     let resume: serde_json::Value = serde_json::from_str(
         document
             .metadata
@@ -346,6 +344,11 @@ async fn archived_runtime_resumes_interrupted_f05_without_repeating_pages() {
         "previously completed pages must replay instead of re-running the engine"
     );
     assert!(resumed.is_disjoint(&computed), "a page was computed twice");
+    assert_eq!(
+        &resumed | &computed,
+        required,
+        "every required page must be covered exactly once"
+    );
     assert_eq!(document.content_hash.0, format!("sha256:{raw_hash}"));
     let derivation: OcrDerivation =
         serde_json::from_str(&document.metadata["ocr_derivation"]).unwrap();

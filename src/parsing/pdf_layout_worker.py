@@ -30,6 +30,7 @@ OCR_CONFIG = {"enabled": False}
 EXPECTED_IDENTITY = None
 PAGE_DEADLINE = None
 INVOCATION_DEADLINE = None
+INVOCATION_PAGE_LIMIT = None
 RASTER_BUDGET = None
 PAGE_RASTER = None
 PAGE_RASTER_SHA256 = None
@@ -1236,7 +1237,7 @@ def selected_ocr_evidence(observations):
 
 
 def parse_worker_input(line):
-    """Validate the negotiated owner header; returns (budget_seconds, resume map).
+    """Validate the negotiated owner header; returns (budget, page cap, resume).
 
     Real PDFs begin with '%', so this line only exists when the owner opts in.
     A checkpoint entry's shape is checked here; its source/runtime/raster
@@ -1253,6 +1254,11 @@ def parse_worker_input(line):
         if (not isinstance(budget, (int, float)) or isinstance(budget, bool)
                 or not 0 < budget <= 300):
             raise ValueError('invalid worker invocation budget')
+    page_limit = header.get('max_pages')
+    if page_limit is not None:
+        if (not isinstance(page_limit, int) or isinstance(page_limit, bool)
+                or not 0 < page_limit <= 64):
+            raise ValueError('invalid worker invocation page limit')
     pages = header.get('pages')
     if not isinstance(pages, dict):
         raise ValueError('invalid worker resume payload')
@@ -1273,7 +1279,7 @@ def parse_worker_input(line):
                     and not isinstance(entry['observation'], dict))):
             raise ValueError('invalid OCR page checkpoint entry')
         resume[int(key)] = entry
-    return budget, resume
+    return budget, page_limit, resume
 
 
 def bound_checkpoint(entry, original_sha256, runtime_identity_sha256):
@@ -1286,7 +1292,7 @@ def bound_checkpoint(entry, original_sha256, runtime_identity_sha256):
 
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256, WORKER_SOURCE
-    global INVOCATION_DEADLINE, PAGE_RASTER_SHA256
+    global INVOCATION_DEADLINE, INVOCATION_PAGE_LIMIT, PAGE_RASTER_SHA256
     protocol_stdout = sys.stdout
     if len(sys.argv) == 5 and sys.argv[1] == '--visual-model':
         visual_model_child(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
@@ -1343,10 +1349,11 @@ def main():
             if len(header_line) > 64 * 1024 * 1024:
                 raise OcrStageFailure('OCR_RESOURCE_LIMIT',
                                       'worker input header exceeds byte limit')
-            budget, resume_pages = parse_worker_input(header_line)
+            budget, page_limit, resume_pages = parse_worker_input(header_line)
             progress_output = True
             if budget is not None:
                 INVOCATION_DEADLINE = time.monotonic() + budget
+            INVOCATION_PAGE_LIMIT = page_limit
 
     def checkpoint_for(page_number):
         # Identity binding is checked at use, after the input hash exists.
@@ -1455,6 +1462,7 @@ def main():
                     require_disabled_page_coverage(page, page_layout)
             if OCR_CONFIG.get("enabled", False):
                 language = "+".join(OCR_CONFIG["languages"])
+                computed_ocr_pages = 0
                 for page, page_layout in zip(doc, layout["pages"]):
                     has_body_text = has_native_body(page_layout)
                     # A trustworthy native body remains the source of truth on
@@ -1483,9 +1491,17 @@ def main():
                             else:
                                 checkpoint = None
                         if checkpoint is None:
+                            # The negotiated page cap bounds the OCR work of
+                            # one invocation; replayed pages are nearly free
+                            # and do not consume it.
+                            if (INVOCATION_PAGE_LIMIT is not None
+                                    and computed_ocr_pages >= INVOCATION_PAGE_LIMIT):
+                                raise OcrStageFailure('OCR_TIMEOUT',
+                                    'local OCR invocation page budget exhausted')
                             excluded = native_text_regions(page_layout)
                             projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
                                 inspect_native=has_body_text, original_boxes=page_layout['boxes'])
+                            computed_ocr_pages += 1
                             if projected_boxes:
                                 page_layout["boxes"] = projected_boxes
                             page_layout["ocr_retry_diagnostic"] = retry_diagnostic

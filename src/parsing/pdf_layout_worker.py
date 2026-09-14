@@ -141,14 +141,28 @@ def has_native_body(page_layout):
                for box in page_layout['boxes'])
 
 
-def page_requires_ocr(page_layout):
+def page_requires_ocr(page_layout, page=None):
     """Return whether the page lacks a usable native prose body.
 
-    Images and figures on a native page are visual evidence, not a reason to
-    rerun OCR over already-authoritative text. A footer-only layer remains
-    OCR-eligible while a native prose body is reused unchanged.
+    Embedded figures on a native page are visual evidence, not a reason to
+    rerun OCR over already-authoritative text. A full-page raster, however,
+    may contain scanned prose with a sparse/native overlay and remains
+    OCR-eligible. A footer-only layer remains OCR-eligible as well.
     """
-    return not has_native_body(page_layout)
+    if not has_native_body(page_layout):
+        return True
+    if page is None:
+        return False
+    page_area = page.rect.width * page.rect.height
+    if page_area <= 0:
+        return False
+    for image in page.get_image_info():
+        bbox = image.get('bbox')
+        if bbox and len(bbox) == 4:
+            image_area = max(0.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+            if image_area / page_area >= 0.90:
+                return True
+    return False
 
 
 class OcrStageFailure(RuntimeError):
@@ -1312,7 +1326,7 @@ def main():
                     # OCR.  Pages without native body text (including a
                     # footer-only scanned page) still take the OCR path, so
                     # scan/native mixed fixtures retain their body coverage.
-                    if page_requires_ocr(page_layout):
+                    if page_requires_ocr(page_layout, page):
                         excluded = native_text_regions(page_layout)
                         projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
                             inspect_native=has_body_text, original_boxes=page_layout['boxes'])

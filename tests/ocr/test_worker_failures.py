@@ -33,6 +33,22 @@ class WorkerFailureTests(unittest.TestCase):
         native_with_figure = {'boxes': [box('text', 'Native prose.'), {'boxclass': 'figure', 'textlines': []}]}
         self.assertFalse(worker.page_requires_ocr(native_with_figure))
 
+        class Rect:
+            width = 100
+            height = 100
+
+        class Page:
+            rect = Rect()
+
+            def __init__(self, bbox):
+                self.bbox = bbox
+
+            def get_image_info(self):
+                return [] if self.bbox is None else [{'bbox': self.bbox}]
+
+        self.assertFalse(worker.page_requires_ocr(native_with_figure, Page([5, 5, 25, 25])))
+        self.assertTrue(worker.page_requires_ocr(native_with_figure, Page([0, 0, 100, 100])))
+
     def test_production_unit_pins_source_view_decoded_stream_budget(self):
         template = Path(__file__).parents[2] / 'deploy/systemd/reading-mcp-tunnel.service'
         self.assertIn(

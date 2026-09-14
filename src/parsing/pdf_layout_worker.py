@@ -1387,10 +1387,15 @@ def main():
                     # the model child is not re-run for completed pages.
                     observation = stored
                 else:
-                    child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler', '-c',
-                        WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
-                        str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
-                        capture_output=True, timeout=min(15, page_time_remaining()), check=False)
+                    try:
+                        child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler',
+                            '-c', WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
+                            str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
+                            capture_output=True, timeout=min(15, page_time_remaining()),
+                            check=False)
+                    except subprocess.TimeoutExpired as error:
+                        raise OcrStageFailure('OCR_TIMEOUT',
+                            'visual model child exceeded shared budget') from error
                     if child.returncode != 0 or len(child.stdout) > 4 * 1024 * 1024:
                         raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model child failed')
                     observation = json.loads(child.stdout)
@@ -1594,7 +1599,9 @@ def run():
         print(f"PDF layout failed: {error}", file=sys.stderr)
         return 1
     except Exception as error:
-        print(f"PDF layout failed: {error}", file=sys.stderr)
+        # Untyped failures must not corrupt the error class downstream: a
+        # subprocess repr can embed the entire worker source, so bound stderr.
+        print(f"PDF layout failed: {str(error)[:1024]}", file=sys.stderr)
         return 1
 
 

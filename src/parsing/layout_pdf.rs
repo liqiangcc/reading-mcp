@@ -1321,7 +1321,7 @@ mod tests {
                 .to_string()
                 .contains("private document passage")
         );
-        assert_eq!(MAX_OCR_OUTPUT_BYTES, 32 * 1024 * 1024);
+        assert_eq!(MAX_OCR_OUTPUT_BYTES, 64 * 1024 * 1024);
         assert_eq!(MAX_OUTPUT_BYTES, 128 * 1024 * 1024);
     }
 

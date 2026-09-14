@@ -257,6 +257,7 @@ impl SystemdOcrUnit {
         let mut callback = vec![
             result_python.to_string(),
             "-I".into(),
+            "-B".into(),
             "-c".into(),
             include_str!("ocr_service_result.py").into(),
         ];
@@ -294,7 +295,7 @@ impl SystemdOcrUnit {
         }
         command
             .arg(python)
-            .args(["-I", "-c", include_str!("ocr_service_supervisor.py")])
+            .args(["-I", "-B", "-c", include_str!("ocr_service_supervisor.py")])
             .args(owner_arguments)
             .arg(python);
         Ok((command, unit))
@@ -796,5 +797,62 @@ while True: time.sleep(1)
             );
         }
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn private_runtime_unit_keeps_rootfs_read_only_and_scratch_tmpfs() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("rootfs");
+        std::fs::create_dir(&root).unwrap();
+        let manifest = directory.path().join("runtime-manifest.json");
+        std::fs::write(&manifest, b"{}").unwrap();
+        let python = Path::new("/opt/ocr-python/bin/python");
+        let (command, _unit) =
+            SystemdOcrUnit::command_in_package(python, &root, &manifest).unwrap();
+        let arguments: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == "--property=ProtectSystem=strict"),
+            "private OCR runtime rootfs must stay read-only"
+        );
+        let scratch: Vec<_> = arguments
+            .iter()
+            .filter(|argument| argument.starts_with("--property=TemporaryFileSystem="))
+            .collect();
+        assert_eq!(scratch.len(), 1);
+        assert!(
+            scratch[0].contains("/tmp:rw") && scratch[0].contains("/run:rw"),
+            "only /tmp and /run may be writable: {scratch:?}"
+        );
+        assert!(
+            arguments.iter().any(|argument| argument
+                == &format!("--property=RootDirectory={}", root.display())),
+            "worker must execute inside the private runtime root"
+        );
+        // Every interpreter launched inside the unit disables bytecode writes:
+        // -I already ignores PYTHONDONTWRITEBYTECODE, so -B is explicit.
+        let after_separator = arguments
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("command separator missing");
+        let exec = &arguments[after_separator..];
+        let interpreter = exec
+            .iter()
+            .position(|argument| argument == python.to_str().unwrap())
+            .expect("supervisor interpreter missing");
+        assert_eq!(exec.get(interpreter + 1).map(String::as_str), Some("-I"));
+        assert_eq!(exec.get(interpreter + 2).map(String::as_str), Some("-B"));
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument.starts_with("--property=ExecStopPost=")
+                    && argument.contains("\"-I\" \"-B\" \"-c\"")),
+            "result callback must also run with -B"
+        );
     }
 }

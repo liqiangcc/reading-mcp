@@ -1291,7 +1291,7 @@ def main():
                 if RASTER_BUDGET is not None:
                     RASTER_BUDGET.reserve_raster(raster_pixel_count(visual_page, OCR_CONFIG['dpi']))
                 pixmap = visual_page.get_pixmap(dpi=OCR_CONFIG['dpi'], colorspace=pymupdf.csRGB, alpha=False)
-                child = subprocess.run([sys.executable, '-I', '-X', 'faulthandler', '-c',
+                child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler', '-c',
                     WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
                     str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
                     capture_output=True, timeout=min(15, page_time_remaining()), check=False)

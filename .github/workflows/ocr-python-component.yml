@@ -78,13 +78,21 @@ jobs:
           cp src/parsing/pdf_layout_worker.py scripts/ocr/offline_runtime_smoke.py tests/fixtures/scanned_pdf/pdf/F07.pdf tests/fixtures/scanned_pdf/pdf/F11.pdf "$runtime_root/opt/ocr-smoke/"
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/python3.12 -m venv /opt/ocr-python
           sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=RuntimeMaxSec=180 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /opt/ocr-python/bin/python -m pip install --no-index --no-cache-dir --require-hashes --find-links /opt/ocr-bootstrap/wheels -r /opt/ocr-bootstrap/requirements.lock
+      - name: Snapshot staging runtime inventory before worker execution
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/python3 -c 'import json,sys; sys.path.insert(0,"scripts/ocr"); import runtime_archive; json.dump(runtime_archive.inventory(sys.argv[1]), open(sys.argv[2], "w"), sort_keys=True)' "$RUNNER_TEMP/ocr-private-runtime/rootfs" "$RUNNER_TEMP/runtime-inventory-before.json"
       - name: Actual frozen OCR with private interpreter libraries and network isolation
         id: initial_private_smoke
         run: |
           set -euo pipefail
           runtime_root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
-          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
           du -sb "$runtime_root" "$runtime_root/opt/ocr-python" "$runtime_root/opt/ocr-bootstrap"
+      - name: Worker execution must not alter the runtime inventory
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/python3 -c 'import json,sys; sys.path.insert(0,"scripts/ocr"); import runtime_archive; before=json.load(open(sys.argv[2])); after=runtime_archive.inventory(sys.argv[1]); assert before == after, "worker execution changed the runtime inventory (lost -B isolation)"; print("runtime inventory unchanged across worker execution: %d entries" % len(after))' "$RUNNER_TEMP/ocr-private-runtime/rootfs" "$RUNNER_TEMP/runtime-inventory-before.json"
       - name: Archive the installed private runtime and verify into a new root
         run: |
           set -euo pipefail
@@ -101,6 +109,7 @@ jobs:
           sudo /usr/bin/python3 scripts/ocr/runtime_archive.py build --root "$runtime_root" --source-sha "$runtime_source_sha" --output "$RUNNER_TEMP/ocr-private-package" | tee "$RUNNER_TEMP/ocr-private-package-build.json"
           runtime_archive_sha=$(cut -d ' ' -f 1 "$RUNNER_TEMP/ocr-private-package/SHA256SUMS")
           sudo /usr/bin/python3 scripts/ocr/runtime_archive.py unpack --archive "$RUNNER_TEMP/ocr-private-package/ocr-private-runtime.tar.gz" --sha256 "$runtime_archive_sha" --source-sha "$runtime_source_sha" --output "$RUNNER_TEMP/verified-ocr-runtime" | tee "$RUNNER_TEMP/ocr-private-package-verify.json"
+          sudo /usr/bin/python3 -c 'import json,sys; sys.path.insert(0,"scripts/ocr"); import runtime_archive; json.dump(runtime_archive.inventory(sys.argv[1]), open(sys.argv[2], "w"), sort_keys=True)' "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/verified-inventory-before.json"
       - name: Execute frozen OCR from the verified archive without network or host interpreter
         id: archive_smoke
         run: |
@@ -108,7 +117,8 @@ jobs:
           verified_root="$RUNNER_TEMP/verified-ocr-runtime"
           public_smoke="$RUNNER_TEMP/ocr-private-runtime/rootfs/opt/ocr-smoke"
           test ! -e "$verified_root/opt/ocr-bootstrap"
-          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$verified_root" --property="BindReadOnlyPaths=$public_smoke:/opt/ocr-smoke" --property=User=65534 --property=Group=65534 --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=NoNewPrivileges=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group --property=LimitCORE=0 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$verified_root" --property="BindReadOnlyPaths=$public_smoke:/opt/ocr-smoke" --property=User=65534 --property=Group=65534 --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=NoNewPrivileges=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700,uid=65534,gid=65534 --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group --property=LimitCORE=0 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-archive-smoke.json"
+          sudo /usr/bin/python3 -c 'import json,sys; sys.path.insert(0,"scripts/ocr"); import runtime_archive; before=json.load(open(sys.argv[2])); after=runtime_archive.inventory(sys.argv[1]); assert before == after, "verified runtime inventory changed during execution"; print("verified runtime inventory unchanged: %d entries" % len(after))' "$RUNNER_TEMP/verified-ocr-runtime" "$RUNNER_TEMP/verified-inventory-before.json"
       - name: Compare exact reconstructed runtime and measure all protected directories
         run: |
           set -euo pipefail
@@ -136,7 +146,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y gdb
           debug_unit="reading-mcp-ocr-import-debug-${GITHUB_RUN_ID}.service"
           trap 'sudo systemctl stop "$debug_unit" >/dev/null 2>&1 || true; sudo systemctl reset-failed "$debug_unit" >/dev/null 2>&1 || true' EXIT
-          sudo systemd-run --quiet --unit="$debug_unit" --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=LimitCORE=0 --property=RuntimeMaxSec=30 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -c 'import time; time.sleep(5); import onnxruntime'
+          sudo systemd-run --quiet --unit="$debug_unit" --property="RootDirectory=$runtime_root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=LimitCORE=0 --property=RuntimeMaxSec=30 /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B -c 'import time; time.sleep(5); import onnxruntime'
           debug_pid=$(sudo systemctl show "$debug_unit" --property=MainPID --value)
           test "$debug_pid" -gt 1
           sudo timeout 20 gdb --quiet --nx --batch -ex "set sysroot $runtime_root" -ex 'set pagination off' -ex continue -ex 'bt 30' -p "$debug_pid" | tee "$RUNNER_TEMP/ocr-private-runtime-native-backtrace.txt"

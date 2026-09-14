@@ -1290,6 +1290,39 @@ def bound_checkpoint(entry, original_sha256, runtime_identity_sha256):
     return entry
 
 
+def visual_page_observation(page, pixmap=None):
+    """Classify one page in the isolated model child, bound to its raster.
+
+    Runs inside the page's bounded unit so a resumed invocation only pays
+    model cost for pages it actually processes this round. The raster is
+    rendered here (its pixels are already accounted by the document-level
+    reserve and the OCR raster step); a caller holding the page pixmap may
+    pass it in instead of rasterizing twice.
+    """
+    import pymupdf
+    if pixmap is None:
+        pixmap = page.get_pixmap(dpi=OCR_CONFIG['dpi'], colorspace=pymupdf.csRGB,
+                                 alpha=False)
+    raster_sha256 = hashlib.sha256(pixmap.samples).hexdigest()
+    try:
+        child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler',
+            '-c', WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
+            str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
+            capture_output=True, timeout=min(15, page_time_remaining()), check=False)
+    except subprocess.TimeoutExpired as error:
+        raise OcrStageFailure('OCR_TIMEOUT',
+                              'visual model child exceeded shared budget') from error
+    if child.returncode != 0 or len(child.stdout) > 4 * 1024 * 1024:
+        raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model child failed')
+    observation = json.loads(child.stdout)
+    if (observation.get('schema') != 'ocr-visual-model-attempt/v1'
+            or observation.get('raster_size') != [pixmap.width, pixmap.height]
+            or observation.get('raster_sha256') != raster_sha256):
+        raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model raster identity mismatch')
+    observation['page'] = page.number + 1
+    return observation
+
+
 def main():
     global OCR_CONFIG, EXPECTED_IDENTITY, RASTER_BUDGET, INPUT_SHA256, WORKER_SOURCE
     global INVOCATION_DEADLINE, INVOCATION_PAGE_LIMIT, PAGE_RASTER_SHA256
@@ -1369,8 +1402,9 @@ def main():
     if visual_model_enabled:
         if not WORKER_SOURCE:
             raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model worker source is missing')
-        # Render with the small PyMuPDF binding first, classify in a child, and
-        # only then import pymupdf4llm. The child exits before layout/OCR work.
+        # Read and bound the input with the small PyMuPDF binding first; the
+        # per-page model child runs inside each page's bounded unit later, so
+        # a resumed invocation only pays model cost for pages it completes.
         import pymupdf
         raw_for_visual = sys.stdin.buffer.read(max_bytes + 1)
         if len(raw_for_visual) > max_bytes:
@@ -1382,36 +1416,6 @@ def main():
             for visual_page in visual_doc:
                 if RASTER_BUDGET is not None:
                     RASTER_BUDGET.reserve_raster(raster_pixel_count(visual_page, OCR_CONFIG['dpi']))
-                pixmap = visual_page.get_pixmap(dpi=OCR_CONFIG['dpi'], colorspace=pymupdf.csRGB, alpha=False)
-                raster_sha256 = hashlib.sha256(pixmap.samples).hexdigest()
-                checkpoint = checkpoint_for(visual_page.number + 1)
-                stored = checkpoint.get('observation') if checkpoint is not None else None
-                if (isinstance(stored, dict)
-                        and stored.get('schema') == 'ocr-visual-model-attempt/v1'
-                        and stored.get('raster_size') == [pixmap.width, pixmap.height]
-                        and stored.get('raster_sha256') == raster_sha256):
-                    # A checkpointed observation binds the identical raster;
-                    # the model child is not re-run for completed pages.
-                    observation = stored
-                else:
-                    try:
-                        child = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler',
-                            '-c', WORKER_SOURCE, '--visual-model', '/opt/ocr-layout-model',
-                            str(pixmap.width), str(pixmap.height)], input=pixmap.samples,
-                            capture_output=True, timeout=min(15, page_time_remaining()),
-                            check=False)
-                    except subprocess.TimeoutExpired as error:
-                        raise OcrStageFailure('OCR_TIMEOUT',
-                            'visual model child exceeded shared budget') from error
-                    if child.returncode != 0 or len(child.stdout) > 4 * 1024 * 1024:
-                        raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model child failed')
-                    observation = json.loads(child.stdout)
-                    if (observation.get('schema') != 'ocr-visual-model-attempt/v1'
-                            or observation.get('raster_size') != [pixmap.width, pixmap.height]
-                            or observation.get('raster_sha256') != raster_sha256):
-                        raise OcrStageFailure('OCR_UNAVAILABLE', 'visual model raster identity mismatch')
-                observation['page'] = visual_page.number + 1
-                visual_results[visual_page.number] = observation
         # The bytes are retained as the canonical input for the normal parse;
         # the stream is not readable a second time after the pre-classification.
         visual_input = raw_for_visual
@@ -1473,6 +1477,8 @@ def main():
                     # scan/native mixed fixtures retain their body coverage.
                     requires_ocr = page_requires_ocr(page_layout, page)
                     resumed_page = False
+                    observation = None
+                    page_pixmap = None
                     if requires_ocr:
                         checkpoint = checkpoint_for(page.number + 1)
                         if checkpoint is not None:
@@ -1480,13 +1486,22 @@ def main():
                             # still counts toward the required-page limit; the
                             # projection step below re-runs on the stored
                             # observation rather than trusting stored results.
-                            pixmap = prepare_page_raster(page)
+                            page_pixmap = prepare_page_raster(page)
                             RASTER_BUDGET.require_page(page.number)
-                            if hashlib.sha256(pixmap.samples).hexdigest() \
-                                    == checkpoint['page_raster_sha256']:
+                            raster_sha256 = hashlib.sha256(page_pixmap.samples).hexdigest()
+                            if raster_sha256 == checkpoint['page_raster_sha256']:
                                 page_layout['boxes'] = checkpoint['boxes']
                                 page_layout['ocr_retry_diagnostic'] = \
                                     checkpoint['ocr_retry_diagnostic']
+                                stored = checkpoint.get('observation')
+                                if (isinstance(stored, dict)
+                                        and stored.get('schema') == 'ocr-visual-model-attempt/v1'
+                                        and stored.get('raster_size') == [page_pixmap.width, page_pixmap.height]
+                                        and stored.get('raster_sha256') == raster_sha256):
+                                    # A checkpointed observation binds the
+                                    # identical raster; the model child is
+                                    # not re-run for completed pages.
+                                    observation = stored
                                 resumed_page = True
                             else:
                                 checkpoint = None
@@ -1498,6 +1513,11 @@ def main():
                                     and computed_ocr_pages >= INVOCATION_PAGE_LIMIT):
                                 raise OcrStageFailure('OCR_TIMEOUT',
                                     'local OCR invocation page budget exhausted')
+                            # Model classification is part of this page's
+                            # bounded unit, so a resumed invocation never
+                            # pays model cost for pages it does not reach.
+                            if visual_model_enabled:
+                                observation = visual_page_observation(page)
                             excluded = native_text_regions(page_layout)
                             projected_boxes, retry_diagnostic = _regional_ocr(page, excluded,
                                 inspect_native=has_body_text, original_boxes=page_layout['boxes'])
@@ -1514,9 +1534,12 @@ def main():
                     # bind, so its unanchored regions must not fail the page and
                     # its attempt is not published as visual evidence.
                     if visual_model_enabled and requires_ocr:
-                        observation = visual_results.get(page.number)
                         if observation is None:
-                            raise OcrStageFailure('OCR_UNAVAILABLE', 'missing visual page observation')
+                            # A replayed page whose stored observation is
+                            # absent or no longer bound still runs the child
+                            # on the identical raster before projection.
+                            observation = visual_page_observation(page, page_pixmap)
+                        visual_results[page.number] = observation
                         selected = page_layout['boxes']
                         predictions = [attempt['res']['boxes'] for attempt in observation['attempts']]
                         if len(predictions) != 1:
@@ -1548,7 +1571,7 @@ def main():
                                 'page_raster_sha256': PAGE_RASTER_SHA256,
                                 'boxes': page_ocr_boxes,
                                 'ocr_retry_diagnostic': page_layout['ocr_retry_diagnostic'],
-                                'observation': visual_results.get(page.number)}
+                                'observation': observation}
                         protocol_stdout.write(json.dumps(progress_record,
                             separators=(',', ':')) + '\n')
                         protocol_stdout.flush()

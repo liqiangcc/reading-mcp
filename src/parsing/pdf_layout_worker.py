@@ -701,8 +701,10 @@ def _regional_retry_boxes(page, region):
     samples = raster.samples
     if len(samples) != raster.width * raster.height * 3:
         return None
-    if RASTER_BUDGET is not None:
-        RASTER_BUDGET.reserve_raster(width * height)
+    # The slice is a bounded copy of bytes the page raster already paid for,
+    # not a new raster allocation: it stays off the 64M raster budget.  Its
+    # own bounds are the raster size itself, the per-page retry cap, and the
+    # shared page deadline below.
     page_time_remaining()
     rows = bytearray(width * height * 3)
     stride = raster.width * 3
@@ -1636,9 +1638,13 @@ def main():
                             # bounded unit, so a resumed invocation never
                             # pays model cost for pages it does not reach.
                             # The unit deadline covers model + engine work,
-                            # and one rasterization serves both stages.
+                            # and one rasterization serves both stages.  A
+                            # verification raster already made for a rejected
+                            # checkpoint is the identical current raster —
+                            # reuse it instead of allocating a second one.
                             PAGE_DEADLINE = time.monotonic() + PAGE_UNIT_SECONDS
-                            page_pixmap = prepare_page_raster(page)
+                            if page_pixmap is None:
+                                page_pixmap = prepare_page_raster(page)
                             if visual_model_enabled:
                                 observation = visual_page_observation(page, page_pixmap)
                             excluded = native_text_regions(page_layout)

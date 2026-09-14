@@ -190,6 +190,36 @@ class RegionalGeometryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "8 required page"):
             budget.require_page(8)
 
+    def test_regional_retry_slice_is_not_a_new_raster_allocation(self):
+        worker, _ = self.deadline_worker()
+        budget = worker["OcrRasterBudget"]()
+        worker["RASTER_BUDGET"] = budget
+        worker["OCR_CONFIG"] = {"enabled": True, "psm": 3, "dpi": 300}
+        # A page raster the size of a real 300dpi A4 scan, already charged.
+        raster = SimpleNamespace(n=3, width=2480, height=3509,
+                                 samples=b"\xff" * (2480 * 3509 * 3))
+        worker["PAGE_RASTER"] = raster
+        budget.reserve_raster(2480 * 3509)
+        engine_calls = []
+        def engine(pixmap, origin, scale_x, scale_y, psm, pnm=None):
+            engine_calls.append((origin, len(pnm or b"")))
+            return []
+        worker["_run_engine"] = engine
+        page = SimpleNamespace(number=0, rect=SimpleNamespace(width=595, height=842))
+        # Eight regional passes — the per-page cap — each slicing a large ROI
+        # must not touch the page-raster budget that already charged the raster.
+        for _ in range(8):
+            result = worker["_regional_retry_boxes"](page, [0, 0, 595, 842])
+            self.assertIsNotNone(result)
+        self.assertEqual(budget.pixels, 2480 * 3509)
+        self.assertEqual(len(engine_calls), 8)
+        self.assertGreater(engine_calls[0][1], 0)
+        # A genuinely new page raster is still a real allocation and the
+        # 64M total limit still applies.
+        budget.reserve_raster(2480 * 3509)
+        with self.assertRaisesRegex(RuntimeError, "64 million"):
+            budget.reserve_raster(64_000_000)
+
     def run_worker_retry(self, primary, retry):
         worker = {}
         exec((Path(__file__).parents[2] / "src/parsing/pdf_layout_worker.py").read_text(), worker)

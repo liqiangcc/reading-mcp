@@ -5,7 +5,7 @@ use crate::application::reading_profile::{
     NavigationResolutionCoverage, PublicationCoverage, ReliabilityEvidence, ReliabilityIntegrity,
     ReliabilitySummary, StructureProvenanceCoverage,
 };
-use crate::domain::{Document, OcrDerivation};
+use crate::domain::{Document, OcrDerivation, ParagraphContentClass, SentenceEligibility};
 
 use super::epub_validator::{
     EPUB_VALIDATION_DEGRADATIONS_METADATA_KEY, EPUB_VALIDATION_ERRORS_METADATA_KEY,
@@ -91,6 +91,16 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
             }];
             return Ok(summary);
         }
+        let media_type = document
+            .media_type
+            .0
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if media_type.eq_ignore_ascii_case("application/pdf") {
+            return inspect_fallback_pdf(document);
+        }
         if document.media_type.0 != EPUB_MEDIA_TYPE {
             return Ok(ReliabilitySummary::not_applicable());
         }
@@ -114,6 +124,51 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
 
         Ok(project_epub_report(&stored))
     }
+}
+
+/// PDFs parsed without persisted layout evidence (lopdf native-ToC / inferred-heading /
+/// page-fallback paths) have no per-block provenance, so fallback paragraphs are
+/// classified from text alone. Surface the count of paragraphs that were kept coarse
+/// because their merged/corrupted text cannot be trusted to produce clean sentences;
+/// otherwise `degradation_count=0` would masquerade as a clean extraction.
+fn inspect_fallback_pdf(document: &Document) -> Result<ReliabilitySummary, ApplicationError> {
+    let invalid = || ApplicationError::ParseFailed("invalid persisted PDF evidence".into());
+    let sentences = document.try_sentence_text_units().map_err(|_| invalid())?;
+    let unreliable = sentences
+        .coverage
+        .iter()
+        .filter(|coverage| {
+            coverage.eligibility == SentenceEligibility::CoarseParagraphOnly
+                && coverage.content_class == ParagraphContentClass::ProseOrUnknown
+        })
+        .count();
+    let extraction_errors = document
+        .metadata
+        .get("pdf_text_extraction_errors")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    if unreliable == 0 && extraction_errors == 0 {
+        return Ok(ReliabilitySummary::not_applicable());
+    }
+
+    let mut codes = Vec::new();
+    if unreliable > 0 {
+        codes.push("pdf_fallback_paragraph_unreliable".to_string());
+    }
+    if extraction_errors > 0 {
+        codes.push("pdf_text_extraction_errors".to_string());
+    }
+
+    let mut summary = ReliabilitySummary::not_applicable();
+    summary.evidence = vec![ReliabilityEvidence {
+        kind: "pdf_text_extraction".into(),
+        schema_version: None,
+        integrity: ReliabilityIntegrity::Valid,
+        degradation_count: unreliable.saturating_add(extraction_errors),
+        degradation_codes: codes,
+    }];
+    Ok(summary)
 }
 
 fn decode_required_report(document: &Document) -> Result<EpubValidationReport, ApplicationError> {

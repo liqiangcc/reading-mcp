@@ -1,0 +1,69 @@
+{
+  "schema": "projection-quality-manifest/v1",
+  "issue": 91,
+  "cases": [
+    {
+      "case": "P01-single-column",
+      "fixture": "pdf/P01-single-column.pdf",
+      "kind": "synthetic",
+      "covers": ["native_single_column", "sentence_boundaries", "exact_read"]
+    },
+    {
+      "case": "P02-double-column",
+      "fixture": "pdf/P02-double-column.pdf",
+      "kind": "synthetic",
+      "covers": ["native_double_column", "reading_order"]
+    },
+    {
+      "case": "P03-cross-page",
+      "fixture": "pdf/P03-cross-page.pdf",
+      "kind": "synthetic",
+      "covers": ["cross_page", "page_binding"]
+    },
+    {
+      "case": "P04-dehyphenation",
+      "fixture": "pdf/P04-dehyphenation.pdf",
+      "kind": "synthetic",
+      "covers": ["soft_wrap", "dehyphenation"]
+    },
+    {
+      "case": "P05-whitespace-loss",
+      "fixture": "pdf/P05-whitespace-loss.pdf",
+      "kind": "synthetic",
+      "covers": ["whitespace_loss", "verbatim_projection"]
+    },
+    {
+      "case": "P06-token-stress",
+      "fixture": "pdf/P06-token-stress.pdf",
+      "kind": "synthetic",
+      "covers": ["protected_abbreviation", "decimal", "citation", "technical_identifier"]
+    },
+    {
+      "case": "P07-front-matter",
+      "fixture": "pdf/P07-front-matter.pdf",
+      "kind": "synthetic",
+      "covers": ["front_matter_vs_abstract", "coarse_region", "metadata_contamination"]
+    },
+    {
+      "case": "P08-preserved-hyphen",
+      "fixture": "pdf/P08-preserved-hyphen.pdf",
+      "kind": "synthetic",
+      "covers": ["ambiguous_hyphen_preserved", "explicit_degradation"]
+    },
+    {
+      "case": "P09-epub-control",
+      "fixture": "epub/P09-epub-control.epub",
+      "kind": "synthetic",
+      "covers": ["epub_control", "non_pdf_parser"]
+    },
+    {
+      "case": "jackson-icse95",
+      "kind": "metadata_only",
+      "url": "https://users.ece.utexas.edu/~perry/education/SE-Intro/jackson-icse95.pdf",
+      "content_hash": "sha256:48c6ab4b1e17360ab32be09d0042b43630d3afcd8da7d453c17042a959ab6061",
+      "document_id": "doc:sha256:d1b359dc396e813fffd18ab8cefa7c8f16ec00fe30c85a1facfd5ab532e334e8",
+      "annotation": "Issue #87 real-paper anchor (Michael Jackson, The World and the Machine, ICSE 1995). Body is NOT vendored; only URL/hash/annotation metadata is kept so the corpus records the real-world front-matter vs abstract contract without copying paper text.",
+      "covers": ["front_matter_vs_abstract", "real_paper_metadata"]
+    }
+  ]
+}

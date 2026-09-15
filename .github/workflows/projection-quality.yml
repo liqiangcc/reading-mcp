@@ -1,0 +1,74 @@
+name: Issue 91 projection quality gate
+on:
+  push:
+    paths:
+      - 'tests/projection_boundary_engine.rs'
+      - 'tests/projection_quality/**'
+      - 'scripts/projection_quality.py'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/pdf_layout_worker.py'
+      - 'src/parsing/epub*.rs'
+      - 'src/parsing/reliability.rs'
+      - 'src/domain/text_unit.rs'
+      - 'src/domain/normalized_text.rs'
+      - 'src/domain/normalized_block.rs'
+      - 'src/domain/text_locator.rs'
+      - 'src/domain/original_source.rs'
+      - 'src/application/read_document.rs'
+      - 'src/application/locator_resolution.rs'
+      - '.github/workflows/projection-quality.yml'
+  pull_request:
+    paths:
+      - 'tests/projection_boundary_engine.rs'
+      - 'tests/projection_quality/**'
+      - 'scripts/projection_quality.py'
+      - 'src/parsing/layout_pdf.rs'
+      - 'src/parsing/pdf_layout_worker.py'
+      - 'src/parsing/epub*.rs'
+      - 'src/parsing/reliability.rs'
+      - 'src/domain/text_unit.rs'
+      - 'src/domain/normalized_text.rs'
+      - 'src/domain/normalized_block.rs'
+      - 'src/domain/text_locator.rs'
+      - 'src/domain/original_source.rs'
+      - 'src/application/read_document.rs'
+      - 'src/application/locator_resolution.rs'
+      - '.github/workflows/projection-quality.yml'
+jobs:
+  projection-quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned layout Python (hosted only)
+        run: |
+          python -m pip install --only-binary=:all: PyMuPDF==1.28.2 pymupdf4llm==1.28.2 pymupdf-layout==1.28.2
+      - name: Frozen synthetic corpus integrity
+        run: |
+          cd tests/projection_quality
+          sha256sum -c SHA256SUMS
+      - name: Canonical projection report (production non-OCR path)
+        env:
+          READING_MCP_PDF_LAYOUT_PYTHON: ${{ steps.python.outputs.python-path }}
+          READING_MCP_PROJECTION_REPORT: ${{ runner.temp }}/projection-report.json
+        run: cargo test --locked --test projection_boundary_engine -- --ignored --nocapture
+      - name: Scorer unit tests
+        run: python -m unittest tests/projection_quality/test_projection_quality.py
+      - name: Frozen Issue 89 thresholds gate
+        run: |
+          python scripts/projection_quality.py --report "$RUNNER_TEMP/projection-report.json" --output "$RUNNER_TEMP/projection-quality.json"
+      - name: Upload projection quality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: projection-quality
+          path: |
+            ${{ runner.temp }}/projection-report.json
+            ${{ runner.temp }}/projection-quality.json
+          if-no-files-found: warn
+          retention-days: 14

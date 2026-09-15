@@ -1,0 +1,47 @@
+{
+  "case": "P07-front-matter",
+  "format": "pdf",
+  "required_degradation_codes": ["pdf_layout_inferred", "pdf_local_ocr_not_applied"],
+  "paragraphs": [
+    {
+      "section": "Front matter",
+      "page": 1,
+      "eligible": false,
+      "content_class": "preformatted",
+      "metadata": true,
+      "text": "Studies in Observational Cartography",
+      "sentences": []
+    },
+    {
+      "section": "Front matter",
+      "page": 1,
+      "eligible": false,
+      "content_class": "preformatted",
+      "metadata": true,
+      "text": "M. Reyes and L. Okafor",
+      "sentences": []
+    },
+    {
+      "section": "Abstract",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "This report examines how observatories preserve source order. Each claim remains bound to its original page.",
+      "sentences": [
+        "This report examines how observatories preserve source order.",
+        "Each claim remains bound to its original page."
+      ]
+    },
+    {
+      "section": "1 Introduction",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The introduction frames the preservation problem. Prior studies left ordering implicit.",
+      "sentences": [
+        "The introduction frames the preservation problem.",
+        "Prior studies left ordering implicit."
+      ]
+    }
+  ]
+}

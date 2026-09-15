@@ -1,0 +1,29 @@
+{
+  "case": "P09-epub-control",
+  "format": "epub",
+  "required_degradation_codes": ["navigation_unavailable"],
+  "paragraphs": [
+    {
+      "section": "Chapter One",
+      "page": null,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The opening chapter states the claim plainly. Every sentence stays bound to its spine item.",
+      "sentences": [
+        "The opening chapter states the claim plainly.",
+        "Every sentence stays bound to its spine item."
+      ]
+    },
+    {
+      "section": "Chapter Two",
+      "page": null,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The closing chapter reviews the evidence. A final note completes the record.",
+      "sentences": [
+        "The closing chapter reviews the evidence.",
+        "A final note completes the record."
+      ]
+    }
+  ]
+}

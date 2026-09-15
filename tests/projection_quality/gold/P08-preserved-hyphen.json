@@ -1,0 +1,18 @@
+{
+  "case": "P08-preserved-hyphen",
+  "format": "pdf",
+  "required_degradation_codes": ["pdf_layout_inferred", "pdf_local_ocr_not_applied", "pdf_ambiguous_hyphens_preserved"],
+  "paragraphs": [
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The survey records a gradual transfor-mation of the field ledger. Each revision remains attached to its page.",
+      "sentences": [
+        "The survey records a gradual transfor-mation of the field ledger.",
+        "Each revision remains attached to its page."
+      ]
+    }
+  ]
+}

@@ -46,7 +46,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install pinned layout Python (hosted only)
-        run: python -m pip install --only-binary=:all: PyMuPDF==1.28.2 pymupdf4llm==1.28.2 pymupdf-layout==1.28.2
+        run: |
+          python -m pip install --only-binary=:all: PyMuPDF==1.28.2 pymupdf4llm==1.28.2 pymupdf-layout==1.28.2
       - name: Frozen synthetic corpus integrity
         run: |
           cd tests/projection_quality
@@ -59,7 +60,8 @@ jobs:
       - name: Scorer unit tests
         run: python -m unittest tests/projection_quality/test_projection_quality.py
       - name: Frozen Issue 89 thresholds gate
-        run: python scripts/projection_quality.py --report "$RUNNER_TEMP/projection-report.json" --output "$RUNNER_TEMP/projection-quality.json"
+        run: |
+          python scripts/projection_quality.py --report "$RUNNER_TEMP/projection-report.json" --output "$RUNNER_TEMP/projection-quality.json"
       - name: Upload projection quality evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -92,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           root="$RUNNER_TEMP/ocr-private-runtime/rootfs"
-          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=WorkingDirectory=/tmp --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
+          sudo systemd-run --quiet --wait --pipe --collect --property="RootDirectory=$root" --property=MountAPIVFS=yes --property=PrivateNetwork=yes --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=TemporaryFileSystem=/tmp:rw,size=512M,mode=0700 --property=WorkingDirectory=/tmp --property=RuntimeMaxSec=60 --property=TimeoutStopSec=1 --property=KillMode=control-group /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 OMP_THREAD_LIMIT=1 ORT_DISABLE_TELEMETRY=1 /opt/ocr-python/bin/python -I -B /opt/ocr-smoke/offline_runtime_smoke.py | tee "$RUNNER_TEMP/ocr-private-runtime-smoke.json"
 
       - name: Build and verify formal immutable runtime archive
         env:

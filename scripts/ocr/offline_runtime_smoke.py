@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -70,6 +71,11 @@ def main():
                       'stderr': (error.stderr or b'').decode(errors='replace')[-8192:]}
         probes.append(record)
         print(json.dumps({'private_runtime_import_probe': record}), file=sys.stderr, flush=True)
+    # Source-level telemetry disable must be proven inside the unit: onnxruntime's
+    # embedded telemetry SDK initializes at import time, so disabling after import
+    # is too late and WorkingDirectory=/tmp only hides the artifact it would write.
+    assert os.environ.get('ORT_DISABLE_TELEMETRY') == '1', \
+        'OCR unit environment lost ORT_DISABLE_TELEMETRY'
     try:
         result = subprocess.run([sys.executable, '-I', '-B', '-X', 'faulthandler', str(source), '1000', str(64 * 1024 * 1024),
         str(4 * 1024 * 1024), json.dumps(config), json.dumps(identity)], input=raw,
@@ -85,6 +91,20 @@ def main():
             'filesystem_presence': {path: Path(path).exists() for path in
                 ('/proc/self/maps', '/sys/devices/system/cpu', '/etc/passwd', '/etc/group', '/etc/ld.so.cache')}}), flush=True)
         raise SystemExit(1)
+    # Every onnxruntime-loading child (classifier, probes, the worker's visual
+    # model child) ran with cwd=/tmp. The scratch tmpfs only makes artifacts
+    # disappear at unit teardown; asserting inside the unit proves the telemetry
+    # SDK never produced them in the first place.
+    leaked = sorted(p.name for p in Path('/tmp').iterdir()
+                    if p.name.endswith('.ses') or p.name.startswith('mat-debug'))
+    assert not leaked, 'onnxruntime telemetry artifacts under unit /tmp: %s' % leaked
+    telemetry_markers = ('Failed to persist telemetry device ID',
+                         'blkid: not found', 'hostname: not found')
+    child_stderr = [classifier.stderr.decode(errors='replace'),
+                    result.stderr.decode(errors='replace'),
+                    *(record.get('stderr', '') for record in probes)]
+    assert not any(marker in stderr for marker in telemetry_markers for stderr in child_stderr), \
+        'onnxruntime telemetry failure noise in child stderr'
     payload = json.loads(result.stdout)
     paragraphs = [block['text'] for section in payload['sections'] for block in section['blocks']
                   if block['kind'] == 'paragraph']

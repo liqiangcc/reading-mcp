@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, Location, Section, SectionId};
 
+use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 #[derive(Default)]
@@ -30,9 +31,8 @@ struct SectionNode {
     path: Vec<String>,
 }
 
-#[async_trait]
-impl Parser for MarkdownParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+impl MarkdownParser {
+    fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let text = String::from_utf8(resource.bytes.clone()).map_err(|error| {
             ApplicationError::ParseFailed(format!("invalid UTF-8 markdown: {error}"))
         })?;
@@ -75,6 +75,13 @@ impl Parser for MarkdownParser {
             metadata: resource.metadata,
             root_sections,
         })
+    }
+}
+
+#[async_trait]
+impl Parser for MarkdownParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        run_blocking(move || MarkdownParser.parse_sync(resource)).await
     }
 }
 

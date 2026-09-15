@@ -152,7 +152,11 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 | `READING_MCP_SOURCE_VIEW_TIMEOUT_SECS` | 10 | 单页渲染超时 |
 | `READING_MCP_PARSE_TIMEOUT_SECS` | 30 | Parser cooperative timeout |
 
-说明：Parser timeout 是 Tokio cooperative timeout。对于长时间不 yield 的同步 CPU 操作，它不是 OS 级硬抢占。因此 PDF 页数、ZIP 解压大小等前置限制仍然是资源安全的主要证据。
+说明：Parser 隔离分三层，职责互不替代：
+
+1. **Async worker 隔离**：in-process 同步 parser（Markdown/Text/HTML/OpenAPI/EPUB/DOCX/内置 lopdf PDF）的 CPU 与 ZIP/HTML 工作通过 `spawn_blocking` 卸载到 Tokio blocking pool，不再占用 async runtime worker；worker 在解析期间仍可调度其它任务。
+2. **Bounded in-process blocking work**：Parser timeout 仍是 Tokio cooperative timeout——它只停止等待，已开始的 blocking 线程不可被杀、会运行到有界完成。因此 PDF 页数、ZIP entry/解压大小、document/section 预算等前置 `ResourceBudget`/`ArchiveLimits` 仍是限制实际工作量的主要证据。
+3. **进程级隔离**：PDF layout worker 与 OCR 走独立子进程/systemd sandbox（可被 deadline 终止），与上述 in-process blocking 边界是不同层级。
 
 ## MCP Response Budget
 

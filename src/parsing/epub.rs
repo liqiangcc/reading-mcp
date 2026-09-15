@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use roxmltree::Document as XmlDocument;
@@ -13,6 +12,7 @@ use crate::domain::{
 
 use super::HtmlParser;
 use super::archive::{ArchiveLimits, read_entry, utf8_entry, validate_archive_entries};
+use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, title_from_metadata};
 use super::epub_navigation::{
     EPUB_NAVIGATION_MAP_VERSION, FragmentCache, build_navigation_map,
@@ -25,23 +25,21 @@ use super::epub_structure::{
 };
 use super::epub_validator::attach_epub_validation_report;
 
+#[derive(Clone)]
 pub struct EpubParser {
     limits: ArchiveLimits,
-    html: Arc<dyn Parser>,
+    html: HtmlParser,
 }
 
 impl EpubParser {
     pub fn new(limits: ArchiveLimits) -> Self {
         Self {
             limits,
-            html: Arc::new(HtmlParser),
+            html: HtmlParser,
         }
     }
-}
 
-#[async_trait]
-impl Parser for EpubParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+    fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let mut archive =
@@ -151,18 +149,15 @@ impl Parser for EpubParser {
                 &manifest_item.media_type,
                 &xhtml,
             );
-            let parsed = self
-                .html
-                .parse(RetrievedResource {
-                    source: DocumentSource(format!("epub:{entry_path}")),
-                    final_source: DocumentSource(format!("epub:{entry_path}")),
-                    media_type: MediaType("text/html".into()),
-                    bytes: xhtml,
-                    etag: None,
-                    last_modified: None,
-                    metadata: BTreeMap::new(),
-                })
-                .await?;
+            let parsed = self.html.parse_sync(RetrievedResource {
+                source: DocumentSource(format!("epub:{entry_path}")),
+                final_source: DocumentSource(format!("epub:{entry_path}")),
+                media_type: MediaType("text/html".into()),
+                bytes: xhtml,
+                etag: None,
+                last_modified: None,
+                metadata: BTreeMap::new(),
+            })?;
             let parsed_blocks = parsed
                 .normalized_block_map()
                 .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?
@@ -312,6 +307,14 @@ impl Parser for EpubParser {
             )));
         }
         Ok(document)
+    }
+}
+
+#[async_trait]
+impl Parser for EpubParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let parser = self.clone();
+        run_blocking(move || parser.parse_sync(resource)).await
     }
 }
 

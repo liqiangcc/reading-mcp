@@ -5,7 +5,9 @@ use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::Document;
 
 use super::PdfParser;
+use super::blocking::run_blocking;
 
+#[derive(Clone)]
 pub struct LimitedPdfParser {
     max_pages: usize,
 }
@@ -14,11 +16,8 @@ impl LimitedPdfParser {
     pub fn new(max_pages: usize) -> Self {
         Self { max_pages }
     }
-}
 
-#[async_trait]
-impl Parser for LimitedPdfParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+    fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let pdf = LopdfDocument::load_mem(&resource.bytes).map_err(|error| {
             ApplicationError::ParseFailed(format!("invalid PDF document: {error}"))
         })?;
@@ -29,6 +28,14 @@ impl Parser for LimitedPdfParser {
                 self.max_pages
             )));
         }
-        PdfParser.parse(resource).await
+        PdfParser.parse_sync(resource)
+    }
+}
+
+#[async_trait]
+impl Parser for LimitedPdfParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let parser = self.clone();
+        run_blocking(move || parser.parse_sync(resource)).await
     }
 }

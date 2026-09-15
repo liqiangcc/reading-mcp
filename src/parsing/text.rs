@@ -3,14 +3,14 @@ use async_trait::async_trait;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, Location, Section, SectionId};
 
+use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, title_from_metadata};
 
 #[derive(Default)]
 pub struct TextParser;
 
-#[async_trait]
-impl Parser for TextParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+impl TextParser {
+    fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let text = String::from_utf8(resource.bytes.clone()).map_err(|error| {
             ApplicationError::ParseFailed(format!("invalid UTF-8 text: {error}"))
         })?;
@@ -42,5 +42,12 @@ impl Parser for TextParser {
                 children: vec![],
             }],
         })
+    }
+}
+
+#[async_trait]
+impl Parser for TextParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        run_blocking(move || TextParser.parse_sync(resource)).await
     }
 }

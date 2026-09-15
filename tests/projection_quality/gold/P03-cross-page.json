@@ -1,0 +1,50 @@
+{
+  "case": "P03-cross-page",
+  "format": "pdf",
+  "required_degradation_codes": ["pdf_layout_inferred", "pdf_local_ocr_not_applied"],
+  "paragraphs": [
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The survey opens before dawn. Field notes begin with a short summary.",
+      "sentences": [
+        "The survey opens before dawn.",
+        "Field notes begin with a short summary."
+      ]
+    },
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The first page ends mid discussion.",
+      "sentences": [
+        "The first page ends mid discussion."
+      ]
+    },
+    {
+      "section": "Document",
+      "page": 2,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The second page continues the same analysis. Readers follow the thread across the page break.",
+      "sentences": [
+        "The second page continues the same analysis.",
+        "Readers follow the thread across the page break."
+      ]
+    },
+    {
+      "section": "Document",
+      "page": 2,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "A closing note confirms the record. The final entry remains bound to page two.",
+      "sentences": [
+        "A closing note confirms the record.",
+        "The final entry remains bound to page two."
+      ]
+    }
+  ]
+}

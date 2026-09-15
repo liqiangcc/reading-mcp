@@ -1,0 +1,40 @@
+{
+  "case": "P01-single-column",
+  "format": "pdf",
+  "required_degradation_codes": ["pdf_layout_inferred", "pdf_local_ocr_not_applied"],
+  "paragraphs": [
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The archive preserves every measurement. Each record keeps its original page.",
+      "sentences": [
+        "The archive preserves every measurement.",
+        "Each record keeps its original page."
+      ]
+    },
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "Researchers review the ledger each morning. A clear label binds each entry to its source.",
+      "sentences": [
+        "Researchers review the ledger each morning.",
+        "A clear label binds each entry to its source."
+      ]
+    },
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The catalog stays open for review. Every correction requires a second signature.",
+      "sentences": [
+        "The catalog stays open for review.",
+        "Every correction requires a second signature."
+      ]
+    }
+  ]
+}

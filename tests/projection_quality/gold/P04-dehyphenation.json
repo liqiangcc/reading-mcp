@@ -1,0 +1,19 @@
+{
+  "case": "P04-dehyphenation",
+  "format": "pdf",
+  "required_degradation_codes": ["pdf_layout_inferred", "pdf_local_ocr_not_applied"],
+  "paragraphs": [
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The research pipeline keeps every stage bound to its source page. Reviewers replay the pipeline whenever a measurement changes. Every replay keeps the original ordering of the record.",
+      "sentences": [
+        "The research pipeline keeps every stage bound to its source page.",
+        "Reviewers replay the pipeline whenever a measurement changes.",
+        "Every replay keeps the original ordering of the record."
+      ]
+    }
+  ]
+}

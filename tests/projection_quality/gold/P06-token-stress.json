@@ -1,0 +1,20 @@
+{
+  "case": "P06-token-stress",
+  "format": "pdf",
+  "required_degradation_codes": ["pdf_layout_inferred", "pdf_local_ocr_not_applied"],
+  "paragraphs": [
+    {
+      "section": "Document",
+      "page": 1,
+      "eligible": true,
+      "content_class": "native_paragraph",
+      "text": "The ratio stayed at 3.14 through the Fig. 2 review. The build kept tag v1.2.3 stable. Prior work [12] reached the same result. The team used e.g. careful sampling.",
+      "sentences": [
+        "The ratio stayed at 3.14 through the Fig. 2 review.",
+        "The build kept tag v1.2.3 stable.",
+        "Prior work [12] reached the same result.",
+        "The team used e.g. careful sampling."
+      ]
+    }
+  ]
+}

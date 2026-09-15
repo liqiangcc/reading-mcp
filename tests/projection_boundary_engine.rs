@@ -14,13 +14,15 @@ use reading_mcp::application::ports::{
 };
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};
 use reading_mcp::domain::{
-    Document, DocumentSource, MediaType, SentenceEligibility, TextLocator,
+    Document, DocumentSource, MediaType, NormalizedTextRange, ParagraphTextUnitSet,
+    SentenceEligibility, SentenceTextUnitSet, TextLocator, TextUnitId,
 };
 use reading_mcp::infrastructure::{ResourceBudget, SqliteDocumentRepository};
 use reading_mcp::parsing::{
     ArchiveLimits, EpubParser, LayoutPdfParser, PersistedDocumentReliabilityInspector,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc};
 
 const PDF_CASES: &[&str] = &[
@@ -37,7 +39,9 @@ const EPUB_CASES: &[&str] = &["P09-epub-control"];
 const DETERMINISM_RUNS: usize = 3;
 
 fn resource(case: &str, media: MediaType, bytes: Vec<u8>) -> RetrievedResource {
-    let source = DocumentSource(format!("https://fixtures.invalid/projection-quality/{case}"));
+    let source = DocumentSource(format!(
+        "https://fixtures.invalid/projection-quality/{case}"
+    ));
     RetrievedResource {
         source: source.clone(),
         final_source: source,
@@ -47,6 +51,27 @@ fn resource(case: &str, media: MediaType, bytes: Vec<u8>) -> RetrievedResource {
         last_modified: None,
         metadata: Default::default(),
     }
+}
+
+/// Deterministic fingerprint over canonical paragraph/sentence unit facts
+/// (identity, normalized ranges, text). `TextUnit`/`SentenceTextUnit` are not
+/// `Serialize`; this digest gives the scorer cross-run unit equality evidence
+/// without reimplementing any projection logic.
+fn units_fingerprint(paragraphs: &ParagraphTextUnitSet, sentences: &SentenceTextUnitSet) -> String {
+    let mut hasher = Sha256::new();
+    let mut feed = |id: &TextUnitId, range: NormalizedTextRange, text: &str| {
+        hasher.update(id.as_ref().as_bytes());
+        hasher.update(u64::try_from(range.start()).unwrap().to_be_bytes());
+        hasher.update(u64::try_from(range.end()).unwrap().to_be_bytes());
+        hasher.update(text.as_bytes());
+    };
+    for unit in &paragraphs.units {
+        feed(&unit.id, unit.normalized_range, &unit.text);
+    }
+    for unit in &sentences.units {
+        feed(&unit.id, unit.normalized_range, &unit.text);
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 async fn units_report(
@@ -88,20 +113,13 @@ async fn units_report(
                 .iter()
                 .find(|c| c.paragraph_id == paragraph.id)
                 .unwrap();
-            let page = paragraph
-                .normalized_range
-                .start()
-                .le(&paragraph.normalized_range.end())
-                .then(|| {
-                    restored
-                        .original_source_target_for_range(
-                            &paragraph.owner_section_id,
-                            paragraph.normalized_range,
-                        )
-                        .unwrap()
-                })
-                .flatten()
-                .map(|target| format!("{target:?}"));
+            let page = restored
+                .original_source_target_for_range(
+                    &paragraph.owner_section_id,
+                    paragraph.normalized_range,
+                )
+                .unwrap()
+                .map(|target| serde_json::to_value(target).unwrap());
             let boundaries: Vec<_> = sentences
                 .units
                 .iter()
@@ -162,6 +180,7 @@ async fn units_report(
             "source_order": paragraph.source_order,
             "eligible": coverage.eligibility == SentenceEligibility::Eligible,
             "content_class": coverage.content_class.as_str(),
+            "exact_read": total == equal,
             "page": page,
             "sentences": boundaries,
         }));
@@ -183,40 +202,44 @@ async fn export_projection_quality_canonical_report() {
         .expect("pinned layout python")
         .into();
     let mut report = serde_json::Map::new();
-    let mut failed = false;
     for case in PDF_CASES {
         // Production-equivalent assembly with OCR disabled: LayoutPdfParser
         // without any OCR config/identity is exactly the release native path.
         let parser = LayoutPdfParser::new(python.clone(), ResourceBudget::default());
-        let bytes =
-            std::fs::read(format!("tests/projection_quality/pdf/{case}.pdf")).unwrap();
+        let bytes = std::fs::read(format!("tests/projection_quality/pdf/{case}.pdf")).unwrap();
         let source = format!("https://fixtures.invalid/projection-quality/{case}.pdf");
         let mut normalized_hashes = Vec::new();
-        let mut units_json = Vec::new();
+        let mut unit_fingerprints = Vec::new();
         let mut parsed_document = None;
         for _ in 0..DETERMINISM_RUNS {
             let document = parser
-                .parse(resource(case, MediaType("application/pdf".into()), bytes.clone()))
+                .parse(resource(
+                    case,
+                    MediaType("application/pdf".into()),
+                    bytes.clone(),
+                ))
                 .await
                 .unwrap_or_else(|error| panic!("{case}: canonical parse failed: {error:?}"));
             normalized_hashes.push(document.normalized_document_hash().0.clone());
-            units_json.push(
-                serde_json::to_string(&document.try_paragraph_text_units().unwrap().units)
-                    .unwrap()
-                    + &serde_json::to_string(
-                        &document.try_sentence_text_units().unwrap().units,
-                    )
-                    .unwrap(),
-            );
+            unit_fingerprints.push(units_fingerprint(
+                &document.try_paragraph_text_units().unwrap(),
+                &document.try_sentence_text_units().unwrap(),
+            ));
             parsed_document = Some(document);
         }
         assert_eq!(
-            normalized_hashes.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            normalized_hashes
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             1,
             "{case}: three canonical parses disagree on normalized hash"
         );
         assert_eq!(
-            units_json.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            unit_fingerprints
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             1,
             "{case}: three canonical parses disagree on unit/range facts"
         );
@@ -224,6 +247,7 @@ async fn export_projection_quality_canonical_report() {
         let mut entry = units_report(case, &document, directory.path()).await;
         entry["document_source"] = json!(source);
         entry["normalized_hashes"] = json!(normalized_hashes);
+        entry["unit_fingerprints"] = json!(unit_fingerprints);
         // The #91 gate must observe the non-OCR path explicitly.
         let codes: Vec<_> = entry["degradation_codes"]
             .as_array()
@@ -239,11 +263,10 @@ async fn export_projection_quality_canonical_report() {
     }
     for case in EPUB_CASES {
         let parser = EpubParser::new(ArchiveLimits::default());
-        let bytes =
-            std::fs::read(format!("tests/projection_quality/epub/{case}.epub")).unwrap();
+        let bytes = std::fs::read(format!("tests/projection_quality/epub/{case}.epub")).unwrap();
         let source = format!("https://fixtures.invalid/projection-quality/{case}.epub");
         let mut normalized_hashes = Vec::new();
-        let mut units_json = Vec::new();
+        let mut unit_fingerprints = Vec::new();
         let mut parsed_document = None;
         for _ in 0..DETERMINISM_RUNS {
             let document = parser
@@ -255,23 +278,25 @@ async fn export_projection_quality_canonical_report() {
                 .await
                 .unwrap_or_else(|error| panic!("{case}: epub parse failed: {error:?}"));
             normalized_hashes.push(document.normalized_document_hash().0.clone());
-            units_json.push(
-                serde_json::to_string(&document.try_paragraph_text_units().unwrap().units)
-                    .unwrap()
-                    + &serde_json::to_string(
-                        &document.try_sentence_text_units().unwrap().units,
-                    )
-                    .unwrap(),
-            );
+            unit_fingerprints.push(units_fingerprint(
+                &document.try_paragraph_text_units().unwrap(),
+                &document.try_sentence_text_units().unwrap(),
+            ));
             parsed_document = Some(document);
         }
         assert_eq!(
-            normalized_hashes.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            normalized_hashes
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             1,
             "{case}: epub parses disagree"
         );
         assert_eq!(
-            units_json.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            unit_fingerprints
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             1,
             "{case}: epub unit facts disagree"
         );
@@ -279,11 +304,11 @@ async fn export_projection_quality_canonical_report() {
         let mut entry = units_report(case, &document, directory.path()).await;
         entry["document_source"] = json!(source);
         entry["normalized_hashes"] = json!(normalized_hashes);
+        entry["unit_fingerprints"] = json!(unit_fingerprints);
         report.insert(case.to_string(), entry);
     }
     let output = PathBuf::from(
-        std::env::var("READING_MCP_PROJECTION_REPORT")
-            .expect("READING_MCP_PROJECTION_REPORT"),
+        std::env::var("READING_MCP_PROJECTION_REPORT").expect("READING_MCP_PROJECTION_REPORT"),
     );
     std::fs::create_dir_all(output.parent().unwrap()).unwrap();
     let encoded = serde_json::to_string_pretty(&json!({
@@ -293,5 +318,4 @@ async fn export_projection_quality_canonical_report() {
     .unwrap();
     std::fs::write(&output, &encoded).unwrap();
     println!("{encoded}");
-    assert!(!failed, "projection export failed");
 }

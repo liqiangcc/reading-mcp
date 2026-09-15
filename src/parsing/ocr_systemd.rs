@@ -768,7 +768,7 @@ assert int((group / 'memory.max').read_text()) == 1536 * 1024 * 1024
 assert int((group / 'pids.max').read_text()) == 64
 assert sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo']
 assert os.statvfs('/tmp').f_blocks * os.statvfs('/tmp').f_frsize == 512 * 1024 * 1024
-assert set(os.environ) <= {'PATH', 'LANG', 'OMP_THREAD_LIMIT', 'LC_CTYPE', 'PYTHONDONTWRITEBYTECODE'}
+assert set(os.environ) <= {'PATH', 'LANG', 'OMP_THREAD_LIMIT', 'LC_CTYPE', 'PYTHONDONTWRITEBYTECODE', 'ORT_DISABLE_TELEMETRY'}
 parent = os.getpid()
 pid = os.fork()
 if pid == 0:

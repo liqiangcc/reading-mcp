@@ -4,11 +4,16 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-pub(crate) const OCR_PROCESS_ENV: [(&str, &str); 4] = [
+pub(crate) const OCR_PROCESS_ENV: [(&str, &str); 5] = [
     ("PATH", "/usr/bin:/bin"),
     ("LANG", "C.UTF-8"),
     ("OMP_THREAD_LIMIT", "1"),
     ("PYTHONDONTWRITEBYTECODE", "1"),
+    // onnxruntime initializes its embedded telemetry SDK at import time, before
+    // any Python call could disable it. The variable must already be present in
+    // the controlled environment; the unit's scratch /tmp only hides the
+    // artifact, it does not prevent the write attempt or helper spawns.
+    ("ORT_DISABLE_TELEMETRY", "1"),
 ];
 
 // `-I` ignores every PYTHON* variable, including PYTHONDONTWRITEBYTECODE, so
@@ -95,6 +100,15 @@ fn hash_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_env_allowlist_disables_onnxruntime_telemetry() {
+        assert!(OCR_PROCESS_ENV.contains(&("ORT_DISABLE_TELEMETRY", "1")));
+        let mut keys = std::collections::BTreeSet::new();
+        for (key, _) in OCR_PROCESS_ENV {
+            assert!(keys.insert(key), "duplicate OCR env key: {key}");
+        }
+    }
 
     #[test]
     fn dependency_hash_streams_all_bytes_and_tracks_changes() {

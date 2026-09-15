@@ -35,7 +35,7 @@ jobs:
         env:
           PROBE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
-          sudo systemd-run --quiet --wait --pipe --collect --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=PrivateNetwork=yes --property=RuntimeMaxSec=600 --property="WorkingDirectory=$GITHUB_WORKSPACE" --setenv=OMP_NUM_THREADS=1 --setenv=OMP_THREAD_LIMIT=1 --setenv=OPENBLAS_NUM_THREADS=1 --setenv=MKL_NUM_THREADS=1 "$PROBE_PYTHON" scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --joint-pipeline --sequential-model --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
+          sudo systemd-run --quiet --wait --pipe --collect --property=MemoryMax=768M --property=MemorySwapMax=0 --property=TasksMax=64 --property=PrivateNetwork=yes --property=RuntimeMaxSec=600 --property="WorkingDirectory=$GITHUB_WORKSPACE" --setenv=OMP_NUM_THREADS=1 --setenv=OMP_THREAD_LIMIT=1 --setenv=OPENBLAS_NUM_THREADS=1 --setenv=MKL_NUM_THREADS=1 --setenv=ORT_DISABLE_TELEMETRY=1 "$PROBE_PYTHON" scripts/ocr/layout_model_probe.py --candidate PP-DocLayout_plus-L_onnx --joint-pipeline --sequential-model --model "$RUNNER_TEMP/layout-model" --output "$RUNNER_TEMP/layout-model-probe"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -21,7 +21,7 @@ import selectors
 import signal
 
 OCR_PROCESS_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1",
-                   "PYTHONDONTWRITEBYTECODE": "1"}
+                   "PYTHONDONTWRITEBYTECODE": "1", "ORT_DISABLE_TELEMETRY": "1"}
 import math
 
 VERSION = "pdf-layout/v1"

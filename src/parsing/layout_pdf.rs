@@ -1235,6 +1235,9 @@ mod tests {
             .map(|(key, value)| format!("{key}={value}"))
             .collect();
         assert_eq!(actual, expected);
+        // The embedded worker keeps its own subprocess allowlist. The telemetry
+        // variable must reach it too because onnxruntime reads it at import time.
+        assert!(WORKER.contains(r#""ORT_DISABLE_TELEMETRY": "1""#));
     }
 
     #[test]

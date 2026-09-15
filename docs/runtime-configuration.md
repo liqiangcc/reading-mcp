@@ -57,6 +57,15 @@ worker 重验同一清单摘要与实际 engine/model/ldd dependencies；发布�
 版本不可变，更新通过新目录与重启，不允许原地热修改。清单不是签名，真实性仍由
 正式 Package/Deployment 的受审归档 hash 验证保证，不能跳过安装验证。
 
+所有受控 OCR/layout 子进程使用显式 env allowlist
+（PATH/LANG/OMP_THREAD_LIMIT/PYTHONDONTWRITEBYTECODE/ORT_DISABLE_TELEMETRY），
+不透传父进程环境。`ORT_DISABLE_TELEMETRY=1` 在 onnxruntime import 之前生效，
+从源头关闭其内嵌 telemetry SDK；read-only rootfs、`WorkingDirectory=/tmp` 和
+inventory gate 只是遏制与检测层，不能等同于源头禁用。env allowlist 不进入
+`OcrRuntimeIdentity` fingerprint（identity 由 config、retry policy、inspection
+policy、dependency sha256 与可选 package identity 决定），因此该变量变更不要求
+reopen，也不需要 operator_revision 迁移。
+
 `READING_MCP_PDF_LAYOUT_PYTHON` 继续用于可信启动核验和独立 source-view renderer，
 必须保留已有固定依赖；不把它改成只在 chroot 内存在的路径。OCR 关闭不读取私有包
 或 Tesseract 文件。`force_refresh` 仍仅保持既有源刷新语义，主动重新派生使用

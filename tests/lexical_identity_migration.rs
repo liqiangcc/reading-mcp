@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 
 #[tokio::test]
-async fn lexical_v2_state_is_invalidated_and_rebuilt_under_v3_identity() {
+async fn lexical_v2_state_is_invalidated_and_rebuilt_under_v4_identity() {
     let directory = tempfile::tempdir().expect("temp directory");
     let database = directory.path().join("lexical-migration.sqlite");
     seed_v2_lexical_state(&database);
@@ -24,11 +24,11 @@ async fn lexical_v2_state_is_invalidated_and_rebuilt_under_v3_identity() {
         index
             .index(&document)
             .await
-            .expect("rebuild v3 lexical state");
+            .expect("rebuild v4 lexical state");
         let hits = index
             .search_lexical(&document.id, "current", 10)
             .await
-            .expect("search rebuilt v3 state");
+            .expect("search rebuilt v4 state");
         assert!(!hits.is_empty());
     }
 
@@ -47,7 +47,7 @@ async fn lexical_v2_state_is_invalidated_and_rebuilt_under_v3_identity() {
             |row| row.get(0),
         )
         .expect("tokenizer version metadata");
-    assert_eq!(index_version, "lexical-search-index/v3");
+    assert_eq!(index_version, "lexical-search-index/v4");
     assert_eq!(tokenizer_version, "lexical-tokenizer/v1");
 }
 

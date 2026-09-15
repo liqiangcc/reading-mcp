@@ -9,7 +9,10 @@ use crate::application::ports::{
 };
 use crate::domain::{Document, DocumentId};
 
-use super::lexical::{LexicalCandidate, build_lexical_candidates, score_candidate};
+use super::lexical::{
+    LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates, match_snippet,
+    relaxed_score_candidate, score_candidate, tokenize,
+};
 
 #[derive(Default)]
 pub struct InMemorySearchIndex {
@@ -79,20 +82,37 @@ impl SearchIndex for InMemorySearchIndex {
             .get(document_id)
             .ok_or(ApplicationError::DocumentNotFound)?;
 
+        let query_tokens = tokenize(query);
         let mut scored = candidates
             .iter()
             .filter_map(|candidate| {
-                score_candidate(candidate, query).map(|score| LexicalSearchHit {
-                    section_id: candidate.section_id.clone(),
-                    title: candidate.title.clone(),
-                    source: candidate.source.clone(),
-                    snippet: candidate.snippet.clone(),
-                    score,
-                    location: candidate.location.clone(),
-                    candidate_kind: candidate.candidate_kind,
-                    text_locator: candidate.text_locator.clone(),
-                    tokenizer_version: LEXICAL_TOKENIZER_VERSION.into(),
+                score_candidate(candidate, query).map(|score| (candidate, score))
+            })
+            .collect::<Vec<_>>();
+        // Strict all-token match is authoritative. Only when it yields nothing
+        // on a multi-token query do we fall back to a deterministic any-token
+        // (OR) ranking; single-token queries are never relaxed.
+        if scored.is_empty() && query_tokens.len() > 1 {
+            scored = candidates
+                .iter()
+                .filter_map(|candidate| {
+                    relaxed_score_candidate(candidate, &query_tokens, query)
+                        .map(|score| (candidate, score))
                 })
+                .collect::<Vec<_>>();
+        }
+        let mut scored = scored
+            .into_iter()
+            .map(|(candidate, score)| LexicalSearchHit {
+                section_id: candidate.section_id.clone(),
+                title: candidate.title.clone(),
+                source: candidate.source.clone(),
+                snippet: match_snippet(&candidate.searchable_text, query, MAX_SNIPPET_CHARS),
+                score,
+                location: candidate.location.clone(),
+                candidate_kind: candidate.candidate_kind,
+                text_locator: candidate.text_locator.clone(),
+                tokenizer_version: LEXICAL_TOKENIZER_VERSION.into(),
             })
             .collect::<Vec<_>>();
 

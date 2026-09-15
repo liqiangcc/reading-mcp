@@ -15,7 +15,8 @@ use crate::domain::{
 };
 
 use super::lexical::{
-    LEXICAL_SEARCH_INDEX_VERSION, build_lexical_candidates, encoded_lexemes, encoded_query,
+    LEXICAL_SEARCH_INDEX_VERSION, MAX_SNIPPET_CHARS, build_lexical_candidates, encoded_lexemes,
+    encoded_query, encoded_relaxed_query, match_snippet, tokenize,
 };
 
 const META_INDEX_VERSION: &str = "lexical_search_index_version";
@@ -86,7 +87,7 @@ impl SearchIndex for SqliteSearchIndex {
                         section_id,
                         title,
                         source,
-                        snippet,
+                        searchable_text,
                         location_json,
                         locator_json,
                         tokenizer_version,
@@ -110,7 +111,7 @@ impl SearchIndex for SqliteSearchIndex {
                         &candidate.section_id.0,
                         &candidate.title,
                         &candidate.source.0,
-                        &candidate.snippet,
+                        &candidate.searchable_text,
                         location_json,
                         locator_json,
                         LEXICAL_TOKENIZER_VERSION,
@@ -201,79 +202,104 @@ impl SearchIndex for SqliteSearchIndex {
             return Err(ApplicationError::DocumentNotFound);
         }
 
-        let mut statement = connection
-            .prepare(
-                "SELECT
-                    candidate_kind,
-                    section_id,
-                    title,
-                    source,
-                    snippet,
-                    location_json,
-                    locator_json,
-                    tokenizer_version,
-                    bm25(lexical_search_units_v2)
-                 FROM lexical_search_units_v2
-                 WHERE lexical_search_units_v2 MATCH ?1 AND document_id = ?2
-                 ORDER BY bm25(lexical_search_units_v2) ASC, CAST(source_order AS INTEGER) ASC
-                 LIMIT ?3",
-            )
-            .map_err(index_error)?;
-        let rows = statement
-            .query_map(
-                params![fts_query, &document_id.0, usize_to_i64(limit)?],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, f64>(8)?,
-                    ))
-                },
-            )
-            .map_err(index_error)?;
+        let mut hits = fts_search(&connection, &fts_query, document_id, query, limit)?;
+        // Strict AND is authoritative; only a zero-hit multi-token query falls
+        // back to a deterministic OR pass. Single-token queries never relax.
+        if hits.is_empty() {
+            let query_tokens = tokenize(query);
+            if query_tokens.len() > 1 {
+                hits = fts_search(
+                    &connection,
+                    &encoded_relaxed_query(&query_tokens),
+                    document_id,
+                    query,
+                    limit,
+                )?;
+            }
+        }
+        Ok(hits)
+    }
+}
 
-        let mut hits = Vec::new();
-        for row in rows {
-            let (
+fn fts_search(
+    connection: &Connection,
+    fts_query: &str,
+    document_id: &DocumentId,
+    raw_query: &str,
+    limit: usize,
+) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT
                 candidate_kind,
                 section_id,
                 title,
                 source,
-                snippet,
+                searchable_text,
                 location_json,
                 locator_json,
                 tokenizer_version,
-                rank,
-            ) = row.map_err(index_error)?;
-            if tokenizer_version != LEXICAL_TOKENIZER_VERSION {
-                return Err(ApplicationError::IndexFailed(format!(
-                    "persisted tokenizer version {tokenizer_version} does not match {LEXICAL_TOKENIZER_VERSION}"
-                )));
-            }
-            hits.push(LexicalSearchHit {
-                section_id: SectionId(section_id),
-                title,
-                source: DocumentSource(source),
-                snippet,
-                score: (1.0 / (1.0 + rank.abs())) as f32,
-                location: serde_json::from_str::<StoredLocation>(&location_json)
-                    .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?
-                    .into(),
-                candidate_kind: parse_kind(&candidate_kind)?,
-                text_locator: serde_json::from_str::<StoredTextLocator>(&locator_json)
-                    .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?
-                    .try_into()?,
-                tokenizer_version,
-            });
+                bm25(lexical_search_units_v2)
+             FROM lexical_search_units_v2
+             WHERE lexical_search_units_v2 MATCH ?1 AND document_id = ?2
+             ORDER BY bm25(lexical_search_units_v2) ASC, CAST(source_order AS INTEGER) ASC
+             LIMIT ?3",
+        )
+        .map_err(index_error)?;
+    let rows = statement
+        .query_map(
+            params![fts_query, &document_id.0, usize_to_i64(limit)?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, f64>(8)?,
+                ))
+            },
+        )
+        .map_err(index_error)?;
+
+    let mut hits = Vec::new();
+    for row in rows {
+        let (
+            candidate_kind,
+            section_id,
+            title,
+            source,
+            searchable_text,
+            location_json,
+            locator_json,
+            tokenizer_version,
+            rank,
+        ) = row.map_err(index_error)?;
+        if tokenizer_version != LEXICAL_TOKENIZER_VERSION {
+            return Err(ApplicationError::IndexFailed(format!(
+                "persisted tokenizer version {tokenizer_version} does not match {LEXICAL_TOKENIZER_VERSION}"
+            )));
         }
-        Ok(hits)
+        hits.push(LexicalSearchHit {
+            section_id: SectionId(section_id),
+            title,
+            source: DocumentSource(source),
+            snippet: match_snippet(&searchable_text, raw_query, MAX_SNIPPET_CHARS),
+            score: (1.0 / (1.0 + rank.abs())) as f32,
+            location: serde_json::from_str::<StoredLocation>(&location_json)
+                .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?
+                .into(),
+            candidate_kind: parse_kind(&candidate_kind)?,
+            text_locator: serde_json::from_str::<StoredTextLocator>(&locator_json)
+                .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?
+                .try_into()?,
+            tokenizer_version,
+        });
     }
+    Ok(hits)
 }
 
 fn ensure_schema(connection: &Connection) -> Result<(), ApplicationError> {
@@ -299,7 +325,7 @@ fn ensure_schema(connection: &Connection) -> Result<(), ApplicationError> {
                 section_id UNINDEXED,
                 title UNINDEXED,
                 source UNINDEXED,
-                snippet UNINDEXED,
+                searchable_text UNINDEXED,
                 location_json UNINDEXED,
                 locator_json UNINDEXED,
                 tokenizer_version UNINDEXED,

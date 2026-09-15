@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use reading_mcp::application::ports::{DocumentRepository, LEXICAL_TOKENIZER_VERSION, SearchIndex};
 use reading_mcp::application::search_document::{
-    SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
+    LocatedSearchHit, SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
 };
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
@@ -184,6 +184,261 @@ async fn missing_derived_lexical_state_rebuilds_from_persisted_canonical_documen
             .iter()
             .any(|hit| hit.candidate_kind == SearchCandidateKind::Sentence)
     );
+}
+
+#[tokio::test]
+async fn strict_multi_token_hits_do_not_fall_back_to_relaxed() {
+    let document = relaxed_fixture();
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let index = Arc::new(InMemorySearchIndex::default());
+    repository.save(document.clone()).await.expect("save");
+    index.index(&document).await.expect("index");
+    let search = SearchDocumentUseCase::new(index, repository);
+
+    // "shared" also lives in section B; a relaxed pass would leak B into the
+    // results, so asserting A-only hits proves strict AND stayed authoritative.
+    let result = search
+        .execute(SearchDocumentCommand {
+            document_id: document.id,
+            query: "shared apple".into(),
+            limit: 10,
+        })
+        .await
+        .expect("strict search");
+
+    assert!(!result.hits.is_empty());
+    assert!(
+        result
+            .hits
+            .iter()
+            .all(|hit| hit.section_id.0 == "section://alpha"),
+        "relaxed fallback must not run when strict AND has hits"
+    );
+}
+
+#[tokio::test]
+async fn zero_hit_multi_token_query_falls_back_to_relaxed_or() {
+    let document = relaxed_fixture();
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let index = Arc::new(InMemorySearchIndex::default());
+    repository.save(document.clone()).await.expect("save");
+    index.index(&document).await.expect("index");
+    let search = SearchDocumentUseCase::new(index, repository);
+
+    // "quasar" appears nowhere, so strict AND cannot hit; the relaxed pass
+    // must surface only candidates that actually contain "apple".
+    let result = search
+        .execute(SearchDocumentCommand {
+            document_id: document.id.clone(),
+            query: "apple quasar".into(),
+            limit: 10,
+        })
+        .await
+        .expect("relaxed search");
+    assert!(!result.hits.is_empty());
+    assert!(
+        result
+            .hits
+            .iter()
+            .all(|hit| hit.section_id.0 == "section://alpha"),
+        "unrelated tokens must not pull in unrelated sections"
+    );
+
+    let again = search
+        .execute(SearchDocumentCommand {
+            document_id: document.id,
+            query: "apple quasar".into(),
+            limit: 10,
+        })
+        .await
+        .expect("relaxed search repeat");
+    let key = |hits: &[LocatedSearchHit]| {
+        hits.iter()
+            .map(|hit| {
+                (
+                    hit.section_id.0.clone(),
+                    hit.text_locator
+                        .normalized_range
+                        .map(|r| (r.start(), r.end())),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        key(&result.hits),
+        key(&again.hits),
+        "ordering must be deterministic"
+    );
+}
+
+#[tokio::test]
+async fn single_token_query_is_never_relaxed() {
+    let document = relaxed_fixture();
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let index = Arc::new(InMemorySearchIndex::default());
+    repository.save(document.clone()).await.expect("save");
+    index.index(&document).await.expect("index");
+
+    let result = SearchDocumentUseCase::new(index, repository)
+        .execute(SearchDocumentCommand {
+            document_id: document.id,
+            query: "quasar".into(),
+            limit: 10,
+        })
+        .await
+        .expect("single token search");
+    assert!(result.hits.is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_and_in_memory_relaxed_fallback_have_parity() {
+    let document = relaxed_fixture();
+    let directory = tempfile::tempdir().expect("temp directory");
+
+    let memory_repository = Arc::new(InMemoryDocumentRepository::default());
+    let memory_index = Arc::new(InMemorySearchIndex::default());
+    memory_repository
+        .save(document.clone())
+        .await
+        .expect("save");
+    memory_index.index(&document).await.expect("index");
+
+    let sqlite_repository =
+        Arc::new(SqliteDocumentRepository::open(directory.path().join("r.sqlite")).expect("repo"));
+    let sqlite_index =
+        Arc::new(SqliteSearchIndex::open(directory.path().join("r.sqlite")).expect("index"));
+    sqlite_repository
+        .save(document.clone())
+        .await
+        .expect("save");
+    sqlite_index.index(&document).await.expect("index");
+
+    let key = |hits: &[LocatedSearchHit]| {
+        let mut keys = hits
+            .iter()
+            .map(|hit| {
+                (
+                    hit.section_id.0.clone(),
+                    match hit.candidate_kind {
+                        SearchCandidateKind::Section => 0u8,
+                        SearchCandidateKind::Paragraph => 1,
+                        SearchCandidateKind::Sentence => 2,
+                    },
+                    hit.text_locator
+                        .normalized_range
+                        .map(|r| (r.start(), r.end())),
+                )
+            })
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
+    };
+
+    for query in ["shared apple", "apple quasar"] {
+        let memory = SearchDocumentUseCase::new(memory_index.clone(), memory_repository.clone())
+            .execute(SearchDocumentCommand {
+                document_id: document.id.clone(),
+                query: query.into(),
+                limit: 10,
+            })
+            .await
+            .expect("in-memory search");
+        let sqlite = SearchDocumentUseCase::new(sqlite_index.clone(), sqlite_repository.clone())
+            .execute(SearchDocumentCommand {
+                document_id: document.id.clone(),
+                query: query.into(),
+                limit: 10,
+            })
+            .await
+            .expect("sqlite search");
+        assert_eq!(
+            key(&memory.hits),
+            key(&sqlite.hits),
+            "backend parity for query {query:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn long_paragraph_snippet_is_centered_on_late_match() {
+    let mut document = fixture();
+    let tail = "zephyr";
+    let mut paragraph = "lead-in ".repeat(60);
+    paragraph.push_str("terminus ");
+    paragraph.push_str(tail);
+    paragraph.push('.');
+    document.root_sections[0].content = paragraph;
+
+    for index in [
+        Arc::new(InMemorySearchIndex::default()) as Arc<dyn SearchIndex>,
+        {
+            let directory = tempfile::tempdir().expect("temp directory");
+            let path = directory.keep().join("snippet.sqlite");
+            Arc::new(SqliteSearchIndex::open(path).expect("sqlite index")) as Arc<dyn SearchIndex>
+        },
+    ] {
+        index.index(&document).await.expect("index");
+        let repository = Arc::new(InMemoryDocumentRepository::default());
+        repository.save(document.clone()).await.expect("save");
+        let result = SearchDocumentUseCase::new(index, repository)
+            .execute(SearchDocumentCommand {
+                document_id: document.id.clone(),
+                query: tail.into(),
+                limit: 10,
+            })
+            .await
+            .expect("search");
+        let paragraph_hit = result
+            .hits
+            .iter()
+            .find(|hit| hit.candidate_kind == SearchCandidateKind::Paragraph)
+            .expect("paragraph hit");
+        assert!(
+            paragraph_hit.snippet.contains(tail),
+            "snippet must contain the late match: {:?}",
+            paragraph_hit.snippet
+        );
+        assert!(
+            paragraph_hit.snippet.starts_with('…'),
+            "clipped leading side must be marked: {:?}",
+            paragraph_hit.snippet
+        );
+        assert!(
+            paragraph_hit.snippet.chars().count() <= 320,
+            "snippet must stay bounded"
+        );
+    }
+}
+
+fn relaxed_fixture() -> Document {
+    Document {
+        id: DocumentId("doc:relaxed".into()),
+        source: DocumentSource("memory:relaxed".into()),
+        title: "Relaxed".into(),
+        media_type: MediaType("text/markdown".into()),
+        content_hash: ContentHash("sha256:relaxed".into()),
+        metadata: BTreeMap::new(),
+        root_sections: vec![
+            Section {
+                id: SectionId("section://alpha".into()),
+                parent_id: None,
+                title: "Alpha".into(),
+                level: 1,
+                content: "Alpha paragraph has shared anchor plus apple term.".into(),
+                location: Location::default(),
+                children: vec![],
+            },
+            Section {
+                id: SectionId("section://beta".into()),
+                parent_id: None,
+                title: "Beta".into(),
+                level: 1,
+                content: "Beta paragraph has shared anchor plus banana term.".into(),
+                location: Location::default(),
+                children: vec![],
+            },
+        ],
+    }
 }
 
 fn fixture() -> Document {

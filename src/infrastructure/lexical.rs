@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use crate::application::ports::{ApplicationError, SearchHitKind};
 use crate::domain::{Document, Location, Section, SentenceTextUnit, TextLocator, TextUnit};
 
-pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v3";
-const MAX_SNIPPET_CHARS: usize = 320;
+pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v4";
+pub(crate) const MAX_SNIPPET_CHARS: usize = 320;
 
 #[derive(Clone, Debug)]
 pub(crate) struct LexicalCandidate {
@@ -12,7 +12,6 @@ pub(crate) struct LexicalCandidate {
     pub(crate) section_id: crate::domain::SectionId,
     pub(crate) title: String,
     pub(crate) source: crate::domain::DocumentSource,
-    pub(crate) snippet: String,
     pub(crate) location: Location,
     pub(crate) text_locator: TextLocator,
     pub(crate) searchable_text: String,
@@ -63,7 +62,6 @@ fn collect_section_candidates(
         section,
         SearchHitKind::Section,
         section.title.clone(),
-        section.title.clone(),
         section.location.clone(),
         TextLocator::for_section(document, section),
         output,
@@ -78,7 +76,6 @@ fn collect_section_candidates(
             document,
             section,
             SearchHitKind::Paragraph,
-            paragraph.text.clone(),
             paragraph.text.clone(),
             text_unit_location(section, paragraph.paragraph_index, None),
             TextLocator::for_paragraph(document, section, paragraph),
@@ -95,7 +92,6 @@ fn collect_section_candidates(
             document,
             section,
             SearchHitKind::Sentence,
-            sentence.text.clone(),
             sentence.text.clone(),
             text_unit_location(
                 section,
@@ -139,7 +135,6 @@ fn push_candidate(
     section: &Section,
     candidate_kind: SearchHitKind,
     searchable_text: String,
-    snippet_source: String,
     location: Location,
     text_locator: TextLocator,
     output: &mut Vec<LexicalCandidate>,
@@ -154,7 +149,6 @@ fn push_candidate(
         section_id: section.id.clone(),
         title: section.title.clone(),
         source: document.source.clone(),
-        snippet: truncate(&snippet_source, MAX_SNIPPET_CHARS),
         location,
         text_locator,
         searchable_text,
@@ -256,13 +250,22 @@ pub(crate) fn encoded_query(value: &str) -> Option<String> {
     if tokens.is_empty() {
         return None;
     }
-    Some(
-        tokens
-            .iter()
-            .map(|token| format!("\"{}\"", encode_token(token)))
-            .collect::<Vec<_>>()
-            .join(" AND "),
-    )
+    Some(join_encoded(&tokens, " AND "))
+}
+
+/// Relaxed OR query used only after the strict AND query returned no rows.
+/// Callers must gate this on a multi-token query; single-token queries are
+/// never relaxed.
+pub(crate) fn encoded_relaxed_query(tokens: &[String]) -> String {
+    join_encoded(tokens, " OR ")
+}
+
+fn join_encoded(tokens: &[String], operator: &str) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("\"{}\"", encode_token(token)))
+        .collect::<Vec<_>>()
+        .join(operator)
 }
 
 fn encode_token(token: &str) -> String {
@@ -287,7 +290,29 @@ pub(crate) fn score_candidate(candidate: &LexicalCandidate, query: &str) -> Opti
     {
         return None;
     }
+    Some(scored(candidate, query_tokens.len(), query))
+}
 
+/// Relaxed counterpart of [`score_candidate`]: ranks candidates matching any
+/// query token by matched-token count. Used only when the strict all-token
+/// query produced zero hits on a multi-token query.
+pub(crate) fn relaxed_score_candidate(
+    candidate: &LexicalCandidate,
+    query_tokens: &[String],
+    query: &str,
+) -> Option<f32> {
+    let candidate_tokens = candidate.tokens.iter().collect::<HashSet<_>>();
+    let matched = query_tokens
+        .iter()
+        .filter(|token| candidate_tokens.contains(*token))
+        .count();
+    if matched == 0 {
+        return None;
+    }
+    Some(scored(candidate, matched, query))
+}
+
+fn scored(candidate: &LexicalCandidate, matched: usize, query: &str) -> f32 {
     let normalized_query = query.to_lowercase();
     let normalized_text = candidate.searchable_text.to_lowercase();
     let phrase_bonus = if normalized_text.contains(&normalized_query) {
@@ -300,16 +325,53 @@ pub(crate) fn score_candidate(candidate: &LexicalCandidate, query: &str) -> Opti
         SearchHitKind::Paragraph => 0.5,
         SearchHitKind::Section => 0.25,
     };
-    Some(phrase_bonus + query_tokens.len() as f32 + kind_bonus)
+    phrase_bonus + matched as f32 + kind_bonus
 }
 
-fn truncate(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+/// Bounded snippet centered on the earliest query-token match. Snippets are
+/// generated at query time (not index time) so the window follows the match;
+/// clipped sides get a single-char ellipsis and the result never exceeds
+/// `max_chars` Unicode scalars.
+pub(crate) fn match_snippet(text: &str, query: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.into();
+    }
+
+    let lowered = text.to_lowercase();
+    let anchor = tokenize(query)
+        .iter()
+        .filter_map(|token| lowered.find(token.as_str()))
+        .min()
+        .map(|byte| lowered[..byte].chars().count())
+        .unwrap_or(0);
+
+    // Center a full-size window on the anchor to learn which sides clip, then
+    // re-window within the reduced budget so one scalar per clipped side is
+    // reserved for the ellipsis marker.
+    let probe_start = anchor.saturating_sub(max_chars / 2);
+    let probe_end = (probe_start + max_chars).min(total);
+    let probe_start = probe_end.saturating_sub(max_chars);
+    let inner = max_chars - usize::from(probe_start > 0) - usize::from(probe_end < total);
+    let start = anchor.saturating_sub(inner / 2);
+    let end = (start + inner).min(total);
+    let start = end.saturating_sub(inner);
+
+    // Re-derive clipping from the final window: a side that clipped only after
+    // re-windowing must still fit its marker inside the budget.
+    let clipped_left = start > 0;
+    let clipped_right = end < total;
+    let take =
+        (end - start).min(max_chars - usize::from(clipped_left) - usize::from(clipped_right));
+    let body: String = text.chars().skip(start).take(take).collect();
+    let prefix = if clipped_left { "…" } else { "" };
+    let suffix = if clipped_right { "…" } else { "" };
+    format!("{prefix}{body}{suffix}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{encoded_query, tokenize};
+    use super::{MAX_SNIPPET_CHARS, encoded_query, match_snippet, tokenize};
 
     #[test]
     fn cjk_substrings_are_represented_by_unigrams_and_bigrams() {
@@ -337,5 +399,43 @@ mod tests {
         ] {
             assert!(tokens.iter().any(|token| token == expected), "{expected}");
         }
+    }
+
+    #[test]
+    fn match_snippet_centers_window_on_late_match() {
+        let text = format!("{}{}", "padding ".repeat(80), "needle term appears late");
+        assert!(text.chars().count() > MAX_SNIPPET_CHARS);
+        let snippet = match_snippet(&text, "needle", MAX_SNIPPET_CHARS);
+        assert!(snippet.contains("needle"));
+        assert!(snippet.starts_with('…'));
+        assert!(!snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= MAX_SNIPPET_CHARS);
+    }
+
+    #[test]
+    fn match_snippet_marks_both_sides_for_middle_match() {
+        let text = format!("{} needle {}", "left ".repeat(60), "right ".repeat(60));
+        assert!(text.chars().count() > MAX_SNIPPET_CHARS);
+        let snippet = match_snippet(&text, "needle", MAX_SNIPPET_CHARS);
+        assert!(snippet.contains("needle"));
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= MAX_SNIPPET_CHARS);
+    }
+
+    #[test]
+    fn match_snippet_returns_short_text_unchanged() {
+        let snippet = match_snippet("short needle text", "needle", MAX_SNIPPET_CHARS);
+        assert_eq!(snippet, "short needle text");
+    }
+
+    #[test]
+    fn match_snippet_respects_cjk_scalar_boundaries() {
+        let text = format!("{}物理帧命中{}", "字".repeat(400), "尾".repeat(200));
+        let snippet = match_snippet(&text, "物理帧", MAX_SNIPPET_CHARS);
+        assert!(snippet.contains("物理帧"));
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= MAX_SNIPPET_CHARS);
     }
 }

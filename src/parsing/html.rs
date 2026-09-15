@@ -10,9 +10,10 @@ use crate::domain::{
     NormalizedBlockProvenance, NormalizedTextRange, Section, SectionId,
 };
 
+use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct HtmlParser;
 
 #[derive(Clone, Debug)]
@@ -44,9 +45,11 @@ struct SectionNode {
     blocks: Vec<NormalizedBlock>,
 }
 
-#[async_trait]
-impl Parser for HtmlParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+impl HtmlParser {
+    pub(super) fn parse_sync(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<Document, ApplicationError> {
         let html = String::from_utf8(resource.bytes.clone()).map_err(|error| {
             ApplicationError::ParseFailed(format!("invalid UTF-8 HTML: {error}"))
         })?;
@@ -111,6 +114,13 @@ impl Parser for HtmlParser {
             .set_normalized_block_map(NormalizedBlockMap::new(blocks))
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
         Ok(normalized)
+    }
+}
+
+#[async_trait]
+impl Parser for HtmlParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        run_blocking(move || HtmlParser.parse_sync(resource)).await
     }
 }
 

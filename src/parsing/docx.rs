@@ -11,8 +11,10 @@ use crate::domain::{Document, Location, Section, SectionId};
 use super::archive::{
     ArchiveLimits, read_entry, read_optional_entry, utf8_entry, validate_archive_entries,
 };
+use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
+#[derive(Clone)]
 pub struct DocxParser {
     limits: ArchiveLimits,
 }
@@ -34,9 +36,8 @@ struct SectionNode {
     path: Vec<String>,
 }
 
-#[async_trait]
-impl Parser for DocxParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+impl DocxParser {
+    fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let mut archive =
@@ -214,6 +215,14 @@ impl Parser for DocxParser {
             metadata,
             root_sections,
         })
+    }
+}
+
+#[async_trait]
+impl Parser for DocxParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let parser = self.clone();
+        run_blocking(move || parser.parse_sync(resource)).await
     }
 }
 

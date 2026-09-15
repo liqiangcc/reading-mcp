@@ -9,6 +9,7 @@ use crate::domain::{
     OriginalSourceTarget, Section, SectionId,
 };
 
+use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
@@ -83,9 +84,11 @@ struct SectionNode {
     path: Vec<String>,
 }
 
-#[async_trait]
-impl Parser for PdfParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+impl PdfParser {
+    pub(super) fn parse_sync(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<Document, ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let pdf = LopdfDocument::load_mem(&resource.bytes).map_err(|error| {
@@ -186,6 +189,13 @@ impl Parser for PdfParser {
                 ))
             })?;
         Ok(document)
+    }
+}
+
+#[async_trait]
+impl Parser for PdfParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        run_blocking(move || PdfParser.parse_sync(resource)).await
     }
 }
 

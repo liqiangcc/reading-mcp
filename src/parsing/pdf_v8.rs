@@ -4,6 +4,7 @@ use lopdf::Document as LopdfDocument;
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, OriginalSourceBindingMap, Section};
 
+use super::blocking::run_blocking;
 use super::pdf_front_matter::{
     PDF_FRONT_MATTER_ABSTRACT_COUNT_METADATA_KEY, PDF_FRONT_MATTER_INFERENCE_VERSION,
     PDF_FRONT_MATTER_INFERENCE_VERSION_METADATA_KEY, split_reliable_abstract_from_preamble,
@@ -17,11 +18,13 @@ const PDF_FRONT_MATTER_INFERENCE_STATUS_METADATA_KEY: &str = "pdf_front_matter_i
 #[derive(Default)]
 pub struct PdfParser;
 
-#[async_trait]
-impl Parser for PdfParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+impl PdfParser {
+    pub(super) fn parse_sync(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<Document, ApplicationError> {
         let layout_resource = resource.clone();
-        let mut document = super::pdf::PdfParser.parse(resource).await?;
+        let mut document = super::pdf::PdfParser.parse_sync(resource)?;
 
         if document
             .metadata
@@ -109,6 +112,13 @@ impl Parser for PdfParser {
         );
 
         Ok(document)
+    }
+}
+
+#[async_trait]
+impl Parser for PdfParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        run_blocking(move || PdfParser.parse_sync(resource)).await
     }
 }
 

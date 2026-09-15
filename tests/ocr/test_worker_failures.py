@@ -65,6 +65,79 @@ class WorkerFailureTests(unittest.TestCase):
         self.assertTrue(worker.page_requires_ocr(
             {'boxes':[box('picture', 'Embedded text layer.'), box('page-footer', 'Page 1')]}))
 
+    def test_full_page_raster_with_substantial_hidden_layer_skips_ocr(self):
+        # An embedded invisible OCR layer that is both substantial and laid out
+        # as regular body lines spanning most of the page is authoritative:
+        # the dominant raster must not trigger a second engine pass.  Hidden
+        # OCR output commonly has no word separators, so the positive fixture
+        # is a two-column page of spaceless lines.
+        line_text = 'embeddedocrtextlayerwithoutwordseparatorsinthisline.'
+
+        def column(x0, x1):
+            return {'boxclass': 'text', 'x0': x0, 'y0': 60, 'x1': x1, 'y1': 740,
+                    'textlines': [
+                        {'bbox': [x0, 60 + i * 40, x1, 60 + i * 40 + 12],
+                         'spans': [{'text': line_text, 'size': 9.0}]}
+                        for i in range(17)]}
+
+        class Page:
+            rect = type('R', (), {'width': 600, 'height': 800})()
+
+            def __init__(self, hidden_chars, visible_chars=0):
+                self.hidden = hidden_chars
+                self.visible = visible_chars
+
+            def get_image_info(self):
+                return [{'bbox': [0, 0, 600, 800]}]
+
+            def get_texttrace(self):
+                traces = []
+                if self.hidden:
+                    traces.append({'type': 3, 'chars': [0] * self.hidden})
+                if self.visible:
+                    traces.append({'type': 0, 'chars': [0] * self.visible})
+                return traces
+
+        strong = {'boxes': [column(40, 280), column(320, 560),
+                            {'boxclass': 'page-footer', 'x0': 250, 'y0': 770,
+                             'x1': 350, 'y1': 780,
+                             'textlines': [{'bbox': [250, 770, 350, 780],
+                                            'spans': [{'text': '1', 'size': 8.0}]}]}]}
+        self.assertTrue(worker.has_authoritative_existing_ocr_layer(Page(3600), strong))
+        self.assertFalse(worker.page_requires_ocr(strong, Page(3600)))
+
+        # Sparse hidden labels: too few hidden characters and body lines.
+        sparse = {'boxes': [{'boxclass': 'text', 'x0': 40, 'y0': 60, 'x1': 200, 'y1': 80,
+                             'textlines': [{'bbox': [40, 60, 200, 80],
+                                            'spans': [{'text': 'Fig. 1', 'size': 9.0}]}]}]}
+        self.assertFalse(worker.has_authoritative_existing_ocr_layer(Page(60), sparse))
+        self.assertTrue(worker.page_requires_ocr(sparse, Page(60)))
+
+        # A dense block that is confined to a small vertical slice of the
+        # page (a long caption or a label cluster) is not a body layer even
+        # when it has many qualifying-width lines.
+        slab = {'boxes': [{'boxclass': 'text', 'x0': 40, 'y0': 300, 'x1': 560, 'y1': 360,
+                           'textlines': [{'bbox': [40, 300 + i * 3, 560, 300 + i * 3 + 2],
+                                          'spans': [{'text': line_text, 'size': 9.0}]}
+                                         for i in range(20)]}]}
+        self.assertFalse(worker.has_authoritative_existing_ocr_layer(Page(4000), slab))
+        self.assertTrue(worker.page_requires_ocr(slab, Page(4000)))
+
+        # A strong layer that is mostly *visible* text is not a hidden OCR
+        # layer and keeps the raster OCR-eligible.
+        self.assertFalse(worker.has_authoritative_existing_ocr_layer(
+            Page(200, visible_chars=2000), strong))
+        self.assertTrue(worker.page_requires_ocr(strong, Page(200, visible_chars=2000)))
+
+        # No text layer at all: the pure-scan shape still requires OCR even
+        # though the layout may carry a stray short line.
+        self.assertFalse(worker.has_authoritative_existing_ocr_layer(Page(0), strong))
+        self.assertTrue(worker.page_requires_ocr(
+            {'boxes': [{'boxclass': 'text', 'x0': 40, 'y0': 60, 'x1': 200, 'y1': 80,
+                        'textlines': [{'bbox': [40, 60, 200, 80],
+                                       'spans': [{'text': 'Stray.', 'size': 9.0}]}]}]},
+            Page(0)))
+
     def test_production_unit_pins_source_view_decoded_stream_budget(self):
         template = Path(__file__).parents[2] / 'deploy/systemd/reading-mcp-tunnel.service'
         self.assertIn(

@@ -26,7 +26,7 @@ use crate::domain::{
 use crate::infrastructure::{FileOcrCheckpointStore, MetaIdentity, ResourceBudget, checkpoint_key};
 
 pub const PDF_LAYOUT_CACHE_NAMESPACE: &str =
-    "pdf-layout/v2:required-inspection/v2:pymupdf4llm-layout/1.28.2";
+    "pdf-layout/v2:required-inspection/v3:pymupdf4llm-layout/1.28.2";
 const WORKER: &str = include_str!("pdf_layout_worker.py");
 const MAX_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
 // Progress records duplicate the heaviest result fields (per-page visual

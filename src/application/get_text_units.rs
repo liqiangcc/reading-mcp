@@ -574,12 +574,22 @@ fn build_declared_stream(
                     intentionally_skipped += 1;
                     continue;
                 }
-                let degradation = if is_coarse_structural_class(paragraph_coverage.content_class) {
-                    coarse_structural_items += 1;
-                    "flat_native_container_no_nested_textunit_evidence"
-                } else {
-                    coarse_non_prose_items += 1;
-                    "requested_sentence_but_non_prose_is_paragraph_only"
+                let degradation = match paragraph_coverage.content_class {
+                    ParagraphContentClass::BlockQuote | ParagraphContentClass::ListItem => {
+                        coarse_structural_items += 1;
+                        "flat_native_container_no_nested_textunit_evidence"
+                    }
+                    ParagraphContentClass::CodeBlock
+                    | ParagraphContentClass::Preformatted
+                    | ParagraphContentClass::Table => {
+                        coarse_non_prose_items += 1;
+                        "requested_sentence_but_non_prose_is_paragraph_only"
+                    }
+                    ParagraphContentClass::ProseOrUnknown
+                    | ParagraphContentClass::NativeParagraph => {
+                        coarse_non_prose_items += 1;
+                        "requested_sentence_but_paragraph_is_coarse_only"
+                    }
                 };
                 items.push(paragraph_item(
                     document,

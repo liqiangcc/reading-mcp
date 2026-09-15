@@ -233,7 +233,7 @@ impl Document {
 
         for paragraph in &paragraph_set.units {
             let content_class = paragraph_content_class(block_map, paragraph);
-            let eligibility = match content_class {
+            let mut eligibility = match content_class {
                 ParagraphContentClass::ProseOrUnknown | ParagraphContentClass::NativeParagraph => {
                     SentenceEligibility::Eligible
                 }
@@ -243,6 +243,19 @@ impl Document {
                 | ParagraphContentClass::Preformatted
                 | ParagraphContentClass::Table => SentenceEligibility::CoarseParagraphOnly,
             };
+
+            // Fallback-only guard: a ProseOrUnknown paragraph has no parser-native
+            // provenance. When its text shows objective merge/corruption evidence
+            // (missing-space glue, doubled characters, a bibliographic masthead run),
+            // terminal-punctuation splitting would produce a fake clean sentence that
+            // hides front matter or extra body text inside one unit. Keep it coarse so
+            // strict callers can fail closed instead of trusting the over-claim.
+            if eligibility == SentenceEligibility::Eligible
+                && content_class == ParagraphContentClass::ProseOrUnknown
+                && looks_like_unreliable_fallback_text(&paragraph.text)
+            {
+                eligibility = SentenceEligibility::CoarseParagraphOnly;
+            }
 
             if eligibility == SentenceEligibility::CoarseParagraphOnly {
                 coverage.push(SentenceParagraphCoverage {
@@ -760,6 +773,213 @@ fn classify_fallback_paragraph_content(text: &str) -> ParagraphContentClass {
     } else {
         ParagraphContentClass::ProseOrUnknown
     }
+}
+
+const MIN_MISSING_SPACE_GLUE_EVENTS: usize = 3;
+const MIN_DOUBLED_RUN_CHARS: usize = 6;
+const MIN_BIBLIOGRAPHIC_MARKERS: usize = 4;
+const BIBLIOGRAPHIC_WINDOW_WORDS: usize = 10;
+
+/// A fallback paragraph that merges heterogeneous fragments (masthead, title, byline,
+/// bibliographic metadata) or carries extraction corruption (missing spaces, doubled
+/// characters) cannot be trusted to produce honest sentences from terminal punctuation.
+/// Detection is limited to objective, document-agnostic evidence.
+fn looks_like_unreliable_fallback_text(text: &str) -> bool {
+    contains_doubled_character_token(text)
+        || missing_space_glue_events(text) >= MIN_MISSING_SPACE_GLUE_EVENTS
+        || has_bibliographic_metadata_run(text)
+}
+
+/// Missing-space concatenation evidence: `StrongInference`, `JohnR.Platt`,
+/// `3642SCIENCE`, `,NewSeries`, `others.John`, `)provided`.
+fn missing_space_glue_events(text: &str) -> usize {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut events = 0usize;
+    for index in 1..chars.len() {
+        let previous = chars[index - 1];
+        let current = chars[index];
+        let glued = (previous.is_ascii_digit() && current.is_uppercase())
+            || (matches!(previous, ',' | ';' | ':' | '.' | '!' | '?') && current.is_uppercase())
+            || (previous == ')' && current.is_alphabetic())
+            // An all-caps run of 3+ immediately continued by a lowercase tail inside
+            // one token ("SCIENCEStrong") means two fragments were merged.
+            || (previous.is_uppercase()
+                && current.is_lowercase()
+                && uppercase_run_ending_at(&chars, index - 1) >= 3)
+            // Interior lowercase->uppercase junction only: single-letter brand
+            // prefixes ("iPhone") and surname patterns ("McDonald") are not glue.
+            || (previous.is_lowercase()
+                && current.is_uppercase()
+                && chars
+                    .get(index.wrapping_sub(2))
+                    .is_some_and(|before| before.is_alphabetic())
+                && !is_surname_junction(&chars, index));
+        events += usize::from(glued);
+    }
+    events
+}
+
+fn is_surname_junction(chars: &[char], index: usize) -> bool {
+    // chars[index - 1] is the lowercase side of the junction.
+    if chars[index - 1] != 'c' {
+        return false;
+    }
+    (index >= 2 && chars[index - 2] == 'M')
+        || (index >= 3 && chars[index - 3] == 'M' && chars[index - 2] == 'a')
+}
+
+fn uppercase_run_ending_at(chars: &[char], end: usize) -> usize {
+    let mut run = 0usize;
+    let mut cursor = end;
+    loop {
+        if chars[cursor].is_uppercase() {
+            run += 1;
+        } else {
+            break;
+        }
+        if cursor == 0 {
+            break;
+        }
+        cursor -= 1;
+    }
+    run
+}
+
+/// Extraction corruption that doubles every character ("NNoottee", "WWhhiillee"):
+/// an alphabetic token whose characters are almost entirely pairwise-doubled runs.
+fn contains_doubled_character_token(text: &str) -> bool {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut cursor = 0usize;
+    while cursor < chars.len() {
+        if !chars[cursor].is_alphabetic() {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < chars.len() && chars[cursor].is_alphabetic() {
+            cursor += 1;
+        }
+        if cursor - start >= MIN_DOUBLED_RUN_CHARS
+            && token_is_pairwise_doubled(&chars[start..cursor])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn token_is_pairwise_doubled(token: &[char]) -> bool {
+    let mut doubled_runs = 0usize;
+    let mut doubled_chars = 0usize;
+    let mut index = 0usize;
+    while index < token.len() {
+        let mut run = 1usize;
+        while index + run < token.len() && token[index + run] == token[index] {
+            run += 1;
+        }
+        if run == 2 {
+            doubled_runs += 1;
+            doubled_chars += 2;
+        }
+        index += run;
+    }
+    // Real words contain scattered doubles ("bookkeeping", "committee"); systematic
+    // corruption doubles nearly every character.
+    doubled_runs >= 3 && doubled_chars * 5 >= token.len() * 4
+}
+
+/// Journal-masthead / bibliographic metadata evidence. Citation markers (Vol/No/pp +
+/// digits), dates, links, and rights markers also appear inside legitimate prose, so
+/// the signal is *density*: a masthead packs several markers into a handful of words
+/// while citation-dense prose spreads them across sentences.
+fn has_bibliographic_metadata_run(text: &str) -> bool {
+    let markers = bibliographic_marker_counts(text);
+    if markers.len() < MIN_BIBLIOGRAPHIC_MARKERS {
+        return false;
+    }
+    let window = BIBLIOGRAPHIC_WINDOW_WORDS.min(markers.len());
+    let mut best = 0usize;
+    let mut current: usize = markers[..window].iter().sum();
+    best = best.max(current);
+    for index in window..markers.len() {
+        current += markers[index];
+        current -= markers[index - window];
+        best = best.max(current);
+    }
+    best >= MIN_BIBLIOGRAPHIC_MARKERS
+}
+
+/// Per-word bibliographic marker counts used for the density check.
+fn bibliographic_marker_counts(text: &str) -> Vec<usize> {
+    let words = text
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let mut counts = Vec::with_capacity(words.len());
+    for (index, word) in words.iter().enumerate() {
+        let lower = word.to_lowercase();
+        let next_is_number = words
+            .get(index + 1)
+            .is_some_and(|next| next.chars().next().is_some_and(|ch| ch.is_ascii_digit()));
+        let mut count = 0usize;
+        if matches!(
+            lower.as_str(),
+            "vol" | "volume" | "no" | "number" | "issue" | "series" | "pp" | "p" | "pages"
+        ) && next_is_number
+        {
+            count += 1;
+        }
+        if is_month_word(&lower) && nearby_number(&words, index) {
+            count += 1;
+        }
+        if word.len() == 4
+            && word.bytes().all(|byte| byte.is_ascii_digit())
+            && let Ok(year) = word.parse::<u32>()
+            && (1800..=2099).contains(&year)
+        {
+            count += 1;
+        }
+        if lower.contains("http")
+            || lower.contains("www.")
+            || lower.contains("url")
+            || lower == "doi"
+        {
+            count += 1;
+        }
+        if matches!(lower.as_str(), "copyright" | "isbn" | "issn") {
+            count += 1;
+        }
+        counts.push(count);
+    }
+    counts
+}
+
+fn is_month_word(word: &str) -> bool {
+    matches!(
+        word.get(..3),
+        Some(
+            "jan"
+                | "feb"
+                | "mar"
+                | "apr"
+                | "may"
+                | "jun"
+                | "jul"
+                | "aug"
+                | "sep"
+                | "oct"
+                | "nov"
+                | "dec"
+        )
+    ) && word.chars().all(|ch| ch.is_alphabetic())
+}
+
+fn nearby_number(words: &[&str], index: usize) -> bool {
+    let lo = index.saturating_sub(2);
+    let hi = (index + 3).min(words.len());
+    words[lo..hi].iter().enumerate().any(|(offset, word)| {
+        lo + offset != index && word.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    })
 }
 
 fn looks_like_fenced_code(text: &str) -> bool {

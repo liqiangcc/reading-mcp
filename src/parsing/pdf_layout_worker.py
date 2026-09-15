@@ -157,13 +157,91 @@ def has_native_body(page_layout):
                for box in page_layout['boxes'])
 
 
+# Conservative gate for an embedded invisible (render-mode 3) OCR text layer:
+# only a substantial, body-shaped hidden layer exempts a dominant raster from
+# the local engine.  Sparse labels, footers and photo captions cannot qualify.
+EXISTING_OCR_MIN_HIDDEN_CHARS = 512
+EXISTING_OCR_MIN_HIDDEN_OVER_VISIBLE = 4
+EXISTING_OCR_MIN_BODY_CHARS = 1000
+EXISTING_OCR_MIN_LINES = 20
+EXISTING_OCR_MIN_QUALIFYING_LINES = 16
+EXISTING_OCR_MIN_QUALIFYING_RATIO = 0.55
+EXISTING_OCR_MIN_LINE_CHARS = 20
+EXISTING_OCR_MIN_FONT_SIZE = 4.0
+EXISTING_OCR_MIN_LINE_WIDTH_RATIO = 0.18
+EXISTING_OCR_MIN_VERTICAL_SPAN = 0.50
+
+
+def has_authoritative_existing_ocr_layer(page, page_layout):
+    """Whether a raster-dominated page already carries transcribed prose.
+
+    The page's own invisible text layer must be substantial (not a sparse
+    overlay) and the layout must already present it as regular body lines
+    spanning most of the page vertically.  Anything weaker keeps the page
+    OCR-eligible.  The geometry is layout-agnostic: line width is measured
+    relative to the page width so multi-column bodies qualify the same way
+    as single-column ones, and no word/space or absolute-point thresholds
+    are assumed.
+    """
+    get_traces = getattr(page, 'get_texttrace', None)
+    if get_traces is None:
+        return False
+    hidden = sum(len(trace.get('chars', [])) for trace in get_traces()
+                 if trace.get('type') == 3)
+    visible = sum(len(trace.get('chars', [])) for trace in get_traces()
+                  if trace.get('type') != 3)
+    if (hidden < EXISTING_OCR_MIN_HIDDEN_CHARS
+            or hidden < EXISTING_OCR_MIN_HIDDEN_OVER_VISIBLE
+            * max(visible, 1)):
+        return False
+    page_width = float(page.rect.width)
+    page_height = float(page.rect.height)
+    if page_width <= 0 or page_height <= 0:
+        return False
+    lines = []
+    body_chars = 0
+    for box in page_layout['boxes']:
+        if box.get('boxclass') not in NATIVE_BODY_BOXCLASSES:
+            continue
+        for line in box.get('textlines', []):
+            text = ' '.join(''.join(span.get('text', '')
+                                    for span in line.get('spans', [])).split())
+            if not text:
+                continue
+            sizes = [float(span['size']) for span in line['spans']
+                     if span.get('size') is not None]
+            bbox = line.get('bbox', [0, 0, 0, 0])
+            body_chars += len(text)
+            lines.append({'chars': len(text),
+                          'size': min(sizes) if sizes else 0.0,
+                          'width': float(bbox[2]) - float(bbox[0]),
+                          'y0': float(bbox[1]), 'y1': float(bbox[3])})
+    if body_chars < EXISTING_OCR_MIN_BODY_CHARS:
+        return False
+    if len(lines) < EXISTING_OCR_MIN_LINES:
+        return False
+    qualifying = [line for line in lines
+                  if line['chars'] >= EXISTING_OCR_MIN_LINE_CHARS
+                  and line['size'] >= EXISTING_OCR_MIN_FONT_SIZE
+                  and line['width']
+                  >= page_width * EXISTING_OCR_MIN_LINE_WIDTH_RATIO]
+    if len(qualifying) < EXISTING_OCR_MIN_QUALIFYING_LINES:
+        return False
+    if len(qualifying) / len(lines) < EXISTING_OCR_MIN_QUALIFYING_RATIO:
+        return False
+    span = (max(line['y1'] for line in qualifying)
+            - min(line['y0'] for line in qualifying))
+    return span / page_height >= EXISTING_OCR_MIN_VERTICAL_SPAN
+
+
 def page_requires_ocr(page_layout, page=None):
     """Return whether the page lacks a usable native prose body.
 
     Embedded figures on a native page are visual evidence, not a reason to
     rerun OCR over already-authoritative text. A full-page raster, however,
     may contain scanned prose with a sparse/native overlay and remains
-    OCR-eligible. A footer-only layer remains OCR-eligible as well.
+    OCR-eligible unless the page's own hidden OCR layer is already a
+    substantial body transcription. A footer-only layer remains OCR-eligible.
     """
     if not has_native_body(page_layout):
         return True
@@ -177,7 +255,7 @@ def page_requires_ocr(page_layout, page=None):
         if bbox and len(bbox) == 4:
             image_area = max(0.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
             if image_area / page_area >= 0.90:
-                return True
+                return not has_authoritative_existing_ocr_layer(page, page_layout)
     return False
 
 

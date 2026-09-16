@@ -27,6 +27,8 @@ set -euo pipefail
 
 command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "systemctl is required" >&2; exit 1; }
+command -v journalctl >/dev/null || { echo "journalctl is required" >&2; exit 1; }
+command -v grep >/dev/null || { echo "grep is required" >&2; exit 1; }
 systemctl is-active --quiet "$SERVICE_NAME" || { echo "service is not active" >&2; exit 1; }
 [[ -r "$ENV_FILE" ]] || { echo "service environment file is not readable" >&2; exit 1; }
 
@@ -63,10 +65,18 @@ trap 'rm -f "$doctor_output"' EXIT
   exit 1
 }
 
-if journalctl -u "$SERVICE_NAME" -n 200 --no-pager 2>/dev/null | rg -i '(authorization:|bearer[[:space:]]+[A-Za-z0-9._-]{16,}|control_plane_api_key|document body|content body)' >/dev/null; then
+# The redaction guard must fail closed: a missing journalctl/grep is caught by
+# the dependency checks above, a failed journal query is a distinct error, and a
+# clean verdict is only emitted after grep actually ran over real output.
+if ! journal_output=$(journalctl -u "$SERVICE_NAME" -n 200 --no-pager); then
+  echo "journalctl query failed; redaction guard could not run" >&2
+  exit 1
+fi
+if grep -iE '(authorization:|bearer[[:space:]]+[A-Za-z0-9._-]{16,}|control_plane_api_key|document body|content body)' <<<"$journal_output" >/dev/null; then
   echo "recent service logs matched a secret/body redaction guard" >&2
   exit 1
 fi
+echo "redaction_guard=pass"
 
 echo "service=active"
 echo "version=$EXPECTED_VERSION"

@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use reading_mcp::application::ports::{Parser, RetrievalOptions, RetrievedResource};
+use reading_mcp::application::ports::{
+    ApplicationError, Parser, RetrievalOptions, RetrievedResource,
+};
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
 use reading_mcp::domain::{DocumentSource, MediaType, SectionId};
@@ -168,6 +170,159 @@ async fn html_parser_extracts_document_metadata_without_network_logic() {
     assert_eq!(
         parsed.root_sections[0].location.anchor.as_deref(),
         Some("intro")
+    );
+}
+
+fn html_resource(media_type: &str, bytes: Vec<u8>) -> RetrievedResource {
+    RetrievedResource {
+        source: DocumentSource("https://example.com/legacy.html".into()),
+        final_source: DocumentSource("https://example.com/legacy.html".into()),
+        media_type: MediaType(media_type.into()),
+        bytes,
+        etag: None,
+        last_modified: None,
+        metadata: Default::default(),
+    }
+}
+
+fn legacy_html(head: &[u8], body: &[u8]) -> Vec<u8> {
+    [
+        b"<!doctype html><html><head>".as_slice(),
+        head,
+        b"</head><body><main><h1>Title</h1><p>".as_slice(),
+        body,
+        b"</p></main></body></html>".as_slice(),
+    ]
+    .concat()
+}
+
+#[tokio::test]
+async fn undeclared_cp1252_html_falls_back_to_windows_1252_with_traceable_metadata() {
+    // 0xF6 = o-umlaut, 0x93/0x94 = curly double quotes in windows-1252; invalid as UTF-8.
+    let bytes = legacy_html(b"", b"Schr\xF6dinger said \x93hypotheses\x94.");
+    assert!(std::str::from_utf8(&bytes).is_err());
+
+    let parsed = HtmlParser
+        .parse(html_resource("text/html", bytes.clone()))
+        .await
+        .expect("undeclared legacy HTML should decode via the WHATWG windows-1252 default");
+
+    assert!(
+        parsed.root_sections[0]
+            .content
+            .contains("Schr\u{f6}dinger said \u{201c}hypotheses\u{201d}.")
+    );
+    assert_eq!(
+        parsed.metadata.get("html_charset").map(String::as_str),
+        Some("windows-1252")
+    );
+    assert_eq!(
+        parsed
+            .metadata
+            .get("html_charset_source")
+            .map(String::as_str),
+        Some("fallback")
+    );
+
+    let reparsed = HtmlParser
+        .parse(html_resource("text/html", bytes))
+        .await
+        .expect("same bytes should parse again");
+    assert_eq!(reparsed.id, parsed.id);
+    assert_eq!(reparsed.content_hash, parsed.content_hash);
+    assert_eq!(
+        reparsed.root_sections[0].content,
+        parsed.root_sections[0].content
+    );
+}
+
+#[tokio::test]
+async fn declared_legacy_charsets_are_honoured_from_meta_and_http() {
+    let meta = HtmlParser
+        .parse(html_resource(
+            "text/html",
+            legacy_html(br#"<meta charset="ISO-8859-1">"#, b"Caf\xE9"),
+        ))
+        .await
+        .expect("meta-declared latin-1 should decode");
+    assert!(meta.root_sections[0].content.contains("Caf\u{e9}"));
+    assert_eq!(
+        meta.metadata.get("html_charset_source").map(String::as_str),
+        Some("meta")
+    );
+
+    let http_equiv = HtmlParser
+        .parse(html_resource(
+            "text/html",
+            legacy_html(
+                br#"<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">"#,
+                b"na\xEFve",
+            ),
+        ))
+        .await
+        .expect("http-equiv declared charset should decode");
+    assert!(http_equiv.root_sections[0].content.contains("na\u{ef}ve"));
+
+    // Shift_JIS bytes for U+65E5 U+672C; the HTTP charset parameter wins over meta.
+    let http = HtmlParser
+        .parse(html_resource(
+            "text/html; charset=\"Shift_JIS\"",
+            legacy_html(br#"<meta charset="iso-8859-1">"#, b"\x93\xFA\x96\x7B"),
+        ))
+        .await
+        .expect("HTTP-declared Shift_JIS should decode");
+    assert!(http.root_sections[0].content.contains("\u{65e5}\u{672c}"));
+    assert_eq!(
+        http.metadata.get("html_charset").map(String::as_str),
+        Some("Shift_JIS")
+    );
+    assert_eq!(
+        http.metadata.get("html_charset_source").map(String::as_str),
+        Some("http")
+    );
+}
+
+#[tokio::test]
+async fn valid_utf8_html_is_unchanged_even_when_a_legacy_charset_is_declared() {
+    let parsed = HtmlParser
+        .parse(html_resource(
+            "text/html; charset=iso-8859-1",
+            legacy_html(br#"<meta charset="iso-8859-1">"#, "Caf\u{e9}".as_bytes()),
+        ))
+        .await
+        .expect("valid UTF-8 should keep the existing decoding path");
+
+    assert!(parsed.root_sections[0].content.contains("Caf\u{e9}"));
+    assert!(!parsed.metadata.contains_key("html_charset"));
+    assert!(!parsed.metadata.contains_key("html_charset_source"));
+}
+
+#[tokio::test]
+async fn invalid_or_unsupported_encodings_return_typed_errors() {
+    let unsupported = HtmlParser
+        .parse(html_resource(
+            "text/html; charset=x-unknown-charset",
+            legacy_html(b"", b"\xF6"),
+        ))
+        .await
+        .expect_err("unknown declared charset must not be guessed");
+    assert!(
+        matches!(&unsupported, ApplicationError::UnsupportedTextEncoding(message)
+            if message.contains("x-unknown-charset") && message.contains("offset")),
+        "{unsupported:?}"
+    );
+
+    let invalid_utf8 = HtmlParser
+        .parse(html_resource(
+            "text/html",
+            legacy_html(br#"<meta charset="utf-8">"#, b"\xF6"),
+        ))
+        .await
+        .expect_err("declared UTF-8 with invalid bytes must fail closed");
+    assert!(
+        matches!(&invalid_utf8, ApplicationError::UnsupportedTextEncoding(message)
+            if message.contains("UTF-8") && message.contains("meta")),
+        "{invalid_utf8:?}"
     );
 }
 

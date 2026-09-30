@@ -2441,6 +2441,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "encoding_rs",
  "image",
  "libc",
  "lopdf",

@@ -112,6 +112,8 @@ pub enum ApplicationError {
     RetrievalFailed(String),
     #[error("parse failed: {0}")]
     ParseFailed(String),
+    #[error("unsupported text encoding: {0}")]
+    UnsupportedTextEncoding(String),
     #[error("local OCR worker failed; no parsed document was published")]
     OcrFailed,
     #[error("local OCR dependencies are unavailable or changed; operator repair is required")]

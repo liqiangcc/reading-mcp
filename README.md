@@ -6,7 +6,7 @@ Reading MCP 让 MCP Client / Agent 能够**精确地与用户阅读同一份文�
 
 它只提供可靠的文档上下文，不在内核中实现 AI 总结、问答、教学、笔记或通用 RAG。
 
-## v0.1.0 当前能力
+## 当前能力
 
 当前 runtime 实际暴露 **9 个 MCP Tool**：
 

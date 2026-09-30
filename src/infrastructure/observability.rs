@@ -254,6 +254,7 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::BlockedSource(_) => "blocked_source",
         ApplicationError::RetrievalFailed(_) => "retrieval_failed",
         ApplicationError::ParseFailed(_) => "parse_failed",
+        ApplicationError::UnsupportedTextEncoding(_) => "unsupported_text_encoding",
         ApplicationError::OcrFailed => "ocr_failed",
         ApplicationError::OcrUnavailable => "ocr_unavailable",
         ApplicationError::OcrRequired => "ocr_required",

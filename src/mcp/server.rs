@@ -1044,6 +1044,7 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::ResourceLimitExceeded(_)
         | ApplicationError::RetrievalFailed(_)
         | ApplicationError::ParseFailed(_)
+        | ApplicationError::UnsupportedTextEncoding(_)
         | ApplicationError::OcrFailed
         | ApplicationError::OcrUnavailable
         | ApplicationError::OcrRequired
@@ -1078,6 +1079,7 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::ResourceLimitExceeded(_) => ("RESOURCE_LIMIT_EXCEEDED", false),
         ApplicationError::RetrievalFailed(_) => ("RETRIEVAL_FAILED", true),
         ApplicationError::ParseFailed(_) => ("PARSE_FAILED", false),
+        ApplicationError::UnsupportedTextEncoding(_) => ("UNSUPPORTED_TEXT_ENCODING", false),
         ApplicationError::OcrFailed => ("OCR_FAILED", false),
         ApplicationError::OcrUnavailable => ("OCR_UNAVAILABLE", false),
         ApplicationError::OcrRequired => ("OCR_REQUIRED", false),
@@ -1127,6 +1129,10 @@ mod tests {
         assert_eq!(
             error_descriptor(&ApplicationError::RetrievalFailed("network".into())),
             ("RETRIEVAL_FAILED", true)
+        );
+        assert_eq!(
+            error_descriptor(&ApplicationError::UnsupportedTextEncoding("gbk".into())),
+            ("UNSUPPORTED_TEXT_ENCODING", false)
         );
         assert_eq!(
             error_descriptor(&ApplicationError::ResourceLimitExceeded("large".into())),

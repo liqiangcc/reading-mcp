@@ -76,6 +76,10 @@ async fn preinitialize_tool_call_is_rejected_without_terminating_stdio_server() 
     let initialized = receive_message(&mut lines).await;
     assert_eq!(initialized["id"], 42);
     assert_eq!(initialized["result"]["serverInfo"]["name"], "reading-mcp");
+    assert_eq!(
+        initialized["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
 
     send_message(
         &mut stdin,

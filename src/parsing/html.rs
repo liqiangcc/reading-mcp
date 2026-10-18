@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
-use encoding_rs::{Encoding, REPLACEMENT, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+use encoding_rs::{Encoding, REPLACEMENT, WINDOWS_1252};
 use markup5ever::interface::tree_builder::TreeSink;
 use scraper::{ElementRef, Html, HtmlTreeSink, Selector};
 
@@ -51,18 +51,14 @@ impl HtmlParser {
         &self,
         resource: RetrievedResource,
     ) -> Result<Document, ApplicationError> {
-        let (html, legacy_charset) = decode_html(&resource.bytes, &resource.media_type)?;
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
+        let mut metadata = resource.metadata;
+        let html = decode_html(resource.bytes, &resource.media_type, &mut metadata)?;
 
         let document = remove_noise(Html::parse_document(&html))?;
         let root = content_root(&document)?;
         let (events, preamble) = collect_content(root)?;
-        let mut metadata = resource.metadata;
-        if let Some((charset, origin)) = legacy_charset {
-            metadata.insert("html_charset".into(), charset.into());
-            metadata.insert("html_charset_source".into(), origin.into());
-        }
         capture_html_metadata(&document, &mut metadata)?;
 
         let fallback_title = title_from_metadata(&metadata, &resource.final_source);
@@ -127,57 +123,64 @@ impl Parser for HtmlParser {
     }
 }
 
-type LegacyCharset = Option<(&'static str, &'static str)>;
-
 fn decode_html(
-    bytes: &[u8],
+    bytes: Vec<u8>,
     media_type: &MediaType,
-) -> Result<(String, LegacyCharset), ApplicationError> {
-    let invalid_at = match std::str::from_utf8(bytes) {
-        Ok(text) => return Ok((text.to_owned(), None)),
-        Err(error) => error.valid_up_to(),
+    metadata: &mut BTreeMap<String, String>,
+) -> Result<String, ApplicationError> {
+    let error = match String::from_utf8(bytes) {
+        Ok(text) => return Ok(text),
+        Err(error) => error,
     };
-    let (encoding, origin, body) = if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
+    let invalid_at = error.utf8_error().valid_up_to();
+    let bytes = error.into_bytes();
+    let unsupported = |detail: String| {
+        ApplicationError::UnsupportedTextEncoding(format!(
+            "{detail}; first invalid UTF-8 byte at offset {invalid_at}"
+        ))
+    };
+    let declared = |label: &str, origin: &str| {
+        Encoding::for_label(label.as_bytes())
+            .filter(|encoding| *encoding != REPLACEMENT)
+            .ok_or_else(|| {
+                unsupported(format!(
+                    "declared HTML charset {label:?} (charset source: {origin}) is not supported"
+                ))
+            })
+    };
+    let (encoding, origin, body) = if let Some((encoding, bom_len)) = Encoding::for_bom(&bytes) {
         (encoding, "bom", &bytes[bom_len..])
     } else if let Some(label) = content_type_charset(&media_type.0) {
-        (resolve_charset(&label, "http", invalid_at)?, "http", bytes)
-    } else if let Some(label) = meta_charset(bytes) {
-        (resolve_charset(&label, "meta", invalid_at)?, "meta", bytes)
+        (declared(label, "http")?, "http", &bytes[..])
+    } else if let Some(label) = meta_charset(&bytes) {
+        // WHATWG: a <meta>-declared UTF-16 charset is treated as UTF-8.
+        (
+            declared(&label, "meta")?.output_encoding(),
+            "meta",
+            &bytes[..],
+        )
     } else {
-        (WINDOWS_1252, "fallback", bytes)
+        (WINDOWS_1252, "fallback", &bytes[..])
     };
     let text = encoding
         .decode_without_bom_handling_and_without_replacement(body)
         .ok_or_else(|| {
-            ApplicationError::UnsupportedTextEncoding(format!(
-                "HTML bytes are not valid {} (charset source: {origin}); first invalid UTF-8 byte at offset {invalid_at}",
+            unsupported(format!(
+                "HTML bytes are not valid {} (charset source: {origin})",
                 encoding.name()
             ))
-        })?;
-    Ok((text.into_owned(), Some((encoding.name(), origin))))
+        })?
+        .into_owned();
+    metadata.insert("html_charset".into(), encoding.name().into());
+    metadata.insert("html_charset_source".into(), origin.into());
+    Ok(text)
 }
 
-fn resolve_charset(
-    label: &str,
-    origin: &str,
-    invalid_at: usize,
-) -> Result<&'static Encoding, ApplicationError> {
-    match Encoding::for_label(label.as_bytes()) {
-        Some(encoding) if origin == "meta" && (encoding == UTF_16LE || encoding == UTF_16BE) => {
-            Ok(UTF_8)
-        }
-        Some(encoding) if encoding != REPLACEMENT => Ok(encoding),
-        _ => Err(ApplicationError::UnsupportedTextEncoding(format!(
-            "declared HTML charset {label:?} (charset source: {origin}) is not supported; first invalid UTF-8 byte at offset {invalid_at}"
-        ))),
-    }
-}
-
-fn content_type_charset(content_type: &str) -> Option<String> {
+fn content_type_charset(content_type: &str) -> Option<&str> {
     content_type.split(';').skip(1).find_map(|parameter| {
         let (name, value) = parameter.split_once('=')?;
         let value = value.trim().trim_matches(['"', '\'']);
-        (name.trim().eq_ignore_ascii_case("charset") && !value.is_empty()).then(|| value.into())
+        (name.trim().eq_ignore_ascii_case("charset") && !value.is_empty()).then_some(value)
     })
 }
 
@@ -186,27 +189,26 @@ fn meta_charset(bytes: &[u8]) -> Option<String> {
     let mut rest = head.as_str();
     while let Some(start) = rest.find("<meta") {
         let tag = &rest[start + "<meta".len()..];
-        let end = tag.find('>').unwrap_or(tag.len());
-        let (attributes, after) = tag.split_at(end);
-        if let Some(index) = attributes.find("charset") {
-            let value = attributes[index + "charset".len()..].trim_start();
-            if let Some(value) = value.strip_prefix('=') {
-                let value: String = value
-                    .trim_start()
-                    .trim_start_matches(['"', '\''])
-                    .chars()
-                    .take_while(|c| {
-                        !matches!(c, '"' | '\'' | ';' | '/' | '>') && !c.is_whitespace()
-                    })
-                    .collect();
-                if !value.is_empty() {
-                    return Some(value);
-                }
-            }
+        let (attributes, after) = tag.split_at(tag.find('>').unwrap_or(tag.len()));
+        if let Some(value) = charset_attribute(attributes) {
+            return Some(value.to_owned());
         }
         rest = after;
     }
     None
+}
+
+fn charset_attribute(attributes: &str) -> Option<&str> {
+    let (_, value) = attributes.split_once("charset")?;
+    let value = value
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start()
+        .trim_start_matches(['"', '\'']);
+    let end = value
+        .find(|c: char| matches!(c, '"' | '\'' | ';' | '/') || c.is_whitespace())
+        .unwrap_or(value.len());
+    (end > 0).then(|| &value[..end])
 }
 
 fn remove_noise(document: Html) -> Result<Html, ApplicationError> {

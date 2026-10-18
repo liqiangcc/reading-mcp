@@ -9,6 +9,7 @@ use zip::ZipArchive;
 use crate::application::ports::ApplicationError;
 
 use super::archive::{ArchiveLimits, read_entry, utf8_entry};
+use super::html::decode_html;
 
 pub(crate) const EPUB_NAVIGATION_MAP_VERSION: &str = "epub-navigation-map/v1";
 const EPUB_NCX_MEDIA_TYPE: &str = "application/x-dtbncx+xml";
@@ -707,17 +708,19 @@ fn resolve_target<R: Read + Seek>(
 }
 
 fn fragment_index(media_type: &str, bytes: &[u8]) -> FragmentIndex {
-    let source = match std::str::from_utf8(bytes) {
-        Ok(source) => source,
+    let source = match decode_html(bytes, media_type) {
+        Ok((source, _)) => source,
         Err(error) => {
-            return FragmentIndex::Malformed(format!("target content is not UTF-8: {error}"));
+            return FragmentIndex::Malformed(format!(
+                "target content could not be decoded: {error}"
+            ));
         }
     };
     if matches!(
         media_type,
         "application/xhtml+xml" | "application/xml" | "text/xml"
     ) {
-        return match XmlDocument::parse(source) {
+        return match XmlDocument::parse(&source) {
             Ok(document) => FragmentIndex::Resolved(
                 document
                     .descendants()
@@ -736,7 +739,7 @@ fn fragment_index(media_type: &str, bytes: &[u8]) -> FragmentIndex {
         };
     }
     if media_type == "text/html" {
-        let document = Html::parse_document(source);
+        let document = Html::parse_document(&source);
         let selector = match Selector::parse("[id], a[name]") {
             Ok(selector) => selector,
             Err(error) => {

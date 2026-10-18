@@ -182,6 +182,18 @@ async fn epub_without_nav_or_ncx_remains_readable_and_records_navigation_degrada
     );
 }
 
+#[tokio::test]
+async fn legacy_charset_chapter_resolves_navigation_fragments() {
+    let document = EpubParser::new(ArchiveLimits::default())
+        .parse(resource(build_legacy_charset_fixture()))
+        .await
+        .expect("EPUB with legacy-charset chapter should parse");
+
+    let map = navigation_map(&document);
+    assert_eq!(map["nodes"][0]["resolution_status"], "resolved_fragment");
+    assert!(format!("{:?}", document.root_sections).contains("Café"));
+}
+
 fn navigation_map(document: &reading_mcp::domain::Document) -> Value {
     serde_json::from_str(
         document
@@ -332,6 +344,34 @@ fn build_no_navigation_fixture() -> Vec<u8> {
     ])
 }
 
+fn build_legacy_charset_fixture() -> Vec<u8> {
+    let package = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Legacy Book</dc:title></metadata>
+  <manifest>
+    <item id="nav" href="nav/toc.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ch1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+    let nav = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
+<nav epub:type="toc"><ol>
+  <li><a href="../text/ch1.xhtml#latin">Latin Chapter</a></li>
+</ol></nav>
+</body></html>"#;
+    build_zip_bytes(&[
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", container_xml().as_bytes()),
+        ("OPS/package.opf", package.as_bytes()),
+        ("OPS/nav/toc.xhtml", nav.as_bytes()),
+        (
+            "OPS/text/ch1.xhtml",
+            b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta charset=\"iso-8859-1\"/></head><body><h1 id=\"latin\">Caf\xe9</h1><p>Cr\xe8me.</p></body></html>",
+        ),
+    ])
+}
+
 fn container_xml() -> &'static str {
     r#"<?xml version="1.0"?>
 <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>
@@ -340,12 +380,20 @@ fn container_xml() -> &'static str {
 }
 
 fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+    let entries = entries
+        .iter()
+        .map(|(name, content)| (*name, content.as_bytes()))
+        .collect::<Vec<_>>();
+    build_zip_bytes(&entries)
+}
+
+fn build_zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(cursor);
     let options = SimpleFileOptions::default();
     for (name, content) in entries {
         writer.start_file(*name, options).expect("ZIP entry");
-        writer.write_all(content.as_bytes()).expect("ZIP content");
+        writer.write_all(content).expect("ZIP content");
     }
     writer.finish().expect("ZIP finish").into_inner()
 }

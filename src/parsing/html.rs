@@ -128,12 +128,14 @@ impl Parser for HtmlParser {
     }
 }
 
+/// The encoding that decoded non-UTF-8 HTML and where its label came from (`bom`, `http`, `meta`, `fallback`).
+pub(super) type DetectedCharset = (&'static Encoding, &'static str);
+
 /// Decodes HTML bytes: valid UTF-8 as-is (charset `None`), otherwise by WHATWG precedence.
-#[allow(clippy::type_complexity)]
 pub(super) fn decode_html<'a>(
     bytes: &'a [u8],
     content_type: &str,
-) -> Result<(Cow<'a, str>, Option<(&'static Encoding, &'static str)>), ApplicationError> {
+) -> Result<(Cow<'a, str>, Option<DetectedCharset>), ApplicationError> {
     let error = match std::str::from_utf8(bytes) {
         Ok(text) => return Ok((Cow::Borrowed(text), None)),
         Err(error) => error,

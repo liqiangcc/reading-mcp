@@ -191,7 +191,7 @@ async fn legacy_charset_chapter_resolves_navigation_fragments() {
 
     let map = navigation_map(&document);
     assert_eq!(map["nodes"][0]["resolution_status"], "resolved_fragment");
-    assert!(format!("{:?}", document.root_sections).contains("Café"));
+    assert!(format!("{:?}", document.root_sections).contains("Crème"));
 }
 
 fn navigation_map(document: &reading_mcp::domain::Document) -> Value {
@@ -357,7 +357,7 @@ fn build_legacy_charset_fixture() -> Vec<u8> {
     let nav = r#"<?xml version="1.0"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
 <nav epub:type="toc"><ol>
-  <li><a href="../text/ch1.xhtml#latin"></a></li>
+  <li><a href="../text/ch1.xhtml#latin">Latin Chapter</a></li>
 </ol></nav>
 </body></html>"#;
     build_zip_bytes(&[

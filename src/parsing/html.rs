@@ -129,6 +129,7 @@ impl Parser for HtmlParser {
 }
 
 /// Decodes HTML bytes: valid UTF-8 as-is (charset `None`), otherwise by WHATWG precedence.
+#[allow(clippy::type_complexity)]
 pub(super) fn decode_html<'a>(
     bytes: &'a [u8],
     content_type: &str,
@@ -155,16 +156,12 @@ pub(super) fn decode_html<'a>(
     let (encoding, origin, body) = if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
         (encoding, "bom", &bytes[bom_len..])
     } else if let Some(label) = content_type_charset(content_type) {
-        (declared(label, "http")?, "http", &bytes[..])
+        (declared(label, "http")?, "http", bytes)
     } else if let Some(label) = meta_charset(bytes) {
         // WHATWG: a <meta>-declared UTF-16 charset is treated as UTF-8.
-        (
-            declared(&label, "meta")?.output_encoding(),
-            "meta",
-            &bytes[..],
-        )
+        (declared(&label, "meta")?.output_encoding(), "meta", bytes)
     } else {
-        (WINDOWS_1252, "fallback", &bytes[..])
+        (WINDOWS_1252, "fallback", bytes)
     };
     let text = encoding
         .decode_without_bom_handling_and_without_replacement(body)

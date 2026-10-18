@@ -7,7 +7,7 @@ use reading_mcp::application::ports::{
 };
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
-use reading_mcp::domain::{DocumentSource, MediaType, SectionId};
+use reading_mcp::domain::{Document, DocumentSource, MediaType, SectionId};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
 use reading_mcp::parsing::{HtmlParser, ParserRouter};
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
@@ -185,6 +185,15 @@ fn html_resource(media_type: &str, bytes: Vec<u8>) -> RetrievedResource {
     }
 }
 
+async fn parse_html(media_type: &str, bytes: Vec<u8>) -> Result<Document, ApplicationError> {
+    HtmlParser.parse(html_resource(media_type, bytes)).await
+}
+
+fn charset_metadata(document: &Document) -> (Option<&str>, Option<&str>) {
+    let get = |key| document.metadata.get(key).map(String::as_str);
+    (get("html_charset"), get("html_charset_source"))
+}
+
 fn legacy_html(head: &[u8], body: &[u8]) -> Vec<u8> {
     [
         b"<!doctype html><html><head>".as_slice(),
@@ -202,8 +211,7 @@ async fn undeclared_cp1252_html_falls_back_to_windows_1252_with_traceable_metada
     let bytes = legacy_html(b"", b"Schr\xF6dinger said \x93hypotheses\x94.");
     assert!(std::str::from_utf8(&bytes).is_err());
 
-    let parsed = HtmlParser
-        .parse(html_resource("text/html", bytes.clone()))
+    let parsed = parse_html("text/html", bytes.clone())
         .await
         .expect("undeclared legacy HTML should decode via the WHATWG windows-1252 default");
 
@@ -213,19 +221,11 @@ async fn undeclared_cp1252_html_falls_back_to_windows_1252_with_traceable_metada
             .contains("Schr\u{f6}dinger said \u{201c}hypotheses\u{201d}.")
     );
     assert_eq!(
-        parsed.metadata.get("html_charset").map(String::as_str),
-        Some("windows-1252")
-    );
-    assert_eq!(
-        parsed
-            .metadata
-            .get("html_charset_source")
-            .map(String::as_str),
-        Some("fallback")
+        charset_metadata(&parsed),
+        (Some("windows-1252"), Some("fallback"))
     );
 
-    let reparsed = HtmlParser
-        .parse(html_resource("text/html", bytes))
+    let reparsed = parse_html("text/html", bytes)
         .await
         .expect("same bytes should parse again");
     assert_eq!(reparsed.id, parsed.id);
@@ -238,87 +238,74 @@ async fn undeclared_cp1252_html_falls_back_to_windows_1252_with_traceable_metada
 
 #[tokio::test]
 async fn declared_legacy_charsets_are_honoured_from_meta_and_http() {
-    let meta = HtmlParser
-        .parse(html_resource(
-            "text/html",
-            legacy_html(br#"<meta charset="ISO-8859-1">"#, b"Caf\xE9"),
-        ))
-        .await
-        .expect("meta-declared latin-1 should decode");
+    // ISO-8859-1 is a WHATWG label for windows-1252.
+    let meta = parse_html(
+        "text/html",
+        legacy_html(br#"<meta charset="ISO-8859-1">"#, b"Caf\xE9"),
+    )
+    .await
+    .expect("meta-declared latin-1 should decode");
     assert!(meta.root_sections[0].content.contains("Caf\u{e9}"));
     assert_eq!(
-        meta.metadata.get("html_charset_source").map(String::as_str),
-        Some("meta")
+        charset_metadata(&meta),
+        (Some("windows-1252"), Some("meta"))
     );
 
-    let http_equiv = HtmlParser
-        .parse(html_resource(
-            "text/html",
-            legacy_html(
-                br#"<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">"#,
-                b"na\xEFve",
-            ),
-        ))
-        .await
-        .expect("http-equiv declared charset should decode");
+    let http_equiv = parse_html(
+        "text/html",
+        legacy_html(
+            br#"<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">"#,
+            b"na\xEFve",
+        ),
+    )
+    .await
+    .expect("http-equiv declared charset should decode");
     assert!(http_equiv.root_sections[0].content.contains("na\u{ef}ve"));
 
     // Shift_JIS bytes for U+65E5 U+672C; the HTTP charset parameter wins over meta.
-    let http = HtmlParser
-        .parse(html_resource(
-            "text/html; charset=\"Shift_JIS\"",
-            legacy_html(br#"<meta charset="iso-8859-1">"#, b"\x93\xFA\x96\x7B"),
-        ))
-        .await
-        .expect("HTTP-declared Shift_JIS should decode");
+    let http = parse_html(
+        "text/html; charset=\"Shift_JIS\"",
+        legacy_html(br#"<meta charset="iso-8859-1">"#, b"\x93\xFA\x96\x7B"),
+    )
+    .await
+    .expect("HTTP-declared Shift_JIS should decode");
     assert!(http.root_sections[0].content.contains("\u{65e5}\u{672c}"));
-    assert_eq!(
-        http.metadata.get("html_charset").map(String::as_str),
-        Some("Shift_JIS")
-    );
-    assert_eq!(
-        http.metadata.get("html_charset_source").map(String::as_str),
-        Some("http")
-    );
+    assert_eq!(charset_metadata(&http), (Some("Shift_JIS"), Some("http")));
 }
 
 #[tokio::test]
 async fn valid_utf8_html_is_unchanged_even_when_a_legacy_charset_is_declared() {
-    let parsed = HtmlParser
-        .parse(html_resource(
-            "text/html; charset=iso-8859-1",
-            legacy_html(br#"<meta charset="iso-8859-1">"#, "Caf\u{e9}".as_bytes()),
-        ))
-        .await
-        .expect("valid UTF-8 should keep the existing decoding path");
+    let parsed = parse_html(
+        "text/html; charset=iso-8859-1",
+        legacy_html(br#"<meta charset="iso-8859-1">"#, "Caf\u{e9}".as_bytes()),
+    )
+    .await
+    .expect("valid UTF-8 should keep the existing decoding path");
 
     assert!(parsed.root_sections[0].content.contains("Caf\u{e9}"));
-    assert!(!parsed.metadata.contains_key("html_charset"));
-    assert!(!parsed.metadata.contains_key("html_charset_source"));
+    assert_eq!(charset_metadata(&parsed), (None, None));
 }
 
 #[tokio::test]
 async fn invalid_or_unsupported_encodings_return_typed_errors() {
-    let unsupported = HtmlParser
-        .parse(html_resource(
-            "text/html; charset=x-unknown-charset",
-            legacy_html(b"", b"\xF6"),
-        ))
-        .await
-        .expect_err("unknown declared charset must not be guessed");
+    let unsupported = parse_html(
+        "text/html; charset=x-unknown-charset",
+        legacy_html(b"", b"\xF6"),
+    )
+    .await
+    .expect_err("unknown declared charset must not be guessed");
     assert!(
         matches!(&unsupported, ApplicationError::UnsupportedTextEncoding(message)
             if message.contains("x-unknown-charset") && message.contains("offset")),
         "{unsupported:?}"
     );
 
-    let invalid_utf8 = HtmlParser
-        .parse(html_resource(
-            "text/html",
-            legacy_html(br#"<meta charset="utf-8">"#, b"\xF6"),
-        ))
-        .await
-        .expect_err("declared UTF-8 with invalid bytes must fail closed");
+    let invalid_utf8 = parse_html(
+        "text/html",
+        legacy_html(br#"<meta charset="utf-8">"#, b"\xF6"),
+    )
+    .await
+    .expect_err("declared UTF-8 with invalid bytes must fail closed");
     assert!(
         matches!(&invalid_utf8, ApplicationError::UnsupportedTextEncoding(message)
             if message.contains("UTF-8") && message.contains("meta")),

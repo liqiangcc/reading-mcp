@@ -1,6 +1,6 @@
 # Reading MCP MVP 实施计划
 
-> Status note: Phase 0–6 是项目历史实施路径。当前 runtime 已在 MVP 之后继续完成 ReadCursor、normalized identity/range、Paragraph/Sentence TextUnit foundation、第 7 个 Tool `get_text_units` 和第 8 个 Tool `list_directory`。本文件中的阶段描述保留历史目标，但“当前能力”以本节和 `docs/README.md` / `docs/phase6-mcp-stdio.md` 为准。
+> Status note: Phase 0–6 是项目历史实施路径。当前 runtime 已在 MVP 之后继续完成 ReadCursor、normalized identity/range、Paragraph/Sentence TextUnit foundation、第 7 个 Tool `get_text_units`、第 8 个 Tool `list_directory` 和第 9 个 Tool `get_source_view`。本文件中的阶段描述保留历史目标，但“当前能力”以本节和 `docs/README.md` / `docs/phase6-mcp-stdio.md` 为准。
 
 ## 1. MVP 目标
 
@@ -33,7 +33,7 @@ MVP 首批验证：
 
 ### 当前 MCP Tools
 
-当前 runtime 实际暴露 8 个 Tool：
+当前 runtime 实际暴露 9 个 Tool：
 
 ```text
 list_documents
@@ -44,6 +44,7 @@ get_text_units
 search_document
 read_document
 get_context
+get_source_view
 ```
 
 演进历史：

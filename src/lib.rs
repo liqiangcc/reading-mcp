@@ -1,3 +1,6 @@
+// async_trait expansion trips this lint on clippy 1.99.1.
+#![allow(clippy::double_must_use)]
+
 pub mod application;
 pub mod domain;
 pub mod infrastructure;

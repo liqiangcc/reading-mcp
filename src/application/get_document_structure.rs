@@ -504,10 +504,7 @@ fn all_section_refs(document: &Document) -> Vec<&Section> {
 }
 
 fn is_page_only_pdf_fallback(document: &Document) -> bool {
-    document
-        .media_type
-        .0
-        .eq_ignore_ascii_case("application/pdf")
+    document.media_type.is_pdf()
         && document
             .metadata
             .get("pdf_structure_provenance")

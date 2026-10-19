@@ -138,12 +138,7 @@ impl OpenDocumentUseCase {
             .retrieve(&command.source, &command.options)
             .await?;
 
-        let is_pdf = resource
-            .media_type
-            .0
-            .split(';')
-            .next()
-            .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"));
+        let is_pdf = resource.media_type.is_pdf();
         if self.ocr_enabled && is_pdf {
             if let Some(known) = known_ocr_pdf {
                 known.store(true, std::sync::atomic::Ordering::Relaxed);

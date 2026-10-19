@@ -33,7 +33,7 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
         page: u32,
         options: SourceViewRenderOptions,
     ) -> Result<RenderedSourceView, ApplicationError> {
-        if !is_pdf(&media_type) {
+        if !media_type.is_pdf() {
             return Err(ApplicationError::SourceViewFailed(format!(
                 "unsupported source-view media type {}",
                 media_type.0
@@ -169,7 +169,7 @@ impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
         page: u32,
         options: SourceViewRenderOptions,
     ) -> Result<RenderedSourceView, ApplicationError> {
-        if !is_pdf(&media_type) {
+        if !media_type.is_pdf() {
             return Err(ApplicationError::SourceViewFailed(format!(
                 "unsupported source-view media type {}",
                 media_type.0
@@ -470,12 +470,4 @@ fn checked_dimension(
             "source-view image {label} exceeds supported dimensions"
         ))
     })
-}
-
-fn is_pdf(media_type: &MediaType) -> bool {
-    media_type
-        .0
-        .split(';')
-        .next()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/pdf"))
 }

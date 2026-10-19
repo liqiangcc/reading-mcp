@@ -121,13 +121,7 @@ impl Parser for CachingParser {
         let key = ParsedCacheKey {
             final_source: resource.final_source.clone(),
             raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
-            normalization_version: if resource
-                .media_type
-                .0
-                .split(';')
-                .next()
-                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"))
-            {
+            normalization_version: if resource.media_type.is_pdf() {
                 self.pdf_namespace
                     .as_ref()
                     .map(|ns| format!("{NORMALIZATION_VERSION}:{ns}"))
@@ -146,12 +140,7 @@ impl Parser for CachingParser {
         }
 
         if let Some(admission) = &self.ocr_admission
-            && resource
-                .media_type
-                .0
-                .split(';')
-                .next()
-                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"))
+            && resource.media_type.is_pdf()
         {
             return admission
                 .parse(key, resource, self.inner.clone(), self.cache.clone())

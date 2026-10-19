@@ -56,6 +56,18 @@ pub struct DocumentSource(pub String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MediaType(pub String);
 
+impl MediaType {
+    /// The media type without parameters, trimmed: `text/html; charset=utf-8` -> `text/html`.
+    pub fn essence(&self) -> &str {
+        self.0.split(';').next().unwrap_or_default().trim()
+    }
+
+    /// Whether the essence is `application/pdf`, ignoring ASCII case.
+    pub fn is_pdf(&self) -> bool {
+        self.essence().eq_ignore_ascii_case("application/pdf")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ContentHash(pub String);
 

@@ -15,14 +15,7 @@ impl OpenApiParser {
         let text = std::str::from_utf8(&resource.bytes).map_err(|error| {
             ApplicationError::ParseFailed(format!("OpenAPI document is not UTF-8: {error}"))
         })?;
-        let media = resource
-            .media_type
-            .0
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
+        let media = resource.media_type.essence().to_ascii_lowercase();
         let value: Value = if media.contains("json") || text.trim_start().starts_with('{') {
             serde_json::from_str(text).map_err(|error| {
                 ApplicationError::ParseFailed(format!("invalid OpenAPI JSON: {error}"))

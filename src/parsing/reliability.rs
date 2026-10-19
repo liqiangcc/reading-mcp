@@ -25,16 +25,7 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
         if let Some(version) = document.metadata.get("pdf_layout_version") {
             let invalid =
                 || ApplicationError::ParseFailed("invalid persisted PDF layout evidence".into());
-            if version != "pdf-layout/v1"
-                || document
-                    .media_type
-                    .0
-                    .split(';')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    != "application/pdf"
-            {
+            if version != "pdf-layout/v1" || !document.media_type.is_pdf() {
                 return Err(invalid());
             }
             document
@@ -91,14 +82,7 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
             }];
             return Ok(summary);
         }
-        let media_type = document
-            .media_type
-            .0
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim();
-        if media_type.eq_ignore_ascii_case("application/pdf") {
+        if document.media_type.is_pdf() {
             return inspect_fallback_pdf(document);
         }
         if document.media_type.0 != EPUB_MEDIA_TYPE {

@@ -10,9 +10,9 @@ use crate::application::ports::{
     SourceViewRenderOptions, SourceViewRenderer,
 };
 use crate::domain::{
-    DocumentId, DocumentSource, MediaType, NORMALIZED_DOCUMENT_HASH_VERSION,
-    NormalizedDocumentHash, ORIGINAL_SOURCE_BINDING_MODEL_VERSION, OriginalSourceBindingError,
-    OriginalSourceTarget, Section, TextLocator,
+    DocumentId, DocumentSource, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
+    ORIGINAL_SOURCE_BINDING_MODEL_VERSION, OriginalSourceBindingError, OriginalSourceTarget,
+    Section, TextLocator,
 };
 
 pub const DEFAULT_SOURCE_VIEW_DPI: u32 = 144;
@@ -136,7 +136,7 @@ impl SourceViewUseCase {
         let (page_number, source_binding_version) =
             resolve_original_page(&document, section, resolved.range)?;
 
-        if !is_pdf(&document.media_type) {
+        if !document.media_type.is_pdf() {
             return Err(ApplicationError::InvalidRequest(format!(
                 "original source view is not available for media type {}",
                 document.media_type.0
@@ -248,12 +248,4 @@ fn source_binding_error(error: OriginalSourceBindingError) -> ApplicationError {
             "invalid persisted original source binding evidence: {other}"
         )),
     }
-}
-
-fn is_pdf(media_type: &MediaType) -> bool {
-    media_type
-        .0
-        .split(';')
-        .next()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/pdf"))
 }

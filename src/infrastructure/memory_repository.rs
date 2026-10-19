@@ -14,13 +14,17 @@ pub struct InMemoryDocumentRepository {
 #[async_trait]
 impl DocumentRepository for InMemoryDocumentRepository {
     async fn save(&self, document: Document) -> Result<(), ApplicationError> {
+        self.save_shared(Arc::new(document)).await
+    }
+
+    async fn save_shared(&self, document: Arc<Document>) -> Result<(), ApplicationError> {
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::RepositoryFailed)?;
         self.documents
             .write()
             .map_err(|_| ApplicationError::RepositoryFailed("repository lock poisoned".into()))?
-            .insert(document.id.clone(), Arc::new(document));
+            .insert(document.id.clone(), document);
         Ok(())
     }
 

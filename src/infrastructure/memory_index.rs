@@ -7,16 +7,30 @@ use crate::application::ports::{
     ApplicationError, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit, SearchHit, SearchHitKind,
     SearchIndex,
 };
-use crate::domain::{Document, DocumentId};
+use crate::domain::{Document, DocumentId, ParagraphTextUnitSet, SentenceTextUnitSet};
 
 use super::lexical::{
-    LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates, match_snippet,
-    relaxed_score_candidate, score_candidate, tokenize,
+    LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates, lexical_candidates_from_units,
+    match_snippet, relaxed_score_candidate, score_candidate, tokenize,
 };
 
 #[derive(Default)]
 pub struct InMemorySearchIndex {
     documents: RwLock<HashMap<DocumentId, Vec<LexicalCandidate>>>,
+}
+
+impl InMemorySearchIndex {
+    fn store_candidates(
+        &self,
+        document_id: &DocumentId,
+        candidates: Vec<LexicalCandidate>,
+    ) -> Result<(), ApplicationError> {
+        self.documents
+            .write()
+            .map_err(|_| ApplicationError::IndexFailed("search index lock poisoned".into()))?
+            .insert(document_id.clone(), candidates);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -31,11 +45,18 @@ impl SearchIndex for InMemorySearchIndex {
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let candidates = build_lexical_candidates(document)?;
-        self.documents
-            .write()
-            .map_err(|_| ApplicationError::IndexFailed("search index lock poisoned".into()))?
-            .insert(document.id.clone(), candidates);
-        Ok(())
+        self.store_candidates(&document.id, candidates)
+    }
+
+    async fn index_with_units(
+        &self,
+        document: &Document,
+        paragraphs: &ParagraphTextUnitSet,
+        sentences: &SentenceTextUnitSet,
+    ) -> Result<(), ApplicationError> {
+        let candidates =
+            lexical_candidates_from_units(document, &paragraphs.units, &sentences.units);
+        self.store_candidates(&document.id, candidates)
     }
 
     async fn search(

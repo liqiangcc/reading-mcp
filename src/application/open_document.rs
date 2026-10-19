@@ -206,13 +206,16 @@ impl OpenDocumentUseCase {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(ApplicationError::OcrTimeout);
         }
-        self.repository.save(document.clone()).await?;
+        let document = Arc::new(document);
+        self.repository.save_shared(Arc::clone(&document)).await?;
         if let Some(index) = &self.text_unit_index {
             index
                 .replace_document(&document.id, &paragraph_units.units)
                 .await?;
         }
-        self.search_index.index(&document).await?;
+        self.search_index
+            .index_with_units(&document, &paragraph_units, &sentence_units)
+            .await?;
 
         Ok(result)
     }

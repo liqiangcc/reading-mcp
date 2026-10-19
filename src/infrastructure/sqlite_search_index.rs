@@ -12,12 +12,13 @@ use crate::application::ports::{
 };
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash,
-    NormalizedTextRange, SectionId, TextLocator,
+    NormalizedTextRange, ParagraphTextUnitSet, SectionId, SentenceTextUnitSet, TextLocator,
 };
 
 use super::lexical::{
-    LEXICAL_SEARCH_INDEX_VERSION, MAX_SNIPPET_CHARS, build_lexical_candidates, encoded_lexemes,
-    encoded_query, encoded_relaxed_query, match_snippet, tokenize,
+    LEXICAL_SEARCH_INDEX_VERSION, LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates,
+    encoded_lexemes, encoded_query, encoded_relaxed_query, lexical_candidates_from_units,
+    match_snippet, tokenize,
 };
 
 const META_INDEX_VERSION: &str = "lexical_search_index_version";
@@ -50,16 +51,12 @@ impl SqliteSearchIndex {
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
 
-#[async_trait]
-impl SearchIndex for SqliteSearchIndex {
-    fn tokenizer_version(&self) -> &'static str {
-        LEXICAL_TOKENIZER_VERSION
-    }
-
-    async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
-        let candidates = build_lexical_candidates(document)?;
+    async fn store_candidates(
+        &self,
+        document: &Document,
+        candidates: Vec<LexicalCandidate>,
+    ) -> Result<(), ApplicationError> {
         let document_id = document.id.clone();
         let normalized_document_hash = document.normalized_document_hash();
         run_sqlite(
@@ -146,6 +143,29 @@ impl SearchIndex for SqliteSearchIndex {
             },
         )
         .await
+    }
+}
+
+#[async_trait]
+impl SearchIndex for SqliteSearchIndex {
+    fn tokenizer_version(&self) -> &'static str {
+        LEXICAL_TOKENIZER_VERSION
+    }
+
+    async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
+        let candidates = build_lexical_candidates(document)?;
+        self.store_candidates(document, candidates).await
+    }
+
+    async fn index_with_units(
+        &self,
+        document: &Document,
+        paragraphs: &ParagraphTextUnitSet,
+        sentences: &SentenceTextUnitSet,
+    ) -> Result<(), ApplicationError> {
+        let candidates =
+            lexical_candidates_from_units(document, &paragraphs.units, &sentences.units);
+        self.store_candidates(document, candidates).await
     }
 
     async fn search(

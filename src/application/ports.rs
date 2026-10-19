@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, SectionId, TextLocator, TextUnit,
+    Document, DocumentId, DocumentSource, Location, MediaType, ParagraphTextUnitSet, SectionId,
+    SentenceTextUnitSet, TextLocator, TextUnit,
 };
 
 use super::reading_profile::ReliabilitySummary;
@@ -227,6 +228,11 @@ pub trait ParsedDocumentCache: Send + Sync {
 pub trait DocumentRepository: Send + Sync {
     async fn save(&self, document: Document) -> Result<(), ApplicationError>;
 
+    /// Saves a document the caller keeps using, without copying it when the repository can share it.
+    async fn save_shared(&self, document: Arc<Document>) -> Result<(), ApplicationError> {
+        self.save(Arc::unwrap_or_clone(document)).await
+    }
+
     async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError>;
 }
 
@@ -255,6 +261,17 @@ pub trait SearchIndex: Send + Sync {
     }
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError>;
+
+    /// Indexes `document` using the paragraph and sentence units the caller already built from it, so the index does
+    /// not build them again. The default ignores the units.
+    async fn index_with_units(
+        &self,
+        document: &Document,
+        _paragraphs: &ParagraphTextUnitSet,
+        _sentences: &SentenceTextUnitSet,
+    ) -> Result<(), ApplicationError> {
+        self.index(document).await
+    }
 
     async fn search(
         &self,

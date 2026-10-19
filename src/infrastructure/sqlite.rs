@@ -88,10 +88,14 @@ impl SqliteDocumentRepository {
 #[async_trait]
 impl DocumentRepository for SqliteDocumentRepository {
     async fn save(&self, document: Document) -> Result<(), ApplicationError> {
+        self.save_shared(Arc::new(document)).await
+    }
+
+    async fn save_shared(&self, document: Arc<Document>) -> Result<(), ApplicationError> {
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::RepositoryFailed)?;
-        let json = serde_json::to_string(&StoredDocument::from_document(&document))
+        let json = serde_json::to_string(&StoredDocument::from_document(&*document))
             .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
         let cache = Arc::clone(&self.cache);
         run_sqlite(

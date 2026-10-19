@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::application::ports::{ApplicationError, SearchHitKind};
-use crate::domain::{Document, Location, Section, SentenceTextUnit, TextLocator, TextUnit};
+use crate::domain::{
+    Document, Location, Section, SectionId, SentenceTextUnit, TextLocator, TextUnit,
+};
 
 pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v4";
 pub(crate) const MAX_SNIPPET_CHARS: usize = 320;
@@ -32,28 +34,56 @@ pub(crate) fn build_lexical_candidates(
             "cannot build lexical Sentence candidates from persisted block evidence: {error}"
         ))
     })?;
-    let mut candidates = Vec::new();
+    Ok(lexical_candidates_from_units(
+        document,
+        &paragraphs.units,
+        &sentences.units,
+    ))
+}
+
+pub(crate) fn lexical_candidates_from_units(
+    document: &Document,
+    paragraphs: &[TextUnit],
+    sentences: &[SentenceTextUnit],
+) -> Vec<LexicalCandidate> {
+    let mut paragraphs_by_section: HashMap<&SectionId, Vec<&TextUnit>> = HashMap::new();
+    for paragraph in paragraphs {
+        paragraphs_by_section
+            .entry(&paragraph.owner_section_id)
+            .or_default()
+            .push(paragraph);
+    }
+    let mut sentences_by_section: HashMap<&SectionId, Vec<&SentenceTextUnit>> = HashMap::new();
+    for sentence in sentences {
+        sentences_by_section
+            .entry(&sentence.owner_section_id)
+            .or_default()
+            .push(sentence);
+    }
+
+    let mut candidates =
+        Vec::with_capacity(document.section_count() + paragraphs.len() + sentences.len());
     let mut source_order = 0usize;
 
     for section in &document.root_sections {
         collect_section_candidates(
             document,
             section,
-            &paragraphs.units,
-            &sentences.units,
+            &paragraphs_by_section,
+            &sentences_by_section,
             &mut candidates,
             &mut source_order,
         );
     }
 
-    Ok(candidates)
+    candidates
 }
 
 fn collect_section_candidates(
     document: &Document,
     section: &Section,
-    paragraphs: &[TextUnit],
-    sentences: &[SentenceTextUnit],
+    paragraphs: &HashMap<&SectionId, Vec<&TextUnit>>,
+    sentences: &HashMap<&SectionId, Vec<&SentenceTextUnit>>,
     output: &mut Vec<LexicalCandidate>,
     source_order: &mut usize,
 ) {
@@ -68,10 +98,7 @@ fn collect_section_candidates(
         source_order,
     );
 
-    for paragraph in paragraphs
-        .iter()
-        .filter(|unit| unit.owner_section_id == section.id)
-    {
+    for paragraph in paragraphs.get(&section.id).into_iter().flatten().copied() {
         push_candidate(
             document,
             section,
@@ -84,10 +111,7 @@ fn collect_section_candidates(
         );
     }
 
-    for sentence in sentences
-        .iter()
-        .filter(|unit| unit.owner_section_id == section.id)
-    {
+    for sentence in sentences.get(&section.id).into_iter().flatten().copied() {
         push_candidate(
             document,
             section,

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
@@ -7,7 +8,7 @@ use scraper::{ElementRef, Html, HtmlTreeSink, Selector};
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{
-    Document, Location, MediaType, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
+    Document, Location, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap,
     NormalizedBlockProvenance, NormalizedTextRange, Section, SectionId,
 };
 
@@ -54,7 +55,11 @@ impl HtmlParser {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let mut metadata = resource.metadata;
-        let html = decode_html(resource.bytes, &resource.media_type, &mut metadata)?;
+        let (html, charset) = decode_html(&resource.bytes, &resource.media_type.0)?;
+        if let Some((encoding, origin)) = charset {
+            metadata.insert("html_charset".into(), encoding.name().into());
+            metadata.insert("html_charset_source".into(), origin.into());
+        }
 
         let document = remove_noise(Html::parse_document(&html))?;
         let root = content_root(&document)?;
@@ -123,17 +128,19 @@ impl Parser for HtmlParser {
     }
 }
 
-fn decode_html(
-    bytes: Vec<u8>,
-    media_type: &MediaType,
-    metadata: &mut BTreeMap<String, String>,
-) -> Result<String, ApplicationError> {
-    let error = match String::from_utf8(bytes) {
-        Ok(text) => return Ok(text),
+/// The encoding that decoded non-UTF-8 HTML and where its label came from (`bom`, `http`, `meta`, `fallback`).
+pub(super) type DetectedCharset = (&'static Encoding, &'static str);
+
+/// Decodes HTML bytes: valid UTF-8 as-is (charset `None`), otherwise by WHATWG precedence.
+pub(super) fn decode_html<'a>(
+    bytes: &'a [u8],
+    content_type: &str,
+) -> Result<(Cow<'a, str>, Option<DetectedCharset>), ApplicationError> {
+    let error = match std::str::from_utf8(bytes) {
+        Ok(text) => return Ok((Cow::Borrowed(text), None)),
         Err(error) => error,
     };
-    let invalid_at = error.utf8_error().valid_up_to();
-    let bytes = error.into_bytes();
+    let invalid_at = error.valid_up_to();
     let unsupported = |detail: String| {
         ApplicationError::UnsupportedTextEncoding(format!(
             "{detail}; first invalid UTF-8 byte at offset {invalid_at}"
@@ -148,19 +155,15 @@ fn decode_html(
                 ))
             })
     };
-    let (encoding, origin, body) = if let Some((encoding, bom_len)) = Encoding::for_bom(&bytes) {
+    let (encoding, origin, body) = if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
         (encoding, "bom", &bytes[bom_len..])
-    } else if let Some(label) = content_type_charset(&media_type.0) {
-        (declared(label, "http")?, "http", &bytes[..])
-    } else if let Some(label) = meta_charset(&bytes) {
+    } else if let Some(label) = content_type_charset(content_type) {
+        (declared(label, "http")?, "http", bytes)
+    } else if let Some(label) = meta_charset(bytes) {
         // WHATWG: a <meta>-declared UTF-16 charset is treated as UTF-8.
-        (
-            declared(&label, "meta")?.output_encoding(),
-            "meta",
-            &bytes[..],
-        )
+        (declared(&label, "meta")?.output_encoding(), "meta", bytes)
     } else {
-        (WINDOWS_1252, "fallback", &bytes[..])
+        (WINDOWS_1252, "fallback", bytes)
     };
     let text = encoding
         .decode_without_bom_handling_and_without_replacement(body)
@@ -169,11 +172,8 @@ fn decode_html(
                 "HTML bytes are not valid {} (charset source: {origin})",
                 encoding.name()
             ))
-        })?
-        .into_owned();
-    metadata.insert("html_charset".into(), encoding.name().into());
-    metadata.insert("html_charset_source".into(), origin.into());
-    Ok(text)
+        })?;
+    Ok((text, Some((encoding, origin))))
 }
 
 fn content_type_charset(content_type: &str) -> Option<&str> {

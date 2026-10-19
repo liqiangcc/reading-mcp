@@ -7,11 +7,12 @@ use reading_mcp::application::get_text_units::{
 };
 use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
 use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
     TextLocator,
 };
-use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -57,7 +58,9 @@ async fn v1_text_unit_cursor_is_stale_before_it_can_resume_a_v2_stream() {
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
     repository.save(document.clone()).await.expect("save");
-    let error = GetTextUnitsUseCase::new(repository)
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let error = GetTextUnitsUseCase::new(repository, index)
         .execute(GetTextUnitsCommand {
             document_id: document.id,
             section_id,

@@ -5,11 +5,15 @@ use reading_mcp::application::get_text_units::{
     GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
     TextUnitDirection,
 };
-use reading_mcp::application::ports::DocumentRepository;
+use reading_mcp::application::ports::{DocumentRepository, TextUnitIndex};
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
-use reading_mcp::infrastructure::{InMemoryDocumentRepository, SqliteDocumentRepository};
+use reading_mcp::infrastructure::{
+    InMemoryDocumentRepository, InMemoryTextUnitIndex, SqliteDocumentRepository,
+    SqliteTextUnitIndex,
+};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -20,7 +24,9 @@ async fn eligible_only_never_claims_all_source_complete_even_for_all_prose() {
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let mut command = sentence_command(&document, 10);
     command.coverage_policy = TextUnitCoveragePolicy::EligibleOnly;
@@ -48,7 +54,10 @@ async fn text_unit_cursor_survives_repository_restart_without_sentence_persisten
         .save(document.clone())
         .await
         .expect("document should persist");
-    let first_use_case = GetTextUnitsUseCase::new(repository);
+    let index: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("text unit index should open"));
+    store_text_units(&*index, &document).await.unwrap();
+    let first_use_case = GetTextUnitsUseCase::new(repository, index.clone());
     let first = first_use_case
         .execute(sentence_command(&document, 1))
         .await
@@ -60,7 +69,7 @@ async fn text_unit_cursor_survives_repository_restart_without_sentence_persisten
     let reopened = Arc::new(
         SqliteDocumentRepository::open(&database).expect("repository should reopen after restart"),
     );
-    let second_use_case = GetTextUnitsUseCase::new(reopened);
+    let second_use_case = GetTextUnitsUseCase::new(reopened, index);
     let mut continuation = sentence_command(&document, 2);
     continuation.cursor = Some(cursor);
     let second = second_use_case

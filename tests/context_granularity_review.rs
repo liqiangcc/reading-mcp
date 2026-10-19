@@ -10,10 +10,11 @@ use reading_mcp::application::get_text_units::{
     TextUnitDirection,
 };
 use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievedResource};
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
-use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use reading_mcp::parsing::HtmlParser;
 
 #[tokio::test]
@@ -27,7 +28,9 @@ async fn sentence_context_matches_preserve_source_enumeration_order_and_coarse_s
         .await
         .expect("document should save");
 
-    let enumeration = GetTextUnitsUseCase::new(repository.clone())
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let enumeration = GetTextUnitsUseCase::new(repository.clone(), index)
         .execute(GetTextUnitsCommand {
             document_id: document.id.clone(),
             section_id: SectionId("section://root".into()),
@@ -101,7 +104,9 @@ async fn native_block_context_preserves_enumeration_content_class_and_degradatio
         .await
         .expect("document should save");
 
-    let enumeration = GetTextUnitsUseCase::new(repository.clone())
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let enumeration = GetTextUnitsUseCase::new(repository.clone(), index)
         .execute(GetTextUnitsCommand {
             document_id: document.id.clone(),
             section_id,

@@ -12,7 +12,9 @@ use reading_mcp::application::source_view::{
     GetSourceViewCommand, SourceViewLimits, SourceViewRepresentation, SourceViewUseCase,
 };
 use reading_mcp::domain::{DocumentSource, ORIGINAL_SOURCE_BINDING_MODEL_VERSION, SectionId};
-use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
+use reading_mcp::infrastructure::{
+    InMemoryDocumentRepository, InMemorySearchIndex, InMemoryTextUnitIndex,
+};
 use reading_mcp::parsing::{ParserRouter, PdfSourceViewRenderer};
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
 
@@ -25,11 +27,13 @@ async fn sentence_on_second_page_of_multi_page_toc_section_renders_page_two() {
         .expect("PDF fixture should be written");
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
-    let opened = OpenDocumentUseCase::new(
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    let opened = OpenDocumentUseCase::with_text_unit_index(
         Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase4()),
         repository.clone(),
+        index.clone(),
         Arc::new(InMemorySearchIndex::default()),
     )
     .execute(OpenDocumentCommand {
@@ -39,7 +43,7 @@ async fn sentence_on_second_page_of_multi_page_toc_section_renders_page_two() {
     .await
     .expect("PDF should open");
 
-    let units = GetTextUnitsUseCase::new(repository.clone())
+    let units = GetTextUnitsUseCase::new(repository.clone(), index)
         .execute(GetTextUnitsCommand {
             document_id: opened.document_id.clone(),
             section_id: SectionId("section://chapter-a".into()),

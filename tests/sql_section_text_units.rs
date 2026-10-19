@@ -6,12 +6,14 @@ use reading_mcp::application::get_text_units::{
     TextUnitDirection,
 };
 use reading_mcp::application::ports::{
-    DocumentRepository, Parser, RetrievedResource, SectionTextUnits, TextUnitIndex,
+    ApplicationError, DocumentRepository, Parser, RetrievedResource, SectionTextUnits,
+    TextUnitIndex,
 };
-use reading_mcp::domain::{
-    Document, DocumentId, DocumentSource, MediaType, NormalizedDocumentHash, Section, SectionId,
+use reading_mcp::application::text_unit_store::store_text_units;
+use reading_mcp::domain::{Document, DocumentId, DocumentSource, MediaType, Section, SectionId};
+use reading_mcp::infrastructure::{
+    InMemoryTextUnitIndex, SqliteDocumentRepository, SqliteTextUnitIndex,
 };
-use reading_mcp::infrastructure::{SqliteDocumentRepository, SqliteTextUnitIndex};
 use reading_mcp::parsing::{MarkdownParser, TextParser};
 
 const PLAIN: &str = "Alpha one. Alpha two. Alpha three.\n\nBeta one. Beta two.\n\nGamma one. Gamma two. Gamma three.";
@@ -41,59 +43,43 @@ async fn sqlite_section_units_match_from_sets_for_every_section() {
             .await
             .expect("both unit sets should persist");
 
-        let normalized_hash = document.normalized_document_hash();
         let sections = all_sections(&document);
         assert!(!sections.is_empty(), "document must have sections");
         for section in &sections {
             let expected = SectionTextUnits::from_sets(&paragraphs, &sentences, &section.id);
             let actual = index
-                .section_units(&document.id, &normalized_hash, &section.id)
+                .section_units(&document.id, &section.id)
                 .await
                 .expect("persisted section units should load");
             assert_eq!(actual, Some(expected));
-        }
-
-        let other_hash = NormalizedDocumentHash("sha256:not-this-document".into());
-        for section in &sections {
-            assert_eq!(
-                index
-                    .section_units(&document.id, &other_hash, &section.id)
-                    .await
-                    .expect("mismatched hash must not error"),
-                None
-            );
         }
     }
 }
 
 #[tokio::test]
-async fn get_text_units_is_identical_with_and_without_persisted_section_units() {
+async fn get_text_units_is_identical_for_in_memory_and_sqlite_indexes() {
     for document in [parse_plain().await, parse_markdown().await] {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let database = directory.path().join("state.sqlite");
         let repository: Arc<dyn DocumentRepository> =
             Arc::new(SqliteDocumentRepository::open(&database).expect("repository should open"));
-        let index: Arc<dyn TextUnitIndex> =
+        let memory_index: Arc<dyn TextUnitIndex> = Arc::new(InMemoryTextUnitIndex::default());
+        let sqlite_index: Arc<dyn TextUnitIndex> =
             Arc::new(SqliteTextUnitIndex::open(&database).expect("text unit index should open"));
 
-        let paragraphs = document
-            .try_paragraph_text_units()
-            .expect("valid paragraph set");
-        let sentences = document
-            .try_sentence_text_units()
-            .expect("valid sentence set");
-        index
-            .replace_document_sets(&document.id, Arc::new(paragraphs), Arc::new(sentences))
+        store_text_units(&*memory_index, &document)
             .await
-            .expect("both unit sets should persist");
+            .expect("in-memory units should persist");
+        store_text_units(&*sqlite_index, &document)
+            .await
+            .expect("sqlite units should persist");
         repository
             .save(document.clone())
             .await
             .expect("document should persist");
 
-        let without_index = GetTextUnitsUseCase::new(repository.clone());
-        let with_index =
-            GetTextUnitsUseCase::new(repository.clone()).with_text_unit_index(index.clone());
+        let memory_use_case = GetTextUnitsUseCase::new(repository.clone(), memory_index);
+        let sqlite_use_case = GetTextUnitsUseCase::new(repository.clone(), sqlite_index);
 
         let sections = all_sections(&document);
         for section in &sections {
@@ -107,8 +93,8 @@ async fn get_text_units_is_identical_with_and_without_persisted_section_units() 
                 ] {
                     for direction in [TextUnitDirection::Forward, TextUnitDirection::Backward] {
                         compare_pages(
-                            &without_index,
-                            &with_index,
+                            &memory_use_case,
+                            &sqlite_use_case,
                             document.id.clone(),
                             section.id.clone(),
                             requested_kind,
@@ -125,8 +111,8 @@ async fn get_text_units_is_identical_with_and_without_persisted_section_units() 
 
 #[allow(clippy::too_many_arguments)]
 async fn compare_pages(
-    without_index: &GetTextUnitsUseCase,
-    with_index: &GetTextUnitsUseCase,
+    memory_use_case: &GetTextUnitsUseCase,
+    sqlite_use_case: &GetTextUnitsUseCase,
     document_id: DocumentId,
     section_id: SectionId,
     requested_kind: RequestedTextUnitKind,
@@ -144,37 +130,77 @@ async fn compare_pages(
         cursor: None,
     };
 
-    let mut without_cursor: Option<String> = None;
-    let mut with_cursor: Option<String> = None;
+    let mut memory_cursor: Option<String> = None;
+    let mut sqlite_cursor: Option<String> = None;
     let mut pages = 0usize;
     loop {
-        let mut without_command = base.clone();
-        without_command.cursor = without_cursor.clone();
-        let mut with_command = base.clone();
-        with_command.cursor = with_cursor.clone();
+        let mut memory_command = base.clone();
+        memory_command.cursor = memory_cursor.clone();
+        let mut sqlite_command = base.clone();
+        sqlite_command.cursor = sqlite_cursor.clone();
 
-        let without_result = without_index
-            .execute(without_command)
+        let memory_result = memory_use_case
+            .execute(memory_command)
             .await
-            .expect("enumeration without the index should succeed");
-        let with_result = with_index
-            .execute(with_command)
+            .expect("enumeration through the in-memory index should succeed");
+        let sqlite_result = sqlite_use_case
+            .execute(sqlite_command)
             .await
-            .expect("enumeration with the index should succeed");
-        assert_eq!(without_result, with_result);
+            .expect("enumeration through the sqlite index should succeed");
+        assert_eq!(memory_result, sqlite_result);
 
         pages += 1;
         assert!(pages <= 4096, "page loop must terminate");
 
-        match (without_result.next_cursor, with_result.next_cursor) {
+        match (memory_result.next_cursor, sqlite_result.next_cursor) {
             (None, None) => break,
-            (Some(without_next), Some(with_next)) => {
-                without_cursor = Some(without_next);
-                with_cursor = Some(with_next);
+            (Some(memory_next), Some(sqlite_next)) => {
+                memory_cursor = Some(memory_next);
+                sqlite_cursor = Some(sqlite_next);
             }
             cursors => panic!("cursor disagreement between read paths: {cursors:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn never_stored_document_has_no_section_units_and_fails_as_stale() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let document = parse_plain().await;
+    let repository: Arc<dyn DocumentRepository> =
+        Arc::new(SqliteDocumentRepository::open(&database).expect("repository should open"));
+    let index: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("text unit index should open"));
+    repository
+        .save(document.clone())
+        .await
+        .expect("document should persist");
+
+    let section_id = document.root_sections[0].id.clone();
+    assert_eq!(
+        index
+            .section_units(&document.id, &section_id)
+            .await
+            .expect("a missing set must not error"),
+        None
+    );
+
+    let use_case = GetTextUnitsUseCase::new(repository, index);
+    let error = use_case
+        .execute(GetTextUnitsCommand {
+            document_id: document.id,
+            section_id,
+            requested_kind: RequestedTextUnitKind::Paragraph,
+            direction: TextUnitDirection::Forward,
+            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
+            max_items: 2,
+            max_chars: None,
+            cursor: None,
+        })
+        .await
+        .expect_err("a document that was never stored must not be read");
+    assert!(matches!(error, ApplicationError::StaleDocument(_)));
 }
 
 fn all_sections(document: &Document) -> Vec<Section> {

@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, NormalizedDocumentHash,
-    ParagraphSectionCoverage, ParagraphTextUnitSet, SectionId, SentenceParagraphCoverage,
-    SentenceTextUnit, SentenceTextUnitSet, TextLocator, TextUnit,
+    Document, DocumentId, DocumentSource, Location, MediaType, ParagraphSectionCoverage,
+    ParagraphTextUnitSet, SectionId, SentenceParagraphCoverage, SentenceTextUnit,
+    SentenceTextUnitSet, TextLocator, TextUnit,
 };
 
 use super::reading_profile::ReliabilitySummary;
@@ -295,27 +295,21 @@ pub trait TextUnitIndex: Send + Sync {
         document_id: &DocumentId,
     ) -> Result<Vec<TextUnit>, ApplicationError>;
 
-    /// Persists both unit sets of a document. The default stores the paragraphs only, as `replace_document` does.
+    /// Persists both unit sets of a document.
     async fn replace_document_sets(
         &self,
         document_id: &DocumentId,
         paragraphs: Arc<ParagraphTextUnitSet>,
         sentences: Arc<SentenceTextUnitSet>,
-    ) -> Result<(), ApplicationError> {
-        let _ = sentences;
-        self.replace_document(document_id, &paragraphs.units).await
-    }
+    ) -> Result<(), ApplicationError>;
 
-    /// Units of one section as persisted by `replace_document_sets`, or `None` when this document's sets are not stored
-    /// for `normalized_document_hash` and the current `TEXT_SEGMENTATION_VERSION`. The default stores nothing.
+    /// Units of one section as persisted by `replace_document_sets`, or `None` when this document's units are not
+    /// stored for the current `TEXT_SEGMENTATION_VERSION`.
     async fn section_units(
         &self,
-        _document_id: &DocumentId,
-        _normalized_document_hash: &NormalizedDocumentHash,
-        _section_id: &SectionId,
-    ) -> Result<Option<SectionTextUnits>, ApplicationError> {
-        Ok(None)
-    }
+        document_id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionTextUnits>, ApplicationError>;
 }
 
 #[async_trait]

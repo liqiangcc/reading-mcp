@@ -217,7 +217,6 @@ impl SqliteTextUnitIndex {
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS text_unit_sets_v1 (
                     document_id TEXT PRIMARY KEY,
-                    normalized_document_hash TEXT NOT NULL,
                     segmentation_version TEXT NOT NULL
                  );
                  CREATE TABLE IF NOT EXISTS text_unit_sections_v1 (
@@ -535,14 +534,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     .execute(
                         "INSERT INTO text_unit_sets_v1(
                             document_id,
-                            normalized_document_hash,
                             segmentation_version
-                         ) VALUES (?1, ?2, ?3)",
-                        params![
-                            &document_id.0,
-                            &paragraphs.normalized_document_hash.0,
-                            TEXT_SEGMENTATION_VERSION,
-                        ],
+                         ) VALUES (?1, ?2)",
+                        params![&document_id.0, TEXT_SEGMENTATION_VERSION],
                     )
                     .map_err(text_unit_index_error)?;
 
@@ -654,11 +648,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     async fn section_units(
         &self,
         document_id: &DocumentId,
-        normalized_document_hash: &NormalizedDocumentHash,
         section_id: &SectionId,
     ) -> Result<Option<SectionTextUnits>, ApplicationError> {
         let document_id = document_id.clone();
-        let normalized_document_hash = normalized_document_hash.clone();
         let section_id = section_id.clone();
         run_sqlite(
             &self.connection,
@@ -666,20 +658,18 @@ impl TextUnitIndex for SqliteTextUnitIndex {
             move |connection| {
                 let set = connection
                     .query_row(
-                        "SELECT normalized_document_hash, segmentation_version
+                        "SELECT segmentation_version
                          FROM text_unit_sets_v1
                          WHERE document_id = ?1",
                         params![&document_id.0],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        |row| row.get::<_, String>(0),
                     )
                     .optional()
                     .map_err(text_unit_index_error)?;
-                let Some((stored_hash, stored_version)) = set else {
+                let Some(stored_version) = set else {
                     return Ok(None);
                 };
-                if stored_hash != normalized_document_hash.0
-                    || stored_version != TEXT_SEGMENTATION_VERSION
-                {
+                if stored_version != TEXT_SEGMENTATION_VERSION {
                     return Ok(None);
                 }
 

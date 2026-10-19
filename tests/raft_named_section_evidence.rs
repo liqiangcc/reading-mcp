@@ -11,8 +11,9 @@ use reading_mcp::application::get_text_units::{
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievedResource,
 };
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{DocumentSource, MediaType, NORMALIZATION_VERSION};
-use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use reading_mcp::parsing::PdfParser;
 
 const RAFT_URL: &str =
@@ -95,6 +96,8 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
         .save(document.clone())
         .await
         .expect("Raft canonical document should save");
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
     let structure = GetDocumentStructureUseCase::new(repository.clone());
 
     let abstract_resolution = structure
@@ -223,7 +226,7 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
     assert!(matches!(stale, ApplicationError::StaleStructure(_)));
     println!("EVIDENCE_E stale_v6_identity=PASS");
 
-    let abstract_reveal = GetTextUnitsUseCase::new(repository.clone())
+    let abstract_reveal = GetTextUnitsUseCase::new(repository.clone(), index.clone())
         .execute(GetTextUnitsCommand {
             document_id: document.id.clone(),
             section_id: abstract_match.section_id.clone(),
@@ -244,7 +247,7 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
     assert!(!abstract_reveal.items[0].text.is_empty());
     println!("EVIDENCE_ABSTRACT_BODY explicit_abstract_body_reveal=PASS");
 
-    let revealed = GetTextUnitsUseCase::new(repository)
+    let revealed = GetTextUnitsUseCase::new(repository, index)
         .execute(GetTextUnitsCommand {
             document_id: document.id,
             section_id: section_id.clone(),

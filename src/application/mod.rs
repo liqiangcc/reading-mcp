@@ -18,3 +18,4 @@ pub mod search_document;
 pub mod source_view;
 mod structure_cursor;
 mod text_unit_cursor;
+pub mod text_unit_store;

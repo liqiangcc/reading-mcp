@@ -6,10 +6,11 @@ use reading_mcp::application::get_text_units::{
     TextUnitDirection,
 };
 use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
-use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 
 #[tokio::test]
 async fn forward_sentence_pages_are_gap_free_overlap_free_and_complete() {
@@ -19,7 +20,9 @@ async fn forward_sentence_pages_are_gap_free_overlap_free_and_complete() {
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let first = use_case
         .execute(command(&document, RequestedTextUnitKind::Sentence, 2, None))
@@ -54,7 +57,9 @@ async fn backward_pages_preserve_source_order_inside_each_page_without_overlap()
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let mut first_command = command(&document, RequestedTextUnitKind::Sentence, 2, None);
     first_command.direction = TextUnitDirection::Backward;
@@ -90,7 +95,9 @@ async fn sentence_preserve_source_emits_coarse_non_prose_while_eligible_only_acc
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let preserve = use_case
         .execute(command(
@@ -145,7 +152,9 @@ async fn paragraph_enumeration_returns_exact_locators_and_does_not_cross_into_ch
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let result = use_case
         .execute(command(
@@ -180,7 +189,9 @@ async fn continuation_cursor_fails_closed_after_normalized_document_changes() {
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository.clone());
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository.clone(), index);
 
     let first = use_case
         .execute(command(&document, RequestedTextUnitKind::Sentence, 1, None))
@@ -212,7 +223,9 @@ async fn cursor_cannot_redefine_requested_kind_or_stream_policy() {
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let first = use_case
         .execute(command(&document, RequestedTextUnitKind::Sentence, 1, None))
@@ -235,7 +248,9 @@ async fn max_chars_never_splits_a_text_unit_and_reports_actionable_resource_limi
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let error = use_case
         .execute(command(

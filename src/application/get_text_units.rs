@@ -9,9 +9,8 @@ use crate::application::text_unit_cursor::{
     TextUnitCursorClaims, decode_text_unit_cursor, encode_text_unit_cursor,
 };
 use crate::domain::{
-    Document, DocumentId, NormalizedDocumentHash, ParagraphContentClass, Section, SectionId,
-    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION,
-    TextLocator, TextUnit,
+    Document, DocumentId, ParagraphContentClass, Section, SectionId, SentenceEligibility,
+    SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
 };
 
 pub const DEFAULT_TEXT_UNIT_MAX_ITEMS: usize = 32;
@@ -160,20 +159,18 @@ pub struct GetTextUnitsResult {
 
 pub struct GetTextUnitsUseCase {
     repository: Arc<dyn DocumentRepository>,
-    text_unit_index: Option<Arc<dyn TextUnitIndex>>,
+    text_unit_index: Arc<dyn TextUnitIndex>,
 }
 
 impl GetTextUnitsUseCase {
-    pub fn new(repository: Arc<dyn DocumentRepository>) -> Self {
+    pub fn new(
+        repository: Arc<dyn DocumentRepository>,
+        text_unit_index: Arc<dyn TextUnitIndex>,
+    ) -> Self {
         Self {
             repository,
-            text_unit_index: None,
+            text_unit_index,
         }
-    }
-
-    pub fn with_text_unit_index(mut self, index: Arc<dyn TextUnitIndex>) -> Self {
-        self.text_unit_index = Some(index);
-        self
     }
 
     pub async fn execute(
@@ -238,9 +235,7 @@ impl GetTextUnitsUseCase {
             }
         }
 
-        let units = self
-            .declared_section_text_units(&document, section, &normalized_hash)
-            .await?;
+        let units = self.declared_section_text_units(&document, section).await?;
         let (stream_items, coverage) = build_declared_stream(
             &document,
             section,
@@ -349,31 +344,16 @@ impl GetTextUnitsUseCase {
         &self,
         document: &Document,
         section: &Section,
-        normalized_hash: &NormalizedDocumentHash,
     ) -> Result<SectionTextUnits, ApplicationError> {
-        if let Some(index) = &self.text_unit_index
-            && let Some(units) = index
-                .section_units(&document.id, normalized_hash, &section.id)
-                .await?
-        {
-            return Ok(units);
-        }
-
-        let paragraph_set = document.try_paragraph_text_units().map_err(|error| {
-            ApplicationError::TextUnitIndexFailed(format!(
-                "cannot materialize Paragraph TextUnits from persisted block evidence: {error}"
-            ))
-        })?;
-        let sentence_set = document.try_sentence_text_units().map_err(|error| {
-            ApplicationError::TextUnitIndexFailed(format!(
-                "cannot materialize Sentence TextUnits from persisted block evidence: {error}"
-            ))
-        })?;
-        Ok(SectionTextUnits::from_sets(
-            &paragraph_set,
-            &sentence_set,
-            &section.id,
-        ))
+        self.text_unit_index
+            .section_units(&document.id, &section.id)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::StaleDocument(format!(
+                    "text units of document {} are not stored for {TEXT_SEGMENTATION_VERSION}; open the document again",
+                    document.id.0
+                ))
+            })
     }
 }
 

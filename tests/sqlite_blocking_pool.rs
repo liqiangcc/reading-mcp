@@ -27,7 +27,7 @@ async fn repository_round_trips_on_current_thread_runtime() {
         .await
         .expect("get")
         .expect("saved");
-    assert_eq!(loaded, document(1));
+    assert_eq!(*loaded, document(1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -50,6 +50,6 @@ async fn concurrent_saves_and_reads_complete() {
         })
         .collect();
     for (n, task) in tasks.into_iter().enumerate() {
-        assert_eq!(task.await.expect("task"), document(n));
+        assert_eq!(*task.await.expect("task"), document(n));
     }
 }

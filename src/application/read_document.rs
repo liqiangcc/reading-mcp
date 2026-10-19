@@ -155,7 +155,7 @@ impl ReadDocumentUseCase {
         read_exact_segment(&document, target, claims.next_char, command.max_chars)
     }
 
-    async fn load_document(&self, id: &DocumentId) -> Result<Document, ApplicationError> {
+    async fn load_document(&self, id: &DocumentId) -> Result<Arc<Document>, ApplicationError> {
         self.repository
             .get(id)
             .await?

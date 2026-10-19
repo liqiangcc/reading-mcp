@@ -78,7 +78,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         .await
     }
 
-    async fn get(&self, id: &DocumentId) -> Result<Option<Document>, ApplicationError> {
+    async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
         let id = id.clone();
         run_sqlite(
             &self.connection,
@@ -99,7 +99,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                     document
                         .validate_ocr_publication()
                         .map_err(ApplicationError::RepositoryFailed)?;
-                    Ok(document)
+                    Ok(Arc::new(document))
                 })
                 .transpose()
             },

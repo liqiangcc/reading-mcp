@@ -9,6 +9,7 @@ use crate::domain::{Document, DocumentId, DocumentSource, MediaType};
 use crate::infrastructure::{BudgetedParser, InMemorySearchIndex, ResourceBudget};
 use async_trait::async_trait;
 use rmcp::ServiceExt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Fixture;
@@ -58,7 +59,7 @@ impl DocumentRepository for NoPublication {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn get(&self, _: &DocumentId) -> Result<Option<Document>, ApplicationError> {
+    async fn get(&self, _: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
         Ok(None)
     }
 }

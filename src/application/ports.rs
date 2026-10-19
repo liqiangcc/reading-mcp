@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -226,7 +227,7 @@ pub trait ParsedDocumentCache: Send + Sync {
 pub trait DocumentRepository: Send + Sync {
     async fn save(&self, document: Document) -> Result<(), ApplicationError>;
 
-    async fn get(&self, id: &DocumentId) -> Result<Option<Document>, ApplicationError>;
+    async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError>;
 }
 
 #[async_trait]

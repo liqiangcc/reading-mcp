@@ -184,9 +184,9 @@ impl SourceViewUseCase {
         let normalized_document_hash = document.normalized_document_hash();
 
         Ok(SourceViewResult {
-            document_id: document.id,
-            source: document.source,
-            content_hash: document.content_hash.0,
+            document_id: document.id.clone(),
+            source: document.source.clone(),
+            content_hash: document.content_hash.0.clone(),
             normalized_document_hash,
             normalized_document_hash_version: NORMALIZED_DOCUMENT_HASH_VERSION.into(),
             source_binding_version,

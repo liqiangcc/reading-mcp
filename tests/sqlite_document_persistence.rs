@@ -42,7 +42,7 @@ async fn current_normalization_version_document_survives_sqlite_reopen() {
         .await
         .expect("current document should load")
         .expect("current document should exist");
-    assert_eq!(restored, document);
+    assert_eq!(*restored, document);
 }
 
 #[tokio::test]

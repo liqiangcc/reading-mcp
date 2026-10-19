@@ -206,7 +206,7 @@ impl GetContextUseCase {
         }
     }
 
-    async fn load_document(&self, id: &DocumentId) -> Result<Document, ApplicationError> {
+    async fn load_document(&self, id: &DocumentId) -> Result<Arc<Document>, ApplicationError> {
         self.repository
             .get(id)
             .await?

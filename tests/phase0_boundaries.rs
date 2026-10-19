@@ -80,14 +80,15 @@ impl DocumentRepository for FakeRepository {
         Ok(())
     }
 
-    async fn get(&self, id: &DocumentId) -> Result<Option<Document>, ApplicationError> {
+    async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
         Ok(self
             .saved
             .lock()
             .expect("repository mutex poisoned")
             .as_ref()
             .filter(|document| &document.id == id)
-            .cloned())
+            .cloned()
+            .map(Arc::new))
     }
 }
 

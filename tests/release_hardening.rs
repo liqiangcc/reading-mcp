@@ -118,7 +118,7 @@ async fn sqlite_repository_and_fts_survive_reopen() {
         .await
         .expect("repository read should succeed")
         .expect("document should survive process-style reopen");
-    assert_eq!(restored, document);
+    assert_eq!(*restored, document);
 
     let index = SqliteSearchIndex::open(&database).expect("FTS index should reopen cleanly");
     let hits = index

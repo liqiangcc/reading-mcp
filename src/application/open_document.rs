@@ -207,6 +207,8 @@ impl OpenDocumentUseCase {
             return Err(ApplicationError::OcrTimeout);
         }
         let document = Arc::new(document);
+        let paragraph_units = Arc::new(paragraph_units);
+        let sentence_units = Arc::new(sentence_units);
         self.repository.save_shared(Arc::clone(&document)).await?;
         if let Some(index) = &self.text_unit_index {
             index
@@ -214,7 +216,11 @@ impl OpenDocumentUseCase {
                 .await?;
         }
         self.search_index
-            .index_with_units(&document, &paragraph_units, &sentence_units)
+            .index_with_units(
+                Arc::clone(&document),
+                Arc::clone(&paragraph_units),
+                Arc::clone(&sentence_units),
+            )
             .await?;
 
         Ok(result)

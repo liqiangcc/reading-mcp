@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 
@@ -50,12 +50,12 @@ impl SearchIndex for InMemorySearchIndex {
 
     async fn index_with_units(
         &self,
-        document: &Document,
-        paragraphs: &ParagraphTextUnitSet,
-        sentences: &SentenceTextUnitSet,
+        document: Arc<Document>,
+        paragraphs: Arc<ParagraphTextUnitSet>,
+        sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
         let candidates =
-            lexical_candidates_from_units(document, &paragraphs.units, &sentences.units);
+            lexical_candidates_from_units(&document, &paragraphs.units, &sentences.units);
         self.store_candidates(&document.id, candidates)
     }
 

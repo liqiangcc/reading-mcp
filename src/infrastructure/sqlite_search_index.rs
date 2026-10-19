@@ -17,7 +17,7 @@ use crate::domain::{
 
 use super::lexical::{
     LEXICAL_SEARCH_INDEX_VERSION, LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates,
-    encoded_lexemes, encoded_query, encoded_relaxed_query, lexical_candidates_from_units,
+    encoded_lexemes, encoded_query, encoded_relaxed_query, for_each_lexical_candidate,
     match_snippet, tokenize,
 };
 
@@ -54,11 +54,14 @@ impl SqliteSearchIndex {
 
     async fn store_candidates(
         &self,
-        document: &Document,
-        candidates: Vec<LexicalCandidate>,
+        document_id: DocumentId,
+        normalized_document_hash: NormalizedDocumentHash,
+        produce: impl FnOnce(
+            &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
+        ) -> Result<(), ApplicationError>
+        + Send
+        + 'static,
     ) -> Result<(), ApplicationError> {
-        let document_id = document.id.clone();
-        let normalized_document_hash = document.normalized_document_hash();
         run_sqlite(
             &self.connection,
             ApplicationError::IndexFailed,
@@ -90,7 +93,7 @@ impl SqliteSearchIndex {
                         )
                         .map_err(index_error)?;
 
-                    for candidate in candidates {
+                    produce(&mut |candidate| {
                         let location_json =
                             serde_json::to_string(&StoredLocation::from(&candidate.location))
                                 .map_err(|error| {
@@ -115,7 +118,8 @@ impl SqliteSearchIndex {
                                 encoded_lexemes(&candidate.tokens),
                             ])
                             .map_err(index_error)?;
-                    }
+                        Ok(())
+                    })?;
                 }
 
                 transaction
@@ -153,19 +157,30 @@ impl SearchIndex for SqliteSearchIndex {
     }
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
+        let document_id = document.id.clone();
+        let normalized_document_hash = document.normalized_document_hash();
         let candidates = build_lexical_candidates(document)?;
-        self.store_candidates(document, candidates).await
+        self.store_candidates(document_id, normalized_document_hash, move |sink| {
+            for candidate in candidates {
+                sink(candidate)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn index_with_units(
         &self,
-        document: &Document,
-        paragraphs: &ParagraphTextUnitSet,
-        sentences: &SentenceTextUnitSet,
+        document: Arc<Document>,
+        paragraphs: Arc<ParagraphTextUnitSet>,
+        sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
-        let candidates =
-            lexical_candidates_from_units(document, &paragraphs.units, &sentences.units);
-        self.store_candidates(document, candidates).await
+        let document_id = document.id.clone();
+        let normalized_document_hash = document.normalized_document_hash();
+        self.store_candidates(document_id, normalized_document_hash, move |sink| {
+            for_each_lexical_candidate(&document, &paragraphs.units, &sentences.units, sink)
+        })
+        .await
     }
 
     async fn search(

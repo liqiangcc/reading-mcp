@@ -41,11 +41,13 @@ pub(crate) fn build_lexical_candidates(
     ))
 }
 
-pub(crate) fn lexical_candidates_from_units(
+/// Calls `sink` with each lexical candidate of `document`, in index order, built from units the caller already has.
+pub(crate) fn for_each_lexical_candidate(
     document: &Document,
     paragraphs: &[TextUnit],
     sentences: &[SentenceTextUnit],
-) -> Vec<LexicalCandidate> {
+    sink: &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
+) -> Result<(), ApplicationError> {
     let mut paragraphs_by_section: HashMap<&SectionId, Vec<&TextUnit>> = HashMap::new();
     for paragraph in paragraphs {
         paragraphs_by_section
@@ -61,8 +63,6 @@ pub(crate) fn lexical_candidates_from_units(
             .push(sentence);
     }
 
-    let mut candidates =
-        Vec::with_capacity(document.section_count() + paragraphs.len() + sentences.len());
     let mut source_order = 0usize;
 
     for section in &document.root_sections {
@@ -71,11 +71,26 @@ pub(crate) fn lexical_candidates_from_units(
             section,
             &paragraphs_by_section,
             &sentences_by_section,
-            &mut candidates,
+            sink,
             &mut source_order,
-        );
+        )?;
     }
 
+    Ok(())
+}
+
+pub(crate) fn lexical_candidates_from_units(
+    document: &Document,
+    paragraphs: &[TextUnit],
+    sentences: &[SentenceTextUnit],
+) -> Vec<LexicalCandidate> {
+    let mut candidates =
+        Vec::with_capacity(document.section_count() + paragraphs.len() + sentences.len());
+    for_each_lexical_candidate(document, paragraphs, sentences, &mut |candidate| {
+        candidates.push(candidate);
+        Ok(())
+    })
+    .expect("pushing into a Vec cannot fail");
     candidates
 }
 
@@ -84,9 +99,9 @@ fn collect_section_candidates(
     section: &Section,
     paragraphs: &HashMap<&SectionId, Vec<&TextUnit>>,
     sentences: &HashMap<&SectionId, Vec<&SentenceTextUnit>>,
-    output: &mut Vec<LexicalCandidate>,
+    sink: &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
     source_order: &mut usize,
-) {
+) -> Result<(), ApplicationError> {
     push_candidate(
         document,
         section,
@@ -94,9 +109,9 @@ fn collect_section_candidates(
         section.title.clone(),
         section.location.clone(),
         TextLocator::for_section(document, section),
-        output,
+        sink,
         source_order,
-    );
+    )?;
 
     for paragraph in paragraphs.get(&section.id).into_iter().flatten().copied() {
         push_candidate(
@@ -106,9 +121,9 @@ fn collect_section_candidates(
             paragraph.text.clone(),
             text_unit_location(section, paragraph.paragraph_index, None),
             TextLocator::for_paragraph(document, section, paragraph),
-            output,
+            sink,
             source_order,
-        );
+        )?;
     }
 
     for sentence in sentences.get(&section.id).into_iter().flatten().copied() {
@@ -123,14 +138,16 @@ fn collect_section_candidates(
                 Some(sentence.sentence_index),
             ),
             TextLocator::for_sentence(document, section, sentence),
-            output,
+            sink,
             source_order,
-        );
+        )?;
     }
 
     for child in &section.children {
-        collect_section_candidates(document, child, paragraphs, sentences, output, source_order);
+        collect_section_candidates(document, child, paragraphs, sentences, sink, source_order)?;
     }
+
+    Ok(())
 }
 
 fn text_unit_location(
@@ -161,14 +178,14 @@ fn push_candidate(
     searchable_text: String,
     location: Location,
     text_locator: TextLocator,
-    output: &mut Vec<LexicalCandidate>,
+    sink: &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
     source_order: &mut usize,
-) {
+) -> Result<(), ApplicationError> {
     let tokens = tokenize(&searchable_text);
     if tokens.is_empty() {
-        return;
+        return Ok(());
     }
-    output.push(LexicalCandidate {
+    sink(LexicalCandidate {
         candidate_kind,
         section_id: section.id.clone(),
         title: section.title.clone(),
@@ -178,8 +195,9 @@ fn push_candidate(
         searchable_text,
         tokens,
         source_order: *source_order,
-    });
+    })?;
     *source_order += 1;
+    Ok(())
 }
 
 pub(crate) fn tokenize(value: &str) -> Vec<String> {

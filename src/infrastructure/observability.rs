@@ -205,14 +205,18 @@ impl SearchIndex for ObservedSearchIndex {
 
     async fn index_with_units(
         &self,
-        document: &Document,
-        paragraphs: &ParagraphTextUnitSet,
-        sentences: &SentenceTextUnitSet,
+        document: Arc<Document>,
+        paragraphs: Arc<ParagraphTextUnitSet>,
+        sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
         let started = Instant::now();
         let result = self
             .inner
-            .index_with_units(document, paragraphs, sentences)
+            .index_with_units(
+                Arc::clone(&document),
+                Arc::clone(&paragraphs),
+                Arc::clone(&sentences),
+            )
             .await;
         emit(json!({
             "event": "index",

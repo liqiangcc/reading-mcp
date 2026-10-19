@@ -266,11 +266,11 @@ pub trait SearchIndex: Send + Sync {
     /// not build them again. The default ignores the units.
     async fn index_with_units(
         &self,
-        document: &Document,
-        _paragraphs: &ParagraphTextUnitSet,
-        _sentences: &SentenceTextUnitSet,
+        document: Arc<Document>,
+        _paragraphs: Arc<ParagraphTextUnitSet>,
+        _sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
-        self.index(document).await
+        self.index(&document).await
     }
 
     async fn search(

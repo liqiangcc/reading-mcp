@@ -27,17 +27,23 @@ async fn parsed_document() -> Document {
 
 #[tokio::test]
 async fn in_memory_index_reuses_caller_units() {
-    let document = parsed_document().await;
-    let paragraphs = document
-        .try_paragraph_text_units()
-        .expect("paragraph units");
-    let sentences = document.try_sentence_text_units().expect("sentence units");
+    let document = Arc::new(parsed_document().await);
+    let paragraphs = Arc::new(
+        document
+            .try_paragraph_text_units()
+            .expect("paragraph units"),
+    );
+    let sentences = Arc::new(document.try_sentence_text_units().expect("sentence units"));
 
     let rebuilt = InMemorySearchIndex::default();
     let reused = InMemorySearchIndex::default();
     rebuilt.index(&document).await.expect("index");
     reused
-        .index_with_units(&document, &paragraphs, &sentences)
+        .index_with_units(
+            Arc::clone(&document),
+            Arc::clone(&paragraphs),
+            Arc::clone(&sentences),
+        )
         .await
         .expect("index with units");
 
@@ -58,11 +64,13 @@ async fn in_memory_index_reuses_caller_units() {
 
 #[tokio::test]
 async fn sqlite_index_reuses_caller_units() {
-    let document = parsed_document().await;
-    let paragraphs = document
-        .try_paragraph_text_units()
-        .expect("paragraph units");
-    let sentences = document.try_sentence_text_units().expect("sentence units");
+    let document = Arc::new(parsed_document().await);
+    let paragraphs = Arc::new(
+        document
+            .try_paragraph_text_units()
+            .expect("paragraph units"),
+    );
+    let sentences = Arc::new(document.try_sentence_text_units().expect("sentence units"));
 
     let directory = tempfile::tempdir().expect("temp directory");
     let rebuilt =
@@ -71,7 +79,11 @@ async fn sqlite_index_reuses_caller_units() {
         SqliteSearchIndex::open(directory.path().join("reused.sqlite")).expect("reused index");
     rebuilt.index(&document).await.expect("index");
     reused
-        .index_with_units(&document, &paragraphs, &sentences)
+        .index_with_units(
+            Arc::clone(&document),
+            Arc::clone(&paragraphs),
+            Arc::clone(&sentences),
+        )
         .await
         .expect("index with units");
 

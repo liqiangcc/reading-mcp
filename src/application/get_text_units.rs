@@ -351,13 +351,12 @@ impl GetTextUnitsUseCase {
         section: &Section,
         normalized_hash: &NormalizedDocumentHash,
     ) -> Result<SectionTextUnits, ApplicationError> {
-        if let Some(index) = &self.text_unit_index {
-            if let Some(units) = index
+        if let Some(index) = &self.text_unit_index
+            && let Some(units) = index
                 .section_units(&document.id, normalized_hash, &section.id)
                 .await?
-            {
-                return Ok(units);
-            }
+        {
+            return Ok(units);
         }
 
         let paragraph_set = document.try_paragraph_text_units().map_err(|error| {

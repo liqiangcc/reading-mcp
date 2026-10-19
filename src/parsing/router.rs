@@ -87,15 +87,6 @@ impl ParserRouter {
         )
     }
 
-    pub fn phase4_with_pdf_limit(max_pages: usize) -> Self {
-        Self::with_html_pdf(
-            Arc::new(MarkdownParser),
-            Arc::new(TextParser),
-            Arc::new(HtmlParser),
-            Arc::new(LimitedPdfParser::new(max_pages)),
-        )
-    }
-
     pub fn with_pdf_parser(mut self, pdf: Arc<dyn Parser>) -> Self {
         self.pdf = Some(pdf);
         self

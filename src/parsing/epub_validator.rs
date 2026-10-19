@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Document, NormalizedBlockKind, Section, SectionId, SentenceEligibility};
+use crate::domain::{
+    Document, NormalizedBlockKind, NormalizedTextIndex, Section, SectionId, SentenceEligibility,
+};
 
 use super::epub_navigation::{
     EPUB_NAVIGATION_MAP_VERSION, EpubNavigationMap, EpubNavigationNode, EpubNavigationProvenance,
@@ -1225,6 +1227,7 @@ fn validate_blocks_and_text_units(
     let mut paragraph_by_id = HashMap::new();
     let mut paragraph_ranges = HashSet::new();
     let mut expected_paragraph_index = HashMap::<SectionId, usize>::new();
+    let mut paragraph_owner_index: Option<(SectionId, NormalizedTextIndex<'_>)> = None;
     for (expected_source_order, paragraph) in paragraph_set.units.iter().enumerate() {
         if paragraph.source_order != expected_source_order {
             push_error(
@@ -1237,16 +1240,28 @@ fn validate_blocks_and_text_units(
                 ),
             );
         }
-        let Some(owner) = document.find_section(&paragraph.owner_section_id) else {
-            push_error(
-                findings,
-                "text_units",
-                "paragraph_unknown_owner",
-                format!("Paragraph {} has missing owner Section", paragraph.id.0),
-            );
-            continue;
-        };
-        match owner.normalized_text_slice(paragraph.normalized_range) {
+        if paragraph_owner_index
+            .as_ref()
+            .is_none_or(|(owner, _)| *owner != paragraph.owner_section_id)
+        {
+            let Some(owner) = document.find_section(&paragraph.owner_section_id) else {
+                push_error(
+                    findings,
+                    "text_units",
+                    "paragraph_unknown_owner",
+                    format!("Paragraph {} has missing owner Section", paragraph.id.0),
+                );
+                continue;
+            };
+            paragraph_owner_index = Some((
+                paragraph.owner_section_id.clone(),
+                owner.normalized_text_index(),
+            ));
+        }
+        let (_, index) = paragraph_owner_index
+            .as_ref()
+            .expect("owner index was just set");
+        match index.slice(paragraph.normalized_range) {
             Ok(slice) if slice == paragraph.text => {}
             _ => push_error(
                 findings,
@@ -1341,6 +1356,7 @@ fn validate_blocks_and_text_units(
     let sentence_set = document.sentence_text_units();
     coverage.text_units.sentence_units = sentence_set.units.len();
     let mut expected_sentence_index = HashMap::new();
+    let mut sentence_owner_index: Option<(SectionId, NormalizedTextIndex<'_>)> = None;
     for (expected_source_order, sentence) in sentence_set.units.iter().enumerate() {
         if sentence.source_order != expected_source_order {
             push_error(
@@ -1353,16 +1369,28 @@ fn validate_blocks_and_text_units(
                 ),
             );
         }
-        let Some(owner) = document.find_section(&sentence.owner_section_id) else {
-            push_error(
-                findings,
-                "text_units",
-                "sentence_unknown_owner",
-                format!("Sentence {} has missing owner Section", sentence.id.0),
-            );
-            continue;
-        };
-        match owner.normalized_text_slice(sentence.normalized_range) {
+        if sentence_owner_index
+            .as_ref()
+            .is_none_or(|(owner, _)| *owner != sentence.owner_section_id)
+        {
+            let Some(owner) = document.find_section(&sentence.owner_section_id) else {
+                push_error(
+                    findings,
+                    "text_units",
+                    "sentence_unknown_owner",
+                    format!("Sentence {} has missing owner Section", sentence.id.0),
+                );
+                continue;
+            };
+            sentence_owner_index = Some((
+                sentence.owner_section_id.clone(),
+                owner.normalized_text_index(),
+            ));
+        }
+        let (_, index) = sentence_owner_index
+            .as_ref()
+            .expect("owner index was just set");
+        match index.slice(sentence.normalized_range) {
             Ok(slice) if slice == sentence.text => {}
             _ => push_error(
                 findings,

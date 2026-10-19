@@ -17,7 +17,7 @@ pub use normalized_block::{
 };
 pub use normalized_text::{
     NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE,
-    NormalizedDocumentHash, NormalizedTextRange, NormalizedTextRangeError,
+    NormalizedDocumentHash, NormalizedTextIndex, NormalizedTextRange, NormalizedTextRangeError,
 };
 pub use ocr::{
     DependencyFingerprint, OcrConfig, OcrDerivation, OcrEvidenceRecord, OcrPageBinding,

@@ -7,7 +7,7 @@ use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, Location, Section, SectionId};
 
 use super::blocking::run_blocking;
-use super::charset::{DetectedCharset, decode_declared_charset};
+use super::charset::{DetectedCharset, decode_declared_charset, record_charset};
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 #[derive(Default)]
@@ -87,9 +87,8 @@ impl OpenApiParser {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let mut metadata = resource.metadata;
-        if let Some((encoding, origin)) = declared_charset {
-            metadata.insert("text_charset".into(), encoding.name().into());
-            metadata.insert("text_charset_source".into(), origin.into());
+        if let Some(detected) = declared_charset {
+            record_charset(&mut metadata, detected);
         }
         metadata.insert("api_specification".into(), specification);
         metadata.insert(

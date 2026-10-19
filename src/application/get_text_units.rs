@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::application::locator_resolution::resolve_text_locator;
-use crate::application::ports::{ApplicationError, DocumentRepository};
+use crate::application::ports::{
+    ApplicationError, DocumentRepository, SectionTextUnits, TextUnitIndex,
+};
 use crate::application::text_unit_cursor::{
     TextUnitCursorClaims, decode_text_unit_cursor, encode_text_unit_cursor,
 };
@@ -157,11 +159,18 @@ pub struct GetTextUnitsResult {
 
 pub struct GetTextUnitsUseCase {
     repository: Arc<dyn DocumentRepository>,
+    text_unit_index: Arc<dyn TextUnitIndex>,
 }
 
 impl GetTextUnitsUseCase {
-    pub fn new(repository: Arc<dyn DocumentRepository>) -> Self {
-        Self { repository }
+    pub fn new(
+        repository: Arc<dyn DocumentRepository>,
+        text_unit_index: Arc<dyn TextUnitIndex>,
+    ) -> Self {
+        Self {
+            repository,
+            text_unit_index,
+        }
     }
 
     pub async fn execute(
@@ -226,9 +235,11 @@ impl GetTextUnitsUseCase {
             }
         }
 
+        let units = self.declared_section_text_units(&document, section).await?;
         let (stream_items, coverage) = build_declared_stream(
             &document,
             section,
+            &units,
             command.requested_kind,
             command.coverage_policy,
         )?;
@@ -327,6 +338,22 @@ impl GetTextUnitsUseCase {
                 total_items,
             },
         })
+    }
+
+    async fn declared_section_text_units(
+        &self,
+        document: &Document,
+        section: &Section,
+    ) -> Result<SectionTextUnits, ApplicationError> {
+        self.text_unit_index
+            .section_units(&document.id, &section.id)
+            .await?
+            .ok_or_else(|| {
+                ApplicationError::StaleDocument(format!(
+                    "text units of document {} are not stored for {TEXT_SEGMENTATION_VERSION}; open the document again",
+                    document.id.0
+                ))
+            })
     }
 }
 
@@ -471,44 +498,27 @@ fn resolve_anchor_index(
 fn build_declared_stream(
     document: &Document,
     section: &Section,
+    units: &SectionTextUnits,
     requested_kind: RequestedTextUnitKind,
     coverage_policy: TextUnitCoveragePolicy,
 ) -> Result<(Vec<TextUnitReadingItem>, TextUnitEnumerationCoverage), ApplicationError> {
-    let paragraph_set = document.try_paragraph_text_units().map_err(|error| {
-        ApplicationError::TextUnitIndexFailed(format!(
-            "cannot materialize Paragraph TextUnits from persisted block evidence: {error}"
+    let paragraphs = units.paragraphs.iter().collect::<Vec<_>>();
+    let section_coverage = units.paragraph_coverage.as_ref().ok_or_else(|| {
+        ApplicationError::InvalidRequest(format!(
+            "paragraph coverage is unavailable for section {}",
+            section.id.0
         ))
     })?;
-    let sentence_set = document.try_sentence_text_units().map_err(|error| {
-        ApplicationError::TextUnitIndexFailed(format!(
-            "cannot materialize Sentence TextUnits from persisted block evidence: {error}"
-        ))
-    })?;
-    let paragraphs = paragraph_set
-        .units
-        .iter()
-        .filter(|unit| unit.owner_section_id == section.id)
-        .collect::<Vec<_>>();
-    let section_coverage = paragraph_set
-        .coverage
-        .iter()
-        .find(|coverage| coverage.owner_section_id == section.id)
-        .ok_or_else(|| {
-            ApplicationError::InvalidRequest(format!(
-                "paragraph coverage is unavailable for section {}",
-                section.id.0
-            ))
-        })?;
 
-    let coverage_by_paragraph = sentence_set
-        .coverage
+    let coverage_by_paragraph = units
+        .sentence_coverage
         .iter()
         .filter(|coverage| coverage.owner_section_id == section.id)
         .map(|coverage| (coverage.paragraph_index, coverage))
         .collect::<HashMap<_, _>>();
     let mut sentences_by_paragraph: HashMap<usize, Vec<&SentenceTextUnit>> = HashMap::new();
-    for sentence in sentence_set
-        .units
+    for sentence in units
+        .sentences
         .iter()
         .filter(|unit| unit.owner_section_id == section.id)
     {

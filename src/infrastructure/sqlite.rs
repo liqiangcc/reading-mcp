@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,10 +9,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::sqlite_support::{open_connection, run_sqlite};
-use crate::application::ports::{ApplicationError, DocumentRepository, TextUnitIndex};
+use crate::application::ports::{
+    ApplicationError, DocumentRepository, SectionTextUnits, TextUnitIndex,
+};
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
-    NormalizedDocumentHash, NormalizedTextRange, Section, SectionId, TextUnit, TextUnitId,
+    NormalizedDocumentHash, NormalizedTextRange, ParagraphContentClass, ParagraphSectionCoverage,
+    ParagraphTextUnitSet, Section, SectionId, SentenceEligibility, SentenceParagraphCoverage,
+    SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextUnit, TextUnitId,
     TextUnitKind,
 };
 
@@ -206,6 +211,37 @@ impl SqliteTextUnitIndex {
                  );
                  CREATE INDEX IF NOT EXISTS idx_text_units_document_source_order
                     ON text_units(document_id, source_order);",
+            )
+            .map_err(text_unit_index_error)?;
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS text_unit_sets_v1 (
+                    document_id TEXT PRIMARY KEY,
+                    segmentation_version TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS text_unit_sections_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    paragraph_coverage_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS text_unit_items_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source_order INTEGER NOT NULL,
+                    unit_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, kind, source_order)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_text_unit_items_v1_section
+                    ON text_unit_items_v1(document_id, owner_section_id, kind, source_order);
+                 CREATE TABLE IF NOT EXISTS text_unit_sentence_coverage_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    coverage_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id, position)
+                 );",
             )
             .map_err(text_unit_index_error)?;
         Ok(Self {
@@ -419,6 +455,402 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         )
         .await
     }
+
+    async fn replace_document_sets(
+        &self,
+        document_id: &DocumentId,
+        paragraphs: Arc<ParagraphTextUnitSet>,
+        sentences: Arc<SentenceTextUnitSet>,
+    ) -> Result<(), ApplicationError> {
+        validate_paragraph_units(document_id, &paragraphs.units)?;
+
+        let document_id = document_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let transaction = connection.transaction().map_err(text_unit_index_error)?;
+                transaction
+                    .execute(
+                        "DELETE FROM text_units WHERE document_id = ?1",
+                        params![&document_id.0],
+                    )
+                    .map_err(text_unit_index_error)?;
+                {
+                    let mut statement = transaction
+                        .prepare(
+                            "INSERT INTO text_units(
+                                unit_id,
+                                document_id,
+                                content_hash,
+                                normalized_document_hash,
+                                owner_section_id,
+                                kind,
+                                paragraph_index,
+                                source_order,
+                                range_start,
+                                range_end,
+                                text,
+                                segmentation_version
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        )
+                        .map_err(text_unit_index_error)?;
+
+                    for unit in &paragraphs.units {
+                        statement
+                            .execute(params![
+                                &unit.id.0,
+                                &unit.document_id.0,
+                                &unit.content_hash.0,
+                                &unit.normalized_document_hash.0,
+                                &unit.owner_section_id.0,
+                                unit.kind.as_str(),
+                                usize_to_i64(unit.paragraph_index)?,
+                                usize_to_i64(unit.source_order)?,
+                                usize_to_i64(unit.normalized_range.start())?,
+                                usize_to_i64(unit.normalized_range.end())?,
+                                &unit.text,
+                                &unit.segmentation_version,
+                            ])
+                            .map_err(text_unit_index_error)?;
+                    }
+                }
+
+                for table in [
+                    "text_unit_sets_v1",
+                    "text_unit_sections_v1",
+                    "text_unit_items_v1",
+                    "text_unit_sentence_coverage_v1",
+                ] {
+                    transaction
+                        .execute(
+                            &format!("DELETE FROM {table} WHERE document_id = ?1"),
+                            params![&document_id.0],
+                        )
+                        .map_err(text_unit_index_error)?;
+                }
+
+                transaction
+                    .execute(
+                        "INSERT INTO text_unit_sets_v1(
+                            document_id,
+                            segmentation_version
+                         ) VALUES (?1, ?2)",
+                        params![&document_id.0, TEXT_SEGMENTATION_VERSION],
+                    )
+                    .map_err(text_unit_index_error)?;
+
+                for coverage in &paragraphs.coverage {
+                    let coverage_json =
+                        serde_json::to_string(&StoredParagraphCoverage::from_coverage(coverage))
+                            .map_err(|error| {
+                                ApplicationError::TextUnitIndexFailed(error.to_string())
+                            })?;
+                    transaction
+                        .execute(
+                            "INSERT INTO text_unit_sections_v1(
+                                document_id,
+                                owner_section_id,
+                                paragraph_coverage_json
+                             ) VALUES (?1, ?2, ?3)",
+                            params![&document_id.0, &coverage.owner_section_id.0, coverage_json,],
+                        )
+                        .map_err(text_unit_index_error)?;
+                }
+
+                {
+                    let mut statement = transaction
+                        .prepare(
+                            "INSERT INTO text_unit_items_v1(
+                                document_id,
+                                owner_section_id,
+                                kind,
+                                source_order,
+                                unit_json
+                             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        )
+                        .map_err(text_unit_index_error)?;
+
+                    for unit in &paragraphs.units {
+                        let unit_json =
+                            serde_json::to_string(&StoredParagraphUnit::from_unit(unit)).map_err(
+                                |error| ApplicationError::TextUnitIndexFailed(error.to_string()),
+                            )?;
+                        statement
+                            .execute(params![
+                                &document_id.0,
+                                &unit.owner_section_id.0,
+                                TextUnitKind::Paragraph.as_str(),
+                                usize_to_i64(unit.source_order)?,
+                                unit_json,
+                            ])
+                            .map_err(text_unit_index_error)?;
+                    }
+
+                    for unit in &sentences.units {
+                        let unit_json = serde_json::to_string(&StoredSentenceUnit::from_unit(unit))
+                            .map_err(|error| {
+                                ApplicationError::TextUnitIndexFailed(error.to_string())
+                            })?;
+                        statement
+                            .execute(params![
+                                &document_id.0,
+                                &unit.owner_section_id.0,
+                                "sentence",
+                                usize_to_i64(unit.source_order)?,
+                                unit_json,
+                            ])
+                            .map_err(text_unit_index_error)?;
+                    }
+                }
+
+                {
+                    let mut statement = transaction
+                        .prepare(
+                            "INSERT INTO text_unit_sentence_coverage_v1(
+                                document_id,
+                                owner_section_id,
+                                position,
+                                coverage_json
+                             ) VALUES (?1, ?2, ?3, ?4)",
+                        )
+                        .map_err(text_unit_index_error)?;
+
+                    let mut positions: HashMap<SectionId, i64> = HashMap::new();
+                    for coverage in &sentences.coverage {
+                        let position = positions
+                            .entry(coverage.owner_section_id.clone())
+                            .or_insert(0);
+                        let coverage_json =
+                            serde_json::to_string(&StoredSentenceCoverage::from_coverage(coverage))
+                                .map_err(|error| {
+                                    ApplicationError::TextUnitIndexFailed(error.to_string())
+                                })?;
+                        statement
+                            .execute(params![
+                                &document_id.0,
+                                &coverage.owner_section_id.0,
+                                *position,
+                                coverage_json,
+                            ])
+                            .map_err(text_unit_index_error)?;
+                        *position += 1;
+                    }
+                }
+
+                transaction.commit().map_err(text_unit_index_error)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    async fn section_units(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionTextUnits>, ApplicationError> {
+        let document_id = document_id.clone();
+        let section_id = section_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let set = connection
+                    .query_row(
+                        "SELECT segmentation_version
+                         FROM text_unit_sets_v1
+                         WHERE document_id = ?1",
+                        params![&document_id.0],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?;
+                let Some(stored_version) = set else {
+                    return Ok(None);
+                };
+                if stored_version != TEXT_SEGMENTATION_VERSION {
+                    return Ok(None);
+                }
+
+                let paragraph_coverage = connection
+                    .query_row(
+                        "SELECT paragraph_coverage_json
+                         FROM text_unit_sections_v1
+                         WHERE document_id = ?1 AND owner_section_id = ?2",
+                        params![&document_id.0, &section_id.0],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?
+                    .map(
+                        |json| -> Result<ParagraphSectionCoverage, ApplicationError> {
+                            let stored: StoredParagraphCoverage = serde_json::from_str(&json)
+                                .map_err(|error| {
+                                    ApplicationError::TextUnitIndexFailed(error.to_string())
+                                })?;
+                            Ok(stored.into_coverage())
+                        },
+                    )
+                    .transpose()?;
+
+                let mut paragraphs = Vec::new();
+                let mut sentences = Vec::new();
+                {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT kind, unit_json
+                             FROM text_unit_items_v1
+                             WHERE document_id = ?1 AND owner_section_id = ?2
+                             ORDER BY kind, source_order",
+                        )
+                        .map_err(text_unit_index_error)?;
+                    let rows = statement
+                        .query_map(params![&document_id.0, &section_id.0], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .map_err(text_unit_index_error)?;
+                    for row in rows {
+                        let (kind, json) = row.map_err(text_unit_index_error)?;
+                        match kind.as_str() {
+                            "paragraph" => {
+                                let stored: StoredParagraphUnit = serde_json::from_str(&json)
+                                    .map_err(|error| {
+                                        ApplicationError::TextUnitIndexFailed(error.to_string())
+                                    })?;
+                                paragraphs.push(stored.into_unit()?);
+                            }
+                            "sentence" => {
+                                let stored: StoredSentenceUnit = serde_json::from_str(&json)
+                                    .map_err(|error| {
+                                        ApplicationError::TextUnitIndexFailed(error.to_string())
+                                    })?;
+                                sentences.push(stored.into_unit()?);
+                            }
+                            other => {
+                                return Err(ApplicationError::TextUnitIndexFailed(format!(
+                                    "unsupported persisted text unit kind {other:?}"
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                let mut sentence_coverage = Vec::new();
+                {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT coverage_json
+                             FROM text_unit_sentence_coverage_v1
+                             WHERE document_id = ?1 AND owner_section_id = ?2
+                             ORDER BY position",
+                        )
+                        .map_err(text_unit_index_error)?;
+                    let rows = statement
+                        .query_map(params![&document_id.0, &section_id.0], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .map_err(text_unit_index_error)?;
+                    for row in rows {
+                        let json = row.map_err(text_unit_index_error)?;
+                        let stored: StoredSentenceCoverage =
+                            serde_json::from_str(&json).map_err(|error| {
+                                ApplicationError::TextUnitIndexFailed(error.to_string())
+                            })?;
+                        sentence_coverage.push(stored.into_coverage()?);
+                    }
+                }
+
+                Ok(Some(SectionTextUnits {
+                    paragraphs,
+                    paragraph_coverage,
+                    sentences,
+                    sentence_coverage,
+                }))
+            },
+        )
+        .await
+    }
+}
+
+fn validate_paragraph_units(
+    document_id: &DocumentId,
+    units: &[TextUnit],
+) -> Result<(), ApplicationError> {
+    for (expected_source_order, unit) in units.iter().enumerate() {
+        if &unit.document_id != document_id {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "unit {} belongs to document {}, expected {}",
+                unit.id.0, unit.document_id.0, document_id.0
+            )));
+        }
+        if unit.source_order != expected_source_order {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "unit {} has source order {}, expected {}",
+                unit.id.0, unit.source_order, expected_source_order
+            )));
+        }
+        if unit.paragraph_index == 0 {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "unit {} has invalid zero paragraph index",
+                unit.id.0
+            )));
+        }
+        if unit.normalized_range.len() != unit.text.chars().count() {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "unit {} range length {} does not match text length {}",
+                unit.id.0,
+                unit.normalized_range.len(),
+                unit.text.chars().count()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_text_unit_kind(value: &str) -> Result<TextUnitKind, ApplicationError> {
+    match value {
+        "paragraph" => Ok(TextUnitKind::Paragraph),
+        other => Err(ApplicationError::TextUnitIndexFailed(format!(
+            "unsupported persisted text unit kind {other:?}"
+        ))),
+    }
+}
+
+fn parse_paragraph_content_class(value: &str) -> Result<ParagraphContentClass, ApplicationError> {
+    match value {
+        "prose_or_unknown" => Ok(ParagraphContentClass::ProseOrUnknown),
+        "native_paragraph" => Ok(ParagraphContentClass::NativeParagraph),
+        "blockquote" => Ok(ParagraphContentClass::BlockQuote),
+        "list_item" => Ok(ParagraphContentClass::ListItem),
+        "code_block" => Ok(ParagraphContentClass::CodeBlock),
+        "preformatted" => Ok(ParagraphContentClass::Preformatted),
+        "table" => Ok(ParagraphContentClass::Table),
+        other => Err(ApplicationError::TextUnitIndexFailed(format!(
+            "unsupported persisted paragraph content class {other:?}"
+        ))),
+    }
+}
+
+fn parse_sentence_eligibility(value: &str) -> Result<SentenceEligibility, ApplicationError> {
+    match value {
+        "eligible" => Ok(SentenceEligibility::Eligible),
+        "coarse_paragraph_only" => Ok(SentenceEligibility::CoarseParagraphOnly),
+        other => Err(ApplicationError::TextUnitIndexFailed(format!(
+            "unsupported persisted sentence eligibility {other:?}"
+        ))),
+    }
+}
+
+fn stored_normalized_range(
+    start: usize,
+    end: usize,
+) -> Result<NormalizedTextRange, ApplicationError> {
+    NormalizedTextRange::new(start, end).map_err(|error| {
+        ApplicationError::TextUnitIndexFailed(format!(
+            "invalid persisted normalized range: {error}"
+        ))
+    })
 }
 
 fn repository_error(error: rusqlite::Error) -> ApplicationError {
@@ -586,5 +1018,204 @@ impl StoredLocation {
             char_end: self.char_end,
             native_location: self.native_location,
         }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredParagraphUnit {
+    id: String,
+    document_id: String,
+    content_hash: String,
+    normalized_document_hash: String,
+    owner_section_id: String,
+    kind: String,
+    paragraph_index: usize,
+    source_order: usize,
+    range_start: usize,
+    range_end: usize,
+    text: String,
+    segmentation_version: String,
+}
+
+impl StoredParagraphUnit {
+    fn from_unit(unit: &TextUnit) -> Self {
+        Self {
+            id: unit.id.0.clone(),
+            document_id: unit.document_id.0.clone(),
+            content_hash: unit.content_hash.0.clone(),
+            normalized_document_hash: unit.normalized_document_hash.0.clone(),
+            owner_section_id: unit.owner_section_id.0.clone(),
+            kind: unit.kind.as_str().to_string(),
+            paragraph_index: unit.paragraph_index,
+            source_order: unit.source_order,
+            range_start: unit.normalized_range.start(),
+            range_end: unit.normalized_range.end(),
+            text: unit.text.clone(),
+            segmentation_version: unit.segmentation_version.clone(),
+        }
+    }
+
+    fn into_unit(self) -> Result<TextUnit, ApplicationError> {
+        let kind = parse_text_unit_kind(&self.kind)?;
+        let normalized_range = stored_normalized_range(self.range_start, self.range_end)?;
+        Ok(TextUnit {
+            id: TextUnitId(self.id),
+            document_id: DocumentId(self.document_id),
+            content_hash: ContentHash(self.content_hash),
+            normalized_document_hash: NormalizedDocumentHash(self.normalized_document_hash),
+            owner_section_id: SectionId(self.owner_section_id),
+            kind,
+            paragraph_index: self.paragraph_index,
+            source_order: self.source_order,
+            normalized_range,
+            text: self.text,
+            segmentation_version: self.segmentation_version,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredSentenceUnit {
+    id: String,
+    document_id: String,
+    content_hash: String,
+    normalized_document_hash: String,
+    owner_section_id: String,
+    paragraph_index: usize,
+    sentence_index: usize,
+    parent_paragraph_id: String,
+    source_order: usize,
+    range_start: usize,
+    range_end: usize,
+    text: String,
+    segmentation_version: String,
+}
+
+impl StoredSentenceUnit {
+    fn from_unit(unit: &SentenceTextUnit) -> Self {
+        Self {
+            id: unit.id.0.clone(),
+            document_id: unit.document_id.0.clone(),
+            content_hash: unit.content_hash.0.clone(),
+            normalized_document_hash: unit.normalized_document_hash.0.clone(),
+            owner_section_id: unit.owner_section_id.0.clone(),
+            paragraph_index: unit.paragraph_index,
+            sentence_index: unit.sentence_index,
+            parent_paragraph_id: unit.parent_paragraph_id.0.clone(),
+            source_order: unit.source_order,
+            range_start: unit.normalized_range.start(),
+            range_end: unit.normalized_range.end(),
+            text: unit.text.clone(),
+            segmentation_version: unit.segmentation_version.clone(),
+        }
+    }
+
+    fn into_unit(self) -> Result<SentenceTextUnit, ApplicationError> {
+        let normalized_range = stored_normalized_range(self.range_start, self.range_end)?;
+        Ok(SentenceTextUnit {
+            id: TextUnitId(self.id),
+            document_id: DocumentId(self.document_id),
+            content_hash: ContentHash(self.content_hash),
+            normalized_document_hash: NormalizedDocumentHash(self.normalized_document_hash),
+            owner_section_id: SectionId(self.owner_section_id),
+            paragraph_index: self.paragraph_index,
+            sentence_index: self.sentence_index,
+            parent_paragraph_id: TextUnitId(self.parent_paragraph_id),
+            source_order: self.source_order,
+            normalized_range,
+            text: self.text,
+            segmentation_version: self.segmentation_version,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredParagraphCoverage {
+    owner_section_id: String,
+    owner_chars: usize,
+    paragraph_chars: usize,
+    separator_chars: usize,
+    paragraph_count: usize,
+    native_paragraph_chars: usize,
+    native_structural_container_chars: usize,
+    native_non_prose_chars: usize,
+    fallback_chars: usize,
+}
+
+impl StoredParagraphCoverage {
+    fn from_coverage(coverage: &ParagraphSectionCoverage) -> Self {
+        Self {
+            owner_section_id: coverage.owner_section_id.0.clone(),
+            owner_chars: coverage.owner_chars,
+            paragraph_chars: coverage.paragraph_chars,
+            separator_chars: coverage.separator_chars,
+            paragraph_count: coverage.paragraph_count,
+            native_paragraph_chars: coverage.native_paragraph_chars,
+            native_structural_container_chars: coverage.native_structural_container_chars,
+            native_non_prose_chars: coverage.native_non_prose_chars,
+            fallback_chars: coverage.fallback_chars,
+        }
+    }
+
+    fn into_coverage(self) -> ParagraphSectionCoverage {
+        ParagraphSectionCoverage {
+            owner_section_id: SectionId(self.owner_section_id),
+            owner_chars: self.owner_chars,
+            paragraph_chars: self.paragraph_chars,
+            separator_chars: self.separator_chars,
+            paragraph_count: self.paragraph_count,
+            native_paragraph_chars: self.native_paragraph_chars,
+            native_structural_container_chars: self.native_structural_container_chars,
+            native_non_prose_chars: self.native_non_prose_chars,
+            fallback_chars: self.fallback_chars,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredSentenceCoverage {
+    owner_section_id: String,
+    paragraph_id: String,
+    paragraph_index: usize,
+    content_class: String,
+    eligibility: String,
+    paragraph_chars: usize,
+    sentence_chars: usize,
+    separator_chars: usize,
+    coarse_only_chars: usize,
+    sentence_count: usize,
+}
+
+impl StoredSentenceCoverage {
+    fn from_coverage(coverage: &SentenceParagraphCoverage) -> Self {
+        Self {
+            owner_section_id: coverage.owner_section_id.0.clone(),
+            paragraph_id: coverage.paragraph_id.0.clone(),
+            paragraph_index: coverage.paragraph_index,
+            content_class: coverage.content_class.as_str().to_string(),
+            eligibility: coverage.eligibility.as_str().to_string(),
+            paragraph_chars: coverage.paragraph_chars,
+            sentence_chars: coverage.sentence_chars,
+            separator_chars: coverage.separator_chars,
+            coarse_only_chars: coverage.coarse_only_chars,
+            sentence_count: coverage.sentence_count,
+        }
+    }
+
+    fn into_coverage(self) -> Result<SentenceParagraphCoverage, ApplicationError> {
+        let content_class = parse_paragraph_content_class(&self.content_class)?;
+        let eligibility = parse_sentence_eligibility(&self.eligibility)?;
+        Ok(SentenceParagraphCoverage {
+            owner_section_id: SectionId(self.owner_section_id),
+            paragraph_id: TextUnitId(self.paragraph_id),
+            paragraph_index: self.paragraph_index,
+            content_class,
+            eligibility,
+            paragraph_chars: self.paragraph_chars,
+            sentence_chars: self.sentence_chars,
+            separator_chars: self.separator_chars,
+            coarse_only_chars: self.coarse_only_chars,
+            sentence_count: self.sentence_count,
+        })
     }
 }

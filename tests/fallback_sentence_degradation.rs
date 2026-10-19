@@ -6,11 +6,12 @@ use reading_mcp::application::get_text_units::{
     TextUnitDirection,
 };
 use reading_mcp::application::ports::{DocumentReliabilityInspector, DocumentRepository};
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, ParagraphContentClass,
     Section, SectionId, SentenceEligibility,
 };
-use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use reading_mcp::parsing::PersistedDocumentReliabilityInspector;
 
 // Issue #139: PDF fallback extraction merges masthead/title/byline/front matter and
@@ -137,7 +138,9 @@ async fn degraded_blob_enumerates_as_paragraph_and_still_reads_exactly() {
         .save(document.clone())
         .await
         .expect("document should save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let result = use_case
         .execute(command(&document, RequestedTextUnitKind::Sentence, 10))

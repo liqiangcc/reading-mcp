@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, ParagraphTextUnitSet, SectionId,
+    Document, DocumentId, DocumentSource, Location, MediaType, ParagraphSectionCoverage,
+    ParagraphTextUnitSet, SectionId, SentenceParagraphCoverage, SentenceTextUnit,
     SentenceTextUnitSet, TextLocator, TextUnit,
 };
 
@@ -236,6 +237,51 @@ pub trait DocumentRepository: Send + Sync {
     async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError>;
 }
 
+/// The persisted paragraph and sentence units of one section, in source order, with their coverage records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionTextUnits {
+    pub paragraphs: Vec<TextUnit>,
+    /// `None` when the document has no paragraph coverage record for this section.
+    pub paragraph_coverage: Option<ParagraphSectionCoverage>,
+    pub sentences: Vec<SentenceTextUnit>,
+    pub sentence_coverage: Vec<SentenceParagraphCoverage>,
+}
+
+impl SectionTextUnits {
+    /// The same section slice that the read paths compute from full unit sets.
+    pub fn from_sets(
+        paragraphs: &ParagraphTextUnitSet,
+        sentences: &SentenceTextUnitSet,
+        section_id: &SectionId,
+    ) -> Self {
+        Self {
+            paragraphs: paragraphs
+                .units
+                .iter()
+                .filter(|unit| unit.owner_section_id == *section_id)
+                .cloned()
+                .collect(),
+            paragraph_coverage: paragraphs
+                .coverage
+                .iter()
+                .find(|coverage| coverage.owner_section_id == *section_id)
+                .cloned(),
+            sentences: sentences
+                .units
+                .iter()
+                .filter(|unit| unit.owner_section_id == *section_id)
+                .cloned()
+                .collect(),
+            sentence_coverage: sentences
+                .coverage
+                .iter()
+                .filter(|coverage| coverage.owner_section_id == *section_id)
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait TextUnitIndex: Send + Sync {
     async fn replace_document(
@@ -248,6 +294,22 @@ pub trait TextUnitIndex: Send + Sync {
         &self,
         document_id: &DocumentId,
     ) -> Result<Vec<TextUnit>, ApplicationError>;
+
+    /// Persists both unit sets of a document.
+    async fn replace_document_sets(
+        &self,
+        document_id: &DocumentId,
+        paragraphs: Arc<ParagraphTextUnitSet>,
+        sentences: Arc<SentenceTextUnitSet>,
+    ) -> Result<(), ApplicationError>;
+
+    /// Units of one section as persisted by `replace_document_sets`, or `None` when this document's units are not
+    /// stored for the current `TEXT_SEGMENTATION_VERSION`.
+    async fn section_units(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionTextUnits>, ApplicationError>;
 }
 
 #[async_trait]

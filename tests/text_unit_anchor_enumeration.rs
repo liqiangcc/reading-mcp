@@ -6,17 +6,20 @@ use reading_mcp::application::get_text_units::{
     TextUnitDirection,
 };
 use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
-use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 
 #[tokio::test]
 async fn boundary_anchor_reports_empty_directional_eos_for_both_kinds_and_policies() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One. Two.\n\nThree. Four.\n\nFive. Six.");
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     for kind in [
         RequestedTextUnitKind::Sentence,
@@ -82,7 +85,9 @@ async fn anchored_cursor_reaches_boundary_without_claiming_full_section_for_both
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One.\n\nTwo.\n\nThree.\n\nFour.");
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
     for kind in [
         RequestedTextUnitKind::Sentence,
         RequestedTextUnitKind::Paragraph,
@@ -134,7 +139,9 @@ async fn forward_anchor_is_exclusive_and_cursor_preserves_anchored_origin() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One. Two. Three. Four.");
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let full = use_case
         .execute(command(&document, 10))
@@ -168,7 +175,9 @@ async fn backward_anchor_is_exclusive_and_returns_source_order() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One. Two. Three. Four.");
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let full = use_case
         .execute(command(&document, 10))
@@ -197,7 +206,9 @@ async fn anchor_must_be_a_member_of_the_declared_stream() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One. Two.");
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let mut paragraph_command = command(&document, 10);
     paragraph_command.requested_kind = RequestedTextUnitKind::Paragraph;
@@ -221,7 +232,9 @@ async fn stale_anchor_fails_through_shared_locator_validation() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One. Two.");
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let mut anchor = use_case
         .execute(command(&document, 10))
@@ -244,7 +257,9 @@ async fn initial_anchor_and_cursor_are_mutually_exclusive() {
     let repository = Arc::new(InMemoryDocumentRepository::default());
     let document = fixture("One. Two. Three.");
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let first = use_case
         .execute(command(&document, 1))

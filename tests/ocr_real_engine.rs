@@ -544,10 +544,15 @@ mod publication_failure {
     use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
     use reading_mcp::application::ports::{
         ApplicationError, DocumentRepository, RetrievalOptions, Retriever, SearchHit, SearchIndex,
-        SourcePolicy, TextUnitIndex,
+        SectionTextUnits, SourcePolicy, TextUnitIndex,
     };
-    use reading_mcp::domain::{Document, DocumentId, OcrEvidenceBlob, TextUnit};
-    use reading_mcp::infrastructure::{ResourceBudget, SqliteDocumentRepository};
+    use reading_mcp::domain::{
+        Document, DocumentId, OcrEvidenceBlob, ParagraphTextUnitSet, SectionId,
+        SentenceTextUnitSet, TextUnit,
+    };
+    use reading_mcp::infrastructure::{
+        InMemoryTextUnitIndex, ResourceBudget, SqliteDocumentRepository,
+    };
     use reading_mcp::parsing::ParserRouter;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -605,6 +610,7 @@ mod publication_failure {
     struct RecordingIndexes {
         search: AtomicUsize,
         units: AtomicUsize,
+        inner: InMemoryTextUnitIndex,
     }
     #[async_trait]
     impl SearchIndex for RecordingIndexes {
@@ -633,6 +639,23 @@ mod publication_failure {
         }
         async fn list_document(&self, _: &DocumentId) -> Result<Vec<TextUnit>, ApplicationError> {
             Ok(vec![])
+        }
+        async fn replace_document_sets(
+            &self,
+            document_id: &DocumentId,
+            paragraphs: Arc<ParagraphTextUnitSet>,
+            sentences: Arc<SentenceTextUnitSet>,
+        ) -> Result<(), ApplicationError> {
+            self.inner
+                .replace_document_sets(document_id, paragraphs, sentences)
+                .await
+        }
+        async fn section_units(
+            &self,
+            document_id: &DocumentId,
+            section_id: &SectionId,
+        ) -> Result<Option<SectionTextUnits>, ApplicationError> {
+            self.inner.section_units(document_id, section_id).await
         }
     }
 

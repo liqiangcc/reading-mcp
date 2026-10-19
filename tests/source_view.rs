@@ -16,7 +16,7 @@ use reading_mcp::application::source_view::{
     GetSourceViewCommand, SourceViewLimits, SourceViewRepresentation, SourceViewUseCase,
 };
 use reading_mcp::domain::{DocumentSource, MediaType, SectionId};
-use reading_mcp::infrastructure::InMemoryDocumentRepository;
+use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use reading_mcp::parsing::{ParserRouter, PdfSourceViewRenderer};
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
 use tempfile::tempdir;
@@ -30,11 +30,13 @@ async fn locator_resolves_to_original_pdf_page_and_renders_visual_fixture() {
         .expect("PDF fixture should be written");
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
-    let opened = OpenDocumentUseCase::new(
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    let opened = OpenDocumentUseCase::with_text_unit_index(
         Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase4()),
         repository.clone(),
+        index.clone(),
         Arc::new(reading_mcp::infrastructure::InMemorySearchIndex::default()),
     )
     .execute(OpenDocumentCommand {
@@ -44,7 +46,7 @@ async fn locator_resolves_to_original_pdf_page_and_renders_visual_fixture() {
     .await
     .expect("PDF should open");
 
-    let units = GetTextUnitsUseCase::new(repository.clone())
+    let units = GetTextUnitsUseCase::new(repository.clone(), index)
         .execute(GetTextUnitsCommand {
             document_id: opened.document_id.clone(),
             section_id: SectionId("section://page-2".into()),
@@ -100,11 +102,13 @@ async fn source_view_fails_closed_when_source_bytes_change() {
         .expect("PDF fixture should be written");
 
     let repository = Arc::new(InMemoryDocumentRepository::default());
-    let opened = OpenDocumentUseCase::new(
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    let opened = OpenDocumentUseCase::with_text_unit_index(
         Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
         Arc::new(FileRetriever),
         Arc::new(ParserRouter::phase4()),
         repository.clone(),
+        index,
         Arc::new(reading_mcp::infrastructure::InMemorySearchIndex::default()),
     )
     .execute(OpenDocumentCommand {

@@ -212,7 +212,11 @@ impl OpenDocumentUseCase {
         self.repository.save_shared(Arc::clone(&document)).await?;
         if let Some(index) = &self.text_unit_index {
             index
-                .replace_document(&document.id, &paragraph_units.units)
+                .replace_document_sets(
+                    &document.id,
+                    Arc::clone(&paragraph_units),
+                    Arc::clone(&sentence_units),
+                )
                 .await?;
         }
         self.search_index

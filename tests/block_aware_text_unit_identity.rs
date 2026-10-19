@@ -6,12 +6,15 @@ use reading_mcp::application::get_text_units::{
     TextUnitDirection,
 };
 use reading_mcp::application::ports::{ApplicationError, DocumentRepository, Parser, SearchIndex};
+use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NormalizedBlock,
     NormalizedBlockKind, NormalizedBlockMap, NormalizedBlockProvenance, NormalizedTextRange,
     ParagraphContentClass, Section, SectionId, SentenceEligibility, TEXT_SEGMENTATION_VERSION,
 };
-use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
+use reading_mcp::infrastructure::{
+    InMemoryDocumentRepository, InMemorySearchIndex, InMemoryTextUnitIndex,
+};
 use reading_mcp::parsing::HtmlParser;
 
 #[tokio::test]
@@ -106,7 +109,9 @@ async fn sentence_enumeration_preserves_flat_structural_and_non_prose_blocks_coa
     let section_id = document.root_sections[0].id.clone();
     let repository = Arc::new(InMemoryDocumentRepository::default());
     repository.save(document.clone()).await.expect("save");
-    let use_case = GetTextUnitsUseCase::new(repository);
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    store_text_units(&*index, &document).await.unwrap();
+    let use_case = GetTextUnitsUseCase::new(repository, index);
 
     let preserved = use_case
         .execute(GetTextUnitsCommand {
@@ -240,12 +245,18 @@ async fn invalid_declared_block_map_fails_closed_for_text_units_and_lexical_inde
         .expect_err("invalid native evidence must fail lexical rebuild");
     assert!(matches!(error, ApplicationError::IndexFailed(_)));
 
+    let index = InMemoryTextUnitIndex::default();
+    let error = store_text_units(&index, &document)
+        .await
+        .expect_err("invalid native evidence must fail closed when storing text units");
+    assert!(matches!(error, ApplicationError::TextUnitIndexFailed(_)));
+
     let repository = Arc::new(InMemoryDocumentRepository::default());
     repository
         .save(document.clone())
         .await
         .expect("save corrupt fixture");
-    let error = GetTextUnitsUseCase::new(repository)
+    let error = GetTextUnitsUseCase::new(repository, Arc::new(index))
         .execute(GetTextUnitsCommand {
             document_id: document.id,
             section_id: document.root_sections[0].id.clone(),
@@ -258,7 +269,7 @@ async fn invalid_declared_block_map_fails_closed_for_text_units_and_lexical_inde
         })
         .await
         .expect_err("enumeration must fail closed");
-    assert!(matches!(error, ApplicationError::TextUnitIndexFailed(_)));
+    assert!(matches!(error, ApplicationError::StaleDocument(_)));
 }
 
 #[test]

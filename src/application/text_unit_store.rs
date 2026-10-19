@@ -8,14 +8,9 @@ pub async fn store_text_units(
     index: &dyn TextUnitIndex,
     document: &Document,
 ) -> Result<(), ApplicationError> {
-    let paragraphs = document.try_paragraph_text_units().map_err(|error| {
+    let (paragraphs, sentences) = document.try_text_unit_sets().map_err(|error| {
         ApplicationError::TextUnitIndexFailed(format!(
             "cannot build current Paragraph coverage from persisted block evidence: {error}"
-        ))
-    })?;
-    let sentences = document.try_sentence_text_units().map_err(|error| {
-        ApplicationError::TextUnitIndexFailed(format!(
-            "cannot build current Sentence coverage from persisted block evidence: {error}"
         ))
     })?;
     index

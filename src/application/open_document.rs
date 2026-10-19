@@ -166,18 +166,15 @@ impl OpenDocumentUseCase {
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::ParseFailed)?;
-        let paragraph_units = document.try_paragraph_text_units().map_err(|error| {
+        let (paragraph_units, sentence_units) = document.try_text_unit_sets().map_err(|error| {
             ApplicationError::TextUnitIndexFailed(format!(
                 "cannot build current Paragraph coverage from persisted block evidence: {error}"
             ))
         })?;
-        let sentence_units = document.try_sentence_text_units().map_err(|error| {
-            ApplicationError::TextUnitIndexFailed(format!(
-                "cannot build current Sentence coverage from persisted block evidence: {error}"
-            ))
-        })?;
         let reliability = match &self.reliability_inspector {
-            Some(inspector) => inspector.inspect(&document)?,
+            Some(inspector) => {
+                inspector.inspect_with_units(&document, &paragraph_units, &sentence_units)?
+            }
             None => ReliabilitySummary::not_applicable(),
         };
         let reading_profile = build_reading_profile(

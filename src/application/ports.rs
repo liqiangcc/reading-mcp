@@ -202,6 +202,17 @@ pub trait SourceViewRenderer: Send + Sync {
 
 pub trait DocumentReliabilityInspector: Send + Sync {
     fn inspect(&self, document: &Document) -> Result<ReliabilitySummary, ApplicationError>;
+
+    /// Inspects `document` reusing the units the caller already built from it. The default ignores them.
+    fn inspect_with_units(
+        &self,
+        document: &Document,
+        _paragraphs: &ParagraphTextUnitSet,
+        sentences: &SentenceTextUnitSet,
+    ) -> Result<ReliabilitySummary, ApplicationError> {
+        let _ = sentences;
+        self.inspect(document)
+    }
 }
 
 #[async_trait]

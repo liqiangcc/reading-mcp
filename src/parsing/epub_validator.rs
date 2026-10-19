@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Document, NormalizedBlockKind, NormalizedTextIndex, Section, SectionId, SentenceEligibility,
+    Document, NormalizedBlockKind, NormalizedTextIndex, ParagraphTextUnitSet, Section, SectionId,
+    SentenceEligibility, SentenceTextUnitSet,
 };
 
 use super::epub_navigation::{
@@ -216,6 +217,22 @@ struct StoredStructureMap {
 }
 
 pub fn validate_epub_document(document: &Document) -> EpubValidationReport {
+    validate_epub_document_inner(document, None)
+}
+
+/// Runs the same checks as [`validate_epub_document`] but reuses unit sets the caller already built.
+pub fn validate_epub_document_with_units(
+    document: &Document,
+    paragraphs: &ParagraphTextUnitSet,
+    sentences: &SentenceTextUnitSet,
+) -> EpubValidationReport {
+    validate_epub_document_inner(document, Some((paragraphs, sentences)))
+}
+
+fn validate_epub_document_inner(
+    document: &Document,
+    units: Option<(&ParagraphTextUnitSet, &SentenceTextUnitSet)>,
+) -> EpubValidationReport {
     let mut findings = Vec::new();
     let mut coverage = EpubValidationCoverage::default();
 
@@ -244,7 +261,7 @@ pub fn validate_epub_document(document: &Document) -> EpubValidationReport {
         );
     }
 
-    validate_blocks_and_text_units(document, &mut coverage, &mut findings);
+    validate_blocks_and_text_units(document, units, &mut coverage, &mut findings);
 
     let error_count = findings
         .iter()
@@ -1132,6 +1149,7 @@ fn validate_canonical_sibling_source_order(
 
 fn validate_blocks_and_text_units(
     document: &Document,
+    units: Option<(&ParagraphTextUnitSet, &SentenceTextUnitSet)>,
     coverage: &mut EpubValidationCoverage,
     findings: &mut Vec<EpubValidationFinding>,
 ) {
@@ -1222,7 +1240,16 @@ fn validate_blocks_and_text_units(
         .section_content_chars
         .saturating_sub(coverage.blocks.block_chars);
 
-    let paragraph_set = document.paragraph_text_units();
+    // A document that returned early above never materializes units, exactly as before.
+    let built_units;
+    let (paragraph_set, sentence_set) = match units {
+        Some(units) => units,
+        None => {
+            built_units = document.text_unit_sets();
+            (&built_units.0, &built_units.1)
+        }
+    };
+
     coverage.text_units.paragraph_units = paragraph_set.units.len();
     let mut paragraph_by_id = HashMap::new();
     let mut paragraph_ranges = HashSet::new();
@@ -1353,7 +1380,6 @@ fn validate_blocks_and_text_units(
         );
     }
 
-    let sentence_set = document.sentence_text_units();
     coverage.text_units.sentence_units = sentence_set.units.len();
     let mut expected_sentence_index = HashMap::new();
     let mut sentence_owner_index: Option<(SectionId, NormalizedTextIndex<'_>)> = None;

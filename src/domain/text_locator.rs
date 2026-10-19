@@ -19,10 +19,18 @@ pub struct TextLocator {
 
 impl TextLocator {
     pub fn for_section(document: &Document, section: &Section) -> Self {
+        Self::for_section_with_hash(document, section, &document.normalized_document_hash())
+    }
+
+    pub fn for_section_with_hash(
+        document: &Document,
+        section: &Section,
+        normalized_document_hash: &NormalizedDocumentHash,
+    ) -> Self {
         Self {
             document_id: document.id.clone(),
             content_hash: document.content_hash.clone(),
-            normalized_document_hash: document.normalized_document_hash(),
+            normalized_document_hash: normalized_document_hash.clone(),
             owner_section_id: section.id.clone(),
             section_path: section.location.section_path.clone(),
             paragraph_index: None,
@@ -38,10 +46,24 @@ impl TextLocator {
         section: &Section,
         normalized_range: NormalizedTextRange,
     ) -> Self {
+        Self::for_character_range_with_hash(
+            document,
+            section,
+            normalized_range,
+            &document.normalized_document_hash(),
+        )
+    }
+
+    pub fn for_character_range_with_hash(
+        document: &Document,
+        section: &Section,
+        normalized_range: NormalizedTextRange,
+        normalized_document_hash: &NormalizedDocumentHash,
+    ) -> Self {
         Self {
             document_id: document.id.clone(),
             content_hash: document.content_hash.clone(),
-            normalized_document_hash: document.normalized_document_hash(),
+            normalized_document_hash: normalized_document_hash.clone(),
             owner_section_id: section.id.clone(),
             section_path: section.location.section_path.clone(),
             paragraph_index: None,

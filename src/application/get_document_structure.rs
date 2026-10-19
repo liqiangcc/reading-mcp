@@ -392,7 +392,7 @@ fn resolve_named_section(
 
     let candidates = matches
         .iter()
-        .map(|section| candidate_metadata(document, section, body_order))
+        .map(|section| candidate_metadata(document, section, body_order, normalized_hash))
         .collect::<Vec<_>>();
     if matches.len() != 1 {
         return Ok(NamedSectionResolution {
@@ -408,8 +408,8 @@ fn resolve_named_section(
     }
 
     let matched_section = matches[0];
-    let matched = candidate_metadata(document, matched_section, body_order);
-    let boundary = build_named_boundary(document, matched_section, body_order);
+    let matched = candidate_metadata(document, matched_section, body_order, normalized_hash);
+    let boundary = build_named_boundary(document, matched_section, body_order, normalized_hash);
     let status = if boundary.is_some() {
         NamedSectionResolutionStatus::Resolved
     } else {
@@ -515,6 +515,7 @@ fn candidate_metadata(
     document: &Document,
     section: &Section,
     body_order: &HashMap<SectionId, usize>,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> NamedSectionCandidate {
     NamedSectionCandidate {
         section_id: section.id.clone(),
@@ -523,7 +524,11 @@ fn candidate_metadata(
         level: section.level,
         location: section.location.clone(),
         body_order: body_order[&section.id],
-        start_locator: TextLocator::for_section(document, section),
+        start_locator: TextLocator::for_section_with_hash(
+            document,
+            section,
+            normalized_document_hash,
+        ),
     }
 }
 
@@ -531,6 +536,7 @@ fn build_named_boundary(
     document: &Document,
     section: &Section,
     body_order: &HashMap<SectionId, usize>,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Option<NamedSectionBoundary> {
     let mut orders = Vec::new();
     collect_scope_body_orders(section, body_order, &mut orders);
@@ -544,7 +550,7 @@ fn build_named_boundary(
     let end_exclusive = if intervals.len() == 1 {
         let next_order = intervals[0].end;
         section_at_body_order(document, body_order, next_order)
-            .map(|next| candidate_metadata(document, next, body_order))
+            .map(|next| candidate_metadata(document, next, body_order, normalized_document_hash))
     } else {
         None
     };

@@ -127,7 +127,12 @@ impl SourceViewUseCase {
             .get(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
-        let resolved = resolve_text_locator(&document, &command.target_locator)?;
+        let normalized_document_hash = document.normalized_document_hash();
+        let resolved = resolve_text_locator(
+            &document,
+            &command.target_locator,
+            &normalized_document_hash,
+        )?;
         let section = document
             .find_section(&resolved.locator.owner_section_id)
             .ok_or(ApplicationError::InvalidLocator(
@@ -180,8 +185,6 @@ impl SourceViewUseCase {
         .map_err(|error| {
             ApplicationError::SourceViewFailed(format!("source view worker failed: {error}"))
         })??;
-
-        let normalized_document_hash = document.normalized_document_hash();
 
         Ok(SourceViewResult {
             document_id: document.id.clone(),

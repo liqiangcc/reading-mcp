@@ -103,9 +103,9 @@ impl ReadDocumentUseCase {
         validate_section_tree_cursor_contract(&claims)?;
 
         let document = self.load_document(&command.document_id).await?;
-        validate_cursor_document_identity(&claims, &document)?;
-
         let normalized_hash = document.normalized_document_hash();
+        validate_cursor_document_identity(&claims, &document, &normalized_hash)?;
+
         let section = document
             .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
@@ -128,8 +128,9 @@ impl ReadDocumentUseCase {
         command: ReadExactTargetCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
         let document = self.load_document(&command.document_id).await?;
-        let target = resolve_text_locator(&document, &command.target_locator)?;
-        read_exact_segment(&document, target, 0, command.max_chars)
+        let normalized_hash = document.normalized_document_hash();
+        let target = resolve_text_locator(&document, &command.target_locator, &normalized_hash)?;
+        read_exact_segment(&document, target, &normalized_hash, 0, command.max_chars)
     }
 
     pub async fn continue_exact(
@@ -146,13 +147,20 @@ impl ReadDocumentUseCase {
         validate_exact_cursor_contract(&claims)?;
 
         let document = self.load_document(&command.document_id).await?;
-        validate_cursor_document_identity(&claims, &document)?;
-        let target = resolve_text_locator(&document, &command.target_locator)?;
+        let normalized_hash = document.normalized_document_hash();
+        validate_cursor_document_identity(&claims, &document, &normalized_hash)?;
+        let target = resolve_text_locator(&document, &command.target_locator, &normalized_hash)?;
         validate_exact_cursor_binding(&claims, &target)?;
 
         let target_chars = target.range.len();
         validate_resumable_position(claims.next_char, target_chars)?;
-        read_exact_segment(&document, target, claims.next_char, command.max_chars)
+        read_exact_segment(
+            &document,
+            target,
+            &normalized_hash,
+            claims.next_char,
+            command.max_chars,
+        )
     }
 
     async fn load_document(&self, id: &DocumentId) -> Result<Arc<Document>, ApplicationError> {
@@ -195,7 +203,7 @@ fn read_rendered_section_segment(
         Some(encode_read_cursor(ReadCursorClaims::new(
             document.id.0.clone(),
             document.content_hash.0.clone(),
-            normalized_hash.0,
+            normalized_hash.0.clone(),
             section.id.0.clone(),
             SECTION_TREE_READ_MODE,
             SECTION_TREE_RENDERING_VERSION,
@@ -220,7 +228,11 @@ fn read_rendered_section_segment(
             end_char: slice.end_char,
             total_chars: slice.total_chars,
         },
-        resolved_target_locator: TextLocator::for_section(document, section),
+        resolved_target_locator: TextLocator::for_section_with_hash(
+            document,
+            section,
+            &normalized_hash,
+        ),
         returned_locator: None,
     })
 }
@@ -228,6 +240,7 @@ fn read_rendered_section_segment(
 fn read_exact_segment(
     document: &Document,
     target: ResolvedTextLocator,
+    normalized_hash: &NormalizedDocumentHash,
     start_char: usize,
     max_chars: Option<usize>,
 ) -> Result<ReadSectionResult, ApplicationError> {
@@ -246,6 +259,7 @@ fn read_exact_segment(
         Some(encode_read_cursor(exact_cursor_claims(
             document,
             &target,
+            normalized_hash,
             slice.end_char,
         ))?)
     };
@@ -273,10 +287,11 @@ fn read_exact_segment(
             total_chars: slice.total_chars,
         },
         resolved_target_locator: target.locator,
-        returned_locator: Some(TextLocator::for_character_range(
+        returned_locator: Some(TextLocator::for_character_range_with_hash(
             document,
             section,
             returned_range,
+            normalized_hash,
         )),
     })
 }
@@ -284,12 +299,13 @@ fn read_exact_segment(
 fn exact_cursor_claims(
     document: &Document,
     target: &ResolvedTextLocator,
+    normalized_hash: &NormalizedDocumentHash,
     next_char: usize,
 ) -> ReadCursorClaims {
     ReadCursorClaims::new_exact(
         document.id.0.clone(),
         document.content_hash.0.clone(),
-        document.normalized_document_hash().0,
+        normalized_hash.0.clone(),
         target.locator.owner_section_id.0.clone(),
         EXACT_TARGET_READ_MODE,
         EXACT_TARGET_RENDERING_VERSION,
@@ -367,6 +383,7 @@ fn validate_cursor_target(
 fn validate_cursor_document_identity(
     claims: &ReadCursorClaims,
     document: &Document,
+    normalized_hash: &NormalizedDocumentHash,
 ) -> Result<(), ApplicationError> {
     if document.content_hash.0 != claims.content_hash {
         return Err(ApplicationError::StaleCursor(format!(
@@ -374,7 +391,6 @@ fn validate_cursor_document_identity(
             claims.content_hash, document.content_hash.0
         )));
     }
-    let normalized_hash = document.normalized_document_hash();
     if normalized_hash.as_ref() != claims.normalized_document_hash.as_str() {
         return Err(ApplicationError::StaleCursor(format!(
             "normalized document hash changed from {} to {normalized_hash}",

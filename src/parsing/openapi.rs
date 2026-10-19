@@ -12,7 +12,7 @@ pub struct OpenApiParser;
 
 impl OpenApiParser {
     fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let text = String::from_utf8(resource.bytes.clone()).map_err(|error| {
+        let text = std::str::from_utf8(&resource.bytes).map_err(|error| {
             ApplicationError::ParseFailed(format!("OpenAPI document is not UTF-8: {error}"))
         })?;
         let media = resource
@@ -24,11 +24,11 @@ impl OpenApiParser {
             .trim()
             .to_ascii_lowercase();
         let value: Value = if media.contains("json") || text.trim_start().starts_with('{') {
-            serde_json::from_str(&text).map_err(|error| {
+            serde_json::from_str(text).map_err(|error| {
                 ApplicationError::ParseFailed(format!("invalid OpenAPI JSON: {error}"))
             })?
         } else {
-            serde_saphyr::from_str(&text).map_err(|error| {
+            serde_saphyr::from_str(text).map_err(|error| {
                 ApplicationError::ParseFailed(format!("invalid OpenAPI YAML: {error}"))
             })?
         };

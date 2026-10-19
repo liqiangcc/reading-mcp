@@ -11,11 +11,11 @@ pub struct TextParser;
 
 impl TextParser {
     fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let text = String::from_utf8(resource.bytes.clone()).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid UTF-8 text: {error}"))
-        })?;
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
+        let text = String::from_utf8(resource.bytes).map_err(|error| {
+            ApplicationError::ParseFailed(format!("invalid UTF-8 text: {error}"))
+        })?;
         let title = title_from_metadata(&resource.metadata, &resource.final_source);
         let char_count = text.chars().count();
 

@@ -6,6 +6,7 @@ use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, Location, Section, SectionId};
 
 use super::blocking::run_blocking;
+use super::charset::decode_declared_charset;
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 #[derive(Default)]
@@ -35,11 +36,26 @@ impl MarkdownParser {
     fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
-        let text = String::from_utf8(resource.bytes).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid UTF-8 markdown: {error}"))
-        })?;
+        let mut metadata = resource.metadata;
+        let text = match String::from_utf8(resource.bytes) {
+            Ok(text) => text,
+            Err(error) => {
+                let utf8_error = error.utf8_error();
+                let bytes = error.into_bytes();
+                let Some((text, (encoding, origin))) =
+                    decode_declared_charset(&bytes, &resource.media_type.0)?
+                else {
+                    return Err(ApplicationError::ParseFailed(format!(
+                        "invalid UTF-8 markdown: {utf8_error}"
+                    )));
+                };
+                metadata.insert("text_charset".into(), encoding.name().into());
+                metadata.insert("text_charset_source".into(), origin.into());
+                text.into_owned()
+            }
+        };
         let events = collect_headings(&text);
-        let fallback_title = title_from_metadata(&resource.metadata, &resource.final_source);
+        let fallback_title = title_from_metadata(&metadata, &resource.final_source);
         let title = events
             .iter()
             .find(|event| event.level == 1)
@@ -72,7 +88,7 @@ impl MarkdownParser {
             title,
             media_type: resource.media_type,
             content_hash: hash,
-            metadata: resource.metadata,
+            metadata,
             root_sections,
         })
     }

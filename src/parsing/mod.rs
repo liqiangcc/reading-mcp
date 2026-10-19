@@ -1,5 +1,6 @@
 mod archive;
 mod blocking;
+mod charset;
 mod common;
 mod docx;
 mod epub;

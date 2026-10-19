@@ -197,6 +197,21 @@ impl Document {
             .expect("canonical normalized block map must be valid for Sentence materialization")
     }
 
+    /// Builds both unit sets from one decode of the persisted block evidence.
+    pub fn try_text_unit_sets(
+        &self,
+    ) -> Result<(ParagraphTextUnitSet, SentenceTextUnitSet), NormalizedBlockMapError> {
+        let block_map = self.normalized_block_map()?;
+        let paragraph_set = self.build_paragraph_text_units(block_map.as_ref());
+        let sentence_set = self.build_sentence_text_units(&paragraph_set, block_map.as_ref());
+        Ok((paragraph_set, sentence_set))
+    }
+
+    pub fn text_unit_sets(&self) -> (ParagraphTextUnitSet, SentenceTextUnitSet) {
+        self.try_text_unit_sets()
+            .expect("canonical normalized block map must be valid for Sentence materialization")
+    }
+
     fn build_paragraph_text_units(
         &self,
         block_map: Option<&NormalizedBlockMap>,

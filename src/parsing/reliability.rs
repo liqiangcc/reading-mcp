@@ -5,13 +5,17 @@ use crate::application::reading_profile::{
     NavigationResolutionCoverage, PublicationCoverage, ReliabilityEvidence, ReliabilityIntegrity,
     ReliabilitySummary, StructureProvenanceCoverage,
 };
-use crate::domain::{Document, OcrDerivation, ParagraphContentClass, SentenceEligibility};
+use crate::domain::{
+    Document, OcrDerivation, ParagraphContentClass, ParagraphTextUnitSet, SentenceEligibility,
+    SentenceTextUnitSet,
+};
 
 use super::epub_validator::{
     EPUB_VALIDATION_DEGRADATIONS_METADATA_KEY, EPUB_VALIDATION_ERRORS_METADATA_KEY,
     EPUB_VALIDATION_INTEGRITY_METADATA_KEY, EPUB_VALIDATION_REPORT_METADATA_KEY,
     EPUB_VALIDATION_REPORT_VERSION, EPUB_VALIDATION_REPORT_VERSION_METADATA_KEY,
     EpubValidationIntegrity, EpubValidationReport, EpubValidationSeverity, validate_epub_document,
+    validate_epub_document_with_units,
 };
 
 const EPUB_MEDIA_TYPE: &str = "application/epub+zip";
@@ -22,92 +26,116 @@ pub struct PersistedDocumentReliabilityInspector;
 
 impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
     fn inspect(&self, document: &Document) -> Result<ReliabilitySummary, ApplicationError> {
-        if let Some(version) = document.metadata.get("pdf_layout_version") {
-            let invalid =
-                || ApplicationError::ParseFailed("invalid persisted PDF layout evidence".into());
-            if version != "pdf-layout/v1" || !document.media_type.is_pdf() {
-                return Err(invalid());
-            }
-            document
-                .normalized_block_map()
-                .map_err(|_| invalid())?
-                .ok_or_else(invalid)?;
-            document
-                .original_source_binding_map()
-                .map_err(|_| invalid())?
-                .ok_or_else(invalid)?;
-            let count = document
-                .metadata
-                .get("pdf_layout_preserved_ambiguous_hyphens")
-                .and_then(|v| v.parse::<usize>().ok())
-                .ok_or_else(invalid)?;
-            let missing = document
-                .metadata
-                .get("pdf_layout_pages_without_text")
-                .and_then(|v| v.parse::<usize>().ok())
-                .ok_or_else(invalid)?;
-            document.validate_ocr_publication().map_err(|_| invalid())?;
-            let derived = OcrDerivation::from_metadata(&document.metadata)
-                .map_err(|_| invalid())?
-                .is_some_and(|derivation| {
-                    derivation
-                        .selected_word_count
-                        .is_some_and(|count| count > 0)
-                });
-            // Persisted evidence says whether local OCR contributed, not whether
-            // the current deployment switch is enabled. Valid provenance does
-            // not establish recognition accuracy, even with high confidence.
-            let mut codes = vec![
-                "pdf_layout_inferred".into(),
-                if derived {
-                    "pdf_local_ocr_unverified"
-                } else {
-                    "pdf_local_ocr_not_applied"
-                }
-                .into(),
-            ];
-            if count > 0 {
-                codes.push("pdf_ambiguous_hyphens_preserved".into());
-            }
-            if missing > 0 {
-                codes.push("pdf_pages_without_text".into());
-            }
-            let mut summary = ReliabilitySummary::not_applicable();
-            summary.evidence = vec![ReliabilityEvidence {
-                kind: "pdf_layout_projection".into(),
-                schema_version: Some(version.clone()),
-                integrity: ReliabilityIntegrity::Valid,
-                degradation_count: 2usize.saturating_add(count).saturating_add(missing),
-                degradation_codes: codes,
-            }];
-            return Ok(summary);
-        }
-        if document.media_type.is_pdf() {
-            return inspect_fallback_pdf(document);
-        }
-        if document.media_type.0 != EPUB_MEDIA_TYPE {
-            return Ok(ReliabilitySummary::not_applicable());
-        }
-
-        let stored = decode_required_report(document)?;
-        validate_stored_summary_metadata(document, &stored)?;
-
-        let revalidated = validate_epub_document(document);
-        if revalidated.integrity != EpubValidationIntegrity::Valid || revalidated.error_count > 0 {
-            return Err(ApplicationError::ParseFailed(format!(
-                "persisted EPUB reliability evidence is internally invalid: {} validation error(s)",
-                revalidated.error_count
-            )));
-        }
-        if stored != revalidated {
-            return Err(ApplicationError::ParseFailed(
-                "persisted EPUB validation report does not match revalidation from canonical facts"
-                    .into(),
-            ));
-        }
-
-        Ok(project_epub_report(&stored))
+        inspect_document(document, None)
     }
+
+    fn inspect_with_units(
+        &self,
+        document: &Document,
+        paragraphs: &ParagraphTextUnitSet,
+        sentences: &SentenceTextUnitSet,
+    ) -> Result<ReliabilitySummary, ApplicationError> {
+        inspect_document(document, Some((paragraphs, sentences)))
+    }
+}
+
+fn inspect_document(
+    document: &Document,
+    units: Option<(&ParagraphTextUnitSet, &SentenceTextUnitSet)>,
+) -> Result<ReliabilitySummary, ApplicationError> {
+    if let Some(version) = document.metadata.get("pdf_layout_version") {
+        let invalid =
+            || ApplicationError::ParseFailed("invalid persisted PDF layout evidence".into());
+        if version != "pdf-layout/v1" || !document.media_type.is_pdf() {
+            return Err(invalid());
+        }
+        document
+            .normalized_block_map()
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        document
+            .original_source_binding_map()
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        let count = document
+            .metadata
+            .get("pdf_layout_preserved_ambiguous_hyphens")
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or_else(invalid)?;
+        let missing = document
+            .metadata
+            .get("pdf_layout_pages_without_text")
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or_else(invalid)?;
+        document.validate_ocr_publication().map_err(|_| invalid())?;
+        let derived = OcrDerivation::from_metadata(&document.metadata)
+            .map_err(|_| invalid())?
+            .is_some_and(|derivation| {
+                derivation
+                    .selected_word_count
+                    .is_some_and(|count| count > 0)
+            });
+        // Persisted evidence says whether local OCR contributed, not whether
+        // the current deployment switch is enabled. Valid provenance does
+        // not establish recognition accuracy, even with high confidence.
+        let mut codes = vec![
+            "pdf_layout_inferred".into(),
+            if derived {
+                "pdf_local_ocr_unverified"
+            } else {
+                "pdf_local_ocr_not_applied"
+            }
+            .into(),
+        ];
+        if count > 0 {
+            codes.push("pdf_ambiguous_hyphens_preserved".into());
+        }
+        if missing > 0 {
+            codes.push("pdf_pages_without_text".into());
+        }
+        let mut summary = ReliabilitySummary::not_applicable();
+        summary.evidence = vec![ReliabilityEvidence {
+            kind: "pdf_layout_projection".into(),
+            schema_version: Some(version.clone()),
+            integrity: ReliabilityIntegrity::Valid,
+            degradation_count: 2usize.saturating_add(count).saturating_add(missing),
+            degradation_codes: codes,
+        }];
+        return Ok(summary);
+    }
+    if document.media_type.is_pdf() {
+        return match units {
+            Some((_, sentences)) => inspect_fallback_pdf_with_sentences(document, sentences),
+            None => inspect_fallback_pdf(document),
+        };
+    }
+    if document.media_type.0 != EPUB_MEDIA_TYPE {
+        return Ok(ReliabilitySummary::not_applicable());
+    }
+
+    let stored = decode_required_report(document)?;
+    validate_stored_summary_metadata(document, &stored)?;
+
+    let revalidated = match units {
+        Some((paragraphs, sentences)) => {
+            validate_epub_document_with_units(document, paragraphs, sentences)
+        }
+        None => validate_epub_document(document),
+    };
+    if revalidated.integrity != EpubValidationIntegrity::Valid || revalidated.error_count > 0 {
+        return Err(ApplicationError::ParseFailed(format!(
+            "persisted EPUB reliability evidence is internally invalid: {} validation error(s)",
+            revalidated.error_count
+        )));
+    }
+    if stored != revalidated {
+        return Err(ApplicationError::ParseFailed(
+            "persisted EPUB validation report does not match revalidation from canonical facts"
+                .into(),
+        ));
+    }
+
+    Ok(project_epub_report(&stored))
 }
 
 /// PDFs parsed without persisted layout evidence (lopdf native-ToC / inferred-heading /
@@ -118,6 +146,13 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
 fn inspect_fallback_pdf(document: &Document) -> Result<ReliabilitySummary, ApplicationError> {
     let invalid = || ApplicationError::ParseFailed("invalid persisted PDF evidence".into());
     let sentences = document.try_sentence_text_units().map_err(|_| invalid())?;
+    inspect_fallback_pdf_with_sentences(document, &sentences)
+}
+
+fn inspect_fallback_pdf_with_sentences(
+    document: &Document,
+    sentences: &SentenceTextUnitSet,
+) -> Result<ReliabilitySummary, ApplicationError> {
     let unreliable = sentences
         .coverage
         .iter()

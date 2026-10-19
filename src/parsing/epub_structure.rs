@@ -119,7 +119,8 @@ struct AppliedNavigation {
 
 #[derive(Clone, Debug)]
 struct FlatSection {
-    section: Section,
+    /// Taken exactly once when the canonical tree is built; the remaining facts stay readable.
+    section: Option<Section>,
     source_order: usize,
     spine_index: usize,
     linear: bool,
@@ -129,6 +130,20 @@ struct FlatSection {
     fallback_provenance: EpubStructureProvenance,
     applied_navigation: Option<AppliedNavigation>,
     aliases: Vec<EpubNavigationAliasFact>,
+}
+
+impl FlatSection {
+    fn section(&self) -> &Section {
+        self.section
+            .as_ref()
+            .expect("flat Section facts are available before the canonical tree is built")
+    }
+
+    fn section_mut(&mut self) -> &mut Section {
+        self.section
+            .as_mut()
+            .expect("flat Section facts are available before the canonical tree is built")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -201,7 +216,7 @@ pub(crate) fn reconcile_epub_structure(
                 ),
             });
         } else {
-            flat_sections[section_index].section.title = node.label.clone();
+            flat_sections[section_index].section_mut().title = node.label.clone();
         }
         flat_sections[section_index].applied_navigation = Some(AppliedNavigation {
             source_order: node.source_order,
@@ -222,7 +237,7 @@ pub(crate) fn reconcile_epub_structure(
             continue;
         };
         match node.parent_source_order {
-            None => flat_sections[section_index].section.parent_id = None,
+            None => flat_sections[section_index].section_mut().parent_id = None,
             Some(_) => {
                 let mapped_parent = nearest_mapped_navigation_parent(
                     node,
@@ -235,16 +250,16 @@ pub(crate) fn reconcile_epub_structure(
                         if flat_sections[parent_index].source_order
                             < flat_sections[section_index].source_order =>
                     {
-                        flat_sections[section_index].section.parent_id =
-                            Some(flat_sections[parent_index].section.id.clone());
+                        flat_sections[section_index].section_mut().parent_id =
+                            Some(flat_sections[parent_index].section().id.clone());
                     }
                     Some(parent_index) => diagnostics.push(EpubStructureDiagnostic {
                         code: "navigation_parent_conflicts_source_order".into(),
                         message: format!(
                             "navigation parent Section {} occurs at source order {} after/equal to child Section {} at {}; source-derived parentage is retained",
-                            flat_sections[parent_index].section.id.0,
+                            flat_sections[parent_index].section().id.0,
                             flat_sections[parent_index].source_order,
-                            flat_sections[section_index].section.id.0,
+                            flat_sections[section_index].section().id.0,
                             flat_sections[section_index].source_order
                         ),
                     }),
@@ -261,7 +276,11 @@ pub(crate) fn reconcile_epub_structure(
     }
 
     let applied_navigation_nodes = primary_for_section.len();
-    let mut root_sections = build_forest(&flat_sections, &mut diagnostics);
+    let section_ids = flat_sections
+        .iter()
+        .map(|flat| flat.section().id.clone())
+        .collect::<Vec<_>>();
+    let mut root_sections = build_forest(&mut flat_sections, &mut diagnostics);
     if applied_navigation_nodes > 0 {
         for root in &mut root_sections {
             rewrite_canonical_paths(root, &[]);
@@ -271,12 +290,14 @@ pub(crate) fn reconcile_epub_structure(
     let final_sections = final_section_facts(&root_sections);
     let sections = flat_sections
         .iter()
-        .map(|flat| {
+        .enumerate()
+        .map(|(index, flat)| {
+            let section_id = &section_ids[index];
             let final_fact = final_sections
-                .get(&flat.section.id)
+                .get(section_id)
                 .expect("reconciled Section must remain present in final forest");
             EpubStructureSectionFact {
-                section_id: flat.section.id.0.clone(),
+                section_id: section_id.0.clone(),
                 source_order: flat.source_order,
                 spine_index: flat.spine_index,
                 linear: flat.linear,
@@ -340,7 +361,7 @@ fn flatten_sections(
         let source_title = section.title.clone();
         let source_level = section.level;
         output.push(FlatSection {
-            section,
+            section: Some(section),
             source_order: *source_order,
             spine_index: parsed.spine_index,
             linear: parsed.linear,
@@ -386,7 +407,7 @@ fn resolve_navigation_section(
             let fragment = node.fragment.as_deref()?;
             let matched = sections.iter().position(|section| {
                 section.entry_path == entry_path
-                    && section.section.location.anchor.as_deref() == Some(fragment)
+                    && section.section().location.anchor.as_deref() == Some(fragment)
             });
             if matched.is_none() {
                 diagnostics.push(EpubStructureDiagnostic {
@@ -482,20 +503,20 @@ fn diagnose_navigation_source_order(
 }
 
 fn build_forest(
-    sections: &[FlatSection],
+    sections: &mut [FlatSection],
     diagnostics: &mut Vec<EpubStructureDiagnostic>,
 ) -> Vec<Section> {
     let by_id = sections
         .iter()
         .enumerate()
-        .map(|(index, section)| (section.section.id.clone(), index))
+        .map(|(index, section)| (section.section().id.clone(), index))
         .collect::<HashMap<_, _>>();
     let mut children = vec![Vec::<usize>::new(); sections.len()];
     let mut roots = Vec::new();
 
     for (index, flat) in sections.iter().enumerate() {
         match flat
-            .section
+            .section()
             .parent_id
             .as_ref()
             .and_then(|id| by_id.get(id).copied())
@@ -506,7 +527,7 @@ fn build_forest(
                     code: "self_parent_section".into(),
                     message: format!(
                         "Section {} would become its own parent during reconciliation; it remains a root",
-                        flat.section.id.0
+                        flat.section().id.0
                     ),
                 });
                 roots.push(index);
@@ -520,14 +541,24 @@ fn build_forest(
     }
     roots.sort_by_key(|index| sections[*index].source_order);
 
+    let mut owned = sections
+        .iter_mut()
+        .map(|flat| flat.section.take())
+        .collect::<Vec<Option<Section>>>();
     roots
         .into_iter()
-        .map(|index| build_section_tree(index, sections, &children))
+        .map(|index| build_section_tree(index, &mut owned, &children))
         .collect()
 }
 
-fn build_section_tree(index: usize, sections: &[FlatSection], children: &[Vec<usize>]) -> Section {
-    let mut section = sections[index].section.clone();
+fn build_section_tree(
+    index: usize,
+    sections: &mut [Option<Section>],
+    children: &[Vec<usize>],
+) -> Section {
+    let mut section = sections[index]
+        .take()
+        .expect("each flat Section is placed into the canonical tree exactly once");
     section.children = children[index]
         .iter()
         .map(|child| build_section_tree(*child, sections, children))

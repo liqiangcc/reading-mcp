@@ -1,6 +1,9 @@
 mod config;
+mod ephemeral_state;
 
 use std::sync::Arc;
+
+pub(crate) use ephemeral_state::EphemeralStateDir;
 
 use crate::application::get_context::GetContextUseCase;
 use crate::application::get_document_structure::GetDocumentStructureUseCase;
@@ -17,10 +20,9 @@ use crate::application::search_document::SearchDocumentUseCase;
 use crate::application::source_view::SourceViewUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
-    FileRawResourceCache, InMemoryDocumentRepository, InMemoryParsedDocumentCache,
-    InMemoryRawResourceCache, InMemorySearchIndex, InMemoryTextUnitIndex,
-    ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
-    ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex, SqliteTextUnitIndex,
+    FileRawResourceCache, ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache,
+    ObservedRetriever, ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex,
+    SqliteTextUnitIndex,
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::{
@@ -75,7 +77,7 @@ pub fn build_server(
         source_http_policy,
     ));
 
-    let components = build_state_components(&config)?;
+    let (components, ephemeral_state) = build_state_components(&config)?;
     let components = if config.telemetry {
         components.observed()
     } else {
@@ -226,6 +228,7 @@ pub fn build_server(
         read_document,
         get_context,
         source_view,
+        ephemeral_state,
     ))
 }
 
@@ -264,33 +267,39 @@ fn build_ocr_identity(
 
 fn build_state_components(
     config: &RuntimeConfig,
-) -> Result<RuntimeComponents, crate::application::ports::ApplicationError> {
-    match &config.state_dir {
-        Some(state_dir) => {
-            std::fs::create_dir_all(state_dir).map_err(|error| {
+) -> Result<
+    (RuntimeComponents, Option<Arc<EphemeralStateDir>>),
+    crate::application::ports::ApplicationError,
+> {
+    let (state_dir, ephemeral_state) = match &config.state_dir {
+        Some(state_dir) => (state_dir.clone(), None),
+        None => {
+            let ephemeral = EphemeralStateDir::new().map_err(|error| {
                 crate::application::ports::ApplicationError::RepositoryFailed(format!(
-                    "{}: {error}",
-                    state_dir.display()
+                    "failed to create temporary state directory: {error}"
                 ))
             })?;
-            let cache_root = state_dir.join("cache");
-            let database = state_dir.join("reading-mcp.sqlite");
-            Ok(RuntimeComponents {
-                raw_cache: Arc::new(FileRawResourceCache::new(&cache_root)),
-                parsed_cache: Arc::new(FileParsedDocumentCache::new(&cache_root)),
-                repository: Arc::new(SqliteDocumentRepository::open(&database)?),
-                text_unit_index: Arc::new(SqliteTextUnitIndex::open(&database)?),
-                search_index: Arc::new(SqliteSearchIndex::open(&database)?),
-            })
+            (ephemeral.path().to_path_buf(), Some(Arc::new(ephemeral)))
         }
-        None => Ok(RuntimeComponents {
-            raw_cache: Arc::new(InMemoryRawResourceCache::default()),
-            parsed_cache: Arc::new(InMemoryParsedDocumentCache::default()),
-            repository: Arc::new(InMemoryDocumentRepository::default()),
-            text_unit_index: Arc::new(InMemoryTextUnitIndex::default()),
-            search_index: Arc::new(InMemorySearchIndex::default()),
-        }),
-    }
+    };
+    std::fs::create_dir_all(&state_dir).map_err(|error| {
+        crate::application::ports::ApplicationError::RepositoryFailed(format!(
+            "{}: {error}",
+            state_dir.display()
+        ))
+    })?;
+    let cache_root = state_dir.join("cache");
+    let database = state_dir.join("reading-mcp.sqlite");
+    Ok((
+        RuntimeComponents {
+            raw_cache: Arc::new(FileRawResourceCache::new(&cache_root)),
+            parsed_cache: Arc::new(FileParsedDocumentCache::new(&cache_root)),
+            repository: Arc::new(SqliteDocumentRepository::open(&database)?),
+            text_unit_index: Arc::new(SqliteTextUnitIndex::open(&database)?),
+            search_index: Arc::new(SqliteSearchIndex::open(&database)?),
+        },
+        ephemeral_state,
+    ))
 }
 
 #[cfg(test)]
@@ -306,6 +315,30 @@ mod ocr_startup_tests {
             ..RuntimeConfig::default()
         };
         assert!(build_ocr_identity(&config).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_server_without_state_dir_uses_ephemeral_sqlite() {
+        let server = build_server(RuntimeConfig {
+            state_dir: None,
+            telemetry: false,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        let prefix = format!("reading-mcp-ephemeral-{}-", std::process::id());
+        let database = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .map(|entry| entry.path().join("reading-mcp.sqlite"))
+            .find(|path| path.is_file());
+        assert!(database.is_some());
+        drop(server);
     }
 
     #[test]

@@ -77,6 +77,9 @@ operator revision。v11/hash-v3 迁移须显式 reopen，保留旧数据与旧�
 READING_MCP_STATE_DIR=memory reading-mcp
 ```
 
+`READING_MCP_STATE_DIR=memory`、空值或没有 home 目录时，仍使用同一套 SQLite + 文件缓存状态，
+只是位于服务器退出时删除的临时目录中；两次运行之间不保留状态。
+
 ## 本地文件授权
 
 默认不允许本地文件。显式设置允许目录：

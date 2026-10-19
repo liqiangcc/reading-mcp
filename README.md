@@ -199,6 +199,9 @@ MCP 进程重启后，已经打开过的 `document_id` 仍可直接用于 `read_
 READING_MCP_STATE_DIR=memory reading-mcp
 ```
 
+`READING_MCP_STATE_DIR=memory`、空值或没有 home 目录时，仍使用同一套 SQLite + 文件缓存状态，
+只是放在服务器退出时删除的临时目录中；两次运行之间不会保留任何状态。
+
 虽然 Repository 和 SearchIndex 可以共享同一个 SQLite 文件，它们仍然是两个独立 Port：Document 是事实来源，Index 是可重建派生状态。
 
 ## HTTP 缓存新鲜度

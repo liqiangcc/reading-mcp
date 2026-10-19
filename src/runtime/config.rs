@@ -17,6 +17,7 @@ pub struct RuntimeConfig {
     pub ocr_runtime_root: Option<PathBuf>,
     pub ocr_runtime_manifest: Option<PathBuf>,
     pub local_roots: Vec<PathBuf>,
+    /// `None` means "temporary state directory removed on shutdown", not in-memory state.
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
     pub telemetry: bool,

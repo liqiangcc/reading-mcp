@@ -75,6 +75,7 @@ pub struct ReadingMcpServer {
     read_document: Arc<ReadDocumentUseCase>,
     get_context: Arc<GetContextUseCase>,
     source_view: Arc<SourceViewUseCase>,
+    _ephemeral_state: Option<Arc<crate::runtime::EphemeralStateDir>>,
 }
 
 impl Default for ReadingMcpServer {
@@ -113,6 +114,7 @@ impl ReadingMcpServer {
         read_document: Arc<ReadDocumentUseCase>,
         get_context: Arc<GetContextUseCase>,
         source_view: Arc<SourceViewUseCase>,
+        ephemeral_state: Option<Arc<crate::runtime::EphemeralStateDir>>,
     ) -> Self {
         Self {
             open_document,
@@ -124,6 +126,7 @@ impl ReadingMcpServer {
             read_document,
             get_context,
             source_view,
+            _ephemeral_state: ephemeral_state,
         }
     }
 }

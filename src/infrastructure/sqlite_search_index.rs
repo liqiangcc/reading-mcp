@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use super::sqlite_support::{open_connection, run_sqlite};
 use crate::application::ports::{
     ApplicationError, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit, SearchHit, SearchHitKind,
     SearchIndex,
@@ -24,23 +25,16 @@ const META_TOKENIZER_VERSION: &str = "lexical_tokenizer_version";
 
 pub struct SqliteSearchIndex {
     path: PathBuf,
-    connection: Mutex<Connection>,
+    connection: Arc<Mutex<Connection>>,
 }
 
 impl SqliteSearchIndex {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                ApplicationError::IndexFailed(format!("{}: {error}", parent.display()))
-            })?;
-        }
-        let connection = Connection::open(&path).map_err(index_error)?;
+        let connection = open_connection(&path, ApplicationError::IndexFailed)?;
         connection
             .execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 PRAGMA synchronous=NORMAL;
-                 CREATE TABLE IF NOT EXISTS lexical_search_meta (
+                "CREATE TABLE IF NOT EXISTS lexical_search_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                  );",
@@ -49,7 +43,7 @@ impl SqliteSearchIndex {
         ensure_schema(&connection)?;
         Ok(Self {
             path,
-            connection: Mutex::new(connection),
+            connection: Arc::new(Mutex::new(connection)),
         })
     }
 
@@ -66,84 +60,92 @@ impl SearchIndex for SqliteSearchIndex {
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let candidates = build_lexical_candidates(document)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| ApplicationError::IndexFailed("SQLite search lock poisoned".into()))?;
-        let transaction = connection.transaction().map_err(index_error)?;
-        transaction
-            .execute(
-                "DELETE FROM lexical_search_units_v2 WHERE document_id = ?1",
-                params![&document.id.0],
-            )
-            .map_err(index_error)?;
-
-        {
-            let mut statement = transaction
-                .prepare(
-                    "INSERT INTO lexical_search_units_v2(
-                        document_id,
-                        candidate_kind,
-                        section_id,
-                        title,
-                        source,
-                        searchable_text,
-                        location_json,
-                        locator_json,
-                        tokenizer_version,
-                        source_order,
-                        lexemes
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                )
-                .map_err(index_error)?;
-
-            for candidate in candidates {
-                let location_json =
-                    serde_json::to_string(&StoredLocation::from(&candidate.location))
-                        .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
-                let locator_json =
-                    serde_json::to_string(&StoredTextLocator::from(&candidate.text_locator))
-                        .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
-                statement
-                    .execute(params![
-                        &document.id.0,
-                        candidate.candidate_kind.as_str(),
-                        &candidate.section_id.0,
-                        &candidate.title,
-                        &candidate.source.0,
-                        &candidate.searchable_text,
-                        location_json,
-                        locator_json,
-                        LEXICAL_TOKENIZER_VERSION,
-                        usize_to_i64(candidate.source_order)?,
-                        encoded_lexemes(&candidate.tokens),
-                    ])
+        let document_id = document.id.clone();
+        let normalized_document_hash = document.normalized_document_hash();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::IndexFailed,
+            move |connection| {
+                let transaction = connection.transaction().map_err(index_error)?;
+                transaction
+                    .execute(
+                        "DELETE FROM lexical_search_units_v2 WHERE document_id = ?1",
+                        params![&document_id.0],
+                    )
                     .map_err(index_error)?;
-            }
-        }
 
-        transaction
-            .execute(
-                "INSERT INTO lexical_search_documents_v2(
-                    document_id,
-                    normalized_document_hash,
-                    index_version,
-                    tokenizer_version
-                 ) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(document_id) DO UPDATE SET
-                    normalized_document_hash = excluded.normalized_document_hash,
-                    index_version = excluded.index_version,
-                    tokenizer_version = excluded.tokenizer_version",
-                params![
-                    &document.id.0,
-                    document.normalized_document_hash().0,
-                    LEXICAL_SEARCH_INDEX_VERSION,
-                    LEXICAL_TOKENIZER_VERSION,
-                ],
-            )
-            .map_err(index_error)?;
-        transaction.commit().map_err(index_error)?;
-        Ok(())
+                {
+                    let mut statement = transaction
+                        .prepare(
+                            "INSERT INTO lexical_search_units_v2(
+                                document_id,
+                                candidate_kind,
+                                section_id,
+                                title,
+                                source,
+                                searchable_text,
+                                location_json,
+                                locator_json,
+                                tokenizer_version,
+                                source_order,
+                                lexemes
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        )
+                        .map_err(index_error)?;
+
+                    for candidate in candidates {
+                        let location_json =
+                            serde_json::to_string(&StoredLocation::from(&candidate.location))
+                                .map_err(|error| {
+                                    ApplicationError::IndexFailed(error.to_string())
+                                })?;
+                        let locator_json = serde_json::to_string(&StoredTextLocator::from(
+                            &candidate.text_locator,
+                        ))
+                        .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
+                        statement
+                            .execute(params![
+                                &document_id.0,
+                                candidate.candidate_kind.as_str(),
+                                &candidate.section_id.0,
+                                &candidate.title,
+                                &candidate.source.0,
+                                &candidate.searchable_text,
+                                location_json,
+                                locator_json,
+                                LEXICAL_TOKENIZER_VERSION,
+                                usize_to_i64(candidate.source_order)?,
+                                encoded_lexemes(&candidate.tokens),
+                            ])
+                            .map_err(index_error)?;
+                    }
+                }
+
+                transaction
+                    .execute(
+                        "INSERT INTO lexical_search_documents_v2(
+                            document_id,
+                            normalized_document_hash,
+                            index_version,
+                            tokenizer_version
+                         ) VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(document_id) DO UPDATE SET
+                            normalized_document_hash = excluded.normalized_document_hash,
+                            index_version = excluded.index_version,
+                            tokenizer_version = excluded.tokenizer_version",
+                        params![
+                            &document_id.0,
+                            normalized_document_hash.0,
+                            LEXICAL_SEARCH_INDEX_VERSION,
+                            LEXICAL_TOKENIZER_VERSION,
+                        ],
+                    )
+                    .map_err(index_error)?;
+                transaction.commit().map_err(index_error)?;
+                Ok(())
+            },
+        )
+        .await
     }
 
     async fn search(
@@ -184,40 +186,44 @@ impl SearchIndex for SqliteSearchIndex {
         let fts_query = encoded_query(query).ok_or_else(|| {
             ApplicationError::InvalidRequest("search query must contain searchable terms".into())
         })?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| ApplicationError::IndexFailed("SQLite search lock poisoned".into()))?;
+        let document_id = document_id.clone();
+        let query = query.to_owned();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::IndexFailed,
+            move |connection| {
+                let indexed = connection
+                    .query_row(
+                        "SELECT 1 FROM lexical_search_documents_v2 WHERE document_id = ?1",
+                        params![&document_id.0],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map_err(index_error)?
+                    .is_some();
+                if !indexed {
+                    return Err(ApplicationError::DocumentNotFound);
+                }
 
-        let indexed = connection
-            .query_row(
-                "SELECT 1 FROM lexical_search_documents_v2 WHERE document_id = ?1",
-                params![&document_id.0],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(index_error)?
-            .is_some();
-        if !indexed {
-            return Err(ApplicationError::DocumentNotFound);
-        }
-
-        let mut hits = fts_search(&connection, &fts_query, document_id, query, limit)?;
-        // Strict AND is authoritative; only a zero-hit multi-token query falls
-        // back to a deterministic OR pass. Single-token queries never relax.
-        if hits.is_empty() {
-            let query_tokens = tokenize(query);
-            if query_tokens.len() > 1 {
-                hits = fts_search(
-                    &connection,
-                    &encoded_relaxed_query(&query_tokens),
-                    document_id,
-                    query,
-                    limit,
-                )?;
-            }
-        }
-        Ok(hits)
+                let mut hits = fts_search(connection, &fts_query, &document_id, &query, limit)?;
+                // Strict AND is authoritative; only a zero-hit multi-token query falls
+                // back to a deterministic OR pass. Single-token queries never relax.
+                if hits.is_empty() {
+                    let query_tokens = tokenize(&query);
+                    if query_tokens.len() > 1 {
+                        hits = fts_search(
+                            connection,
+                            &encoded_relaxed_query(&query_tokens),
+                            &document_id,
+                            &query,
+                            limit,
+                        )?;
+                    }
+                }
+                Ok(hits)
+            },
+        )
+        .await
     }
 }
 

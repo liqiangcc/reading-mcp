@@ -1,5 +1,7 @@
 use crate::application::ports::ApplicationError;
-use crate::domain::{Document, NormalizedTextRange, TEXT_SEGMENTATION_VERSION, TextLocator};
+use crate::domain::{
+    Document, NormalizedDocumentHash, NormalizedTextRange, TEXT_SEGMENTATION_VERSION, TextLocator,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResolvedLocatorKind {
@@ -30,6 +32,7 @@ pub(crate) struct ResolvedTextLocator {
 pub(crate) fn resolve_text_locator(
     document: &Document,
     locator: &TextLocator,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<ResolvedTextLocator, ApplicationError> {
     if locator.document_id != document.id {
         return Err(ApplicationError::InvalidLocator(format!(
@@ -44,11 +47,10 @@ pub(crate) fn resolve_text_locator(
         )));
     }
 
-    let normalized_hash = document.normalized_document_hash();
-    if locator.normalized_document_hash != normalized_hash {
+    if locator.normalized_document_hash != *normalized_document_hash {
         return Err(ApplicationError::StaleLocator(format!(
             "normalized document hash changed from {} to {}",
-            locator.normalized_document_hash.0, normalized_hash.0
+            locator.normalized_document_hash.0, normalized_document_hash.0
         )));
     }
 
@@ -71,7 +73,11 @@ pub(crate) fn resolve_text_locator(
             let range = NormalizedTextRange::new(0, section.normalized_text_len())
                 .expect("zero-to-length normalized range is valid");
             Ok(ResolvedTextLocator {
-                locator: TextLocator::for_section(document, section),
+                locator: TextLocator::for_section_with_hash(
+                    document,
+                    section,
+                    normalized_document_hash,
+                ),
                 kind: ResolvedLocatorKind::Section,
                 range,
             })
@@ -81,7 +87,12 @@ pub(crate) fn resolve_text_locator(
                 ApplicationError::InvalidLocator(format!("invalid character range: {error}"))
             })?;
             Ok(ResolvedTextLocator {
-                locator: TextLocator::for_character_range(document, section, range),
+                locator: TextLocator::for_character_range_with_hash(
+                    document,
+                    section,
+                    range,
+                    normalized_document_hash,
+                ),
                 kind: ResolvedLocatorKind::CharacterRange,
                 range,
             })

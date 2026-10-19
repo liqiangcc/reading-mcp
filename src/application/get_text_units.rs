@@ -9,8 +9,9 @@ use crate::application::text_unit_cursor::{
     TextUnitCursorClaims, decode_text_unit_cursor, encode_text_unit_cursor,
 };
 use crate::domain::{
-    Document, DocumentId, ParagraphContentClass, Section, SectionId, SentenceEligibility,
-    SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
+    Document, DocumentId, NormalizedDocumentHash, ParagraphContentClass, Section, SectionId,
+    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION,
+    TextLocator, TextUnit,
 };
 
 pub const DEFAULT_TEXT_UNIT_MAX_ITEMS: usize = 32;
@@ -256,6 +257,7 @@ impl GetTextUnitsUseCase {
                 anchor_locator,
                 command.requested_kind,
                 command.coverage_policy,
+                &normalized_hash,
             )?)
         } else {
             None
@@ -321,7 +323,11 @@ impl GetTextUnitsUseCase {
 
         Ok(GetTextUnitsResult {
             document_id: document.id.clone(),
-            target_section_locator: TextLocator::for_section(&document, section),
+            target_section_locator: TextLocator::for_section_with_hash(
+                &document,
+                section,
+                &normalized_hash,
+            ),
             start_anchor_locator,
             requested_kind: command.requested_kind,
             direction: command.direction,
@@ -474,8 +480,9 @@ fn resolve_anchor_index(
     anchor_locator: &TextLocator,
     requested_kind: RequestedTextUnitKind,
     coverage_policy: TextUnitCoveragePolicy,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<usize, ApplicationError> {
-    let resolved = resolve_text_locator(document, anchor_locator)?;
+    let resolved = resolve_text_locator(document, anchor_locator, normalized_document_hash)?;
     if resolved.locator.owner_section_id != section.id {
         return Err(ApplicationError::InvalidRequest(format!(
             "get_text_units anchor belongs to section {}, requested section is {}",

@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::application::ports::{ApplicationError, SearchHitKind};
 use crate::domain::{
-    Document, Location, Section, SectionId, SentenceTextUnit, TextLocator, TextUnit,
+    Document, Location, NormalizedDocumentHash, Section, SectionId, SentenceTextUnit, TextLocator,
+    TextUnit,
 };
 
 pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v4";
@@ -64,11 +65,13 @@ pub(crate) fn for_each_lexical_candidate(
     }
 
     let mut source_order = 0usize;
+    let normalized_document_hash = document.normalized_document_hash();
 
     for section in &document.root_sections {
         collect_section_candidates(
             document,
             section,
+            &normalized_document_hash,
             &paragraphs_by_section,
             &sentences_by_section,
             sink,
@@ -97,6 +100,7 @@ pub(crate) fn lexical_candidates_from_units(
 fn collect_section_candidates(
     document: &Document,
     section: &Section,
+    normalized_document_hash: &NormalizedDocumentHash,
     paragraphs: &HashMap<&SectionId, Vec<&TextUnit>>,
     sentences: &HashMap<&SectionId, Vec<&SentenceTextUnit>>,
     sink: &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
@@ -108,7 +112,7 @@ fn collect_section_candidates(
         SearchHitKind::Section,
         section.title.clone(),
         section.location.clone(),
-        TextLocator::for_section(document, section),
+        TextLocator::for_section_with_hash(document, section, normalized_document_hash),
         sink,
         source_order,
     )?;
@@ -144,7 +148,15 @@ fn collect_section_candidates(
     }
 
     for child in &section.children {
-        collect_section_candidates(document, child, paragraphs, sentences, sink, source_order)?;
+        collect_section_candidates(
+            document,
+            child,
+            normalized_document_hash,
+            paragraphs,
+            sentences,
+            sink,
+            source_order,
+        )?;
     }
 
     Ok(())

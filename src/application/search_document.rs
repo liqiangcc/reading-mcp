@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
 use crate::application::ports::{ApplicationError, DocumentRepository, SearchHitKind, SearchIndex};
-use crate::domain::{Document, DocumentId, DocumentSource, Location, SectionId, TextLocator};
+use crate::domain::{
+    Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, SectionId, TextLocator,
+};
 
 const MAX_SEARCH_LIMIT: usize = 50;
 
@@ -77,11 +79,14 @@ impl SearchDocumentUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let tokenizer_version = self.search_index.tokenizer_version();
+        let normalized_document_hash = document.normalized_document_hash();
 
         let hits = if self.search_index.supports_precise_lexical_candidates() {
-            self.precise_hits(&document, query, command.limit).await?
+            self.precise_hits(&document, query, command.limit, &normalized_document_hash)
+                .await?
         } else {
-            self.legacy_hits(&document, query, command.limit).await?
+            self.legacy_hits(&document, query, command.limit, &normalized_document_hash)
+                .await?
         };
 
         Ok(SearchDocumentResult {
@@ -96,6 +101,7 @@ impl SearchDocumentUseCase {
         document: &Document,
         query: &str,
         limit: usize,
+        normalized_document_hash: &NormalizedDocumentHash,
     ) -> Result<Vec<LocatedSearchHit>, ApplicationError> {
         let expected_tokenizer_version = self.search_index.tokenizer_version();
         let index_hits = match self
@@ -128,11 +134,13 @@ impl SearchDocumentUseCase {
                 )));
             }
 
-            let resolved = resolve_text_locator(document, &hit.text_locator).map_err(|error| {
-                ApplicationError::IndexFailed(format!(
-                    "search hit carries an invalid canonical locator: {error}"
-                ))
-            })?;
+            let resolved =
+                resolve_text_locator(document, &hit.text_locator, normalized_document_hash)
+                    .map_err(|error| {
+                        ApplicationError::IndexFailed(format!(
+                            "search hit carries an invalid canonical locator: {error}"
+                        ))
+                    })?;
             if hit.section_id != resolved.locator.owner_section_id {
                 return Err(ApplicationError::IndexFailed(format!(
                     "search hit section {} does not match locator owner {}",
@@ -159,6 +167,7 @@ impl SearchDocumentUseCase {
         document: &Document,
         query: &str,
         limit: usize,
+        normalized_document_hash: &NormalizedDocumentHash,
     ) -> Result<Vec<LocatedSearchHit>, ApplicationError> {
         let index_hits = self.search_index.search(&document.id, query, limit).await?;
         let mut hits = Vec::with_capacity(index_hits.len());
@@ -183,7 +192,11 @@ impl SearchDocumentUseCase {
                 score: hit.score,
                 location: hit.location,
                 candidate_kind: SearchCandidateKind::Section,
-                text_locator: TextLocator::for_section(document, section),
+                text_locator: TextLocator::for_section_with_hash(
+                    document,
+                    section,
+                    normalized_document_hash,
+                ),
             });
         }
         Ok(hits)

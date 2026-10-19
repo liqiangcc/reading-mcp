@@ -7,8 +7,9 @@ use crate::application::reading_support::{
     content_response_limit, flatten_sections, render_section_shallow, truncate_chars,
 };
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, ParagraphContentClass, Section, SectionId,
-    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TextLocator, TextUnit,
+    Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, ParagraphContentClass,
+    Section, SectionId, SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit,
+    TextLocator, TextUnit,
 };
 
 const MAX_CONTEXT_WINDOW: usize = 20;
@@ -129,12 +130,14 @@ impl GetContextUseCase {
     ) -> Result<GetContextResult, ApplicationError> {
         validate_window(command.before, command.after)?;
         let document = self.load_document(&command.document_id).await?;
+        let normalized_document_hash = document.normalized_document_hash();
         section_neighbor_result(
             &document,
             &command.section_id,
             command.before,
             command.after,
             command.max_chars,
+            &normalized_document_hash,
         )
     }
 
@@ -147,7 +150,8 @@ impl GetContextUseCase {
         }
 
         let document = self.load_document(&command.document_id).await?;
-        let resolved = resolve_target(&document, command.target)?;
+        let normalized_document_hash = document.normalized_document_hash();
+        let resolved = resolve_target(&document, command.target, &normalized_document_hash)?;
 
         match command.relation {
             ContextRelation::Neighbor {
@@ -162,6 +166,7 @@ impl GetContextUseCase {
                     before,
                     after,
                     command.max_chars,
+                    &normalized_document_hash,
                 )
             }
             ContextRelation::Neighbor {
@@ -199,10 +204,19 @@ impl GetContextUseCase {
             } => paragraph_container_result(&document, resolved, command.max_chars),
             ContextRelation::Container {
                 kind: ContextContainerKind::Section,
-            } => section_container_result(&document, resolved, command.max_chars),
-            ContextRelation::Structural { kind } => {
-                structural_result(&document, resolved, kind, command.max_chars)
-            }
+            } => section_container_result(
+                &document,
+                resolved,
+                command.max_chars,
+                &normalized_document_hash,
+            ),
+            ContextRelation::Structural { kind } => structural_result(
+                &document,
+                resolved,
+                kind,
+                command.max_chars,
+                &normalized_document_hash,
+            ),
         }
     }
 
@@ -223,6 +237,7 @@ struct ResolvedTarget {
 fn resolve_target(
     document: &Document,
     target: ContextTarget,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<ResolvedTarget, ApplicationError> {
     match target {
         ContextTarget::Section(section_id) => {
@@ -230,12 +245,16 @@ fn resolve_target(
                 .find_section(&section_id)
                 .ok_or(ApplicationError::SectionNotFound)?;
             Ok(ResolvedTarget {
-                locator: TextLocator::for_section(document, section),
+                locator: TextLocator::for_section_with_hash(
+                    document,
+                    section,
+                    normalized_document_hash,
+                ),
                 kind: ContextItemKind::Section,
             })
         }
         ContextTarget::Locator(locator) => {
-            let resolved = resolve_text_locator(document, &locator)?;
+            let resolved = resolve_text_locator(document, &locator, normalized_document_hash)?;
             let kind = match resolved.kind {
                 ResolvedLocatorKind::Section => ContextItemKind::Section,
                 ResolvedLocatorKind::Paragraph => ContextItemKind::Paragraph,
@@ -282,6 +301,7 @@ fn section_neighbor_result(
     before: usize,
     after: usize,
     max_chars: Option<usize>,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<GetContextResult, ApplicationError> {
     let mut sections = Vec::new();
     flatten_sections(&document.root_sections, &mut sections);
@@ -299,7 +319,8 @@ fn section_neighbor_result(
         .collect::<Vec<_>>()
         .join("\n\n");
     let (content, truncated) = truncate_chars(rendered, max_chars);
-    let anchor_locator = TextLocator::for_section(document, owner);
+    let anchor_locator =
+        TextLocator::for_section_with_hash(document, owner, normalized_document_hash);
     let items = sections[start..end]
         .iter()
         .enumerate()
@@ -308,7 +329,11 @@ fn section_neighbor_result(
             ContextItem {
                 title: Some(section.title.clone()),
                 content: None,
-                locator: TextLocator::for_section(document, section),
+                locator: TextLocator::for_section_with_hash(
+                    document,
+                    section,
+                    normalized_document_hash,
+                ),
                 role: relative_role(absolute, owner_index),
                 effective_kind: ContextItemKind::Section,
                 content_class: None,
@@ -463,6 +488,7 @@ fn section_container_result(
     document: &Document,
     target: ResolvedTarget,
     max_chars: Option<usize>,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<GetContextResult, ApplicationError> {
     let section = document
         .find_section(&target.locator.owner_section_id)
@@ -485,6 +511,7 @@ fn section_container_result(
             document,
             section,
             ContextItemRole::Container,
+            normalized_document_hash,
         )],
     })
 }
@@ -494,6 +521,7 @@ fn structural_result(
     target: ResolvedTarget,
     kind: StructuralContextKind,
     max_chars: Option<usize>,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<GetContextResult, ApplicationError> {
     let owner = document
         .find_section(&target.locator.owner_section_id)
@@ -520,7 +548,14 @@ fn structural_result(
     ensure_string_budget(&metadata_projection, max_chars)?;
     let items = sections
         .iter()
-        .map(|section| section_context_item(document, section, ContextItemRole::Structural))
+        .map(|section| {
+            section_context_item(
+                document,
+                section,
+                ContextItemRole::Structural,
+                normalized_document_hash,
+            )
+        })
         .collect();
 
     Ok(GetContextResult {
@@ -737,11 +772,12 @@ fn section_context_item(
     document: &Document,
     section: &Section,
     role: ContextItemRole,
+    normalized_document_hash: &NormalizedDocumentHash,
 ) -> ContextItem {
     ContextItem {
         title: Some(section.title.clone()),
         content: None,
-        locator: TextLocator::for_section(document, section),
+        locator: TextLocator::for_section_with_hash(document, section, normalized_document_hash),
         role,
         effective_kind: ContextItemKind::Section,
         content_class: None,

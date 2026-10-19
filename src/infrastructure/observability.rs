@@ -8,7 +8,9 @@ use crate::application::ports::{
     ApplicationError, LexicalSearchHit, ParsedCacheKey, ParsedDocumentCache, Parser,
     RawResourceCache, RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex,
 };
-use crate::domain::{Document, DocumentId, DocumentSource};
+use crate::domain::{
+    Document, DocumentId, DocumentSource, ParagraphTextUnitSet, SentenceTextUnitSet,
+};
 
 fn emit(value: serde_json::Value) {
     eprintln!("{value}");
@@ -192,6 +194,26 @@ impl SearchIndex for ObservedSearchIndex {
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let started = Instant::now();
         let result = self.inner.index(document).await;
+        emit(json!({
+            "event": "index",
+            "duration_ms": started.elapsed().as_millis(),
+            "sections": document.section_count(),
+            "success": result.is_ok()
+        }));
+        result
+    }
+
+    async fn index_with_units(
+        &self,
+        document: &Document,
+        paragraphs: &ParagraphTextUnitSet,
+        sentences: &SentenceTextUnitSet,
+    ) -> Result<(), ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .index_with_units(document, paragraphs, sentences)
+            .await;
         emit(json!({
             "event": "index",
             "duration_ms": started.elapsed().as_millis(),

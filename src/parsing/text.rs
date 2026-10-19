@@ -4,6 +4,7 @@ use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, Location, Section, SectionId};
 
 use super::blocking::run_blocking;
+use super::charset::decode_text;
 use super::common::{content_hash, document_id, title_from_metadata};
 
 #[derive(Default)]
@@ -13,10 +14,14 @@ impl TextParser {
     fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
-        let text = String::from_utf8(resource.bytes).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid UTF-8 text: {error}"))
-        })?;
-        let title = title_from_metadata(&resource.metadata, &resource.final_source);
+        let mut metadata = resource.metadata;
+        let text = decode_text(
+            resource.bytes,
+            &resource.media_type.0,
+            &mut metadata,
+            |error| ApplicationError::ParseFailed(format!("invalid UTF-8 text: {error}")),
+        )?;
+        let title = title_from_metadata(&metadata, &resource.final_source);
         let char_count = text.chars().count();
 
         Ok(Document {
@@ -25,7 +30,7 @@ impl TextParser {
             title: title.clone(),
             media_type: resource.media_type,
             content_hash: hash,
-            metadata: resource.metadata,
+            metadata,
             root_sections: vec![Section {
                 id: SectionId("section://document".into()),
                 parent_id: None,

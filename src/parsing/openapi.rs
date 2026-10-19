@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -5,6 +7,7 @@ use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{Document, Location, Section, SectionId};
 
 use super::blocking::run_blocking;
+use super::charset::{DetectedCharset, decode_declared_charset, record_charset};
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 #[derive(Default)]
@@ -12,16 +15,28 @@ pub struct OpenApiParser;
 
 impl OpenApiParser {
     fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let text = std::str::from_utf8(&resource.bytes).map_err(|error| {
-            ApplicationError::ParseFailed(format!("OpenAPI document is not UTF-8: {error}"))
-        })?;
+        let mut declared_charset: Option<DetectedCharset> = None;
+        let text: Cow<'_, str> = match std::str::from_utf8(&resource.bytes) {
+            Ok(text) => Cow::Borrowed(text),
+            Err(error) => match decode_declared_charset(&resource.bytes, &resource.media_type.0)? {
+                Some((text, detected)) => {
+                    declared_charset = Some(detected);
+                    text
+                }
+                None => {
+                    return Err(ApplicationError::ParseFailed(format!(
+                        "OpenAPI document is not UTF-8: {error}"
+                    )));
+                }
+            },
+        };
         let media = resource.media_type.essence().to_ascii_lowercase();
         let value: Value = if media.contains("json") || text.trim_start().starts_with('{') {
-            serde_json::from_str(text).map_err(|error| {
+            serde_json::from_str(&text).map_err(|error| {
                 ApplicationError::ParseFailed(format!("invalid OpenAPI JSON: {error}"))
             })?
         } else {
-            serde_saphyr::from_str(text).map_err(|error| {
+            serde_saphyr::from_str(&text).map_err(|error| {
                 ApplicationError::ParseFailed(format!("invalid OpenAPI YAML: {error}"))
             })?
         };
@@ -72,6 +87,9 @@ impl OpenApiParser {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let mut metadata = resource.metadata;
+        if let Some(detected) = declared_charset {
+            record_charset(&mut metadata, detected);
+        }
         metadata.insert("api_specification".into(), specification);
         metadata.insert(
             "api_path_count".into(),

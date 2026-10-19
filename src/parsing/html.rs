@@ -13,6 +13,7 @@ use crate::domain::{
 };
 
 use super::blocking::run_blocking;
+use super::charset::{DetectedCharset, content_type_charset};
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
 #[derive(Clone, Default)]
@@ -128,9 +129,6 @@ impl Parser for HtmlParser {
     }
 }
 
-/// The encoding that decoded non-UTF-8 HTML and where its label came from (`bom`, `http`, `meta`, `fallback`).
-pub(super) type DetectedCharset = (&'static Encoding, &'static str);
-
 /// Decodes HTML bytes: valid UTF-8 as-is (charset `None`), otherwise by WHATWG precedence.
 pub(super) fn decode_html<'a>(
     bytes: &'a [u8],
@@ -174,14 +172,6 @@ pub(super) fn decode_html<'a>(
             ))
         })?;
     Ok((text, Some((encoding, origin))))
-}
-
-fn content_type_charset(content_type: &str) -> Option<&str> {
-    content_type.split(';').skip(1).find_map(|parameter| {
-        let (name, value) = parameter.split_once('=')?;
-        let value = value.trim().trim_matches(['"', '\'']);
-        (name.trim().eq_ignore_ascii_case("charset") && !value.is_empty()).then_some(value)
-    })
 }
 
 fn meta_charset(bytes: &[u8]) -> Option<String> {

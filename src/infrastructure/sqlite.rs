@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -14,9 +15,48 @@ use crate::domain::{
     TextUnitKind,
 };
 
+/// How many decoded documents `SqliteDocumentRepository` keeps in memory.
+const DOCUMENT_CACHE_CAPACITY: usize = 8;
+
+/// Most recently used decoded documents, front first. `data_version` is `PRAGMA data_version` at the time the
+/// entries were loaded: SQLite changes it when another connection commits, so a new value means they may be stale.
+#[derive(Default)]
+struct DocumentCache {
+    data_version: Option<i64>,
+    entries: VecDeque<(DocumentId, Arc<Document>)>,
+}
+
+impl DocumentCache {
+    fn sync_version(&mut self, data_version: i64) {
+        if self.data_version != Some(data_version) {
+            self.entries.clear();
+            self.data_version = Some(data_version);
+        }
+    }
+
+    fn get(&mut self, id: &DocumentId) -> Option<Arc<Document>> {
+        let index = self.entries.iter().position(|(cached, _)| cached == id)?;
+        let entry = self.entries.remove(index)?;
+        let document = Arc::clone(&entry.1);
+        self.entries.push_front(entry);
+        Some(document)
+    }
+
+    fn insert(&mut self, id: DocumentId, document: Arc<Document>) {
+        self.remove(&id);
+        self.entries.push_front((id, document));
+        self.entries.truncate(DOCUMENT_CACHE_CAPACITY);
+    }
+
+    fn remove(&mut self, id: &DocumentId) {
+        self.entries.retain(|(cached, _)| cached != id);
+    }
+}
+
 pub struct SqliteDocumentRepository {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
+    cache: Arc<Mutex<DocumentCache>>,
 }
 
 impl SqliteDocumentRepository {
@@ -36,6 +76,7 @@ impl SqliteDocumentRepository {
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
+            cache: Arc::new(Mutex::new(DocumentCache::default())),
         })
     }
 
@@ -52,6 +93,7 @@ impl DocumentRepository for SqliteDocumentRepository {
             .map_err(ApplicationError::RepositoryFailed)?;
         let json = serde_json::to_string(&StoredDocument::from_document(&document))
             .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::RepositoryFailed,
@@ -72,6 +114,10 @@ impl DocumentRepository for SqliteDocumentRepository {
                         ],
                     )
                     .map_err(repository_error)?;
+                let mut cache = cache.lock().map_err(|_| {
+                    ApplicationError::RepositoryFailed("document cache lock poisoned".into())
+                })?;
+                cache.remove(&document.id);
                 Ok(())
             },
         )
@@ -80,10 +126,21 @@ impl DocumentRepository for SqliteDocumentRepository {
 
     async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
         let id = id.clone();
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
+                let data_version: i64 = connection
+                    .query_row("PRAGMA data_version", [], |row| row.get(0))
+                    .map_err(repository_error)?;
+                let mut cache = cache.lock().map_err(|_| {
+                    ApplicationError::RepositoryFailed("document cache lock poisoned".into())
+                })?;
+                cache.sync_version(data_version);
+                if let Some(document) = cache.get(&id) {
+                    return Ok(Some(document));
+                }
                 let json = connection
                     .query_row(
                         "SELECT document_json FROM documents WHERE id = ?1",
@@ -99,7 +156,9 @@ impl DocumentRepository for SqliteDocumentRepository {
                     document
                         .validate_ocr_publication()
                         .map_err(ApplicationError::RepositoryFailed)?;
-                    Ok(Arc::new(document))
+                    let document = Arc::new(document);
+                    cache.insert(id.clone(), Arc::clone(&document));
+                    Ok(document)
                 })
                 .transpose()
             },

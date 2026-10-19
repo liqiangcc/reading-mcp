@@ -33,7 +33,5 @@ pub use ocr_evidence::FileOcrEvidenceStore;
 pub use ocr_identity::build_ocr_runtime_identity;
 pub(crate) use ocr_identity::{OCR_INTERPRETER_ARGS, OCR_PROCESS_ENV};
 pub(crate) use ocr_identity_process::dependency_output;
-#[doc(hidden)]
-pub use sqlite::SqliteSearchIndex as LegacySqliteSearchIndex;
 pub use sqlite::{SqliteDocumentRepository, SqliteTextUnitIndex};
 pub use sqlite_search_index::SqliteSearchIndex;

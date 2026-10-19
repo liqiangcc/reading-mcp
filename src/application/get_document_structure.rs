@@ -266,11 +266,9 @@ impl GetDocumentStructureUseCase {
             ))?)
         };
 
-        let document = Arc::unwrap_or_clone(document);
-
         Ok(DocumentStructureResult {
             document_id: document.id.clone(),
-            title: document.title,
+            title: document.title.clone(),
             content_hash: document.content_hash.clone(),
             normalized_document_hash: normalized_hash,
             normalized_document_hash_version: NORMALIZED_DOCUMENT_HASH_VERSION.into(),

@@ -199,7 +199,7 @@ pub fn build_server(
             retriever,
             parser,
             repository.clone(),
-            text_unit_index,
+            text_unit_index.clone(),
             search_index.clone(),
         )
         .with_reliability_inspector(Arc::new(PersistedDocumentReliabilityInspector))
@@ -208,7 +208,9 @@ pub fn build_server(
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
     let list_directory = Arc::new(ListDirectoryUseCase::new(config.local_roots.clone()));
     let get_structure = Arc::new(GetDocumentStructureUseCase::new(repository.clone()));
-    let get_text_units = Arc::new(GetTextUnitsUseCase::new(repository.clone()));
+    let get_text_units = Arc::new(
+        GetTextUnitsUseCase::new(repository.clone()).with_text_unit_index(text_unit_index),
+    );
     let search_document = Arc::new(SearchDocumentUseCase::new(search_index, repository.clone()));
     let read_document = Arc::new(ReadDocumentUseCase::new(repository.clone()));
     let get_context = Arc::new(GetContextUseCase::new(repository));

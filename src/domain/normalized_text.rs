@@ -111,6 +111,62 @@ impl fmt::Display for NormalizedTextRangeError {
 
 impl Error for NormalizedTextRangeError {}
 
+const SCALAR_INDEX_STRIDE: usize = 64;
+
+/// Byte offsets of one text's Unicode scalars, sampled every `SCALAR_INDEX_STRIDE` scalars. Built once in O(n),
+/// it slices any `NormalizedTextRange` of that text in O(range) instead of rescanning the text from its start.
+pub struct NormalizedTextIndex<'a> {
+    text: &'a str,
+    checkpoints: Vec<usize>,
+    char_len: usize,
+}
+
+impl<'a> NormalizedTextIndex<'a> {
+    pub fn new(text: &'a str) -> Self {
+        let mut checkpoints = Vec::with_capacity(text.len() / SCALAR_INDEX_STRIDE + 1);
+        let mut char_len = 0;
+        for (scalar, (byte, _)) in text.char_indices().enumerate() {
+            if scalar % SCALAR_INDEX_STRIDE == 0 {
+                checkpoints.push(byte);
+            }
+            char_len = scalar + 1;
+        }
+        Self {
+            text,
+            checkpoints,
+            char_len,
+        }
+    }
+
+    pub fn char_len(&self) -> usize {
+        self.char_len
+    }
+
+    /// Same result and error as `range.slice(text)`.
+    pub fn slice(&self, range: NormalizedTextRange) -> Result<&'a str, NormalizedTextRangeError> {
+        if range.end() > self.char_len {
+            return Err(NormalizedTextRangeError::OutOfBounds {
+                start: range.start(),
+                end: range.end(),
+                owner_len: self.char_len,
+            });
+        }
+        Ok(&self.text[self.byte_offset(range.start())..self.byte_offset(range.end())])
+    }
+
+    fn byte_offset(&self, scalar: usize) -> usize {
+        if scalar >= self.char_len {
+            return self.text.len();
+        }
+        let base = self.checkpoints[scalar / SCALAR_INDEX_STRIDE];
+        let (offset, _) = self.text[base..]
+            .char_indices()
+            .nth(scalar % SCALAR_INDEX_STRIDE)
+            .expect("a scalar below char_len has a byte offset");
+        base + offset
+    }
+}
+
 impl Document {
     pub fn normalized_document_hash(&self) -> NormalizedDocumentHash {
         let mut hasher = Sha256::new();
@@ -154,6 +210,10 @@ impl Document {
 impl Section {
     pub fn normalized_text_len(&self) -> usize {
         self.content.chars().count()
+    }
+
+    pub fn normalized_text_index(&self) -> NormalizedTextIndex<'_> {
+        NormalizedTextIndex::new(&self.content)
     }
 
     pub fn validate_normalized_range(

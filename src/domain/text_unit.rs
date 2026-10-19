@@ -2,7 +2,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ContentHash, Document, DocumentId, NormalizedBlockKind, NormalizedBlockMap,
-    NormalizedBlockMapError, NormalizedDocumentHash, NormalizedTextRange, Section, SectionId,
+    NormalizedBlockMapError, NormalizedDocumentHash, NormalizedTextIndex, NormalizedTextRange,
+    Section, SectionId,
 };
 
 pub const TEXT_SEGMENTATION_VERSION: &str = "text-segmentation/v3";
@@ -231,6 +232,8 @@ impl Document {
         let mut units = Vec::new();
         let mut coverage = Vec::with_capacity(paragraph_set.units.len());
 
+        let mut owner_index: Option<(SectionId, NormalizedTextIndex<'_>)> = None;
+
         for paragraph in &paragraph_set.units {
             let content_class = paragraph_content_class(block_map, paragraph);
             let mut eligibility = match content_class {
@@ -275,15 +278,25 @@ impl Document {
 
             let ranges = sentence_ranges(paragraph);
             let sentence_chars = ranges.iter().map(|range| range.len()).sum::<usize>();
-            let section = self
-                .find_section(&paragraph.owner_section_id)
-                .expect("paragraph owner section must exist in its canonical document");
+            if owner_index
+                .as_ref()
+                .is_none_or(|(owner, _)| *owner != paragraph.owner_section_id)
+            {
+                let section = self
+                    .find_section(&paragraph.owner_section_id)
+                    .expect("paragraph owner section must exist in its canonical document");
+                owner_index = Some((
+                    paragraph.owner_section_id.clone(),
+                    section.normalized_text_index(),
+                ));
+            }
+            let (_, index) = owner_index.as_ref().expect("owner index was just set");
 
             for (offset, range) in ranges.iter().copied().enumerate() {
                 let sentence_index = offset + 1;
                 let source_order = units.len();
-                let text = section
-                    .normalized_text_slice(range)
+                let text = index
+                    .slice(range)
                     .expect("generated sentence range must be a valid owner slice")
                     .to_string();
                 let id = sentence_text_unit_id(
@@ -346,11 +359,12 @@ fn collect_section_paragraphs(
     coverage: &mut Vec<ParagraphSectionCoverage>,
 ) {
     let candidates = section_paragraph_candidates(section, block_map);
+    let index = section.normalized_text_index();
     let paragraph_chars = candidates
         .iter()
         .map(|candidate| candidate.range.len())
         .sum::<usize>();
-    let owner_chars = section.normalized_text_len();
+    let owner_chars = index.char_len();
     let native_paragraph_chars = candidates
         .iter()
         .filter(|candidate| candidate.source == ParagraphBoundarySource::NativeParagraph)
@@ -399,8 +413,8 @@ fn collect_section_paragraphs(
     for (offset, candidate) in candidates.into_iter().enumerate() {
         let paragraph_index = offset + 1;
         let source_order = units.len();
-        let text = section
-            .normalized_text_slice(candidate.range)
+        let text = index
+            .slice(candidate.range)
             .expect("generated paragraph range must be a valid owner slice")
             .to_string();
         let id = paragraph_text_unit_id(

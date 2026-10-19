@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -148,12 +149,20 @@ def extract_error(response: dict) -> str | None:
     return None
 
 
+def server_command(binary: str, wrapper: str | None, label: str) -> list[str]:
+    """Build the server command, applying the optional wrapper prefix and its {label}."""
+    if not wrapper:
+        return [binary]
+    parts = [part.replace("{label}", label) for part in shlex.split(wrapper)]
+    return parts + [binary]
+
+
 def run_one(
-    binary: str, env: dict, source: str | None, run_timeout: float
+    command: list[str], env: dict, source: str | None, run_timeout: float
 ) -> tuple[int, float | None, str | None, bool]:
     """Run one open_document call. Returns (peak_rss_kib, open_seconds, error, timed_out)."""
     process = subprocess.Popen(
-        [binary],
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -269,9 +278,12 @@ def main() -> int:
     parser.add_argument("--sizes-mb", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--run-timeout-seconds", type=float, default=480.0)
+    parser.add_argument("--states", default="memory,dir")
+    parser.add_argument("--wrapper", default=None)
     args = parser.parse_args()
 
     sizes = sorted(float(value) for value in args.sizes_mb.split(",") if value.strip())
+    states = [value.strip() for value in args.states.split(",") if value.strip()]
     run_timeout = args.run_timeout_seconds
     binary = os.path.abspath(args.binary)
     if not os.path.exists(binary):
@@ -286,15 +298,16 @@ def main() -> int:
             write_document(path, round(size * MIB))
             documents[size] = os.path.abspath(path)
 
-        for state in ("memory", "dir"):
+        for state in states:
             if state == "memory":
                 state_dir = "memory"
             else:
                 state_dir = os.path.abspath(tempfile.mkdtemp(prefix="state-dir-", dir=root))
             env = server_environment(root, state_dir)
 
+            baseline_command = server_command(binary, args.wrapper, f"{state}-baseline")
             baseline_peak, _, baseline_error, baseline_timed_out = run_one(
-                binary, env, None, run_timeout
+                baseline_command, env, None, run_timeout
             )
             baseline_row = {
                 "state": state,
@@ -326,8 +339,9 @@ def main() -> int:
                     dump_rows(args.out, rows)
                     continue
 
+                command = server_command(binary, args.wrapper, f"{state}-{size:g}mib")
                 peak, open_seconds, error, timed_out = run_one(
-                    binary, env, documents[size], run_timeout
+                    command, env, documents[size], run_timeout
                 )
                 ok = error is None and not timed_out
                 row = {

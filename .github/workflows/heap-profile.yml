@@ -1,0 +1,42 @@
+name: Heap profile
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/**']
+jobs:
+  heap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install heaptrack
+        run: sudo apt-get update && sudo apt-get install -y heaptrack
+      - name: Build release binary with line tables
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Record heap profiles
+        run: |
+          mkdir -p heap
+          python3 scripts/memory-profile.py --binary target/release/reading-mcp --sizes-mb 4 \
+            --states memory,dir --wrapper "heaptrack -o heap/{label}" --out heap/runs.json
+      - name: Summarize peak consumers
+        run: |
+          heaptrack_print --help
+          for f in heap/*-4mib*; do
+            echo "=== $f"
+            heaptrack_print --file "$f" --print-peaks=1 --peak-limit=25 --sub-peak-limit=4 \
+              --print-allocators=0 --print-temporary=0 --print-leaks=0 --print-histogram=0 \
+              | tee "$f.peaks.txt" | head -400
+          done
+      - name: Upload heap data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heap-profile
+          path: heap/

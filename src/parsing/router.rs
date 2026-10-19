@@ -108,14 +108,7 @@ impl ParserRouter {
 #[async_trait]
 impl Parser for ParserRouter {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let media_type = resource
-            .media_type
-            .0
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
+        let media_type = resource.media_type.essence().to_ascii_lowercase();
 
         let parser = match media_type.as_str() {
             "text/markdown" | "text/x-markdown" => return self.markdown.parse(resource).await,

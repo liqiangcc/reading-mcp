@@ -100,12 +100,7 @@ impl BudgetedParser {
 #[async_trait]
 impl Parser for BudgetedParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let is_pdf = resource
-            .media_type
-            .0
-            .split(';')
-            .next()
-            .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/pdf"));
+        let is_pdf = resource.media_type.is_pdf();
         let parse_timeout = if self.ocr_enabled && is_pdf {
             OCR_PARSE_TIMEOUT
         } else {

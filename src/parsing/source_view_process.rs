@@ -62,7 +62,7 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
         page: u32,
         options: SourceViewRenderOptions,
     ) -> Result<RenderedSourceView, ApplicationError> {
-        if !is_pdf(&media_type) {
+        if !media_type.is_pdf() {
             return Err(ApplicationError::SourceViewFailed(format!(
                 "unsupported source-view media type {}",
                 media_type.0
@@ -372,12 +372,4 @@ fn restrict_temp_permissions(path: &Path) -> Result<(), ApplicationError> {
 #[cfg(not(unix))]
 fn restrict_temp_permissions(_path: &Path) -> Result<(), ApplicationError> {
     Ok(())
-}
-
-fn is_pdf(media_type: &MediaType) -> bool {
-    media_type
-        .0
-        .split(';')
-        .next()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/pdf"))
 }

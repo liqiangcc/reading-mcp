@@ -14,6 +14,7 @@ mod ocr_identity_process;
 mod ocr_singleflight;
 mod sqlite;
 mod sqlite_search_index;
+mod sqlite_support;
 
 pub use budget::{BudgetedParser, BudgetedRetriever, OCR_PARSE_TIMEOUT, ResourceBudget};
 pub use cache::{

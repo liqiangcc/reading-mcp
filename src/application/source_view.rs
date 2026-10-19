@@ -182,6 +182,7 @@ impl SourceViewUseCase {
         })??;
 
         let normalized_document_hash = document.normalized_document_hash();
+        let document = Arc::unwrap_or_clone(document);
 
         Ok(SourceViewResult {
             document_id: document.id,

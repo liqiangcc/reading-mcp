@@ -597,7 +597,7 @@ mod publication_failure {
             self.saves.fetch_add(1, Ordering::SeqCst);
             self.inner.save(document).await
         }
-        async fn get(&self, id: &DocumentId) -> Result<Option<Document>, ApplicationError> {
+        async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
             self.inner.get(id).await
         }
     }

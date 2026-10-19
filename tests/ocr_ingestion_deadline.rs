@@ -70,8 +70,8 @@ impl DocumentRepository for Repository {
         *self.saved.lock().unwrap() = Some(document);
         Ok(())
     }
-    async fn get(&self, _: &DocumentId) -> Result<Option<Document>, ApplicationError> {
-        Ok(self.saved.lock().unwrap().clone())
+    async fn get(&self, _: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
+        Ok(self.saved.lock().unwrap().clone().map(Arc::new))
     }
 }
 #[derive(Default)]

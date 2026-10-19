@@ -23,7 +23,7 @@ async fn sqlite_document_repository_rejects_unversioned_and_stale_normalization(
     let current =
         SqliteDocumentRepository::open(&database).expect("SQLite repository should reopen");
     assert_eq!(
-        current
+        *current
             .get(&document.id)
             .await
             .expect("current normalization should load")

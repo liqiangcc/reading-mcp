@@ -1,0 +1,26 @@
+name: Memory profile
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/**']
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Profile open_document memory
+        run: python3 scripts/memory-profile.py --binary target/release/reading-mcp --sizes-mb 16,64 --out memory-profile.json
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-profile
+          path: memory-profile.json

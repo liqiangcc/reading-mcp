@@ -381,6 +381,36 @@ pub trait TextUnitIndex: Send + Sync {
         section_id: &SectionId,
     ) -> Result<Option<SectionTextUnits>, ApplicationError>;
 
+    /// One stored unit of a section by its 1-based indices: a paragraph (`sentence_index` None) or a sentence.
+    /// Err(StaleDocument) when the document's units are not stored; Ok(None) when stored but no such unit.
+    async fn section_unit(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+        kind: EffectiveTextUnitKind,
+        paragraph_index: usize,
+        sentence_index: Option<usize>,
+    ) -> Result<Option<OwnedStreamUnit>, ApplicationError> {
+        let Some(units) = self.section_units(document_id, section_id).await? else {
+            return Err(stale_text_units(document_id));
+        };
+        Ok(match kind {
+            EffectiveTextUnitKind::Paragraph => units
+                .paragraphs
+                .into_iter()
+                .find(|unit| unit.paragraph_index == paragraph_index)
+                .map(OwnedStreamUnit::Paragraph),
+            EffectiveTextUnitKind::Sentence => units
+                .sentences
+                .into_iter()
+                .find(|unit| {
+                    unit.paragraph_index == paragraph_index
+                        && Some(unit.sentence_index) == sentence_index
+                })
+                .map(OwnedStreamUnit::Sentence),
+        })
+    }
+
     /// `None` when the section's stream is not stored (open the document again).
     async fn section_stream_summary(
         &self,

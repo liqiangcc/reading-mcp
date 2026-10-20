@@ -1,4 +1,5 @@
 mod body_order;
+pub mod derived_text_units;
 mod directory_cursor;
 mod discovery_cursor;
 pub mod get_context;

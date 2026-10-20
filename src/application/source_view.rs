@@ -4,10 +4,11 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tokio::task::spawn_blocking;
 
+use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::locator_resolution::resolve_text_locator;
 use crate::application::ports::{
     ApplicationError, DocumentRepository, RenderedSourceView, RetrievalOptions, Retriever,
-    SourceViewRenderOptions, SourceViewRenderer,
+    SourceViewRenderOptions, SourceViewRenderer, TextUnitIndex,
 };
 use crate::domain::{
     DocumentId, DocumentSource, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
@@ -93,6 +94,7 @@ pub struct SourceViewUseCase {
     retriever: Arc<dyn Retriever>,
     renderer: Arc<dyn SourceViewRenderer>,
     limits: SourceViewLimits,
+    text_unit_index: Option<Arc<dyn TextUnitIndex>>,
 }
 
 impl SourceViewUseCase {
@@ -107,7 +109,13 @@ impl SourceViewUseCase {
             retriever,
             renderer,
             limits,
+            text_unit_index: None,
         }
+    }
+
+    pub fn with_text_unit_index(mut self, index: Arc<dyn TextUnitIndex>) -> Self {
+        self.text_unit_index = Some(index);
+        self
     }
 
     pub async fn execute(
@@ -128,11 +136,17 @@ impl SourceViewUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let normalized_document_hash = document.normalized_document_hash();
+        let units: Arc<dyn TextUnitIndex> = match &self.text_unit_index {
+            Some(index) => Arc::clone(index),
+            None => Arc::new(DerivedTextUnits::new(Arc::clone(&document))),
+        };
         let resolved = resolve_text_locator(
             &document,
             &command.target_locator,
             &normalized_document_hash,
-        )?;
+            units.as_ref(),
+        )
+        .await?;
         let section = document
             .find_section(&resolved.locator.owner_section_id)
             .ok_or(ApplicationError::InvalidLocator(

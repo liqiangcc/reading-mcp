@@ -1,15 +1,20 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::derived_text_units::DerivedTextUnits;
+use crate::application::get_text_units::{
+    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
+};
 use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
-use crate::application::ports::{ApplicationError, DocumentRepository};
+use crate::application::ports::{
+    ApplicationError, DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex,
+    TextUnitStreamKey,
+};
 use crate::application::reading_support::{
     content_response_limit, flatten_sections, render_section_shallow, truncate_chars,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, ParagraphContentClass,
-    Section, SectionId, SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit,
-    TextLocator, TextUnit,
+    Section, SectionId, TEXT_SEGMENTATION_VERSION, TextLocator,
 };
 
 const MAX_CONTEXT_WINDOW: usize = 20;
@@ -117,11 +122,20 @@ pub struct GetContextResult {
 
 pub struct GetContextUseCase {
     repository: Arc<dyn DocumentRepository>,
+    text_unit_index: Option<Arc<dyn TextUnitIndex>>,
 }
 
 impl GetContextUseCase {
     pub fn new(repository: Arc<dyn DocumentRepository>) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            text_unit_index: None,
+        }
+    }
+
+    pub fn with_text_unit_index(mut self, index: Arc<dyn TextUnitIndex>) -> Self {
+        self.text_unit_index = Some(index);
+        self
     }
 
     pub async fn execute(
@@ -151,7 +165,14 @@ impl GetContextUseCase {
 
         let document = self.load_document(&command.document_id).await?;
         let normalized_document_hash = document.normalized_document_hash();
-        let resolved = resolve_target(&document, command.target, &normalized_document_hash)?;
+        let units = self.text_units(&document);
+        let resolved = resolve_target(
+            &document,
+            command.target,
+            &normalized_document_hash,
+            units.as_ref(),
+        )
+        .await?;
 
         match command.relation {
             ContextRelation::Neighbor {
@@ -182,7 +203,9 @@ impl GetContextUseCase {
                     before,
                     after,
                     command.max_chars,
+                    units.as_ref(),
                 )
+                .await
             }
             ContextRelation::Neighbor {
                 unit: ContextUnit::Sentence,
@@ -197,11 +220,16 @@ impl GetContextUseCase {
                     before,
                     after,
                     command.max_chars,
+                    units.as_ref(),
                 )
+                .await
             }
             ContextRelation::Container {
                 kind: ContextContainerKind::Paragraph,
-            } => paragraph_container_result(&document, resolved, command.max_chars),
+            } => {
+                paragraph_container_result(&document, resolved, command.max_chars, units.as_ref())
+                    .await
+            }
             ContextRelation::Container {
                 kind: ContextContainerKind::Section,
             } => section_container_result(
@@ -226,6 +254,13 @@ impl GetContextUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)
     }
+
+    fn text_units(&self, document: &Arc<Document>) -> Arc<dyn TextUnitIndex> {
+        match &self.text_unit_index {
+            Some(index) => Arc::clone(index),
+            None => Arc::new(DerivedTextUnits::new(Arc::clone(document))),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -234,10 +269,11 @@ struct ResolvedTarget {
     kind: ContextItemKind,
 }
 
-fn resolve_target(
+async fn resolve_target(
     document: &Document,
     target: ContextTarget,
     normalized_document_hash: &NormalizedDocumentHash,
+    units: &dyn TextUnitIndex,
 ) -> Result<ResolvedTarget, ApplicationError> {
     match target {
         ContextTarget::Section(section_id) => {
@@ -254,7 +290,8 @@ fn resolve_target(
             })
         }
         ContextTarget::Locator(locator) => {
-            let resolved = resolve_text_locator(document, &locator, normalized_document_hash)?;
+            let resolved =
+                resolve_text_locator(document, &locator, normalized_document_hash, units).await?;
             let kind = match resolved.kind {
                 ResolvedLocatorKind::Section => ContextItemKind::Section,
                 ResolvedLocatorKind::Paragraph => ContextItemKind::Paragraph,
@@ -360,42 +397,75 @@ fn section_neighbor_result(
     })
 }
 
-fn text_unit_neighbor_result(
+async fn text_unit_neighbor_result(
     document: &Document,
     target: ResolvedTarget,
     unit: ContextUnit,
     before: usize,
     after: usize,
     max_chars: Option<usize>,
+    units: &dyn TextUnitIndex,
 ) -> Result<GetContextResult, ApplicationError> {
     let section = document
         .find_section(&target.locator.owner_section_id)
         .ok_or(ApplicationError::SectionNotFound)?;
 
-    let stream = match unit {
-        ContextUnit::Paragraph => paragraph_context_stream(document, section)?,
-        ContextUnit::Sentence => sentence_context_stream(document, section)?,
+    let (requested_kind, unit_kind) = match unit {
+        ContextUnit::Paragraph => (
+            RequestedTextUnitKind::Paragraph,
+            EffectiveTextUnitKind::Paragraph,
+        ),
+        ContextUnit::Sentence => (
+            RequestedTextUnitKind::Sentence,
+            EffectiveTextUnitKind::Sentence,
+        ),
         ContextUnit::Section => unreachable!("Section neighbors use section_neighbor_result"),
     };
+    let key = TextUnitStreamKey {
+        document_id: &document.id,
+        section_id: &section.id,
+        kind: requested_kind,
+        policy: TextUnitCoveragePolicy::PreserveSource,
+    };
+    let summary = units
+        .section_stream_summary(key)
+        .await?
+        .ok_or_else(|| stale_text_units(document))?;
+    let paragraph_index = target
+        .locator
+        .paragraph_index
+        .ok_or_else(|| not_in_stream(unit))?;
+    let anchor_position = units
+        .section_stream_position(
+            key,
+            unit_kind,
+            paragraph_index,
+            target.locator.sentence_index,
+        )
+        .await?
+        .ok_or_else(|| not_in_stream(unit))?;
+    let start = anchor_position.saturating_sub(before);
+    let end = (anchor_position + after + 1).min(summary.total_items);
+    let rows = units
+        .section_stream_items(key, TextUnitDirection::Forward, start, end - start)
+        .await?;
 
-    let anchor_index = stream
-        .iter()
-        .position(|item| item.locator == target.locator)
-        .ok_or_else(|| {
-            ApplicationError::StaleLocator(format!(
-                "locator is not part of the current {} context stream",
-                match unit {
-                    ContextUnit::Paragraph => "paragraph",
-                    ContextUnit::Sentence => "sentence",
-                    ContextUnit::Section => "section",
-                }
-            ))
-        })?;
-    let start = anchor_index.saturating_sub(before);
-    let end = (anchor_index + after + 1).min(stream.len());
-    let mut items = stream[start..end].to_vec();
-    for (offset, item) in items.iter_mut().enumerate() {
-        item.role = relative_role(start + offset, anchor_index);
+    let mut anchor_found = false;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let position = row.position;
+        let mut item = context_item_from_row(document, section, row, unit);
+        if position == anchor_position {
+            if item.locator != target.locator {
+                return Err(not_in_stream(unit));
+            }
+            anchor_found = true;
+        }
+        item.role = relative_role(position, anchor_position);
+        items.push(item);
+    }
+    if !anchor_found {
+        return Err(not_in_stream(unit));
     }
     ensure_precise_item_budget(&items, max_chars)?;
 
@@ -417,10 +487,11 @@ fn text_unit_neighbor_result(
     })
 }
 
-fn paragraph_container_result(
+async fn paragraph_container_result(
     document: &Document,
     target: ResolvedTarget,
     max_chars: Option<usize>,
+    units: &dyn TextUnitIndex,
 ) -> Result<GetContextResult, ApplicationError> {
     if target.kind == ContextItemKind::Section {
         return Err(ApplicationError::InvalidRequest(
@@ -435,36 +506,52 @@ fn paragraph_container_result(
         ApplicationError::InvalidLocator("text locator has no paragraph ownership".into())
     })?;
 
-    let paragraph_set = document
-        .try_paragraph_text_units()
-        .map_err(text_unit_materialization_error)?;
-    let paragraph = paragraph_set
-        .units
-        .iter()
-        .find(|unit| unit.owner_section_id == section.id && unit.paragraph_index == paragraph_index)
-        .ok_or_else(|| {
-            ApplicationError::StaleLocator(format!(
-                "paragraph {paragraph_index} no longer exists in section {}",
-                section.id.0
-            ))
-        })?;
-    let sentence_set = document
-        .try_sentence_text_units()
-        .map_err(text_unit_materialization_error)?;
-    let coverage = sentence_set
-        .coverage
-        .iter()
-        .find(|coverage| {
-            coverage.owner_section_id == section.id && coverage.paragraph_index == paragraph_index
-        })
-        .ok_or_else(|| {
-            ApplicationError::InvalidRequest(format!(
-                "sentence coverage is unavailable for paragraph {paragraph_index}"
-            ))
-        })?;
+    let key = TextUnitStreamKey {
+        document_id: &document.id,
+        section_id: &section.id,
+        kind: RequestedTextUnitKind::Paragraph,
+        policy: TextUnitCoveragePolicy::PreserveSource,
+    };
+    let missing_paragraph = || {
+        ApplicationError::StaleLocator(format!(
+            "paragraph {paragraph_index} no longer exists in section {}",
+            section.id.0
+        ))
+    };
+    let position = units
+        .section_stream_position(key, EffectiveTextUnitKind::Paragraph, paragraph_index, None)
+        .await?
+        .ok_or_else(|| missing_paragraph())?;
+    let content_class = units
+        .section_stream_items(key, TextUnitDirection::Forward, position, 1)
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.content_class)
+        .ok_or_else(|| missing_paragraph())?;
+    let paragraph = match units
+        .section_unit(
+            &document.id,
+            &section.id,
+            EffectiveTextUnitKind::Paragraph,
+            paragraph_index,
+            None,
+        )
+        .await?
+    {
+        Some(OwnedStreamUnit::Paragraph(paragraph)) => paragraph,
+        _ => return Err(missing_paragraph()),
+    };
 
-    let mut item = paragraph_context_item(document, section, paragraph, coverage);
-    item.role = ContextItemRole::Container;
+    let item = ContextItem {
+        title: None,
+        content: Some(paragraph.text.clone()),
+        locator: TextLocator::for_paragraph(document, section, &paragraph),
+        role: ContextItemRole::Container,
+        effective_kind: ContextItemKind::Paragraph,
+        content_class: Some(content_class.as_str().into()),
+        degradation: None,
+    };
     let items = vec![item];
     ensure_precise_item_budget(&items, max_chars)?;
 
@@ -482,6 +569,59 @@ fn paragraph_container_result(
         },
         items,
     })
+}
+
+fn context_item_from_row(
+    document: &Document,
+    section: &Section,
+    row: StoredStreamItem,
+    stream_unit: ContextUnit,
+) -> ContextItem {
+    let degradation = match (&row.unit, stream_unit) {
+        (OwnedStreamUnit::Paragraph(_), ContextUnit::Sentence) => {
+            Some(coarse_sentence_context_degradation(row.content_class).into())
+        }
+        _ => None,
+    };
+    let (content, locator, effective_kind) = match row.unit {
+        OwnedStreamUnit::Paragraph(unit) => (
+            unit.text,
+            TextLocator::for_paragraph(document, section, &unit),
+            ContextItemKind::Paragraph,
+        ),
+        OwnedStreamUnit::Sentence(unit) => (
+            unit.text,
+            TextLocator::for_sentence(document, section, &unit),
+            ContextItemKind::Sentence,
+        ),
+    };
+    ContextItem {
+        title: None,
+        content: Some(content),
+        locator,
+        role: ContextItemRole::Anchor,
+        effective_kind,
+        content_class: Some(row.content_class.as_str().into()),
+        degradation,
+    }
+}
+
+fn not_in_stream(unit: ContextUnit) -> ApplicationError {
+    ApplicationError::StaleLocator(format!(
+        "locator is not part of the current {} context stream",
+        match unit {
+            ContextUnit::Paragraph => "paragraph",
+            ContextUnit::Sentence => "sentence",
+            ContextUnit::Section => "section",
+        }
+    ))
+}
+
+fn stale_text_units(document: &Document) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "text units of document {} are not stored for {TEXT_SEGMENTATION_VERSION}; open the document again",
+        document.id.0
+    ))
 }
 
 fn section_container_result(
@@ -616,136 +756,6 @@ fn siblings<'a>(
         .collect())
 }
 
-fn paragraph_context_stream(
-    document: &Document,
-    section: &Section,
-) -> Result<Vec<ContextItem>, ApplicationError> {
-    let paragraph_set = document
-        .try_paragraph_text_units()
-        .map_err(text_unit_materialization_error)?;
-    let sentence_set = document
-        .try_sentence_text_units()
-        .map_err(text_unit_materialization_error)?;
-    let coverage = sentence_set
-        .coverage
-        .iter()
-        .filter(|coverage| coverage.owner_section_id == section.id)
-        .map(|coverage| (coverage.paragraph_index, coverage))
-        .collect::<HashMap<_, _>>();
-
-    paragraph_set
-        .units
-        .iter()
-        .filter(|paragraph| paragraph.owner_section_id == section.id)
-        .map(|paragraph| {
-            let paragraph_coverage = coverage
-                .get(&paragraph.paragraph_index)
-                .copied()
-                .ok_or_else(|| {
-                    ApplicationError::InvalidRequest(format!(
-                        "sentence coverage is unavailable for paragraph {} in section {}",
-                        paragraph.paragraph_index, section.id.0
-                    ))
-                })?;
-            Ok(paragraph_context_item(
-                document,
-                section,
-                paragraph,
-                paragraph_coverage,
-            ))
-        })
-        .collect()
-}
-
-fn sentence_context_stream(
-    document: &Document,
-    section: &Section,
-) -> Result<Vec<ContextItem>, ApplicationError> {
-    let paragraph_set = document
-        .try_paragraph_text_units()
-        .map_err(text_unit_materialization_error)?;
-    let sentence_set = document
-        .try_sentence_text_units()
-        .map_err(text_unit_materialization_error)?;
-    let coverage_by_paragraph = sentence_set
-        .coverage
-        .iter()
-        .filter(|coverage| coverage.owner_section_id == section.id)
-        .map(|coverage| (coverage.paragraph_index, coverage))
-        .collect::<HashMap<_, _>>();
-    let mut sentences_by_paragraph: HashMap<usize, Vec<&SentenceTextUnit>> = HashMap::new();
-    for sentence in sentence_set
-        .units
-        .iter()
-        .filter(|sentence| sentence.owner_section_id == section.id)
-    {
-        sentences_by_paragraph
-            .entry(sentence.paragraph_index)
-            .or_default()
-            .push(sentence);
-    }
-
-    let mut result = Vec::new();
-    for paragraph in paragraph_set
-        .units
-        .iter()
-        .filter(|paragraph| paragraph.owner_section_id == section.id)
-    {
-        let coverage = coverage_by_paragraph
-            .get(&paragraph.paragraph_index)
-            .copied()
-            .ok_or_else(|| {
-                ApplicationError::InvalidRequest(format!(
-                    "sentence coverage is unavailable for paragraph {} in section {}",
-                    paragraph.paragraph_index, section.id.0
-                ))
-            })?;
-
-        if coverage.eligibility == SentenceEligibility::CoarseParagraphOnly {
-            let mut item = paragraph_context_item(document, section, paragraph, coverage);
-            item.degradation =
-                Some(coarse_sentence_context_degradation(coverage.content_class).into());
-            result.push(item);
-            continue;
-        }
-
-        for sentence in sentences_by_paragraph
-            .get(&paragraph.paragraph_index)
-            .into_iter()
-            .flatten()
-        {
-            result.push(ContextItem {
-                title: None,
-                content: Some(sentence.text.clone()),
-                locator: TextLocator::for_sentence(document, section, sentence),
-                role: ContextItemRole::Anchor,
-                effective_kind: ContextItemKind::Sentence,
-                content_class: Some(coverage.content_class.as_str().into()),
-                degradation: None,
-            });
-        }
-    }
-
-    Ok(result)
-}
-
-fn paragraph_context_item(
-    document: &Document,
-    section: &Section,
-    paragraph: &TextUnit,
-    coverage: &SentenceParagraphCoverage,
-) -> ContextItem {
-    ContextItem {
-        title: None,
-        content: Some(paragraph.text.clone()),
-        locator: TextLocator::for_paragraph(document, section, paragraph),
-        role: ContextItemRole::Anchor,
-        effective_kind: ContextItemKind::Paragraph,
-        content_class: Some(coverage.content_class.as_str().into()),
-        degradation: None,
-    }
-}
-
 fn coarse_sentence_context_degradation(content_class: ParagraphContentClass) -> &'static str {
     match content_class {
         ParagraphContentClass::BlockQuote | ParagraphContentClass::ListItem => {
@@ -760,12 +770,6 @@ fn coarse_sentence_context_degradation(content_class: ParagraphContentClass) -> 
             "requested_sentence_context_but_paragraph_is_coarse_only"
         }
     }
-}
-
-fn text_unit_materialization_error(error: impl std::fmt::Display) -> ApplicationError {
-    ApplicationError::TextUnitIndexFailed(format!(
-        "cannot build context from persisted block evidence: {error}"
-    ))
 }
 
 fn section_context_item(

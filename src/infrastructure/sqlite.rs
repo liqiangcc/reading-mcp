@@ -1073,6 +1073,96 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         .await
     }
 
+    async fn section_unit(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+        unit_kind: EffectiveTextUnitKind,
+        paragraph_index: usize,
+        sentence_index: Option<usize>,
+    ) -> Result<Option<OwnedStreamUnit>, ApplicationError> {
+        let document_id = document_id.clone();
+        let section_id = section_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let set = connection
+                    .query_row(
+                        "SELECT segmentation_version
+                         FROM text_unit_sets_v1
+                         WHERE document_id = ?1",
+                        params![&document_id.0],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?;
+                let Some(stored_version) = set else {
+                    return Err(stale_text_units(&document_id));
+                };
+                if stored_version != TEXT_SEGMENTATION_VERSION {
+                    return Err(stale_text_units(&document_id));
+                }
+
+                let has_paragraph_stream = connection
+                    .query_row(
+                        "SELECT 1
+                         FROM text_unit_stream_summaries_v1
+                         WHERE document_id = ?1
+                           AND owner_section_id = ?2
+                           AND requested_kind = ?3
+                           AND coverage_policy = ?4",
+                        params![
+                            &document_id.0,
+                            &section_id.0,
+                            RequestedTextUnitKind::Paragraph.as_str(),
+                            TextUnitCoveragePolicy::PreserveSource.as_str()
+                        ],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?
+                    .is_some();
+                if !has_paragraph_stream {
+                    return Err(stale_text_units(&document_id));
+                }
+
+                let paragraph_index = usize_to_i64(paragraph_index)?;
+                let sentence_index = sentence_index.map(usize_to_i64).transpose()?;
+                let found = connection
+                    .query_row(
+                        "SELECT i.unit_json
+                         FROM text_unit_streams_v1 s
+                         JOIN text_unit_items_v1 i
+                           ON i.document_id = s.document_id
+                          AND i.kind = s.unit_kind
+                          AND i.source_order = s.unit_source_order
+                         WHERE s.document_id = ?1
+                           AND s.owner_section_id = ?2
+                           AND s.requested_kind = ?3
+                           AND s.unit_kind = ?4
+                           AND s.paragraph_index = ?5
+                           AND s.sentence_index IS ?6",
+                        params![
+                            &document_id.0,
+                            &section_id.0,
+                            unit_kind.as_str(),
+                            unit_kind.as_str(),
+                            paragraph_index,
+                            sentence_index,
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?;
+                found
+                    .map(|json| decode_stream_unit(unit_kind.as_str(), &json))
+                    .transpose()
+            },
+        )
+        .await
+    }
+
     async fn section_stream_summary(
         &self,
         key: TextUnitStreamKey<'_>,
@@ -1292,6 +1382,13 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         )
         .await
     }
+}
+
+fn stale_text_units(document_id: &DocumentId) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "text units of document {} are not stored for {TEXT_SEGMENTATION_VERSION}; open the document again",
+        document_id.0
+    ))
 }
 
 /// Decodes one stream row's unit with the same decoding the section read path uses.

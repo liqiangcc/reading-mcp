@@ -597,6 +597,10 @@ pub trait SearchIndex: Send + Sync {
         LEGACY_SEARCH_TOKENIZER_VERSION
     }
 
+    fn index_version(&self) -> &'static str {
+        "none"
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError>;
 
     /// Indexes `document` using the paragraph and sentence units the caller already built from it, so the index does

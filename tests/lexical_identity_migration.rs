@@ -7,29 +7,30 @@ use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 
 #[tokio::test]
-async fn lexical_v2_state_is_invalidated_and_rebuilt_under_v4_identity() {
+async fn lexical_v4_state_is_invalidated_and_rebuilt_under_v5_identity() {
     let directory = tempfile::tempdir().expect("temp directory");
     let database = directory.path().join("lexical-migration.sqlite");
-    seed_v2_lexical_state(&database);
+    seed_v4_lexical_state(&database);
 
     {
         let index = SqliteSearchIndex::open(&database).expect("open should migrate derived state");
         let error = index
             .search_lexical(&DocumentId("doc:legacy".into()), "legacy", 10)
             .await
-            .expect_err("v2 document rows must be discarded");
+            .expect_err("legacy document rows must be discarded");
         assert!(matches!(error, ApplicationError::DocumentNotFound));
 
         let document = fixture();
         index
             .index(&document)
             .await
-            .expect("rebuild v4 lexical state");
+            .expect("rebuild v5 lexical state");
         let hits = index
             .search_lexical(&document.id, "current", 10)
             .await
-            .expect("search rebuilt v4 state");
+            .expect("search rebuilt v5 state");
         assert!(!hits.is_empty());
+        assert_eq!(index.index_version(), "lexical-search-index/v5");
     }
 
     let connection = Connection::open(&database).expect("inspect migrated metadata");
@@ -47,11 +48,21 @@ async fn lexical_v2_state_is_invalidated_and_rebuilt_under_v4_identity() {
             |row| row.get(0),
         )
         .expect("tokenizer version metadata");
-    assert_eq!(index_version, "lexical-search-index/v4");
+    assert_eq!(index_version, "lexical-search-index/v5");
     assert_eq!(tokenizer_version, "lexical-tokenizer/v1");
+    for legacy in ["lexical_search_units_v2", "lexical_search_documents_v2"] {
+        let present: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = ?1",
+                params![legacy],
+                |row| row.get(0),
+            )
+            .expect("legacy table probe");
+        assert_eq!(present, 0, "{legacy} must be dropped");
+    }
 }
 
-fn seed_v2_lexical_state(path: &std::path::Path) {
+fn seed_v4_lexical_state(path: &std::path::Path) {
     let connection = Connection::open(path).expect("seed database");
     connection
         .execute_batch(
@@ -83,7 +94,7 @@ fn seed_v2_lexical_state(path: &std::path::Path) {
     connection
         .execute(
             "INSERT INTO lexical_search_meta(key, value) VALUES (?1, ?2)",
-            params!["lexical_search_index_version", "lexical-search-index/v2"],
+            params!["lexical_search_index_version", "lexical-search-index/v4"],
         )
         .expect("legacy index meta");
     connection
@@ -100,7 +111,7 @@ fn seed_v2_lexical_state(path: &std::path::Path) {
             params![
                 "doc:legacy",
                 "sha256:legacy",
-                "lexical-search-index/v2",
+                "lexical-search-index/v4",
                 "lexical-tokenizer/v1"
             ],
         )

@@ -856,17 +856,13 @@ async fn stored_context_reports_stale_instead_of_deriving_after_stream_rows_are_
         .expect("units should persist");
 
     let connection = rusqlite::Connection::open(&database).expect("database should open");
-    for table in ["section_layout_v1"] {
-        connection
-            .execute(
-                &format!(
-                    "DELETE FROM {table}
-                     WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)"
-                ),
-                rusqlite::params![&document.id.0],
-            )
-            .expect("section layout rows should be deleted");
-    }
+    connection
+        .execute(
+            "DELETE FROM section_layout_v1
+             WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+        )
+        .expect("section layout rows should be deleted");
 
     let section = document.root_sections[0].clone();
     let paragraph = document

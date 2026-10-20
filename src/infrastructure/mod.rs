@@ -26,8 +26,8 @@ pub use memory_repository::InMemoryDocumentRepository;
 pub use memory_text_unit_index::InMemoryTextUnitIndex;
 pub use noop_index::NoopSearchIndex;
 pub use observability::{
-    ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
-    ObservedSearchIndex,
+    ObservedDocumentRepository, ObservedParsedDocumentCache, ObservedParser,
+    ObservedRawResourceCache, ObservedRetriever, ObservedSearchIndex, ObservedTextUnitIndex,
 };
 pub use ocr_checkpoint::{FileOcrCheckpointStore, MetaIdentity, checkpoint_key};
 pub use ocr_evidence::FileOcrEvidenceStore;

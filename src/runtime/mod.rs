@@ -20,9 +20,9 @@ use crate::application::search_document::SearchDocumentUseCase;
 use crate::application::source_view::SourceViewUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
-    FileRawResourceCache, ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache,
-    ObservedRetriever, ObservedSearchIndex, SqliteDocumentRepository, SqliteOpenResultStore,
-    SqliteSearchIndex, SqliteTextUnitIndex,
+    FileRawResourceCache, ObservedDocumentRepository, ObservedParsedDocumentCache, ObservedParser,
+    ObservedRawResourceCache, ObservedRetriever, ObservedSearchIndex, ObservedTextUnitIndex,
+    SqliteDocumentRepository, SqliteOpenResultStore, SqliteSearchIndex, SqliteTextUnitIndex,
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::{
@@ -51,8 +51,8 @@ impl RuntimeComponents {
         Self {
             raw_cache: Arc::new(ObservedRawResourceCache::new(self.raw_cache)),
             parsed_cache: Arc::new(ObservedParsedDocumentCache::new(self.parsed_cache)),
-            repository: self.repository,
-            text_unit_index: self.text_unit_index,
+            repository: Arc::new(ObservedDocumentRepository::new(self.repository)),
+            text_unit_index: Arc::new(ObservedTextUnitIndex::new(self.text_unit_index)),
             search_index: Arc::new(ObservedSearchIndex::new(self.search_index)),
             open_results: self.open_results,
         }

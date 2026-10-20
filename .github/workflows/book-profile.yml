@@ -40,9 +40,6 @@ jobs:
       - name: Unit text equals range slice (real books)
         if: always()
         run: READING_MCP_SLICE_CHECK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test unit_text_slices -- --ignored --nocapture
-      - name: Unit text equals range slice (real books)
-        if: always()
-        run: READING_MCP_SLICE_CHECK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test unit_text_slices -- --ignored --nocapture
       - name: Profile book scenarios
         run: |
           BOOKS="$RUNNER_TEMP/books"

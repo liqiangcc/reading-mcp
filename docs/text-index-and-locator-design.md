@@ -418,7 +418,7 @@ Search granularity may support:
 auto | section | paragraph | sentence
 ```
 
-Title-only structural hits remain Section candidates. FTS/BM25 remains the primary search design unless evidence shows otherwise.
+Title-only structural hits remain Section candidates. Lexical search scans the stored section text (R2c step 3, the full-text index was dropped).
 
 ### 9.5 `read_document`
 

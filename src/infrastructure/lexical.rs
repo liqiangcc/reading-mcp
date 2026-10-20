@@ -1,12 +1,14 @@
+use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use crate::application::ports::{ApplicationError, SearchHitKind};
+use crate::application::ports::{ApplicationError, LexicalSearchHit, SearchHitKind};
 use crate::domain::{
     Document, Location, NormalizedDocumentHash, Section, SectionId, SentenceTextUnit, TextLocator,
     TextUnit,
 };
 
-pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v5";
+pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-scan/v1";
 pub(crate) const MAX_SNIPPET_CHARS: usize = 320;
 
 #[derive(Clone, Debug)]
@@ -162,7 +164,7 @@ fn collect_section_candidates(
     Ok(())
 }
 
-fn text_unit_location(
+pub(crate) fn text_unit_location(
     section: &Section,
     paragraph_index: usize,
     sentence_index: Option<usize>,
@@ -291,45 +293,220 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
-pub(crate) fn encoded_lexemes(tokens: &[String]) -> String {
-    tokens
-        .iter()
-        .map(|token| encode_token(token))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-pub(crate) fn encoded_query(value: &str) -> Option<String> {
-    let tokens = tokenize(value);
-    if tokens.is_empty() {
-        return None;
+/// `text.to_lowercase()` without allocating when the text cannot change under lowercasing.
+/// Every branch returns exactly `text.to_lowercase()`.
+pub(crate) fn lowercase_fast(text: &str) -> Cow<'_, str> {
+    if text
+        .chars()
+        .all(|ch| (ch.is_ascii() && !ch.is_ascii_uppercase()) || is_caseless(ch))
+    {
+        return Cow::Borrowed(text);
     }
-    Some(join_encoded(&tokens, " AND "))
-}
-
-/// Relaxed OR query used only after the strict AND query returned no rows.
-/// Callers must gate this on a multi-token query; single-token queries are
-/// never relaxed.
-pub(crate) fn encoded_relaxed_query(tokens: &[String]) -> String {
-    join_encoded(tokens, " OR ")
-}
-
-fn join_encoded(tokens: &[String], operator: &str) -> String {
-    tokens
-        .iter()
-        .map(|token| format!("\"{}\"", encode_token(token)))
-        .collect::<Vec<_>>()
-        .join(operator)
-}
-
-fn encode_token(token: &str) -> String {
-    let mut output = String::with_capacity(1 + token.len() * 2);
-    output.push('x');
-    for byte in token.as_bytes() {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    if text.chars().all(|ch| ch.is_ascii() || is_caseless(ch)) {
+        let mut lowered = String::with_capacity(text.len());
+        for ch in text.chars() {
+            if ch.is_ascii() {
+                lowered.push(ch.to_ascii_lowercase());
+            } else {
+                lowered.push(ch);
+            }
+        }
+        return Cow::Owned(lowered);
     }
-    output
+    Cow::Owned(text.to_lowercase())
+}
+
+/// Characters that `to_lowercase` always returns unchanged: CJK scripts and the punctuation ranges
+/// around them. Fullwidth Latin letters are deliberately absent, since they lowercase to ASCII.
+fn is_caseless(ch: char) -> bool {
+    is_cjk(ch)
+        || matches!(
+            ch as u32,
+            0x2000..=0x206F | 0x3000..=0x303F | 0xFF00..=0xFF20 | 0xFF3B..=0xFF40 | 0xFF5B..=0xFF65
+        )
+}
+
+/// One parsed search query: the tokens that must be found in a candidate's own `tokenize` output,
+/// plus the lowercase forms the prefilter and the phrase bonus compare against.
+pub(crate) struct LexicalQuery {
+    /// `query.to_lowercase()`; the phrase bonus compares candidates against it.
+    pub(crate) raw_lowered: String,
+    /// `tokenize(query)`, in its order.
+    pub(crate) tokens: Vec<String>,
+    /// Per token: a CJK token (one or two CJK chars) is a `tokenize` member exactly when the lowered
+    /// text contains it, because `tokenize` emits every CJK unigram and every adjacent CJK pair.
+    cjk: Vec<bool>,
+    /// Set when a token holds a sigma: `to_lowercase` maps `Σ` by position, so a slice can lowercase
+    /// differently at its edge than the text it was cut from.
+    fold: bool,
+    /// The tokens in prefilter order: longer first, sigma-folded when `fold` is set.
+    prefilter: Vec<String>,
+}
+
+impl LexicalQuery {
+    /// `None` when the query has no searchable token.
+    pub(crate) fn new(query: &str) -> Option<Self> {
+        let tokens = tokenize(query);
+        if tokens.is_empty() {
+            return None;
+        }
+        let fold = tokens
+            .iter()
+            .any(|token| token.contains('σ') || token.contains('ς'));
+        let cjk = tokens
+            .iter()
+            .map(|token| {
+                let count = token.chars().count();
+                (count == 1 || count == 2) && token.chars().all(is_cjk)
+            })
+            .collect();
+        let mut prefilter = tokens
+            .iter()
+            .map(|token| {
+                if fold {
+                    token.replace('ς', "σ")
+                } else {
+                    token.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        // Longer tokens are rarer, so a failing prefilter is found sooner.
+        prefilter.sort_by(|left, right| right.chars().count().cmp(&left.chars().count()));
+        Some(Self {
+            raw_lowered: query.to_lowercase(),
+            tokens,
+            cjk,
+            fold,
+            prefilter,
+        })
+    }
+
+    pub(crate) fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Every query token is in `tokenize(text)`. `lowered` must be `lowercase_fast(text)`.
+    pub(crate) fn strict_match(&self, text: &str, lowered: &str) -> bool {
+        if !self
+            .tokens
+            .iter()
+            .all(|token| lowered.contains(token.as_str()))
+        {
+            return false;
+        }
+        if self.cjk.iter().all(|&cjk| cjk) {
+            return true;
+        }
+        let tokens = tokenize(text).into_iter().collect::<HashSet<_>>();
+        self.tokens
+            .iter()
+            .zip(&self.cjk)
+            .all(|(token, &cjk)| cjk || tokens.contains(token))
+    }
+
+    /// The number of query tokens in `tokenize(text)`. `lowered` must be `lowercase_fast(text)`.
+    pub(crate) fn relaxed_count(&self, text: &str, lowered: &str) -> usize {
+        let mut matched = 0usize;
+        let mut tokens: Option<HashSet<String>> = None;
+        for (token, &cjk) in self.tokens.iter().zip(&self.cjk) {
+            if !lowered.contains(token.as_str()) {
+                continue;
+            }
+            let member = if cjk {
+                true
+            } else {
+                tokens
+                    .get_or_insert_with(|| tokenize(text).into_iter().collect())
+                    .contains(token)
+            };
+            if member {
+                matched += 1;
+            }
+        }
+        matched
+    }
+
+    /// Prefilter on a larger lowered text that contains the candidates: could every token be in it?
+    pub(crate) fn may_contain_all(&self, lowered_container: &str) -> bool {
+        let folded;
+        let container = if self.fold {
+            folded = lowered_container.replace('ς', "σ");
+            folded.as_str()
+        } else {
+            lowered_container
+        };
+        self.prefilter
+            .iter()
+            .all(|token| container.contains(token.as_str()))
+    }
+
+    /// Prefilter on a larger lowered text that contains the candidates: could any token be in it?
+    pub(crate) fn may_contain_any(&self, lowered_container: &str) -> bool {
+        let folded;
+        let container = if self.fold {
+            folded = lowered_container.replace('ς', "σ");
+            folded.as_str()
+        } else {
+            lowered_container
+        };
+        self.prefilter
+            .iter()
+            .any(|token| container.contains(token.as_str()))
+    }
+}
+
+/// The one lexical score formula: an exact phrase match, the matched token count and the kind bonus.
+/// `lowered_text` must be `lowercase_fast(text)` and `raw_lowered_query` `query.to_lowercase()`.
+pub(crate) fn score_lowered(
+    lowered_text: &str,
+    raw_lowered_query: &str,
+    kind: SearchHitKind,
+    matched: usize,
+) -> f32 {
+    let phrase_bonus = if lowered_text.contains(raw_lowered_query) {
+        4.0
+    } else {
+        0.0
+    };
+    let kind_bonus = match kind {
+        SearchHitKind::Sentence => 1.0,
+        SearchHitKind::Paragraph => 0.5,
+        SearchHitKind::Section => 0.25,
+    };
+    phrase_bonus + matched as f32 + kind_bonus
+}
+
+/// The total order of lexical hits: score, then kind, then section, then the start of the unit.
+pub(crate) fn compare_hits(left: &LexicalSearchHit, right: &LexicalSearchHit) -> Ordering {
+    right
+        .score
+        .total_cmp(&left.score)
+        .then_with(|| {
+            candidate_kind_order(left.candidate_kind)
+                .cmp(&candidate_kind_order(right.candidate_kind))
+        })
+        .then_with(|| left.section_id.0.cmp(&right.section_id.0))
+        .then_with(|| {
+            left.text_locator
+                .normalized_range
+                .map(|range| range.start())
+                .unwrap_or_default()
+                .cmp(
+                    &right
+                        .text_locator
+                        .normalized_range
+                        .map(|range| range.start())
+                        .unwrap_or_default(),
+                )
+        })
+}
+
+pub(crate) const fn candidate_kind_order(kind: SearchHitKind) -> u8 {
+    match kind {
+        SearchHitKind::Sentence => 0,
+        SearchHitKind::Paragraph => 1,
+        SearchHitKind::Section => 2,
+    }
 }
 
 pub(crate) fn score_candidate(candidate: &LexicalCandidate, query: &str) -> Option<f32> {
@@ -367,19 +544,12 @@ pub(crate) fn relaxed_score_candidate(
 }
 
 fn scored(candidate: &LexicalCandidate, matched: usize, query: &str) -> f32 {
-    let normalized_query = query.to_lowercase();
-    let normalized_text = candidate.searchable_text.to_lowercase();
-    let phrase_bonus = if normalized_text.contains(&normalized_query) {
-        4.0
-    } else {
-        0.0
-    };
-    let kind_bonus = match candidate.candidate_kind {
-        SearchHitKind::Sentence => 1.0,
-        SearchHitKind::Paragraph => 0.5,
-        SearchHitKind::Section => 0.25,
-    };
-    phrase_bonus + matched as f32 + kind_bonus
+    score_lowered(
+        &lowercase_fast(&candidate.searchable_text),
+        &query.to_lowercase(),
+        candidate.candidate_kind,
+        matched,
+    )
 }
 
 /// Bounded snippet centered on the earliest query-token match. Snippets are
@@ -425,7 +595,12 @@ pub(crate) fn match_snippet(text: &str, query: &str, max_chars: usize) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SNIPPET_CHARS, encoded_query, match_snippet, tokenize};
+    use std::collections::HashSet;
+
+    use super::{
+        LexicalQuery, MAX_SNIPPET_CHARS, is_caseless, is_cjk, lowercase_fast, match_snippet,
+        tokenize,
+    };
 
     #[test]
     fn cjk_substrings_are_represented_by_unigrams_and_bigrams() {
@@ -433,8 +608,106 @@ mod tests {
         for expected in ["虚", "拟", "内", "存", "虚拟", "拟内", "内存"] {
             assert!(tokens.iter().any(|token| token == expected), "{expected}");
         }
-        let query = encoded_query("拟内存").expect("query");
-        assert!(query.contains(" AND "));
+    }
+
+    #[test]
+    fn caseless_ranges_lowercase_to_themselves() {
+        let ranges: [(u32, u32); 11] = [
+            (0x2000, 0x206F),
+            (0x3000, 0x303F),
+            (0xFF00, 0xFF20),
+            (0xFF3B, 0xFF40),
+            (0xFF5B, 0xFF65),
+            (0x3400, 0x4DBF),
+            (0x4E00, 0x9FFF),
+            (0xF900, 0xFAFF),
+            (0x3040, 0x309F),
+            (0x30A0, 0x30FF),
+            (0xAC00, 0xD7AF),
+        ];
+        let mut checked = 0usize;
+        for (first, last) in ranges {
+            for code in first..=last {
+                let ch = char::from_u32(code).expect("range holds only scalar values");
+                assert!(is_caseless(ch), "U+{code:04X} must be caseless");
+                assert_eq!(
+                    ch.to_lowercase().collect::<String>(),
+                    ch.to_string(),
+                    "U+{code:04X} is not caseless"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 39_000, "only {checked} chars checked");
+    }
+
+    #[test]
+    fn lowercase_fast_matches_to_lowercase() {
+        for sample in [
+            "ASCII Mixed Case",
+            "虚拟内存机制，页表。「引用」",
+            "ＡＢＣ",
+            "İstanbul",
+            "ΟΔΟΣ ΟΔΟΣ.",
+            "x86_64 Read-Cursor/V2",
+            "",
+            "已经小写的文本 123",
+        ] {
+            let expected = sample.to_lowercase();
+            assert_eq!(
+                lowercase_fast(sample).as_ref(),
+                expected.as_str(),
+                "sample {sample:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_and_relaxed_matching_follow_the_tokenize_definition() {
+        let samples = [
+            ("虚拟内存机制，页表。「引用」", "虚拟内存"),
+            ("虚拟内存机制，页表。「引用」", "虚拟 页表"),
+            ("x86_64 Read-Cursor/V2 std::sync::Arc", "read-cursor/v2"),
+            ("x86_64 Read-Cursor/V2 std::sync::Arc", "x86_64 arc"),
+            ("x86_64 Read-Cursor/V2 std::sync::Arc", "x86 arc missing"),
+            ("İstanbul is a city", "istanbul"),
+            ("ＡＢＣ fullwidth", "abc"),
+            ("ΟΔΟΣ.ΟΔΟΣ", "οδος"),
+            ("plain english sentence", "sentence"),
+        ];
+        for (text, query) in samples {
+            let query = LexicalQuery::new(query).expect("query tokens");
+            let lowered = lowercase_fast(text);
+            let tokens = tokenize(text).into_iter().collect::<HashSet<_>>();
+            let expected_strict = query.tokens.iter().all(|token| tokens.contains(token));
+            let expected_matched = query
+                .tokens
+                .iter()
+                .filter(|token| tokens.contains(*token))
+                .count();
+            assert_eq!(
+                query.strict_match(text, &lowered),
+                expected_strict,
+                "strict {text:?}"
+            );
+            assert_eq!(
+                query.relaxed_count(text, &lowered),
+                expected_matched,
+                "relaxed {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefilters_never_reject_a_containing_slice() {
+        let container = "ΟΔΟΣ.ΟΔΟΣ rest of the paragraph";
+        let lowered = lowercase_fast(container);
+        let query = LexicalQuery::new("οδος").expect("query");
+        assert!(query.may_contain_all(&lowered));
+        assert!(query.may_contain_any(&lowered));
+        let missing = LexicalQuery::new("οδος quasar").expect("query");
+        assert!(!missing.may_contain_all(&lowered));
+        assert!(missing.may_contain_any(&lowered));
     }
 
     #[test]

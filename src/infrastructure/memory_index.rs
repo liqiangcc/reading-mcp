@@ -4,14 +4,14 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::application::ports::{
-    ApplicationError, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit, SearchHit, SearchHitKind,
-    SearchIndex,
+    ApplicationError, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit, SearchHit, SearchIndex,
 };
 use crate::domain::{Document, DocumentId, ParagraphTextUnitSet, SentenceTextUnitSet};
 
 use super::lexical::{
-    LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates, lexical_candidates_from_units,
-    match_snippet, relaxed_score_candidate, score_candidate, tokenize,
+    LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates, compare_hits,
+    lexical_candidates_from_units, match_snippet, relaxed_score_candidate, score_candidate,
+    tokenize,
 };
 
 #[derive(Default)]
@@ -137,38 +137,8 @@ impl SearchIndex for InMemorySearchIndex {
             })
             .collect::<Vec<_>>();
 
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| {
-                    candidate_kind_order(left.candidate_kind)
-                        .cmp(&candidate_kind_order(right.candidate_kind))
-                })
-                .then_with(|| left.section_id.0.cmp(&right.section_id.0))
-                .then_with(|| {
-                    left.text_locator
-                        .normalized_range
-                        .map(|range| range.start())
-                        .unwrap_or_default()
-                        .cmp(
-                            &right
-                                .text_locator
-                                .normalized_range
-                                .map(|range| range.start())
-                                .unwrap_or_default(),
-                        )
-                })
-        });
+        scored.sort_by(compare_hits);
         scored.truncate(limit);
         Ok(scored)
-    }
-}
-
-const fn candidate_kind_order(kind: SearchHitKind) -> u8 {
-    match kind {
-        SearchHitKind::Sentence => 0,
-        SearchHitKind::Paragraph => 1,
-        SearchHitKind::Section => 2,
     }
 }

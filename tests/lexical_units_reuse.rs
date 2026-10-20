@@ -73,10 +73,20 @@ async fn sqlite_index_reuses_caller_units() {
     let sentences = Arc::new(document.try_sentence_text_units().expect("sentence units"));
 
     let directory = tempfile::tempdir().expect("temp directory");
-    let rebuilt =
-        SqliteSearchIndex::open(directory.path().join("rebuilt.sqlite")).expect("rebuilt index");
-    let reused =
-        SqliteSearchIndex::open(directory.path().join("reused.sqlite")).expect("reused index");
+    let rebuilt_path = directory.path().join("rebuilt.sqlite");
+    let reused_path = directory.path().join("reused.sqlite");
+    let rebuilt_repository = SqliteDocumentRepository::open(&rebuilt_path).expect("repository");
+    rebuilt_repository
+        .save((*document).clone())
+        .await
+        .expect("save rebuilt document");
+    let reused_repository = SqliteDocumentRepository::open(&reused_path).expect("repository");
+    reused_repository
+        .save((*document).clone())
+        .await
+        .expect("save reused document");
+    let rebuilt = SqliteSearchIndex::open(&rebuilt_path).expect("rebuilt index");
+    let reused = SqliteSearchIndex::open(&reused_path).expect("reused index");
     rebuilt.index(&document).await.expect("index");
     reused
         .index_with_units(

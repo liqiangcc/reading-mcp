@@ -1,19 +1,22 @@
-use reading_mcp::application::ports::{ApplicationError, SearchIndex};
+use reading_mcp::application::ports::{ApplicationError, DocumentRepository, SearchIndex};
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
-use reading_mcp::infrastructure::SqliteSearchIndex;
+use reading_mcp::infrastructure::{
+    SqliteDocumentRepository, SqliteSearchIndex, SqliteTextUnitIndex,
+};
 use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 
 #[tokio::test]
-async fn lexical_v4_state_is_invalidated_and_rebuilt_under_v5_identity() {
+async fn lexical_v4_state_is_dropped_and_search_scans_the_stored_text() {
     let directory = tempfile::tempdir().expect("temp directory");
     let database = directory.path().join("lexical-migration.sqlite");
     seed_v4_lexical_state(&database);
 
     {
-        let index = SqliteSearchIndex::open(&database).expect("open should migrate derived state");
+        let repository = SqliteDocumentRepository::open(&database).expect("repository");
+        let index = SqliteSearchIndex::open(&database).expect("open should drop derived state");
         let error = index
             .search_lexical(&DocumentId("doc:legacy".into()), "legacy", 10)
             .await
@@ -21,45 +24,71 @@ async fn lexical_v4_state_is_invalidated_and_rebuilt_under_v5_identity() {
         assert!(matches!(error, ApplicationError::DocumentNotFound));
 
         let document = fixture();
+        repository
+            .save(document.clone())
+            .await
+            .expect("save document");
         index
             .index(&document)
             .await
-            .expect("rebuild v5 lexical state");
+            .expect("store the document's units");
         let hits = index
             .search_lexical(&document.id, "current", 10)
             .await
-            .expect("search rebuilt v5 state");
+            .expect("search the stored text");
         assert!(!hits.is_empty());
-        assert_eq!(index.index_version(), "lexical-search-index/v5");
+        assert_eq!(index.index_version(), "lexical-scan/v1");
     }
 
     let connection = Connection::open(&database).expect("inspect migrated metadata");
-    let index_version: String = connection
+    let remaining: i64 = connection
         .query_row(
-            "SELECT value FROM lexical_search_meta WHERE key = 'lexical_search_index_version'",
+            "SELECT count(*) FROM sqlite_master
+             WHERE name LIKE 'lexical!_search!_%' ESCAPE '!'",
             [],
             |row| row.get(0),
         )
-        .expect("index version metadata");
-    let tokenizer_version: String = connection
-        .query_row(
-            "SELECT value FROM lexical_search_meta WHERE key = 'lexical_tokenizer_version'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("tokenizer version metadata");
-    assert_eq!(index_version, "lexical-search-index/v5");
-    assert_eq!(tokenizer_version, "lexical-tokenizer/v1");
-    for legacy in ["lexical_search_units_v2", "lexical_search_documents_v2"] {
-        let present: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = ?1",
-                params![legacy],
-                |row| row.get(0),
+        .expect("legacy table probe");
+    assert_eq!(remaining, 0, "every lexical_search_% table must be dropped");
+}
+
+#[test]
+fn opening_the_text_unit_index_drops_the_legacy_search_tables() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("legacy-fts.sqlite");
+    {
+        let connection = Connection::open(&database).expect("seed database");
+        connection
+            .execute_batch(
+                "CREATE TABLE lexical_search_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                 );
+                 CREATE TABLE lexical_search_candidates_v5 (
+                    rowid INTEGER PRIMARY KEY,
+                    doc_key INTEGER NOT NULL
+                 );
+                 CREATE VIRTUAL TABLE lexical_search_fts_v5 USING fts5(
+                    lexemes,
+                    doc,
+                    content='',
+                    contentless_delete=1
+                 );",
             )
-            .expect("legacy table probe");
-        assert_eq!(present, 0, "{legacy} must be dropped");
+            .expect("legacy search schema");
     }
+
+    let _index = SqliteTextUnitIndex::open(&database).expect("open text unit index");
+    let connection = Connection::open(&database).expect("inspect");
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master
+             WHERE name LIKE 'lexical!_search!_%' ESCAPE '!'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy table probe");
+    assert_eq!(remaining, 0, "every lexical_search_% table must be dropped");
 }
 
 fn seed_v4_lexical_state(path: &std::path::Path) {

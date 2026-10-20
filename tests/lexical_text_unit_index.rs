@@ -356,6 +356,10 @@ async fn sqlite_and_in_memory_relaxed_fallback_have_parity() {
             key(&sqlite.hits),
             "backend parity for query {query:?}"
         );
+        assert_eq!(
+            memory.hits, sqlite.hits,
+            "backend hits must be identical for query {query:?}"
+        );
     }
 }
 
@@ -374,6 +378,11 @@ async fn long_paragraph_snippet_is_centered_on_late_match() {
         {
             let directory = tempfile::tempdir().expect("temp directory");
             let path = directory.keep().join("snippet.sqlite");
+            let repository = SqliteDocumentRepository::open(&path).expect("sqlite repository");
+            repository
+                .save(document.clone())
+                .await
+                .expect("save document");
             Arc::new(SqliteSearchIndex::open(path).expect("sqlite index")) as Arc<dyn SearchIndex>
         },
     ] {
@@ -421,9 +430,15 @@ async fn sqlite_search_is_scoped_to_the_matched_document() {
     document_b.content_hash = ContentHash("sha256:other".into());
     document_b.root_sections[0].id = SectionId("section://other".into());
 
+    let alone_repository = SqliteDocumentRepository::open(directory.path().join("alone.sqlite"))
+        .expect("alone repository");
     let alone = Arc::new(
         SqliteSearchIndex::open(directory.path().join("alone.sqlite")).expect("alone index"),
     );
+    alone_repository
+        .save(document_a.clone())
+        .await
+        .expect("save alone");
     alone.index(&document_a).await.expect("index alone");
     let alone_hits = alone
         .search_lexical(&document_a.id, "物理帧", 10)
@@ -431,9 +446,19 @@ async fn sqlite_search_is_scoped_to_the_matched_document() {
         .expect("search alone");
     assert!(!alone_hits.is_empty());
 
+    let shared_repository = SqliteDocumentRepository::open(directory.path().join("shared.sqlite"))
+        .expect("shared repository");
     let shared = Arc::new(
         SqliteSearchIndex::open(directory.path().join("shared.sqlite")).expect("shared index"),
     );
+    shared_repository
+        .save(document_a.clone())
+        .await
+        .expect("save a");
+    shared_repository
+        .save(document_b.clone())
+        .await
+        .expect("save b");
     shared.index(&document_a).await.expect("index a");
     shared.index(&document_b).await.expect("index b");
 
@@ -464,46 +489,27 @@ async fn sqlite_search_is_scoped_to_the_matched_document() {
 }
 
 #[tokio::test]
-async fn sqlite_reindex_replaces_previous_candidate_rows() {
+async fn sqlite_reindex_keeps_one_stored_copy_of_the_document() {
     let directory = tempfile::tempdir().expect("temp directory");
     let database = directory.path().join("reindex.sqlite");
     let document = fixture();
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
+    repository
+        .save(document.clone())
+        .await
+        .expect("save document");
     let index = Arc::new(SqliteSearchIndex::open(&database).expect("index"));
 
     index.index(&document).await.expect("first index");
-    let connection = rusqlite::Connection::open(&database).expect("inspect");
-    let first_candidates: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM lexical_search_candidates_v5",
-            [],
-            |row| row.get(0),
-        )
-        .expect("candidate count");
-    let first_fts: i64 = connection
-        .query_row("SELECT count(*) FROM lexical_search_fts_v5", [], |row| {
-            row.get(0)
-        })
-        .expect("fts count");
-    assert!(first_candidates > 0);
-    assert_eq!(first_candidates, first_fts);
-    drop(connection);
+    let first_layouts = section_layout_rows(&database, &document);
+    assert!(first_layouts > 0);
 
     index.index(&document).await.expect("second index");
-    let connection = rusqlite::Connection::open(&database).expect("inspect again");
-    let candidates: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM lexical_search_candidates_v5",
-            [],
-            |row| row.get(0),
-        )
-        .expect("candidate count");
-    let fts: i64 = connection
-        .query_row("SELECT count(*) FROM lexical_search_fts_v5", [], |row| {
-            row.get(0)
-        })
-        .expect("fts count");
-    assert_eq!(candidates, first_candidates);
-    assert_eq!(fts, first_fts);
+    assert_eq!(
+        section_layout_rows(&database, &document),
+        first_layouts,
+        "re-index must not duplicate the stored section layouts"
+    );
 
     let hits = index
         .search_lexical(&document.id, "物理帧", 50)
@@ -521,6 +527,20 @@ async fn sqlite_reindex_replaces_previous_candidate_rows() {
             "re-index must not produce duplicate hits"
         );
     }
+}
+
+fn section_layout_rows(database: &std::path::Path, document: &Document) -> i64 {
+    let connection = rusqlite::Connection::open(database).expect("inspect");
+    connection
+        .query_row(
+            "SELECT count(*) FROM section_layout_v1
+             WHERE doc_key = (
+                SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1
+             )",
+            rusqlite::params![&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("section layout count")
 }
 
 fn relaxed_fixture() -> Document {

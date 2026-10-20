@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use super::lexical::{LexicalQuery, candidate_kind_order, lowercase_fast, score_lowered};
 use super::section_layout::{
     CHUNK_CHARS, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
 };
@@ -17,8 +18,8 @@ use crate::application::get_text_units::{
 };
 use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, OpenResultStore, OwnedStreamUnit, SectionTextUnits,
-    StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
+    ApplicationError, DocumentRepository, OpenResultStore, OwnedStreamUnit, SearchHitKind,
+    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use crate::application::text_unit_stream::{
     ParagraphCoverageDesc, ParagraphDesc, SectionCoverageDesc, SectionStreamPlanDesc, SentenceDesc,
@@ -595,6 +596,7 @@ impl SqliteTextUnitIndex {
                     ON section_layout_v1(doc_key, section_id);",
             )
             .map_err(text_unit_index_error)?;
+        drop_legacy_lexical_search_tables(&connection)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
@@ -605,6 +607,315 @@ impl SqliteTextUnitIndex {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The normalized hash this document's units are stored for, if they are stored for the current
+    /// `TEXT_SEGMENTATION_VERSION`.
+    pub(crate) async fn stored_unit_hash(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Option<NormalizedDocumentHash>, ApplicationError> {
+        let document_id = document_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let Some(meta) = load_stored_document(connection, &document_id)? else {
+                    return Ok(None);
+                };
+                if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
+                    return Ok(None);
+                }
+                Ok(Some(meta.normalized_document_hash))
+            },
+        )
+        .await
+    }
+
+    /// The best `limit` paragraph and sentence candidates, best first, plus the section ids they
+    /// index. `Ok(None)` when this document's units are not stored for the current
+    /// `TEXT_SEGMENTATION_VERSION`, or were stored for another normalized document hash.
+    ///
+    /// The scan reads the stored section text and the stored unit boundaries directly. It never uses
+    /// the layout cache, so it cannot evict the layouts the reader has cached.
+    pub(crate) async fn scan_lexical(
+        &self,
+        document_id: &DocumentId,
+        expected_hash: &NormalizedDocumentHash,
+        query: Arc<LexicalQuery>,
+        mode: MatchMode,
+        limit: usize,
+    ) -> Result<Option<(Vec<SectionId>, Vec<ScannedUnitHit>)>, ApplicationError> {
+        let document_id = document_id.clone();
+        let expected_hash = expected_hash.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let Some(meta) = load_stored_document(connection, &document_id)? else {
+                    return Ok(None);
+                };
+                if meta.segmentation_version != TEXT_SEGMENTATION_VERSION
+                    || meta.normalized_document_hash != expected_hash
+                {
+                    return Ok(None);
+                }
+
+                let sections = stored_sections(connection, meta.doc_key)?;
+                let mut layout_statement = connection
+                    .prepare(
+                        "SELECT layout FROM section_layout_v1
+                         WHERE doc_key = ?1 AND section_key = ?2",
+                    )
+                    .map_err(text_unit_index_error)?;
+                let mut section_ids: Vec<SectionId> = Vec::new();
+                let mut hits: Vec<ScannedUnitHit> = Vec::new();
+                let flush_at = limit.saturating_mul(4).saturating_add(64);
+
+                for (section_key, section_id, char_len) in sections {
+                    if char_len == 0 {
+                        continue;
+                    }
+                    let text = load_section_text(connection, meta.doc_key, section_key, char_len)?;
+                    let lowered = lowercase_fast(&text);
+                    let worth_scanning = match mode {
+                        MatchMode::Strict => query.may_contain_all(&lowered),
+                        MatchMode::Relaxed => query.may_contain_any(&lowered),
+                    };
+                    if !worth_scanning {
+                        continue;
+                    }
+
+                    let layout_blob: Vec<u8> = layout_statement
+                        .query_row(params![meta.doc_key, section_key], |row| row.get(0))
+                        .map_err(text_unit_index_error)?;
+                    let layout = SectionLayout::decode(&layout_blob)?;
+                    let index = NormalizedTextIndex::new(&text);
+                    let section = section_ids.len();
+                    section_ids.push(section_id);
+                    let mut prefilters: HashMap<(usize, usize), bool> = HashMap::new();
+
+                    for paragraph in &layout.paragraphs {
+                        let slice = slice_section_text_str(
+                            &index,
+                            paragraph.start,
+                            paragraph.end,
+                            "paragraph",
+                        )?;
+                        let lowered = lowercase_fast(slice);
+                        let prefilter = match mode {
+                            MatchMode::Strict => query.may_contain_all(&lowered),
+                            MatchMode::Relaxed => query.may_contain_any(&lowered),
+                        };
+                        prefilters.insert((paragraph.start, paragraph.end), prefilter);
+                        if !prefilter {
+                            continue;
+                        }
+                        let Some(score) =
+                            unit_score(&query, mode, slice, &lowered, SearchHitKind::Paragraph)
+                        else {
+                            continue;
+                        };
+                        hits.push(ScannedUnitHit {
+                            section,
+                            kind: SearchHitKind::Paragraph,
+                            paragraph_index: paragraph.paragraph_index,
+                            sentence_index: None,
+                            start: paragraph.start,
+                            score,
+                        });
+                        if hits.len() >= flush_at {
+                            sort_scanned_hits(&mut hits, &section_ids);
+                            hits.truncate(limit);
+                        }
+                    }
+
+                    for sentence in &layout.sentences {
+                        let parent = (sentence.parent_start, sentence.parent_end);
+                        let prefilter = match prefilters.get(&parent) {
+                            Some(&prefilter) => prefilter,
+                            None => {
+                                let parent_slice = slice_section_text_str(
+                                    &index,
+                                    parent.0,
+                                    parent.1,
+                                    "paragraph",
+                                )?;
+                                let parent_lowered = lowercase_fast(parent_slice);
+                                let prefilter = match mode {
+                                    MatchMode::Strict => query.may_contain_all(&parent_lowered),
+                                    MatchMode::Relaxed => query.may_contain_any(&parent_lowered),
+                                };
+                                prefilters.insert(parent, prefilter);
+                                prefilter
+                            }
+                        };
+                        if !prefilter {
+                            continue;
+                        }
+                        let slice = slice_section_text_str(
+                            &index,
+                            sentence.start,
+                            sentence.end,
+                            "sentence",
+                        )?;
+                        let lowered = lowercase_fast(slice);
+                        let Some(score) =
+                            unit_score(&query, mode, slice, &lowered, SearchHitKind::Sentence)
+                        else {
+                            continue;
+                        };
+                        hits.push(ScannedUnitHit {
+                            section,
+                            kind: SearchHitKind::Sentence,
+                            paragraph_index: sentence.paragraph_index,
+                            sentence_index: Some(sentence.sentence_index),
+                            start: sentence.start,
+                            score,
+                        });
+                        if hits.len() >= flush_at {
+                            sort_scanned_hits(&mut hits, &section_ids);
+                            hits.truncate(limit);
+                        }
+                    }
+                }
+
+                sort_scanned_hits(&mut hits, &section_ids);
+                hits.truncate(limit);
+                Ok(Some((section_ids, hits)))
+            },
+        )
+        .await
+    }
+}
+
+/// Which candidates a lexical scan accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MatchMode {
+    /// Every query token is in the candidate.
+    Strict,
+    /// At least one query token is in the candidate.
+    Relaxed,
+}
+
+/// One paragraph or sentence hit of a scan; `section` indexes the returned section id list.
+pub(crate) struct ScannedUnitHit {
+    pub section: usize,
+    pub kind: SearchHitKind,
+    pub paragraph_index: usize,
+    pub sentence_index: Option<usize>,
+    /// The unit's normalized range start.
+    pub start: usize,
+    pub score: f32,
+}
+
+fn stored_sections(
+    connection: &Connection,
+    doc_key: i64,
+) -> Result<Vec<(i64, SectionId, usize)>, ApplicationError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT section_key, section_id, char_len
+             FROM section_layout_v1
+             WHERE doc_key = ?1
+             ORDER BY section_key ASC",
+        )
+        .map_err(text_unit_index_error)?;
+    let rows = statement
+        .query_map(params![doc_key], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(text_unit_index_error)?;
+    let mut sections = Vec::new();
+    for row in rows {
+        let (section_key, section_id, char_len) = row.map_err(text_unit_index_error)?;
+        sections.push((
+            section_key,
+            SectionId(section_id),
+            i64_to_usize(char_len, "char_len")?,
+        ));
+    }
+    Ok(sections)
+}
+
+/// Scores one unit as a candidate, or `None` when the mode rejects it.
+fn unit_score(
+    query: &LexicalQuery,
+    mode: MatchMode,
+    text: &str,
+    lowered: &str,
+    kind: SearchHitKind,
+) -> Option<f32> {
+    match mode {
+        MatchMode::Strict => {
+            if query.strict_match(text, lowered) {
+                Some(score_lowered(
+                    lowered,
+                    &query.raw_lowered,
+                    kind,
+                    query.token_count(),
+                ))
+            } else {
+                None
+            }
+        }
+        MatchMode::Relaxed => {
+            let matched = query.relaxed_count(text, lowered);
+            if matched > 0 {
+                Some(score_lowered(lowered, &query.raw_lowered, kind, matched))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn sort_scanned_hits(hits: &mut [ScannedUnitHit], section_ids: &[SectionId]) {
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| candidate_kind_order(left.kind).cmp(&candidate_kind_order(right.kind)))
+            .then_with(|| {
+                section_ids[left.section]
+                    .0
+                    .cmp(&section_ids[right.section].0)
+            })
+            .then_with(|| left.start.cmp(&right.start))
+    });
+}
+
+/// The v5 search index kept its own FTS tables. Search now scans the stored section text, so they are
+/// dropped, and the file is vacuumed once to give their space back.
+fn drop_legacy_lexical_search_tables(connection: &Connection) -> Result<(), ApplicationError> {
+    let legacy_tables: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master
+             WHERE type = 'table' AND name LIKE 'lexical!_search!_%' ESCAPE '!'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(text_unit_index_error)?;
+    if legacy_tables == 0 {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS lexical_search_fts_v5;
+             DROP TABLE IF EXISTS lexical_search_candidates_v5;
+             DROP TABLE IF EXISTS lexical_search_documents_v5;
+             DROP TABLE IF EXISTS lexical_search_units_v2;
+             DROP TABLE IF EXISTS lexical_search_documents_v2;
+             DROP TABLE IF EXISTS lexical_search_meta;",
+        )
+        .map_err(text_unit_index_error)?;
+    // Reclaim the space the dropped tables held. A failure here is harmless: the tables are gone and
+    // the file merely keeps its size.
+    let _ = connection.execute_batch("VACUUM");
+    Ok(())
 }
 
 /// One section's borrowed units and coverages, grouped in a single pass over the unit sets.
@@ -1573,8 +1884,17 @@ fn slice_section_text(
     end: usize,
     what: &str,
 ) -> Result<String, ApplicationError> {
+    slice_section_text_str(index, start, end, what).map(str::to_owned)
+}
+
+fn slice_section_text_str<'a>(
+    index: &NormalizedTextIndex<'a>,
+    start: usize,
+    end: usize,
+    what: &str,
+) -> Result<&'a str, ApplicationError> {
     let range = stored_normalized_range(start, end)?;
-    index.slice(range).map(str::to_owned).map_err(|error| {
+    index.slice(range).map_err(|error| {
         ApplicationError::TextUnitIndexFailed(format!(
             "persisted {what} range is not a valid section slice: {error}"
         ))

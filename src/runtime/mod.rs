@@ -312,13 +312,18 @@ fn build_state_components(
     })?;
     let cache_root = state_dir.join("cache");
     let database = state_dir.join("reading-mcp.sqlite");
+    let repository = Arc::new(SqliteDocumentRepository::open(&database)?);
+    let text_unit_index = Arc::new(SqliteTextUnitIndex::open(&database)?);
     Ok((
         RuntimeComponents {
             raw_cache: Arc::new(FileRawResourceCache::new(&cache_root)),
             parsed_cache: Arc::new(FileParsedDocumentCache::new(&cache_root)),
-            repository: Arc::new(SqliteDocumentRepository::open(&database)?),
-            text_unit_index: Arc::new(SqliteTextUnitIndex::open(&database)?),
-            search_index: Arc::new(SqliteSearchIndex::open(&database)?),
+            search_index: Arc::new(SqliteSearchIndex::new(
+                repository.clone(),
+                text_unit_index.clone(),
+            )),
+            repository,
+            text_unit_index,
             open_results: Arc::new(SqliteOpenResultStore::open(&database)?),
         },
         ephemeral_state,

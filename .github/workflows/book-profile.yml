@@ -86,11 +86,12 @@ jobs:
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p book
           args=(--binary target/release/reading-mcp --states dir --markdown-sections 2000
-            --cjk-sizes-mb 4
+            --cjk-sizes-mb 4,16
             --parse-timeout-seconds 900 --run-timeout-seconds 900
             --wrapper "heaptrack -o book/{label}" --out book/runs-heap.json)
           docs=""
-          for pair in "zh-classic=$BOOKS/zh-classic.epub" "en-novel=$BOOKS/en-novel.epub"; do
+          for pair in "zh-classic=$BOOKS/zh-classic.epub" "en-novel=$BOOKS/en-novel.epub" \
+                      "zh-large=$BOOKS/zh-large.epub"; do
             label="${pair%%=*}"
             file="${pair#*=}"
             if [ -f "$file" ]; then

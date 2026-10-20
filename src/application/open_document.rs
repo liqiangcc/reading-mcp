@@ -212,21 +212,19 @@ impl OpenDocumentUseCase {
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::ParseFailed)?;
-        let (paragraph_units, sentence_units) = document.try_text_unit_sets().map_err(|error| {
+        let segmentation = Arc::new(document.try_segmentation().map_err(|error| {
             ApplicationError::TextUnitIndexFailed(format!(
                 "cannot build current Paragraph coverage from persisted block evidence: {error}"
             ))
-        })?;
+        })?);
+        let normalized_document_hash = document.normalized_document_hash();
         let reliability = match &self.reliability_inspector {
-            Some(inspector) => {
-                inspector.inspect_with_units(&document, &paragraph_units, &sentence_units)?
-            }
+            Some(inspector) => inspector.inspect_with_segmentation(&document, &segmentation)?,
             None => ReliabilitySummary::not_applicable(),
         };
         let reading_profile = build_reading_profile(
             &document,
-            &paragraph_units,
-            &sentence_units,
+            &segmentation,
             reliability,
             self.search_index.supports_precise_lexical_candidates(),
         )?;
@@ -236,7 +234,7 @@ impl OpenDocumentUseCase {
             title: document.title.clone(),
             media_type: document.media_type.clone(),
             content_hash: document.content_hash.clone(),
-            normalized_document_hash: document.normalized_document_hash(),
+            normalized_document_hash: normalized_document_hash.clone(),
             normalized_document_hash_version: NORMALIZED_DOCUMENT_HASH_VERSION.into(),
             normalization_version: NORMALIZATION_VERSION.into(),
             normalized_text_coordinate_space: NORMALIZED_TEXT_COORDINATE_SPACE.into(),
@@ -250,8 +248,6 @@ impl OpenDocumentUseCase {
             return Err(ApplicationError::OcrTimeout);
         }
         let document = Arc::new(document);
-        let paragraph_units = Arc::new(paragraph_units);
-        let sentence_units = Arc::new(sentence_units);
         // Drop any stored result before re-indexing, so a crash part way through can never leave a row that
         // claims the document is complete.
         if let Some((store, _)) = &self.open_results {
@@ -260,18 +256,14 @@ impl OpenDocumentUseCase {
         self.repository.save_shared(Arc::clone(&document)).await?;
         if let Some(index) = &self.text_unit_index {
             index
-                .replace_document_sets(
-                    &document,
-                    Arc::clone(&paragraph_units),
-                    Arc::clone(&sentence_units),
-                )
+                .replace_document_segmentation(&document, Arc::clone(&segmentation))
                 .await?;
         }
         self.search_index
-            .index_with_units(
+            .index_with_segmentation(
                 Arc::clone(&document),
-                Arc::clone(&paragraph_units),
-                Arc::clone(&sentence_units),
+                normalized_document_hash,
+                segmentation,
             )
             .await?;
 

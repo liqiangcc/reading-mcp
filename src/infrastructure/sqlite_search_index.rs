@@ -14,8 +14,7 @@ use crate::application::ports::{
     OwnedStreamUnit, SearchHit, SearchHitKind, SearchIndex, TextUnitIndex,
 };
 use crate::domain::{
-    Document, DocumentId, NormalizedDocumentHash, ParagraphTextUnitSet, Section,
-    SentenceTextUnitSet, TextLocator,
+    Document, DocumentId, DocumentSegmentation, NormalizedDocumentHash, Section, TextLocator,
 };
 
 /// Lexical search over the stored section text: no full-text index is built, the candidates are found by
@@ -38,20 +37,21 @@ impl SqliteSearchIndex {
         Ok(Self::new(repository, units))
     }
 
-    /// Stores the units of `document` unless they are already stored for its current normalized hash.
-    async fn ensure_units(
+    /// Stores the segmentation of `document` unless its units are already stored for the same
+    /// normalized hash.
+    async fn ensure_segmentation(
         &self,
         document: Arc<Document>,
-        paragraphs: Arc<ParagraphTextUnitSet>,
-        sentences: Arc<SentenceTextUnitSet>,
+        normalized_document_hash: NormalizedDocumentHash,
+        segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
         if self.units.stored_unit_hash(&document.id).await?.as_ref()
-            == Some(&paragraphs.normalized_document_hash)
+            == Some(&normalized_document_hash)
         {
             return Ok(());
         }
         self.units
-            .replace_document_sets(&document, paragraphs, sentences)
+            .replace_document_segmentation(&document, segmentation)
             .await
     }
 
@@ -257,27 +257,28 @@ impl SearchIndex for SqliteSearchIndex {
     }
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
-        let paragraphs = Arc::new(document.try_paragraph_text_units().map_err(|error| {
+        let segmentation = Arc::new(document.try_segmentation().map_err(|error| {
             ApplicationError::IndexFailed(format!(
-                "cannot build lexical Paragraph candidates from persisted block evidence: {error}"
+                "cannot build lexical candidates from persisted block evidence: {error}"
             ))
         })?);
-        let sentences = Arc::new(document.try_sentence_text_units().map_err(|error| {
-            ApplicationError::IndexFailed(format!(
-                "cannot build lexical Sentence candidates from persisted block evidence: {error}"
-            ))
-        })?);
-        self.ensure_units(Arc::new(document.clone()), paragraphs, sentences)
-            .await
+        let normalized_document_hash = document.normalized_document_hash();
+        self.ensure_segmentation(
+            Arc::new(document.clone()),
+            normalized_document_hash,
+            segmentation,
+        )
+        .await
     }
 
-    async fn index_with_units(
+    async fn index_with_segmentation(
         &self,
         document: Arc<Document>,
-        paragraphs: Arc<ParagraphTextUnitSet>,
-        sentences: Arc<SentenceTextUnitSet>,
+        normalized_document_hash: NormalizedDocumentHash,
+        segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
-        self.ensure_units(document, paragraphs, sentences).await
+        self.ensure_segmentation(document, normalized_document_hash, segmentation)
+            .await
     }
 
     async fn search(

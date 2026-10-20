@@ -6,8 +6,7 @@ use crate::application::reading_profile::{
     ReliabilitySummary, StructureProvenanceCoverage,
 };
 use crate::domain::{
-    Document, OcrDerivation, ParagraphContentClass, ParagraphTextUnitSet, SentenceEligibility,
-    SentenceTextUnitSet,
+    Document, DocumentSegmentation, OcrDerivation, ParagraphContentClass, SentenceEligibility,
 };
 
 use super::epub_validator::{
@@ -15,7 +14,7 @@ use super::epub_validator::{
     EPUB_VALIDATION_INTEGRITY_METADATA_KEY, EPUB_VALIDATION_REPORT_METADATA_KEY,
     EPUB_VALIDATION_REPORT_VERSION, EPUB_VALIDATION_REPORT_VERSION_METADATA_KEY,
     EpubValidationIntegrity, EpubValidationReport, EpubValidationSeverity, validate_epub_document,
-    validate_epub_document_with_units,
+    validate_epub_document_with_segmentation,
 };
 
 const EPUB_MEDIA_TYPE: &str = "application/epub+zip";
@@ -29,19 +28,18 @@ impl DocumentReliabilityInspector for PersistedDocumentReliabilityInspector {
         inspect_document(document, None)
     }
 
-    fn inspect_with_units(
+    fn inspect_with_segmentation(
         &self,
         document: &Document,
-        paragraphs: &ParagraphTextUnitSet,
-        sentences: &SentenceTextUnitSet,
+        segmentation: &DocumentSegmentation,
     ) -> Result<ReliabilitySummary, ApplicationError> {
-        inspect_document(document, Some((paragraphs, sentences)))
+        inspect_document(document, Some(segmentation))
     }
 }
 
 fn inspect_document(
     document: &Document,
-    units: Option<(&ParagraphTextUnitSet, &SentenceTextUnitSet)>,
+    segmentation: Option<&DocumentSegmentation>,
 ) -> Result<ReliabilitySummary, ApplicationError> {
     if let Some(version) = document.metadata.get("pdf_layout_version") {
         let invalid =
@@ -104,8 +102,8 @@ fn inspect_document(
         return Ok(summary);
     }
     if document.media_type.is_pdf() {
-        return match units {
-            Some((_, sentences)) => inspect_fallback_pdf_with_sentences(document, sentences),
+        return match segmentation {
+            Some(segmentation) => inspect_fallback_pdf_with_segmentation(document, segmentation),
             None => inspect_fallback_pdf(document),
         };
     }
@@ -116,10 +114,8 @@ fn inspect_document(
     let stored = decode_required_report(document)?;
     validate_stored_summary_metadata(document, &stored)?;
 
-    let revalidated = match units {
-        Some((paragraphs, sentences)) => {
-            validate_epub_document_with_units(document, paragraphs, sentences)
-        }
+    let revalidated = match segmentation {
+        Some(segmentation) => validate_epub_document_with_segmentation(document, segmentation),
         None => validate_epub_document(document),
     };
     if revalidated.integrity != EpubValidationIntegrity::Valid || revalidated.error_count > 0 {
@@ -145,17 +141,18 @@ fn inspect_document(
 /// otherwise `degradation_count=0` would masquerade as a clean extraction.
 fn inspect_fallback_pdf(document: &Document) -> Result<ReliabilitySummary, ApplicationError> {
     let invalid = || ApplicationError::ParseFailed("invalid persisted PDF evidence".into());
-    let sentences = document.try_sentence_text_units().map_err(|_| invalid())?;
-    inspect_fallback_pdf_with_sentences(document, &sentences)
+    let segmentation = document.try_segmentation().map_err(|_| invalid())?;
+    inspect_fallback_pdf_with_segmentation(document, &segmentation)
 }
 
-fn inspect_fallback_pdf_with_sentences(
+fn inspect_fallback_pdf_with_segmentation(
     document: &Document,
-    sentences: &SentenceTextUnitSet,
+    segmentation: &DocumentSegmentation,
 ) -> Result<ReliabilitySummary, ApplicationError> {
-    let unreliable = sentences
-        .coverage
+    let unreliable = segmentation
+        .sections
         .iter()
+        .flat_map(|section| section.sentence_coverage.iter())
         .filter(|coverage| {
             coverage.eligibility == SentenceEligibility::CoarseParagraphOnly
                 && coverage.content_class == ParagraphContentClass::ProseOrUnknown

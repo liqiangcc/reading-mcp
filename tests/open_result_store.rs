@@ -16,8 +16,9 @@ use reading_mcp::application::reading_profile::{
     SentenceFirstCapability, SimpleReadingCapability, StructureCapability,
 };
 use reading_mcp::domain::{
-    ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NormalizedDocumentHash,
-    ParagraphTextUnitSet, Section, SectionId, SentenceTextUnitSet, TextUnit,
+    ContentHash, Document, DocumentId, DocumentSegmentation, DocumentSource, Location, MediaType,
+    NormalizedDocumentHash, ParagraphTextUnitSet, Section, SectionId, SentenceTextUnitSet,
+    TextUnit,
 };
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, SqliteOpenResultStore};
 use tempfile::tempdir;
@@ -144,11 +145,11 @@ impl SearchIndex for CountingSearch {
         Ok(())
     }
 
-    async fn index_with_units(
+    async fn index_with_segmentation(
         &self,
         _document: Arc<Document>,
-        _paragraphs: Arc<ParagraphTextUnitSet>,
-        _sentences: Arc<SentenceTextUnitSet>,
+        _normalized_document_hash: NormalizedDocumentHash,
+        _segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
         self.index_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())

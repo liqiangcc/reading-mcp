@@ -3,8 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Document, NormalizedBlockKind, NormalizedTextIndex, ParagraphTextUnitSet, Section, SectionId,
-    SentenceEligibility, SentenceTextUnitSet,
+    Document, DocumentSegmentation, NormalizedBlockKind, Section, SectionId, SentenceEligibility,
 };
 
 use super::epub_navigation::{
@@ -220,18 +219,18 @@ pub fn validate_epub_document(document: &Document) -> EpubValidationReport {
     validate_epub_document_inner(document, None)
 }
 
-/// Runs the same checks as [`validate_epub_document`] but reuses unit sets the caller already built.
-pub fn validate_epub_document_with_units(
+/// Runs the same checks as [`validate_epub_document`] but reuses the segmentation the caller
+/// already built.
+pub fn validate_epub_document_with_segmentation(
     document: &Document,
-    paragraphs: &ParagraphTextUnitSet,
-    sentences: &SentenceTextUnitSet,
+    segmentation: &DocumentSegmentation,
 ) -> EpubValidationReport {
-    validate_epub_document_inner(document, Some((paragraphs, sentences)))
+    validate_epub_document_inner(document, Some(segmentation))
 }
 
 fn validate_epub_document_inner(
     document: &Document,
-    units: Option<(&ParagraphTextUnitSet, &SentenceTextUnitSet)>,
+    segmentation: Option<&DocumentSegmentation>,
 ) -> EpubValidationReport {
     let mut findings = Vec::new();
     let mut coverage = EpubValidationCoverage::default();
@@ -261,7 +260,7 @@ fn validate_epub_document_inner(
         );
     }
 
-    validate_blocks_and_text_units(document, units, &mut coverage, &mut findings);
+    validate_blocks_and_text_units(document, segmentation, &mut coverage, &mut findings);
 
     let error_count = findings
         .iter()
@@ -1149,7 +1148,7 @@ fn validate_canonical_sibling_source_order(
 
 fn validate_blocks_and_text_units(
     document: &Document,
-    units: Option<(&ParagraphTextUnitSet, &SentenceTextUnitSet)>,
+    segmentation: Option<&DocumentSegmentation>,
     coverage: &mut EpubValidationCoverage,
     findings: &mut Vec<EpubValidationFinding>,
 ) {
@@ -1240,107 +1239,91 @@ fn validate_blocks_and_text_units(
         .section_content_chars
         .saturating_sub(coverage.blocks.block_chars);
 
-    // A document that returned early above never materializes units, exactly as before.
-    let built_units;
-    let (paragraph_set, sentence_set) = match units {
-        Some(units) => units,
-        None => {
-            built_units = document.text_unit_sets();
-            (&built_units.0, &built_units.1)
-        }
-    };
+    // A document that returned early above never segments, exactly as before.
+    let built_segmentation = segmentation.is_none().then(|| document.segmentation());
+    let segmentation = segmentation
+        .or(built_segmentation.as_ref())
+        .expect("validated block evidence always segments");
+    let segmentation_by_section = segmentation
+        .sections
+        .iter()
+        .map(|section| (&section.section_id, section))
+        .collect::<HashMap<_, _>>();
 
-    coverage.text_units.paragraph_units = paragraph_set.units.len();
-    let mut paragraph_by_id = HashMap::new();
+    coverage.text_units.paragraph_units = segmentation
+        .sections
+        .iter()
+        .map(|section| section.paragraphs.len())
+        .sum();
     let mut paragraph_ranges = HashSet::new();
-    let mut expected_paragraph_index = HashMap::<SectionId, usize>::new();
-    let mut paragraph_owner_index: Option<(SectionId, NormalizedTextIndex<'_>)> = None;
-    for (expected_source_order, paragraph) in paragraph_set.units.iter().enumerate() {
-        if paragraph.source_order != expected_source_order {
+    let mut expected_paragraph_source_order = 0usize;
+    for section in &segmentation.sections {
+        let section_id = &section.section_id;
+        let Some(owner) = document.find_section(section_id) else {
             push_error(
                 findings,
                 "text_units",
-                "paragraph_source_order_gap",
-                format!(
-                    "Paragraph {} has source_order {}, expected {}",
-                    paragraph.id.0, paragraph.source_order, expected_source_order
-                ),
+                "paragraph_unknown_owner",
+                format!("Paragraph {} has missing owner Section", section_id.0),
             );
-        }
-        if paragraph_owner_index
-            .as_ref()
-            .is_none_or(|(owner, _)| *owner != paragraph.owner_section_id)
-        {
-            let Some(owner) = document.find_section(&paragraph.owner_section_id) else {
+            expected_paragraph_source_order += section.paragraphs.len();
+            continue;
+        };
+        let index = owner.normalized_text_index();
+        for (expected_paragraph_index, paragraph) in (1usize..).zip(section.paragraphs.iter()) {
+            if paragraph.source_order != expected_paragraph_source_order {
                 push_error(
                     findings,
                     "text_units",
-                    "paragraph_unknown_owner",
-                    format!("Paragraph {} has missing owner Section", paragraph.id.0),
+                    "paragraph_source_order_gap",
+                    format!(
+                        "Paragraph {}#p{} has source_order {}, expected {}",
+                        section_id.0,
+                        paragraph.paragraph_index,
+                        paragraph.source_order,
+                        expected_paragraph_source_order
+                    ),
                 );
-                continue;
-            };
-            paragraph_owner_index = Some((
-                paragraph.owner_section_id.clone(),
-                owner.normalized_text_index(),
+            }
+            expected_paragraph_source_order += 1;
+            // A boundary carries no text, so its text is the slice: validity of the range is the
+            // whole check the materialized `slice == text` comparison made.
+            if index.slice(paragraph.range).is_err() {
+                push_error(
+                    findings,
+                    "text_units",
+                    "paragraph_exact_slice_mismatch",
+                    format!(
+                        "Paragraph {}#p{} is not the exact persisted owner slice",
+                        section_id.0, paragraph.paragraph_index
+                    ),
+                );
+            }
+            if paragraph.paragraph_index != expected_paragraph_index {
+                push_error(
+                    findings,
+                    "text_units",
+                    "paragraph_index_gap",
+                    format!(
+                        "Paragraph {}#p{} has index {}, expected {} in owner {:?}",
+                        section_id.0,
+                        paragraph.paragraph_index,
+                        paragraph.paragraph_index,
+                        expected_paragraph_index,
+                        section_id.0
+                    ),
+                );
+            }
+            coverage.text_units.paragraph_chars += paragraph.range.len();
+            paragraph_ranges.insert((
+                section_id.clone(),
+                paragraph.range.start(),
+                paragraph.range.end(),
             ));
         }
-        let (_, index) = paragraph_owner_index
-            .as_ref()
-            .expect("owner index was just set");
-        match index.slice(paragraph.normalized_range) {
-            Ok(slice) if slice == paragraph.text => {}
-            _ => push_error(
-                findings,
-                "text_units",
-                "paragraph_exact_slice_mismatch",
-                format!(
-                    "Paragraph {} is not the exact persisted owner slice",
-                    paragraph.id.0
-                ),
-            ),
-        }
-        let expected = expected_paragraph_index
-            .entry(paragraph.owner_section_id.clone())
-            .or_insert(1);
-        if paragraph.paragraph_index != *expected {
-            push_error(
-                findings,
-                "text_units",
-                "paragraph_index_gap",
-                format!(
-                    "Paragraph {} has index {}, expected {} in owner {:?}",
-                    paragraph.id.0,
-                    paragraph.paragraph_index,
-                    *expected,
-                    paragraph.owner_section_id.0
-                ),
-            );
-        }
-        *expected += 1;
-        coverage.text_units.paragraph_chars += paragraph.normalized_range.len();
-        paragraph_ranges.insert((
-            paragraph.owner_section_id.clone(),
-            paragraph.normalized_range.start(),
-            paragraph.normalized_range.end(),
-        ));
-        paragraph_by_id.insert(paragraph.id.clone(), paragraph);
-    }
 
-    for section_coverage in &paragraph_set.coverage {
-        let Some(section) = document.find_section(&section_coverage.owner_section_id) else {
-            push_error(
-                findings,
-                "text_units",
-                "paragraph_coverage_unknown_owner",
-                format!(
-                    "Paragraph coverage references missing Section {:?}",
-                    section_coverage.owner_section_id.0
-                ),
-            );
-            continue;
-        };
-        if section_coverage.owner_chars != section.normalized_text_len()
+        let section_coverage = &section.paragraph_coverage;
+        if section_coverage.owner_chars != owner.normalized_text_len()
             || section_coverage.paragraph_chars + section_coverage.separator_chars
                 != section_coverage.owner_chars
         {
@@ -1350,7 +1333,7 @@ fn validate_blocks_and_text_units(
                 "paragraph_coverage_invariant_failed",
                 format!(
                     "Paragraph coverage for Section {:?} does not partition owner text",
-                    section_coverage.owner_section_id.0
+                    section_id.0
                 ),
             );
         }
@@ -1380,115 +1363,119 @@ fn validate_blocks_and_text_units(
         );
     }
 
-    coverage.text_units.sentence_units = sentence_set.units.len();
-    let mut expected_sentence_index = HashMap::new();
-    let mut sentence_owner_index: Option<(SectionId, NormalizedTextIndex<'_>)> = None;
-    for (expected_source_order, sentence) in sentence_set.units.iter().enumerate() {
-        if sentence.source_order != expected_source_order {
+    coverage.text_units.sentence_units = segmentation
+        .sections
+        .iter()
+        .map(|section| section.sentences.len())
+        .sum();
+    let mut expected_sentence_source_order = 0usize;
+    for section in &segmentation.sections {
+        let section_id = &section.section_id;
+        let Some(owner) = document.find_section(section_id) else {
             push_error(
                 findings,
                 "text_units",
-                "sentence_source_order_gap",
-                format!(
-                    "Sentence {} has source_order {}, expected {}",
-                    sentence.id.0, sentence.source_order, expected_source_order
-                ),
+                "sentence_unknown_owner",
+                format!("Sentence {} has missing owner Section", section_id.0),
             );
-        }
-        if sentence_owner_index
-            .as_ref()
-            .is_none_or(|(owner, _)| *owner != sentence.owner_section_id)
-        {
-            let Some(owner) = document.find_section(&sentence.owner_section_id) else {
+            expected_sentence_source_order += section.sentences.len();
+            continue;
+        };
+        let index = owner.normalized_text_index();
+        let mut expected_sentence_index = HashMap::<(usize, usize), usize>::new();
+        for sentence in &section.sentences {
+            if sentence.source_order != expected_sentence_source_order {
                 push_error(
                     findings,
                     "text_units",
-                    "sentence_unknown_owner",
-                    format!("Sentence {} has missing owner Section", sentence.id.0),
+                    "sentence_source_order_gap",
+                    format!(
+                        "Sentence {}#p{}.s{} has source_order {}, expected {}",
+                        section_id.0,
+                        sentence.paragraph_index,
+                        sentence.sentence_index,
+                        sentence.source_order,
+                        expected_sentence_source_order
+                    ),
+                );
+            }
+            expected_sentence_source_order += 1;
+            if index.slice(sentence.range).is_err() {
+                push_error(
+                    findings,
+                    "text_units",
+                    "sentence_exact_slice_mismatch",
+                    format!(
+                        "Sentence {}#p{}.s{} is not the exact persisted owner slice",
+                        section_id.0, sentence.paragraph_index, sentence.sentence_index
+                    ),
+                );
+            }
+            let parent = (sentence.parent_range.start(), sentence.parent_range.end());
+            if !paragraph_ranges.contains(&(section_id.clone(), parent.0, parent.1)) {
+                push_error(
+                    findings,
+                    "text_units",
+                    "sentence_missing_parent_paragraph",
+                    format!(
+                        "Sentence {}#p{}.s{} parent Paragraph is missing",
+                        section_id.0, sentence.paragraph_index, sentence.sentence_index
+                    ),
                 );
                 continue;
-            };
-            sentence_owner_index = Some((
-                sentence.owner_section_id.clone(),
-                owner.normalized_text_index(),
-            ));
+            }
+            if sentence.range.start() < parent.0 || sentence.range.end() > parent.1 {
+                push_error(
+                    findings,
+                    "text_units",
+                    "sentence_outside_parent_paragraph",
+                    format!(
+                        "Sentence {}#p{}.s{} is not contained by its parent Paragraph",
+                        section_id.0, sentence.paragraph_index, sentence.sentence_index
+                    ),
+                );
+            }
+            let expected = expected_sentence_index.entry(parent).or_insert(1usize);
+            if sentence.sentence_index != *expected {
+                push_error(
+                    findings,
+                    "text_units",
+                    "sentence_index_gap",
+                    format!(
+                        "Sentence {}#p{}.s{} has index {}, expected {}",
+                        section_id.0,
+                        sentence.paragraph_index,
+                        sentence.sentence_index,
+                        sentence.sentence_index,
+                        *expected
+                    ),
+                );
+            }
+            *expected += 1;
+            coverage.text_units.sentence_chars += sentence.range.len();
         }
-        let (_, index) = sentence_owner_index
-            .as_ref()
-            .expect("owner index was just set");
-        match index.slice(sentence.normalized_range) {
-            Ok(slice) if slice == sentence.text => {}
-            _ => push_error(
-                findings,
-                "text_units",
-                "sentence_exact_slice_mismatch",
-                format!(
-                    "Sentence {} is not the exact persisted owner slice",
-                    sentence.id.0
-                ),
-            ),
-        }
-        let Some(paragraph) = paragraph_by_id.get(&sentence.parent_paragraph_id) else {
-            push_error(
-                findings,
-                "text_units",
-                "sentence_missing_parent_paragraph",
-                format!("Sentence {} parent Paragraph is missing", sentence.id.0),
-            );
-            continue;
-        };
-        if paragraph.owner_section_id != sentence.owner_section_id
-            || sentence.normalized_range.start() < paragraph.normalized_range.start()
-            || sentence.normalized_range.end() > paragraph.normalized_range.end()
-        {
-            push_error(
-                findings,
-                "text_units",
-                "sentence_outside_parent_paragraph",
-                format!(
-                    "Sentence {} is not contained by its parent Paragraph",
-                    sentence.id.0
-                ),
-            );
-        }
-        let expected = expected_sentence_index
-            .entry(sentence.parent_paragraph_id.clone())
-            .or_insert(1usize);
-        if sentence.sentence_index != *expected {
-            push_error(
-                findings,
-                "text_units",
-                "sentence_index_gap",
-                format!(
-                    "Sentence {} has index {}, expected {}",
-                    sentence.id.0, sentence.sentence_index, *expected
-                ),
-            );
-        }
-        *expected += 1;
-        coverage.text_units.sentence_chars += sentence.normalized_range.len();
-    }
 
-    for sentence_coverage in &sentence_set.coverage {
-        if sentence_coverage.sentence_chars
-            + sentence_coverage.separator_chars
-            + sentence_coverage.coarse_only_chars
-            != sentence_coverage.paragraph_chars
-        {
-            push_error(
-                findings,
-                "text_units",
-                "sentence_coverage_invariant_failed",
-                format!(
-                    "Sentence coverage for Paragraph {} does not partition its current Paragraph text",
-                    sentence_coverage.paragraph_id.0
-                ),
-            );
-        }
-        coverage.text_units.sentence_separator_chars += sentence_coverage.separator_chars;
-        coverage.text_units.sentence_coarse_only_chars += sentence_coverage.coarse_only_chars;
-        if sentence_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly {
-            coverage.text_units.coarse_paragraphs += 1;
+        for sentence_coverage in &section.sentence_coverage {
+            if sentence_coverage.sentence_chars
+                + sentence_coverage.separator_chars
+                + sentence_coverage.coarse_only_chars
+                != sentence_coverage.paragraph_chars
+            {
+                push_error(
+                    findings,
+                    "text_units",
+                    "sentence_coverage_invariant_failed",
+                    format!(
+                        "Sentence coverage for Paragraph {}#p{} does not partition its current Paragraph text",
+                        section_id.0, sentence_coverage.paragraph_index
+                    ),
+                );
+            }
+            coverage.text_units.sentence_separator_chars += sentence_coverage.separator_chars;
+            coverage.text_units.sentence_coarse_only_chars += sentence_coverage.coarse_only_chars;
+            if sentence_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly {
+                coverage.text_units.coarse_paragraphs += 1;
+            }
         }
     }
 
@@ -1498,15 +1485,19 @@ fn validate_blocks_and_text_units(
             NormalizedBlockKind::Preformatted | NormalizedBlockKind::Table
         )
     }) {
-        if sentence_set.units.iter().any(|sentence| {
-            sentence.owner_section_id == block.owner_section_id
-                && ranges_overlap(
-                    block.normalized_range.start(),
-                    block.normalized_range.end(),
-                    sentence.normalized_range.start(),
-                    sentence.normalized_range.end(),
-                )
-        }) {
+        let overlaps = segmentation_by_section
+            .get(&block.owner_section_id)
+            .is_some_and(|section| {
+                section.sentences.iter().any(|sentence| {
+                    ranges_overlap(
+                        block.normalized_range.start(),
+                        block.normalized_range.end(),
+                        sentence.range.start(),
+                        sentence.range.end(),
+                    )
+                })
+            });
+        if overlaps {
             coverage.blocks.native_non_prose_blocks_with_sentence_units += 1;
         }
     }

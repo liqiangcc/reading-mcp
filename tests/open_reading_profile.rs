@@ -29,16 +29,9 @@ async fn canonical_profile_preserves_native_and_coarse_evidence() {
         .await
         .expect("HTML profile fixture should parse");
 
-    let paragraphs = document
-        .try_paragraph_text_units()
-        .expect("Paragraph coverage should materialize");
-    let sentences = document
-        .try_sentence_text_units()
-        .expect("Sentence coverage should materialize");
     let profile = build_reading_profile(
         &document,
-        &paragraphs,
-        &sentences,
+        &document.segmentation(),
         ReliabilitySummary::not_applicable(),
         true,
     )
@@ -141,16 +134,10 @@ async fn degraded_epub_keeps_canonical_readability_and_exposes_source_gap() {
         .await
         .expect("degraded but readable EPUB should parse");
 
-    let paragraphs = document
-        .try_paragraph_text_units()
-        .expect("canonical Paragraph coverage should remain readable");
-    let sentences = document
-        .try_sentence_text_units()
-        .expect("canonical Sentence coverage should remain readable");
     let reliability = PersistedDocumentReliabilityInspector
         .inspect(&document)
         .expect("degraded persisted facts should still project");
-    let profile = build_reading_profile(&document, &paragraphs, &sentences, reliability, true)
+    let profile = build_reading_profile(&document, &document.segmentation(), reliability, true)
         .expect("degraded source should still have a truthful open profile");
 
     assert_eq!(

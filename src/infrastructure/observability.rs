@@ -12,8 +12,8 @@ use crate::application::ports::{
     TextUnitStreamSummary,
 };
 use crate::domain::{
-    Document, DocumentId, DocumentSource, NormalizedDocumentHash, ParagraphTextUnitSet, SectionId,
-    SentenceTextUnitSet, TextUnit,
+    Document, DocumentId, DocumentSegmentation, DocumentSource, NormalizedDocumentHash,
+    ParagraphTextUnitSet, SectionId, SentenceTextUnitSet, TextUnit,
 };
 
 fn emit(value: serde_json::Value) {
@@ -211,19 +211,19 @@ impl SearchIndex for ObservedSearchIndex {
         result
     }
 
-    async fn index_with_units(
+    async fn index_with_segmentation(
         &self,
         document: Arc<Document>,
-        paragraphs: Arc<ParagraphTextUnitSet>,
-        sentences: Arc<SentenceTextUnitSet>,
+        normalized_document_hash: NormalizedDocumentHash,
+        segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
         let started = Instant::now();
         let result = self
             .inner
-            .index_with_units(
+            .index_with_segmentation(
                 Arc::clone(&document),
-                Arc::clone(&paragraphs),
-                Arc::clone(&sentences),
+                normalized_document_hash,
+                Arc::clone(&segmentation),
             )
             .await;
         emit(json!({
@@ -398,6 +398,20 @@ impl TextUnitIndex for ObservedTextUnitIndex {
         let result = self
             .inner
             .replace_document_sets(document, paragraphs, sentences)
+            .await;
+        emit_text_unit_write(started, result.is_ok());
+        result
+    }
+
+    async fn replace_document_segmentation(
+        &self,
+        document: &Arc<Document>,
+        segmentation: Arc<DocumentSegmentation>,
+    ) -> Result<(), ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .replace_document_segmentation(document, segmentation)
             .await;
         emit_text_unit_write(started, result.is_ok());
         result

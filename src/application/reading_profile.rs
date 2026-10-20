@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::ports::ApplicationError;
 use crate::domain::{
-    Document, ParagraphTextUnitSet, SentenceEligibility, SentenceTextUnitSet,
-    TEXT_SEGMENTATION_VERSION,
+    Document, DocumentSegmentation, SentenceEligibility, TEXT_SEGMENTATION_VERSION,
 };
 
 pub const READING_PROFILE_SCHEMA_VERSION: &str = "reading-profile/v1";
@@ -146,36 +145,39 @@ pub struct ReadingProfile {
 
 pub fn build_reading_profile(
     document: &Document,
-    paragraphs: &ParagraphTextUnitSet,
-    sentences: &SentenceTextUnitSet,
+    segmentation: &DocumentSegmentation,
     reliability: ReliabilitySummary,
     precise_lexical_candidates: bool,
 ) -> Result<ReadingProfile, ApplicationError> {
     let mut coverage = CanonicalTextCoverage::default();
+    let mut sentence_paragraphs = 0usize;
 
-    for section in &paragraphs.coverage {
-        coverage.owner_chars += section.owner_chars;
-        coverage.paragraph_chars += section.paragraph_chars;
-        coverage.paragraph_separator_chars += section.separator_chars;
-        coverage.paragraph_count += section.paragraph_count;
-        coverage.native_paragraph_chars += section.native_paragraph_chars;
-        coverage.native_structural_container_chars += section.native_structural_container_chars;
-        coverage.native_non_prose_chars += section.native_non_prose_chars;
-        coverage.fallback_chars += section.fallback_chars;
-    }
+    for section in &segmentation.sections {
+        let section_coverage = &section.paragraph_coverage;
+        coverage.owner_chars += section_coverage.owner_chars;
+        coverage.paragraph_chars += section_coverage.paragraph_chars;
+        coverage.paragraph_separator_chars += section_coverage.separator_chars;
+        coverage.paragraph_count += section_coverage.paragraph_count;
+        coverage.native_paragraph_chars += section_coverage.native_paragraph_chars;
+        coverage.native_structural_container_chars +=
+            section_coverage.native_structural_container_chars;
+        coverage.native_non_prose_chars += section_coverage.native_non_prose_chars;
+        coverage.fallback_chars += section_coverage.fallback_chars;
 
-    for paragraph in &sentences.coverage {
-        match paragraph.eligibility {
-            SentenceEligibility::Eligible => coverage.sentence_eligible_paragraphs += 1,
-            SentenceEligibility::CoarseParagraphOnly => coverage.coarse_paragraphs += 1,
+        for paragraph in &section.sentence_coverage {
+            match paragraph.eligibility {
+                SentenceEligibility::Eligible => coverage.sentence_eligible_paragraphs += 1,
+                SentenceEligibility::CoarseParagraphOnly => coverage.coarse_paragraphs += 1,
+            }
+            coverage.sentence_count += paragraph.sentence_count;
+            coverage.sentence_chars += paragraph.sentence_chars;
+            coverage.sentence_separator_chars += paragraph.separator_chars;
+            coverage.sentence_coarse_only_chars += paragraph.coarse_only_chars;
+            sentence_paragraphs += 1;
         }
-        coverage.sentence_count += paragraph.sentence_count;
-        coverage.sentence_chars += paragraph.sentence_chars;
-        coverage.sentence_separator_chars += paragraph.separator_chars;
-        coverage.sentence_coarse_only_chars += paragraph.coarse_only_chars;
     }
 
-    validate_coverage(&coverage, sentences.coverage.len())?;
+    validate_coverage(&coverage, sentence_paragraphs)?;
 
     let coarse_regions = coverage.coarse_paragraphs > 0 || coverage.sentence_coarse_only_chars > 0;
     let available = ReadingCapabilityAvailability::Available;

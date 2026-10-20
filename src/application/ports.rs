@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, NormalizedDocumentHash,
-    ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet, SectionId,
-    SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
-    TextLocator, TextUnit,
+    Document, DocumentId, DocumentSegmentation, DocumentSource, Location, MediaType,
+    NormalizedDocumentHash, ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet,
+    SectionId, SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet,
+    TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
 };
 
 use super::get_text_units::{
@@ -210,14 +210,13 @@ pub trait SourceViewRenderer: Send + Sync {
 pub trait DocumentReliabilityInspector: Send + Sync {
     fn inspect(&self, document: &Document) -> Result<ReliabilitySummary, ApplicationError>;
 
-    /// Inspects `document` reusing the units the caller already built from it. The default ignores them.
-    fn inspect_with_units(
+    /// Inspects `document` reusing the segmentation the caller already built from it. The default
+    /// ignores it.
+    fn inspect_with_segmentation(
         &self,
         document: &Document,
-        _paragraphs: &ParagraphTextUnitSet,
-        sentences: &SentenceTextUnitSet,
+        _segmentation: &DocumentSegmentation,
     ) -> Result<ReliabilitySummary, ApplicationError> {
-        let _ = sentences;
         self.inspect(document)
     }
 }
@@ -386,6 +385,19 @@ pub trait TextUnitIndex: Send + Sync {
         paragraphs: Arc<ParagraphTextUnitSet>,
         sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError>;
+
+    /// Persists a document's segmentation without building whole-document unit sets. The default
+    /// materializes the units and calls `replace_document_sets`.
+    async fn replace_document_segmentation(
+        &self,
+        document: &Arc<Document>,
+        segmentation: Arc<DocumentSegmentation>,
+    ) -> Result<(), ApplicationError> {
+        let normalized_document_hash = document.normalized_document_hash();
+        let (paragraphs, sentences) = segmentation.materialize(document, &normalized_document_hash);
+        self.replace_document_sets(document, Arc::new(paragraphs), Arc::new(sentences))
+            .await
+    }
 
     /// Units of one section as persisted by `replace_document_sets`, or `None` when this document's units are not
     /// stored for the current `TEXT_SEGMENTATION_VERSION`.
@@ -617,13 +629,13 @@ pub trait SearchIndex: Send + Sync {
 
     async fn index(&self, document: &Document) -> Result<(), ApplicationError>;
 
-    /// Indexes `document` using the paragraph and sentence units the caller already built from it, so the index does
-    /// not build them again. The default ignores the units.
-    async fn index_with_units(
+    /// Indexes `document` using the segmentation the caller already built from it, so the index does
+    /// not segment it again. The default ignores the segmentation.
+    async fn index_with_segmentation(
         &self,
         document: Arc<Document>,
-        _paragraphs: Arc<ParagraphTextUnitSet>,
-        _sentences: Arc<SentenceTextUnitSet>,
+        _normalized_document_hash: NormalizedDocumentHash,
+        _segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
         self.index(&document).await
     }

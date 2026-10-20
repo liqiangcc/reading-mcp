@@ -30,11 +30,12 @@ use crate::application::text_unit_stream::{
     UnitRef, plan_section_stream_desc,
 };
 use crate::domain::{
-    ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
-    NormalizedDocumentHash, NormalizedTextIndex, NormalizedTextRange, ParagraphContentClass,
-    ParagraphSectionCoverage, ParagraphTextUnitSet, Section, SectionId, SentenceEligibility,
-    SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
-    TextUnit, TextUnitId, TextUnitKind, paragraph_text_unit_id, sentence_text_unit_id,
+    ContentHash, Document, DocumentId, DocumentSegmentation, DocumentSource, Location, MediaType,
+    NORMALIZATION_VERSION, NormalizedDocumentHash, NormalizedTextIndex, NormalizedTextRange,
+    ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet, Section, SectionId,
+    SectionSegmentation, SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit,
+    SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextUnit, TextUnitId, TextUnitKind,
+    paragraph_text_unit_id, sentence_text_unit_id,
 };
 
 /// How many decoded documents `SqliteDocumentRepository` keeps in memory.
@@ -774,6 +775,39 @@ impl SqliteTextUnitIndex {
         .await
     }
 
+    /// The stored `section_layout_v1` rows of `document_id`, in `section_key` order, as
+    /// `(section_id, encoded layout)`. Diagnostics only: it proves that ingesting from units and
+    /// ingesting from boundaries write identical rows.
+    pub async fn stored_section_layouts(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<(String, Vec<u8>)>, ApplicationError> {
+        let document_id = document_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT l.section_id, l.layout
+                           FROM section_layout_v1 l
+                           JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
+                          WHERE d.document_id = ?1
+                          ORDER BY l.section_key",
+                    )
+                    .map_err(text_unit_index_error)?;
+                let rows = statement
+                    .query_map(params![&document_id.0], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(text_unit_index_error)?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(text_unit_index_error)
+            },
+        )
+        .await
+    }
+
     /// The best `limit` paragraph and sentence candidates, best first, plus the section ids they
     /// index. `Ok(None)` when this document's units are not stored for the current
     /// `TEXT_SEGMENTATION_VERSION`, or were stored for another normalized document hash.
@@ -1326,6 +1360,171 @@ struct SectionGroups<'a> {
     sentence_coverage: Vec<&'a SentenceParagraphCoverage>,
 }
 
+/// Where one document's per-section layouts and paragraph coverage records come from: the unit sets
+/// of `replace_document_sets`, or the boundaries of `replace_document_segmentation`. Both must produce
+/// byte-identical rows.
+enum SectionLayoutSource<'a> {
+    Units(&'a HashMap<SectionId, SectionGroups<'a>>),
+    Segmentation(&'a HashMap<&'a SectionId, &'a SectionSegmentation>),
+}
+
+impl SectionLayoutSource<'_> {
+    fn paragraph_coverage_json(
+        &self,
+        section_id: &SectionId,
+    ) -> Result<Option<String>, ApplicationError> {
+        let coverage = match self {
+            Self::Units(groups) => groups
+                .get(section_id)
+                .and_then(|group| group.paragraph_coverage),
+            Self::Segmentation(sections) => sections
+                .get(section_id)
+                .copied()
+                .map(|section| &section.paragraph_coverage),
+        };
+        match coverage {
+            Some(coverage) => Ok(Some(
+                serde_json::to_string(&StoredParagraphCoverage::from_coverage(coverage))
+                    .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn layout(&self, section_id: &SectionId) -> Result<SectionLayout, ApplicationError> {
+        match self {
+            Self::Units(groups) => match groups.get(section_id) {
+                Some(group) => build_section_layout(group),
+                None => Ok(empty_section_layout()),
+            },
+            Self::Segmentation(sections) => match sections.get(section_id).copied() {
+                Some(section) => build_segmentation_section_layout(section),
+                None => Ok(empty_section_layout()),
+            },
+        }
+    }
+}
+
+fn empty_section_layout() -> SectionLayout {
+    SectionLayout {
+        paragraphs: Vec::new(),
+        sentences: Vec::new(),
+        coverage: Vec::new(),
+    }
+}
+
+/// Writes one document's `section_text_v1` chunks and `section_layout_v1` rows in a transaction.
+fn write_document_sections(
+    connection: &mut Connection,
+    cache: &Mutex<SectionLayoutCache>,
+    document: &Document,
+    normalized_document_hash: &NormalizedDocumentHash,
+    source: &SectionLayoutSource<'_>,
+) -> Result<(), ApplicationError> {
+    let transaction = connection.transaction().map_err(text_unit_index_error)?;
+
+    transaction
+        .execute(
+            "INSERT INTO text_unit_documents_v2(
+                document_id,
+                content_hash,
+                normalized_document_hash,
+                segmentation_version
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(document_id) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                normalized_document_hash = excluded.normalized_document_hash,
+                segmentation_version = excluded.segmentation_version",
+            params![
+                &document.id.0,
+                &document.content_hash.0,
+                normalized_document_hash.as_ref(),
+                TEXT_SEGMENTATION_VERSION,
+            ],
+        )
+        .map_err(text_unit_index_error)?;
+    let doc_key: i64 = transaction
+        .query_row(
+            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+            params![&document.id.0],
+            |row| row.get(0),
+        )
+        .map_err(text_unit_index_error)?;
+
+    transaction
+        .execute(
+            "DELETE FROM section_text_v1 WHERE doc_key = ?1",
+            params![doc_key],
+        )
+        .map_err(text_unit_index_error)?;
+    transaction
+        .execute(
+            "DELETE FROM section_layout_v1 WHERE doc_key = ?1",
+            params![doc_key],
+        )
+        .map_err(text_unit_index_error)?;
+
+    // Section keys follow document order: a depth-first walk of the root sections and their
+    // children. Every section is stored, including sections without units or coverage.
+    let mut ordered_sections = Vec::new();
+    collect_sections(&document.root_sections, &mut ordered_sections);
+    let mut section_keys = HashMap::new();
+    for (index, section) in ordered_sections.iter().enumerate() {
+        section_keys.insert(
+            section.id.clone(),
+            i64::try_from(index).map_err(|_| {
+                ApplicationError::TextUnitIndexFailed("document has too many sections".into())
+            })?,
+        );
+    }
+
+    {
+        let mut chunk_statement = transaction
+            .prepare(
+                "INSERT INTO section_text_v1(doc_key, section_key, chunk_no, text)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(text_unit_index_error)?;
+        let mut layout_statement = transaction
+            .prepare(
+                "INSERT INTO section_layout_v1(
+                    doc_key,
+                    section_key,
+                    section_id,
+                    char_len,
+                    paragraph_coverage_json,
+                    layout
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(text_unit_index_error)?;
+
+        for section in &ordered_sections {
+            let section_key = section_keys[&section.id];
+            insert_section_text(&mut chunk_statement, doc_key, section_key, &section.content)?;
+
+            let paragraph_coverage_json = source.paragraph_coverage_json(&section.id)?;
+            let layout_blob = source.layout(&section.id)?.encode()?;
+            layout_statement
+                .execute(params![
+                    doc_key,
+                    section_key,
+                    &section.id.0,
+                    usize_to_i64(section.normalized_text_len())?,
+                    paragraph_coverage_json,
+                    layout_blob,
+                ])
+                .map_err(text_unit_index_error)?;
+        }
+    }
+
+    transaction.commit().map_err(text_unit_index_error)?;
+    let mut cache = cache.lock().map_err(|_| {
+        ApplicationError::TextUnitIndexFailed("section layout cache lock poisoned".into())
+    })?;
+    cache.remove_document(doc_key);
+    Ok(())
+}
+
 #[async_trait]
 impl TextUnitIndex for SqliteTextUnitIndex {
     async fn replace_document(
@@ -1454,64 +1653,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
-                let transaction = connection.transaction().map_err(text_unit_index_error)?;
-
-                transaction
-                    .execute(
-                        "INSERT INTO text_unit_documents_v2(
-                            document_id,
-                            content_hash,
-                            normalized_document_hash,
-                            segmentation_version
-                         ) VALUES (?1, ?2, ?3, ?4)
-                         ON CONFLICT(document_id) DO UPDATE SET
-                            content_hash = excluded.content_hash,
-                            normalized_document_hash = excluded.normalized_document_hash,
-                            segmentation_version = excluded.segmentation_version",
-                        params![
-                            &document.id.0,
-                            &document.content_hash.0,
-                            paragraphs.normalized_document_hash.as_ref(),
-                            TEXT_SEGMENTATION_VERSION,
-                        ],
-                    )
-                    .map_err(text_unit_index_error)?;
-                let doc_key: i64 = transaction
-                    .query_row(
-                        "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
-                        params![&document.id.0],
-                        |row| row.get(0),
-                    )
-                    .map_err(text_unit_index_error)?;
-
-                transaction
-                    .execute(
-                        "DELETE FROM section_text_v1 WHERE doc_key = ?1",
-                        params![doc_key],
-                    )
-                    .map_err(text_unit_index_error)?;
-                transaction
-                    .execute(
-                        "DELETE FROM section_layout_v1 WHERE doc_key = ?1",
-                        params![doc_key],
-                    )
-                    .map_err(text_unit_index_error)?;
-
-                // Section keys follow document order: a depth-first walk of the root sections and their
-                // children. Every section is stored, including sections without units or coverage.
-                let mut ordered_sections = Vec::new();
-                collect_sections(&document.root_sections, &mut ordered_sections);
-                let mut section_keys = HashMap::new();
-                for (index, section) in ordered_sections.iter().enumerate() {
-                    section_keys.insert(
-                        section.id.clone(),
-                        i64::try_from(index).map_err(|_| {
-                            ApplicationError::TextUnitIndexFailed(
-                                "document has too many sections".into(),
-                            )
-                        })?,
-                    );
-                }
+                let normalized_document_hash = paragraphs.normalized_document_hash.clone();
 
                 // Group each section's units and coverages in one pass over the sets.
                 let mut groups: HashMap<SectionId, SectionGroups<'_>> = HashMap::new();
@@ -1543,78 +1685,42 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         .push(coverage);
                 }
 
-                {
-                    let mut chunk_statement = transaction
-                        .prepare(
-                            "INSERT INTO section_text_v1(doc_key, section_key, chunk_no, text)
-                             VALUES (?1, ?2, ?3, ?4)",
-                        )
-                        .map_err(text_unit_index_error)?;
-                    let mut layout_statement = transaction
-                        .prepare(
-                            "INSERT INTO section_layout_v1(
-                                doc_key,
-                                section_key,
-                                section_id,
-                                char_len,
-                                paragraph_coverage_json,
-                                layout
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        )
-                        .map_err(text_unit_index_error)?;
+                write_document_sections(
+                    connection,
+                    &cache,
+                    &document,
+                    &normalized_document_hash,
+                    &SectionLayoutSource::Units(&groups),
+                )
+            },
+        )
+        .await
+    }
 
-                    for section in &ordered_sections {
-                        let section_key = section_keys[&section.id];
-                        insert_section_text(
-                            &mut chunk_statement,
-                            doc_key,
-                            section_key,
-                            &section.content,
-                        )?;
-
-                        let group = groups.get(&section.id);
-                        let paragraph_coverage_json =
-                            match group.and_then(|group| group.paragraph_coverage) {
-                                Some(coverage) => Some(
-                                    serde_json::to_string(&StoredParagraphCoverage::from_coverage(
-                                        coverage,
-                                    ))
-                                    .map_err(|error| {
-                                        ApplicationError::TextUnitIndexFailed(error.to_string())
-                                    })?,
-                                ),
-                                None => None,
-                            };
-                        let layout = match group {
-                            Some(group) => build_section_layout(group)?,
-                            None => SectionLayout {
-                                paragraphs: Vec::new(),
-                                sentences: Vec::new(),
-                                coverage: Vec::new(),
-                            },
-                        };
-                        let layout_blob = layout.encode()?;
-                        layout_statement
-                            .execute(params![
-                                doc_key,
-                                section_key,
-                                &section.id.0,
-                                usize_to_i64(section.normalized_text_len())?,
-                                paragraph_coverage_json,
-                                layout_blob,
-                            ])
-                            .map_err(text_unit_index_error)?;
-                    }
-                }
-
-                transaction.commit().map_err(text_unit_index_error)?;
-                let mut cache = cache.lock().map_err(|_| {
-                    ApplicationError::TextUnitIndexFailed(
-                        "section layout cache lock poisoned".into(),
-                    )
-                })?;
-                cache.remove_document(doc_key);
-                Ok(())
+    async fn replace_document_segmentation(
+        &self,
+        document: &Arc<Document>,
+        segmentation: Arc<DocumentSegmentation>,
+    ) -> Result<(), ApplicationError> {
+        let document = Arc::clone(document);
+        let cache = Arc::clone(&self.cache);
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let normalized_document_hash = document.normalized_document_hash();
+                let sections = segmentation
+                    .sections
+                    .iter()
+                    .map(|section| (&section.section_id, section))
+                    .collect::<HashMap<_, _>>();
+                write_document_sections(
+                    connection,
+                    &cache,
+                    &document,
+                    &normalized_document_hash,
+                    &SectionLayoutSource::Segmentation(&sections),
+                )
             },
         )
         .await
@@ -2565,6 +2671,72 @@ fn build_section_layout(group: &SectionGroups<'_>) -> Result<SectionLayout, Appl
                 separator_chars: coverage.separator_chars,
                 coarse_only_chars: coverage.coarse_only_chars,
                 sentence_count: coverage.sentence_count,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+
+    Ok(SectionLayout {
+        paragraphs,
+        sentences,
+        coverage,
+    })
+}
+
+/// The same layout `build_section_layout` derives from units, built straight from the boundaries.
+fn build_segmentation_section_layout(
+    section: &SectionSegmentation,
+) -> Result<SectionLayout, ApplicationError> {
+    let paragraphs = section
+        .paragraphs
+        .iter()
+        .map(|boundary| LayoutParagraph {
+            paragraph_index: boundary.paragraph_index,
+            source_order: boundary.source_order,
+            start: boundary.range.start(),
+            end: boundary.range.end(),
+        })
+        .collect();
+
+    let sentences = section
+        .sentences
+        .iter()
+        .map(|boundary| LayoutSentence {
+            paragraph_index: boundary.paragraph_index,
+            sentence_index: boundary.sentence_index,
+            source_order: boundary.source_order,
+            start: boundary.range.start(),
+            end: boundary.range.end(),
+            parent_start: boundary.parent_range.start(),
+            parent_end: boundary.parent_range.end(),
+        })
+        .collect();
+
+    let coverage = section
+        .sentence_coverage
+        .iter()
+        .map(|boundary| {
+            Ok(LayoutCoverage {
+                paragraph_index: boundary.paragraph_index,
+                paragraph_start: boundary.paragraph_range.start(),
+                paragraph_end: boundary.paragraph_range.end(),
+                content_class: u8::try_from(content_class_code(boundary.content_class)).map_err(
+                    |_| {
+                        ApplicationError::TextUnitIndexFailed(
+                            "paragraph content class code does not fit u8".into(),
+                        )
+                    },
+                )?,
+                eligibility: u8::try_from(sentence_eligibility_code(boundary.eligibility))
+                    .map_err(|_| {
+                        ApplicationError::TextUnitIndexFailed(
+                            "sentence eligibility code does not fit u8".into(),
+                        )
+                    })?,
+                paragraph_chars: boundary.paragraph_chars,
+                sentence_chars: boundary.sentence_chars,
+                separator_chars: boundary.separator_chars,
+                coarse_only_chars: boundary.coarse_only_chars,
+                sentence_count: boundary.sentence_count,
             })
         })
         .collect::<Result<Vec<_>, ApplicationError>>()?;

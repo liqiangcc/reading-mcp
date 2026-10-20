@@ -28,6 +28,7 @@ async fn sqlite_section_units_match_from_sets_for_every_section() {
         Arc::new(SqliteTextUnitIndex::open(&database).expect("text unit index should open"));
 
     for document in [parse_plain().await, parse_markdown().await] {
+        let document = Arc::new(document);
         let paragraphs = document
             .try_paragraph_text_units()
             .expect("valid paragraph set");
@@ -36,7 +37,7 @@ async fn sqlite_section_units_match_from_sets_for_every_section() {
             .expect("valid sentence set");
         index
             .replace_document_sets(
-                &document.id,
+                &document,
                 Arc::new(paragraphs.clone()),
                 Arc::new(sentences.clone()),
             )
@@ -239,4 +240,104 @@ fn resource(source: &str, media_type: &str, body: &str) -> RetrievedResource {
         last_modified: None,
         metadata: BTreeMap::new(),
     }
+}
+
+#[tokio::test]
+async fn sqlite_section_units_read_long_sections_across_chunks() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let index: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("text unit index should open"));
+
+    let body = "Alpha one. ".repeat(4_000);
+    let document = parse_text(&body).await;
+    let paragraphs = document
+        .try_paragraph_text_units()
+        .expect("valid paragraph set");
+    let sentences = document
+        .try_sentence_text_units()
+        .expect("valid sentence set");
+    store_text_units(&*index, &document)
+        .await
+        .expect("long units should persist");
+
+    for section in all_sections(&document) {
+        let expected = SectionTextUnits::from_sets(&paragraphs, &sentences, &section.id);
+        let actual = index
+            .section_units(&document.id, &section.id)
+            .await
+            .expect("persisted section units should load")
+            .expect("the section should be stored");
+        assert_eq!(actual, expected, "chunked section {}", section.id.0);
+    }
+
+    assert!(
+        sentences.units.iter().any(|unit| {
+            unit.normalized_range.start() / 16_384 != (unit.normalized_range.end() - 1) / 16_384
+        }),
+        "the fixture must contain a sentence that straddles a text chunk"
+    );
+}
+
+#[tokio::test]
+async fn replacing_sets_twice_invalidates_the_section_layout_cache() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let index: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("text unit index should open"));
+
+    let document_id = DocumentId("doc:cache".into());
+    let section_id = SectionId("section://root".into());
+
+    let mut first = parse_text("First version. Only one sentence.").await;
+    first.id = document_id.clone();
+    first.root_sections[0].id = section_id.clone();
+    let first_paragraphs = first
+        .try_paragraph_text_units()
+        .expect("valid first paragraph set");
+    let first_sentences = first
+        .try_sentence_text_units()
+        .expect("valid first sentence set");
+    store_text_units(&*index, &first)
+        .await
+        .expect("first units should persist");
+    let before = index
+        .section_units(&document_id, &section_id)
+        .await
+        .expect("first read should succeed")
+        .expect("first section should be stored");
+    assert_eq!(
+        before,
+        SectionTextUnits::from_sets(&first_paragraphs, &first_sentences, &section_id)
+    );
+
+    let mut second = parse_text("Second version. It has two sentences. And a third.").await;
+    second.id = document_id.clone();
+    second.root_sections[0].id = section_id.clone();
+    let second_paragraphs = second
+        .try_paragraph_text_units()
+        .expect("valid second paragraph set");
+    let second_sentences = second
+        .try_sentence_text_units()
+        .expect("valid second sentence set");
+    store_text_units(&*index, &second)
+        .await
+        .expect("second units should replace the first");
+    let after = index
+        .section_units(&document_id, &section_id)
+        .await
+        .expect("second read should succeed")
+        .expect("second section should be stored");
+    assert_eq!(
+        after,
+        SectionTextUnits::from_sets(&second_paragraphs, &second_sentences, &section_id)
+    );
+    assert_ne!(after.paragraphs, before.paragraphs);
+}
+
+async fn parse_text(body: &str) -> Document {
+    TextParser
+        .parse(resource("memory:long.txt", "text/plain", body))
+        .await
+        .expect("plain text should parse")
 }

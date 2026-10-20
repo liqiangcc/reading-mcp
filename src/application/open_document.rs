@@ -261,7 +261,7 @@ impl OpenDocumentUseCase {
         if let Some(index) = &self.text_unit_index {
             index
                 .replace_document_sets(
-                    &document.id,
+                    &document,
                     Arc::clone(&paragraph_units),
                     Arc::clone(&sentence_units),
                 )

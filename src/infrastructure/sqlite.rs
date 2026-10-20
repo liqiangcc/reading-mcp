@@ -3,29 +3,34 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use super::section_layout::{
+    CHUNK_CHARS, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
+};
 use super::sqlite_support::{open_connection, run_sqlite};
 use crate::application::get_text_units::{
     EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
-    TextUnitEnumerationCoverage,
 };
 use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
     ApplicationError, DocumentRepository, OpenResultStore, OwnedStreamUnit, SectionTextUnits,
     StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
-use crate::application::text_unit_stream::{StreamUnit, plan_section_stream};
+use crate::application::text_unit_stream::{
+    ParagraphCoverageDesc, ParagraphDesc, SectionCoverageDesc, SectionStreamPlanDesc, SentenceDesc,
+    UnitRef, plan_section_stream_desc,
+};
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
-    NormalizedDocumentHash, NormalizedTextRange, ParagraphContentClass, ParagraphSectionCoverage,
-    ParagraphTextUnitSet, Section, SectionId, SentenceEligibility, SentenceParagraphCoverage,
-    SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextUnit, TextUnitId,
-    TextUnitKind, paragraph_text_unit_id, sentence_text_unit_id,
+    NormalizedDocumentHash, NormalizedTextIndex, NormalizedTextRange, ParagraphContentClass,
+    ParagraphSectionCoverage, ParagraphTextUnitSet, Section, SectionId, SentenceEligibility,
+    SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
+    TextUnit, TextUnitId, TextUnitKind, paragraph_text_unit_id, sentence_text_unit_id,
 };
 
 /// How many decoded documents `SqliteDocumentRepository` keeps in memory.
@@ -72,6 +77,153 @@ impl DocumentCache {
 
     fn remove(&mut self, id: &DocumentId) {
         self.entries.retain(|(cached, _, _)| cached != id);
+    }
+}
+
+/// How many decoded section layouts `SqliteTextUnitIndex` keeps in memory.
+const SECTION_LAYOUT_CACHE_CAPACITY: usize = 32;
+
+/// One decoded section layout, its planner descriptors and the stream plans built from them.
+struct CachedSectionLayout {
+    doc_key: i64,
+    section_key: i64,
+    section_id: SectionId,
+    char_len: usize,
+    paragraph_coverage: Option<ParagraphSectionCoverage>,
+    layout: Arc<SectionLayout>,
+    paragraphs: Vec<ParagraphDesc>,
+    sentences: Vec<SentenceDesc>,
+    coverage: Vec<ParagraphCoverageDesc>,
+    section_coverage: Option<SectionCoverageDesc>,
+    paragraph_plan: OnceLock<Result<Arc<SectionStreamPlanDesc>, String>>,
+    sentence_plan: OnceLock<Result<Arc<SectionStreamPlanDesc>, String>>,
+}
+
+impl CachedSectionLayout {
+    fn new(
+        doc_key: i64,
+        section_key: i64,
+        section_id: SectionId,
+        char_len: usize,
+        paragraph_coverage: Option<ParagraphSectionCoverage>,
+        layout: SectionLayout,
+    ) -> Result<Self, ApplicationError> {
+        let paragraphs: Vec<ParagraphDesc> = layout
+            .paragraphs
+            .iter()
+            .map(|paragraph| ParagraphDesc {
+                paragraph_index: paragraph.paragraph_index,
+                char_count: paragraph.end - paragraph.start,
+            })
+            .collect();
+        let sentences: Vec<SentenceDesc> = layout
+            .sentences
+            .iter()
+            .map(|sentence| SentenceDesc {
+                paragraph_index: sentence.paragraph_index,
+                sentence_index: sentence.sentence_index,
+                char_count: sentence.end - sentence.start,
+            })
+            .collect();
+        let coverage = layout
+            .coverage
+            .iter()
+            .map(|coverage| {
+                Ok(ParagraphCoverageDesc {
+                    paragraph_index: coverage.paragraph_index,
+                    content_class: content_class_from_code(i64::from(coverage.content_class))?,
+                    eligibility: sentence_eligibility_from_code(i64::from(coverage.eligibility))?,
+                    separator_chars: coverage.separator_chars,
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let section_coverage = paragraph_coverage
+            .as_ref()
+            .map(|coverage| SectionCoverageDesc {
+                owner_chars: coverage.owner_chars,
+                separator_chars: coverage.separator_chars,
+                paragraph_count: coverage.paragraph_count,
+            });
+        Ok(Self {
+            doc_key,
+            section_key,
+            section_id,
+            char_len,
+            paragraph_coverage,
+            layout: Arc::new(layout),
+            paragraphs,
+            sentences,
+            coverage,
+            section_coverage,
+            paragraph_plan: OnceLock::new(),
+            sentence_plan: OnceLock::new(),
+        })
+    }
+
+    fn plan(
+        &self,
+        kind: RequestedTextUnitKind,
+    ) -> Result<Arc<SectionStreamPlanDesc>, ApplicationError> {
+        let cell = match kind {
+            RequestedTextUnitKind::Paragraph => &self.paragraph_plan,
+            RequestedTextUnitKind::Sentence => &self.sentence_plan,
+        };
+        let plan = cell.get_or_init(|| {
+            plan_section_stream_desc(
+                &self.section_id,
+                &self.paragraphs,
+                self.section_coverage.as_ref(),
+                &self.sentences,
+                &self.coverage,
+                kind,
+            )
+            .map(Arc::new)
+            .map_err(|error| error.to_string())
+        });
+        match plan {
+            Ok(plan) => Ok(Arc::clone(plan)),
+            Err(error) => Err(ApplicationError::InvalidRequest(error.clone())),
+        }
+    }
+}
+
+/// Most recently used section layouts, front first. `data_version` is `PRAGMA data_version` at the
+/// time the entries were loaded, so a commit from another connection invalidates them.
+#[derive(Default)]
+struct SectionLayoutCache {
+    data_version: Option<i64>,
+    entries: VecDeque<Arc<CachedSectionLayout>>,
+}
+
+impl SectionLayoutCache {
+    fn sync_version(&mut self, data_version: i64) {
+        if self.data_version != Some(data_version) {
+            self.entries.clear();
+            self.data_version = Some(data_version);
+        }
+    }
+
+    fn get(&mut self, doc_key: i64, section_key: i64) -> Option<Arc<CachedSectionLayout>> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.doc_key == doc_key && entry.section_key == section_key)?;
+        let entry = self.entries.remove(index)?;
+        let result = Arc::clone(&entry);
+        self.entries.push_front(entry);
+        Some(result)
+    }
+
+    fn insert(&mut self, entry: Arc<CachedSectionLayout>) {
+        self.entries.retain(|cached| {
+            cached.doc_key != entry.doc_key || cached.section_key != entry.section_key
+        });
+        self.entries.push_front(entry);
+        self.entries.truncate(SECTION_LAYOUT_CACHE_CAPACITY);
+    }
+
+    fn remove_document(&mut self, doc_key: i64) {
+        self.entries.retain(|cached| cached.doc_key != doc_key);
     }
 }
 
@@ -357,6 +509,7 @@ impl OpenResultStore for SqliteOpenResultStore {
 pub struct SqliteTextUnitIndex {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
+    cache: Arc<Mutex<SectionLayoutCache>>,
 }
 
 impl SqliteTextUnitIndex {
@@ -403,6 +556,17 @@ impl SqliteTextUnitIndex {
                  DROP TABLE IF EXISTS text_unit_sets_v1;",
             )
             .map_err(text_unit_index_error)?;
+        // The v2 store kept unit text on every row. The v3 store keeps section text once and only
+        // the unit boundaries, so the v2 tables are removed and their documents re-ingest on reopen.
+        connection
+            .execute_batch(
+                "DROP TABLE IF EXISTS text_unit_sections_v2;
+                 DROP TABLE IF EXISTS text_unit_items_v2;
+                 DROP TABLE IF EXISTS text_unit_sentence_coverage_v2;
+                 DROP TABLE IF EXISTS text_unit_streams_v2;
+                 DROP TABLE IF EXISTS text_unit_stream_summaries_v2;",
+            )
+            .map_err(text_unit_index_error)?;
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS text_unit_documents_v2 (
@@ -412,79 +576,30 @@ impl SqliteTextUnitIndex {
                     normalized_document_hash TEXT NOT NULL,
                     segmentation_version TEXT NOT NULL
                  );
-                 CREATE TABLE IF NOT EXISTS text_unit_sections_v2 (
+                 CREATE TABLE IF NOT EXISTS section_text_v1 (
+                    doc_key INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    chunk_no INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY (doc_key, section_key, chunk_no)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE IF NOT EXISTS section_layout_v1 (
                     doc_key INTEGER NOT NULL,
                     section_key INTEGER NOT NULL,
                     section_id TEXT NOT NULL,
+                    char_len INTEGER NOT NULL,
                     paragraph_coverage_json TEXT,
+                    layout BLOB NOT NULL,
                     PRIMARY KEY (doc_key, section_key)
                  ) WITHOUT ROWID;
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_text_unit_sections_v2_id
-                    ON text_unit_sections_v2(doc_key, section_id);
-                 CREATE TABLE IF NOT EXISTS text_unit_items_v2 (
-                    doc_key INTEGER NOT NULL,
-                    kind INTEGER NOT NULL,
-                    source_order INTEGER NOT NULL,
-                    section_key INTEGER NOT NULL,
-                    paragraph_index INTEGER NOT NULL,
-                    sentence_index INTEGER NOT NULL,
-                    range_start INTEGER NOT NULL,
-                    range_end INTEGER NOT NULL,
-                    parent_start INTEGER,
-                    parent_end INTEGER,
-                    text TEXT NOT NULL,
-                    PRIMARY KEY (doc_key, kind, source_order)
-                 ) WITHOUT ROWID;
-                 CREATE INDEX IF NOT EXISTS idx_text_unit_items_v2_unit
-                    ON text_unit_items_v2(doc_key, section_key, kind, paragraph_index, sentence_index);
-                 CREATE TABLE IF NOT EXISTS text_unit_sentence_coverage_v2 (
-                    doc_key INTEGER NOT NULL,
-                    section_key INTEGER NOT NULL,
-                    position INTEGER NOT NULL,
-                    paragraph_index INTEGER NOT NULL,
-                    paragraph_start INTEGER NOT NULL,
-                    paragraph_end INTEGER NOT NULL,
-                    content_class INTEGER NOT NULL,
-                    eligibility INTEGER NOT NULL,
-                    paragraph_chars INTEGER NOT NULL,
-                    sentence_chars INTEGER NOT NULL,
-                    separator_chars INTEGER NOT NULL,
-                    coarse_only_chars INTEGER NOT NULL,
-                    sentence_count INTEGER NOT NULL,
-                    PRIMARY KEY (doc_key, section_key, position)
-                 ) WITHOUT ROWID;
-                 CREATE TABLE IF NOT EXISTS text_unit_streams_v2 (
-                    doc_key INTEGER NOT NULL,
-                    section_key INTEGER NOT NULL,
-                    requested_kind INTEGER NOT NULL,
-                    position INTEGER NOT NULL,
-                    eligible_position INTEGER,
-                    unit_kind INTEGER NOT NULL,
-                    unit_source_order INTEGER NOT NULL,
-                    content_class INTEGER NOT NULL,
-                    degradation INTEGER,
-                    char_count INTEGER NOT NULL,
-                    PRIMARY KEY (doc_key, section_key, requested_kind, position)
-                 ) WITHOUT ROWID;
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_text_unit_streams_v2_eligible
-                    ON text_unit_streams_v2(doc_key, section_key, requested_kind, eligible_position)
-                    WHERE eligible_position IS NOT NULL;
-                 CREATE INDEX IF NOT EXISTS idx_text_unit_streams_v2_unit
-                    ON text_unit_streams_v2(doc_key, section_key, requested_kind, unit_kind, unit_source_order);
-                 CREATE TABLE IF NOT EXISTS text_unit_stream_summaries_v2 (
-                    doc_key INTEGER NOT NULL,
-                    section_key INTEGER NOT NULL,
-                    requested_kind INTEGER NOT NULL,
-                    coverage_policy INTEGER NOT NULL,
-                    total_items INTEGER NOT NULL,
-                    coverage_json TEXT NOT NULL,
-                    PRIMARY KEY (doc_key, section_key, requested_kind, coverage_policy)
-                 ) WITHOUT ROWID;",
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_section_layout_v1_id
+                    ON section_layout_v1(doc_key, section_id);",
             )
             .map_err(text_unit_index_error)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
+            cache: Arc::new(Mutex::new(SectionLayoutCache::default())),
         })
     }
 
@@ -602,105 +717,15 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         document_id: &DocumentId,
     ) -> Result<Vec<TextUnit>, ApplicationError> {
         let document_id = document_id.clone();
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 if let Some(meta) = load_stored_document(connection, &document_id)? {
-                    return paragraph_units_from_v2(connection, &meta);
+                    return paragraph_units_from_layout(connection, &cache, &meta);
                 }
-                let mut statement = connection
-                    .prepare(
-                        "SELECT
-                            unit_id,
-                            content_hash,
-                            normalized_document_hash,
-                            owner_section_id,
-                            kind,
-                            paragraph_index,
-                            source_order,
-                            range_start,
-                            range_end,
-                            text,
-                            segmentation_version
-                         FROM text_units
-                         WHERE document_id = ?1
-                         ORDER BY source_order ASC",
-                    )
-                    .map_err(text_unit_index_error)?;
-                let rows = statement
-                    .query_map(params![&document_id.0], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, i64>(5)?,
-                            row.get::<_, i64>(6)?,
-                            row.get::<_, i64>(7)?,
-                            row.get::<_, i64>(8)?,
-                            row.get::<_, String>(9)?,
-                            row.get::<_, String>(10)?,
-                        ))
-                    })
-                    .map_err(text_unit_index_error)?;
-
-                let mut units = Vec::new();
-                for row in rows {
-                    let (
-                        unit_id,
-                        content_hash,
-                        normalized_document_hash,
-                        owner_section_id,
-                        kind,
-                        paragraph_index,
-                        source_order,
-                        range_start,
-                        range_end,
-                        text,
-                        segmentation_version,
-                    ) = row.map_err(text_unit_index_error)?;
-                    let kind = match kind.as_str() {
-                        "paragraph" => TextUnitKind::Paragraph,
-                        other => {
-                            return Err(ApplicationError::TextUnitIndexFailed(format!(
-                                "unsupported persisted text unit kind {other:?}"
-                            )));
-                        }
-                    };
-                    let range_start = i64_to_usize(range_start, "range_start")?;
-                    let range_end = i64_to_usize(range_end, "range_end")?;
-                    let normalized_range = NormalizedTextRange::new(range_start, range_end)
-                        .map_err(|error| {
-                            ApplicationError::TextUnitIndexFailed(format!(
-                                "invalid persisted normalized range: {error}"
-                            ))
-                        })?;
-
-                    if normalized_range.len() != text.chars().count() {
-                        return Err(ApplicationError::TextUnitIndexFailed(format!(
-                            "persisted unit {unit_id} range length {} does not match text length {}",
-                            normalized_range.len(),
-                            text.chars().count()
-                        )));
-                    }
-
-                    units.push(TextUnit {
-                        id: TextUnitId(unit_id),
-                        document_id: document_id.clone(),
-                        content_hash: ContentHash(content_hash),
-                        normalized_document_hash: NormalizedDocumentHash(normalized_document_hash),
-                        owner_section_id: SectionId(owner_section_id),
-                        kind,
-                        paragraph_index: i64_to_usize(paragraph_index, "paragraph_index")?,
-                        source_order: i64_to_usize(source_order, "source_order")?,
-                        normalized_range,
-                        text,
-                        segmentation_version,
-                    });
-                }
-                Ok(units)
+                legacy_list_document(connection, &document_id)
             },
         )
         .await
@@ -708,30 +733,20 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
     async fn replace_document_sets(
         &self,
-        document_id: &DocumentId,
+        document: &Arc<Document>,
         paragraphs: Arc<ParagraphTextUnitSet>,
         sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
-        validate_paragraph_units(document_id, &paragraphs.units)?;
+        validate_paragraph_units(&document.id, &paragraphs.units)?;
 
-        let document_id = document_id.clone();
+        let document = Arc::clone(document);
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let transaction = connection.transaction().map_err(text_unit_index_error)?;
 
-                let content_hash = paragraphs
-                    .units
-                    .first()
-                    .map(|unit| unit.content_hash.0.as_str())
-                    .or_else(|| {
-                        sentences
-                            .units
-                            .first()
-                            .map(|unit| unit.content_hash.0.as_str())
-                    })
-                    .unwrap_or("");
                 transaction
                     .execute(
                         "INSERT INTO text_unit_documents_v2(
@@ -745,8 +760,8 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                             normalized_document_hash = excluded.normalized_document_hash,
                             segmentation_version = excluded.segmentation_version",
                         params![
-                            &document_id.0,
-                            content_hash,
+                            &document.id.0,
+                            &document.content_hash.0,
                             paragraphs.normalized_document_hash.as_ref(),
                             TEXT_SEGMENTATION_VERSION,
                         ],
@@ -755,228 +770,41 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 let doc_key: i64 = transaction
                     .query_row(
                         "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
-                        params![&document_id.0],
+                        params![&document.id.0],
                         |row| row.get(0),
                     )
                     .map_err(text_unit_index_error)?;
 
-                for table in [
-                    "text_unit_sections_v2",
-                    "text_unit_items_v2",
-                    "text_unit_sentence_coverage_v2",
-                    "text_unit_streams_v2",
-                    "text_unit_stream_summaries_v2",
-                ] {
-                    transaction
-                        .execute(
-                            &format!("DELETE FROM {table} WHERE doc_key = ?1"),
-                            params![doc_key],
-                        )
-                        .map_err(text_unit_index_error)?;
-                }
-
-                // Section keys are assigned in first-seen order: paragraph coverages, paragraph units,
-                // sentence units, then sentence coverages.
-                let mut section_keys: HashMap<SectionId, i64> = HashMap::new();
-                let mut section_rows: Vec<(SectionId, i64, Option<String>)> = Vec::new();
-                let mut next_section_key = 0i64;
-                for coverage in &paragraphs.coverage {
-                    match section_keys.entry(coverage.owner_section_id.clone()) {
-                        Entry::Occupied(_) => continue,
-                        Entry::Vacant(entry) => {
-                            let coverage_json = serde_json::to_string(
-                                &StoredParagraphCoverage::from_coverage(coverage),
-                            )
-                            .map_err(|error| {
-                                ApplicationError::TextUnitIndexFailed(error.to_string())
-                            })?;
-                            entry.insert(next_section_key);
-                            section_rows.push((
-                                coverage.owner_section_id.clone(),
-                                next_section_key,
-                                Some(coverage_json),
-                            ));
-                            next_section_key += 1;
-                        }
-                    }
-                }
-                for section_id in paragraphs
-                    .units
-                    .iter()
-                    .map(|unit| &unit.owner_section_id)
-                    .chain(sentences.units.iter().map(|unit| &unit.owner_section_id))
-                    .chain(
-                        sentences
-                            .coverage
-                            .iter()
-                            .map(|coverage| &coverage.owner_section_id),
+                transaction
+                    .execute(
+                        "DELETE FROM section_text_v1 WHERE doc_key = ?1",
+                        params![doc_key],
                     )
-                {
-                    match section_keys.entry(section_id.clone()) {
-                        Entry::Occupied(_) => continue,
-                        Entry::Vacant(entry) => {
-                            entry.insert(next_section_key);
-                            section_rows.push((section_id.clone(), next_section_key, None));
-                            next_section_key += 1;
-                        }
-                    }
-                }
-                {
-                    let mut statement = transaction
-                        .prepare(
-                            "INSERT INTO text_unit_sections_v2(
-                                doc_key,
-                                section_key,
-                                section_id,
-                                paragraph_coverage_json
-                             ) VALUES (?1, ?2, ?3, ?4)",
-                        )
-                        .map_err(text_unit_index_error)?;
-                    for (section_id, section_key, coverage_json) in &section_rows {
-                        statement
-                            .execute(params![doc_key, section_key, &section_id.0, coverage_json])
-                            .map_err(text_unit_index_error)?;
-                    }
+                    .map_err(text_unit_index_error)?;
+                transaction
+                    .execute(
+                        "DELETE FROM section_layout_v1 WHERE doc_key = ?1",
+                        params![doc_key],
+                    )
+                    .map_err(text_unit_index_error)?;
+
+                // Section keys follow document order: a depth-first walk of the root sections and their
+                // children. Every section is stored, including sections without units or coverage.
+                let mut ordered_sections = Vec::new();
+                collect_sections(&document.root_sections, &mut ordered_sections);
+                let mut section_keys = HashMap::new();
+                for (index, section) in ordered_sections.iter().enumerate() {
+                    section_keys.insert(
+                        section.id.clone(),
+                        i64::try_from(index).map_err(|_| {
+                            ApplicationError::TextUnitIndexFailed(
+                                "document has too many sections".into(),
+                            )
+                        })?,
+                    );
                 }
 
-                // Paragraph ranges, by section key and 1-based paragraph index, for recomputing ids of
-                // sentences and of sentence coverage rows.
-                let paragraph_ranges: HashMap<(i64, usize), NormalizedTextRange> = paragraphs
-                    .units
-                    .iter()
-                    .map(|unit| {
-                        (
-                            (section_keys[&unit.owner_section_id], unit.paragraph_index),
-                            unit.normalized_range,
-                        )
-                    })
-                    .collect();
-
-                {
-                    let mut statement = transaction
-                        .prepare(
-                            "INSERT INTO text_unit_items_v2(
-                                doc_key,
-                                kind,
-                                source_order,
-                                section_key,
-                                paragraph_index,
-                                sentence_index,
-                                range_start,
-                                range_end,
-                                parent_start,
-                                parent_end,
-                                text
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                        )
-                        .map_err(text_unit_index_error)?;
-
-                    for unit in &paragraphs.units {
-                        let section_key = section_keys[&unit.owner_section_id];
-                        statement
-                            .execute(params![
-                                doc_key,
-                                UNIT_KIND_PARAGRAPH,
-                                usize_to_i64(unit.source_order)?,
-                                section_key,
-                                usize_to_i64(unit.paragraph_index)?,
-                                0i64,
-                                usize_to_i64(unit.normalized_range.start())?,
-                                usize_to_i64(unit.normalized_range.end())?,
-                                Option::<i64>::None,
-                                Option::<i64>::None,
-                                &unit.text,
-                            ])
-                            .map_err(text_unit_index_error)?;
-                    }
-
-                    for unit in &sentences.units {
-                        let section_key = section_keys[&unit.owner_section_id];
-                        let parent = paragraph_ranges
-                            .get(&(section_key, unit.paragraph_index))
-                            .ok_or_else(|| {
-                                ApplicationError::TextUnitIndexFailed(format!(
-                                    "sentence {} has no persisted parent paragraph range",
-                                    unit.id.0
-                                ))
-                            })?;
-                        statement
-                            .execute(params![
-                                doc_key,
-                                UNIT_KIND_SENTENCE,
-                                usize_to_i64(unit.source_order)?,
-                                section_key,
-                                usize_to_i64(unit.paragraph_index)?,
-                                usize_to_i64(unit.sentence_index)?,
-                                usize_to_i64(unit.normalized_range.start())?,
-                                usize_to_i64(unit.normalized_range.end())?,
-                                usize_to_i64(parent.start())?,
-                                usize_to_i64(parent.end())?,
-                                &unit.text,
-                            ])
-                            .map_err(text_unit_index_error)?;
-                    }
-                }
-
-                {
-                    let mut statement = transaction
-                        .prepare(
-                            "INSERT INTO text_unit_sentence_coverage_v2(
-                                doc_key,
-                                section_key,
-                                position,
-                                paragraph_index,
-                                paragraph_start,
-                                paragraph_end,
-                                content_class,
-                                eligibility,
-                                paragraph_chars,
-                                sentence_chars,
-                                separator_chars,
-                                coarse_only_chars,
-                                sentence_count
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                        )
-                        .map_err(text_unit_index_error)?;
-
-                    let mut positions: HashMap<SectionId, i64> = HashMap::new();
-                    for coverage in &sentences.coverage {
-                        let section_key = section_keys[&coverage.owner_section_id];
-                        let position = positions
-                            .entry(coverage.owner_section_id.clone())
-                            .or_insert(0);
-                        let paragraph = paragraph_ranges
-                            .get(&(section_key, coverage.paragraph_index))
-                            .ok_or_else(|| {
-                                ApplicationError::TextUnitIndexFailed(format!(
-                                    "sentence coverage {} has no persisted paragraph range",
-                                    coverage.paragraph_id.0
-                                ))
-                            })?;
-                        statement
-                            .execute(params![
-                                doc_key,
-                                section_key,
-                                *position,
-                                usize_to_i64(coverage.paragraph_index)?,
-                                usize_to_i64(paragraph.start())?,
-                                usize_to_i64(paragraph.end())?,
-                                content_class_code(coverage.content_class),
-                                sentence_eligibility_code(coverage.eligibility),
-                                usize_to_i64(coverage.paragraph_chars)?,
-                                usize_to_i64(coverage.sentence_chars)?,
-                                usize_to_i64(coverage.separator_chars)?,
-                                usize_to_i64(coverage.coarse_only_chars)?,
-                                usize_to_i64(coverage.sentence_count)?,
-                            ])
-                            .map_err(text_unit_index_error)?;
-                        *position += 1;
-                    }
-                }
-
-                // Group the section's units and coverages in one pass, then plan and store each section's
-                // stream. Never call `SectionTextUnits::from_sets` per section (that would be O(units x
-                // sections)) and never clone unit text.
+                // Group each section's units and coverages in one pass over the sets.
                 let mut groups: HashMap<SectionId, SectionGroups<'_>> = HashMap::new();
                 for unit in &paragraphs.units {
                     groups
@@ -1007,119 +835,76 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 }
 
                 {
-                    let mut stream_statement = transaction
+                    let mut chunk_statement = transaction
                         .prepare(
-                            "INSERT INTO text_unit_streams_v2(
-                                doc_key,
-                                section_key,
-                                requested_kind,
-                                position,
-                                eligible_position,
-                                unit_kind,
-                                unit_source_order,
-                                content_class,
-                                degradation,
-                                char_count
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            "INSERT INTO section_text_v1(doc_key, section_key, chunk_no, text)
+                             VALUES (?1, ?2, ?3, ?4)",
                         )
                         .map_err(text_unit_index_error)?;
-                    let mut summary_statement = transaction
+                    let mut layout_statement = transaction
                         .prepare(
-                            "INSERT INTO text_unit_stream_summaries_v2(
+                            "INSERT INTO section_layout_v1(
                                 doc_key,
                                 section_key,
-                                requested_kind,
-                                coverage_policy,
-                                total_items,
-                                coverage_json
+                                section_id,
+                                char_len,
+                                paragraph_coverage_json,
+                                layout
                              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         )
                         .map_err(text_unit_index_error)?;
 
-                    for (section_id, group) in &groups {
-                        let Some(_) = group.paragraph_coverage else {
-                            continue;
+                    for section in &ordered_sections {
+                        let section_key = section_keys[&section.id];
+                        insert_section_text(
+                            &mut chunk_statement,
+                            doc_key,
+                            section_key,
+                            &section.content,
+                        )?;
+
+                        let group = groups.get(&section.id);
+                        let paragraph_coverage_json =
+                            match group.and_then(|group| group.paragraph_coverage) {
+                                Some(coverage) => Some(
+                                    serde_json::to_string(&StoredParagraphCoverage::from_coverage(
+                                        coverage,
+                                    ))
+                                    .map_err(|error| {
+                                        ApplicationError::TextUnitIndexFailed(error.to_string())
+                                    })?,
+                                ),
+                                None => None,
+                            };
+                        let layout = match group {
+                            Some(group) => build_section_layout(group)?,
+                            None => SectionLayout {
+                                paragraphs: Vec::new(),
+                                sentences: Vec::new(),
+                                coverage: Vec::new(),
+                            },
                         };
-                        let section_key = section_keys[section_id];
-                        for requested_kind in [
-                            RequestedTextUnitKind::Paragraph,
-                            RequestedTextUnitKind::Sentence,
-                        ] {
-                            let plan = plan_section_stream(
-                                section_id,
-                                &group.paragraphs,
-                                group.paragraph_coverage,
-                                &group.sentences,
-                                &group.sentence_coverage,
-                                requested_kind,
-                            )
-                            .map_err(|error| {
-                                ApplicationError::TextUnitIndexFailed(format!(
-                                    "cannot plan the text unit stream of section {}: {error}",
-                                    section_id.0
-                                ))
-                            })?;
-
-                            let mut eligible_position = 0i64;
-                            for (position, entry) in plan.entries.iter().enumerate() {
-                                let eligible_position_value = if entry.eligible {
-                                    Some(eligible_position)
-                                } else {
-                                    None
-                                };
-                                if entry.eligible {
-                                    eligible_position += 1;
-                                }
-                                stream_statement
-                                    .execute(params![
-                                        doc_key,
-                                        section_key,
-                                        requested_kind_code(requested_kind),
-                                        usize_to_i64(position)?,
-                                        eligible_position_value,
-                                        unit_kind_code(entry.unit),
-                                        usize_to_i64(entry.unit.source_order())?,
-                                        content_class_code(entry.content_class),
-                                        entry.degradation.map(degradation_code).transpose()?,
-                                        usize_to_i64(entry.char_count)?,
-                                    ])
-                                    .map_err(text_unit_index_error)?;
-                            }
-
-                            for (policy, coverage, total_items) in [
-                                (
-                                    TextUnitCoveragePolicy::PreserveSource,
-                                    &plan.preserve_source,
-                                    plan.entries.len(),
-                                ),
-                                (
-                                    TextUnitCoveragePolicy::EligibleOnly,
-                                    &plan.eligible_only,
-                                    eligible_position as usize,
-                                ),
-                            ] {
-                                let coverage_json = serde_json::to_string(
-                                    &StoredStreamCoverage::from_coverage(coverage),
-                                )
-                                .map_err(|error| {
-                                    ApplicationError::TextUnitIndexFailed(error.to_string())
-                                })?;
-                                summary_statement
-                                    .execute(params![
-                                        doc_key,
-                                        section_key,
-                                        requested_kind_code(requested_kind),
-                                        coverage_policy_code(policy),
-                                        usize_to_i64(total_items)?,
-                                        coverage_json,
-                                    ])
-                                    .map_err(text_unit_index_error)?;
-                            }
-                        }
+                        let layout_blob = layout.encode()?;
+                        layout_statement
+                            .execute(params![
+                                doc_key,
+                                section_key,
+                                &section.id.0,
+                                usize_to_i64(section.normalized_text_len())?,
+                                paragraph_coverage_json,
+                                layout_blob,
+                            ])
+                            .map_err(text_unit_index_error)?;
                     }
                 }
 
                 transaction.commit().map_err(text_unit_index_error)?;
+                let mut cache = cache.lock().map_err(|_| {
+                    ApplicationError::TextUnitIndexFailed(
+                        "section layout cache lock poisoned".into(),
+                    )
+                })?;
+                cache.remove_document(doc_key);
                 Ok(())
             },
         )
@@ -1133,6 +918,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Option<SectionTextUnits>, ApplicationError> {
         let document_id = document_id.clone();
         let section_id = section_id.clone();
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -1143,7 +929,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Ok(None);
                 }
-                let Some(section) = load_section(connection, meta.doc_key, &section_id)? else {
+                let Some(entry) =
+                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
+                else {
                     return Ok(Some(SectionTextUnits {
                         paragraphs: Vec::new(),
                         paragraph_coverage: None,
@@ -1152,158 +940,72 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     }));
                 };
 
-                let paragraph_coverage = section
-                    .paragraph_coverage_json
-                    .map(
-                        |json| -> Result<ParagraphSectionCoverage, ApplicationError> {
-                            let stored: StoredParagraphCoverage = serde_json::from_str(&json)
-                                .map_err(|error| {
-                                    ApplicationError::TextUnitIndexFailed(error.to_string())
-                                })?;
-                            Ok(stored.into_coverage())
-                        },
-                    )
-                    .transpose()?;
+                let text =
+                    load_section_text(connection, meta.doc_key, entry.section_key, entry.char_len)?;
+                let index = NormalizedTextIndex::new(&text);
 
-                let mut paragraphs = Vec::new();
-                let mut sentences = Vec::new();
-                {
-                    let mut statement = connection
-                        .prepare(
-                            "SELECT kind, source_order, paragraph_index, sentence_index,
-                                    range_start, range_end, parent_start, parent_end, text
-                             FROM text_unit_items_v2
-                             WHERE doc_key = ?1 AND section_key = ?2
-                             ORDER BY kind, source_order",
-                        )
-                        .map_err(text_unit_index_error)?;
-                    let rows = statement
-                        .query_map(params![meta.doc_key, section.section_key], |row| {
-                            Ok((
-                                row.get::<_, i64>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, i64>(3)?,
-                                row.get::<_, i64>(4)?,
-                                row.get::<_, i64>(5)?,
-                                row.get::<_, Option<i64>>(6)?,
-                                row.get::<_, Option<i64>>(7)?,
-                                row.get::<_, String>(8)?,
-                            ))
-                        })
-                        .map_err(text_unit_index_error)?;
-                    for row in rows {
-                        let (
-                            kind,
-                            source_order,
-                            paragraph_index,
-                            sentence_index,
-                            range_start,
-                            range_end,
-                            parent_start,
-                            parent_end,
-                            text,
-                        ) = row.map_err(text_unit_index_error)?;
-                        match unit_kind_from_code(kind)? {
-                            UNIT_KIND_PARAGRAPH => paragraphs.push(rebuild_paragraph_unit(
-                                &meta,
-                                &section_id,
-                                paragraph_index,
-                                source_order,
-                                range_start,
-                                range_end,
-                                text,
-                            )?),
-                            UNIT_KIND_SENTENCE => sentences.push(rebuild_sentence_unit(
-                                &meta,
-                                &section_id,
-                                paragraph_index,
-                                sentence_index,
-                                source_order,
-                                range_start,
-                                range_end,
-                                parent_start,
-                                parent_end,
-                                text,
-                            )?),
-                            _ => unreachable!("unit kind codes are validated"),
-                        }
-                    }
+                let mut paragraphs = Vec::with_capacity(entry.layout.paragraphs.len());
+                for paragraph in &entry.layout.paragraphs {
+                    let unit_text =
+                        slice_section_text(&index, paragraph.start, paragraph.end, "paragraph")?;
+                    paragraphs.push(rebuild_paragraph_unit(
+                        &meta,
+                        &section_id,
+                        usize_to_i64(paragraph.paragraph_index)?,
+                        usize_to_i64(paragraph.source_order)?,
+                        usize_to_i64(paragraph.start)?,
+                        usize_to_i64(paragraph.end)?,
+                        unit_text,
+                    )?);
                 }
 
-                let mut sentence_coverage = Vec::new();
-                {
-                    let mut statement = connection
-                        .prepare(
-                            "SELECT paragraph_index, paragraph_start, paragraph_end, content_class,
-                                    eligibility, paragraph_chars, sentence_chars, separator_chars,
-                                    coarse_only_chars, sentence_count
-                             FROM text_unit_sentence_coverage_v2
-                             WHERE doc_key = ?1 AND section_key = ?2
-                             ORDER BY position",
-                        )
-                        .map_err(text_unit_index_error)?;
-                    let rows = statement
-                        .query_map(params![meta.doc_key, section.section_key], |row| {
-                            Ok((
-                                row.get::<_, i64>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, i64>(3)?,
-                                row.get::<_, i64>(4)?,
-                                row.get::<_, i64>(5)?,
-                                row.get::<_, i64>(6)?,
-                                row.get::<_, i64>(7)?,
-                                row.get::<_, i64>(8)?,
-                                row.get::<_, i64>(9)?,
-                            ))
-                        })
-                        .map_err(text_unit_index_error)?;
-                    for row in rows {
-                        let (
-                            paragraph_index,
-                            paragraph_start,
-                            paragraph_end,
-                            content_class,
-                            eligibility,
-                            paragraph_chars,
-                            sentence_chars,
-                            separator_chars,
-                            coarse_only_chars,
-                            sentence_count,
-                        ) = row.map_err(text_unit_index_error)?;
-                        let paragraph_index = i64_to_usize(paragraph_index, "paragraph_index")?;
-                        let paragraph_range = stored_normalized_range(
-                            i64_to_usize(paragraph_start, "paragraph_start")?,
-                            i64_to_usize(paragraph_end, "paragraph_end")?,
-                        )?;
-                        sentence_coverage.push(SentenceParagraphCoverage {
-                            owner_section_id: section_id.clone(),
-                            paragraph_id: paragraph_text_unit_id(
-                                &meta.document_id,
-                                &meta.normalized_document_hash,
-                                &section_id,
-                                paragraph_index,
-                                paragraph_range,
-                            ),
-                            paragraph_index,
-                            content_class: content_class_from_code(content_class)?,
-                            eligibility: sentence_eligibility_from_code(eligibility)?,
-                            paragraph_chars: i64_to_usize(paragraph_chars, "paragraph_chars")?,
-                            sentence_chars: i64_to_usize(sentence_chars, "sentence_chars")?,
-                            separator_chars: i64_to_usize(separator_chars, "separator_chars")?,
-                            coarse_only_chars: i64_to_usize(
-                                coarse_only_chars,
-                                "coarse_only_chars",
-                            )?,
-                            sentence_count: i64_to_usize(sentence_count, "sentence_count")?,
-                        });
-                    }
+                let mut sentences = Vec::with_capacity(entry.layout.sentences.len());
+                for sentence in &entry.layout.sentences {
+                    let unit_text =
+                        slice_section_text(&index, sentence.start, sentence.end, "sentence")?;
+                    sentences.push(rebuild_sentence_unit(
+                        &meta,
+                        &section_id,
+                        usize_to_i64(sentence.paragraph_index)?,
+                        usize_to_i64(sentence.sentence_index)?,
+                        usize_to_i64(sentence.source_order)?,
+                        usize_to_i64(sentence.start)?,
+                        usize_to_i64(sentence.end)?,
+                        Some(usize_to_i64(sentence.parent_start)?),
+                        Some(usize_to_i64(sentence.parent_end)?),
+                        unit_text,
+                    )?);
+                }
+
+                let mut sentence_coverage = Vec::with_capacity(entry.layout.coverage.len());
+                for coverage in &entry.layout.coverage {
+                    let paragraph_range =
+                        stored_normalized_range(coverage.paragraph_start, coverage.paragraph_end)?;
+                    sentence_coverage.push(SentenceParagraphCoverage {
+                        owner_section_id: section_id.clone(),
+                        paragraph_id: paragraph_text_unit_id(
+                            &meta.document_id,
+                            &meta.normalized_document_hash,
+                            &section_id,
+                            coverage.paragraph_index,
+                            paragraph_range,
+                        ),
+                        paragraph_index: coverage.paragraph_index,
+                        content_class: content_class_from_code(i64::from(coverage.content_class))?,
+                        eligibility: sentence_eligibility_from_code(i64::from(
+                            coverage.eligibility,
+                        ))?,
+                        paragraph_chars: coverage.paragraph_chars,
+                        sentence_chars: coverage.sentence_chars,
+                        separator_chars: coverage.separator_chars,
+                        coarse_only_chars: coverage.coarse_only_chars,
+                        sentence_count: coverage.sentence_count,
+                    });
                 }
 
                 Ok(Some(SectionTextUnits {
                     paragraphs,
-                    paragraph_coverage,
+                    paragraph_coverage: entry.paragraph_coverage.clone(),
                     sentences,
                     sentence_coverage,
                 }))
@@ -1322,6 +1024,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Option<OwnedStreamUnit>, ApplicationError> {
         let document_id = document_id.clone();
         let section_id = section_id.clone();
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -1332,109 +1035,67 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Err(stale_text_units(&document_id));
                 }
-                let Some(section) = load_section(connection, meta.doc_key, &section_id)? else {
-                    return Err(stale_text_units(&document_id));
-                };
-
-                let has_paragraph_stream = connection
-                    .query_row(
-                        "SELECT 1
-                         FROM text_unit_stream_summaries_v2
-                         WHERE doc_key = ?1
-                           AND section_key = ?2
-                           AND requested_kind = ?3
-                           AND coverage_policy = ?4",
-                        params![
-                            meta.doc_key,
-                            section.section_key,
-                            requested_kind_code(RequestedTextUnitKind::Paragraph),
-                            coverage_policy_code(TextUnitCoveragePolicy::PreserveSource)
-                        ],
-                        |_| Ok(()),
-                    )
-                    .optional()
-                    .map_err(text_unit_index_error)?
-                    .is_some();
-                if !has_paragraph_stream {
-                    return Err(stale_text_units(&document_id));
-                }
-
-                let paragraph_index = usize_to_i64(paragraph_index)?;
-                let sentence_index = sentence_index.map(usize_to_i64).transpose()?.unwrap_or(0);
-                let found = connection
-                    .query_row(
-                        "SELECT source_order, paragraph_index, sentence_index, range_start,
-                                range_end, parent_start, parent_end, text
-                         FROM text_unit_items_v2
-                         WHERE doc_key = ?1
-                           AND section_key = ?2
-                           AND kind = ?3
-                           AND paragraph_index = ?4
-                           AND sentence_index = ?5
-                         LIMIT 1",
-                        params![
-                            meta.doc_key,
-                            section.section_key,
-                            effective_unit_kind_code(unit_kind),
-                            paragraph_index,
-                            sentence_index,
-                        ],
-                        |row| {
-                            Ok((
-                                row.get::<_, i64>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, i64>(3)?,
-                                row.get::<_, i64>(4)?,
-                                row.get::<_, Option<i64>>(5)?,
-                                row.get::<_, Option<i64>>(6)?,
-                                row.get::<_, String>(7)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(text_unit_index_error)?;
-                let Some((
-                    source_order,
-                    paragraph_index,
-                    sentence_index,
-                    range_start,
-                    range_end,
-                    parent_start,
-                    parent_end,
-                    text,
-                )) = found
+                let Some(entry) =
+                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
                 else {
-                    return Ok(None);
+                    return Err(stale_text_units(&document_id));
                 };
-                let unit = match unit_kind {
+
+                match unit_kind {
                     EffectiveTextUnitKind::Paragraph => {
-                        OwnedStreamUnit::Paragraph(rebuild_paragraph_unit(
+                        let Some(paragraph) = entry
+                            .layout
+                            .paragraphs
+                            .iter()
+                            .find(|paragraph| paragraph.paragraph_index == paragraph_index)
+                        else {
+                            return Ok(None);
+                        };
+                        let text = load_text_slice(
+                            connection,
+                            meta.doc_key,
+                            entry.section_key,
+                            paragraph.start,
+                            paragraph.end,
+                        )?;
+                        Ok(Some(OwnedStreamUnit::Paragraph(rebuild_paragraph_unit(
                             &meta,
                             &section_id,
-                            paragraph_index,
-                            source_order,
-                            range_start,
-                            range_end,
+                            usize_to_i64(paragraph.paragraph_index)?,
+                            usize_to_i64(paragraph.source_order)?,
+                            usize_to_i64(paragraph.start)?,
+                            usize_to_i64(paragraph.end)?,
                             text,
-                        )?)
+                        )?)))
                     }
                     EffectiveTextUnitKind::Sentence => {
-                        OwnedStreamUnit::Sentence(rebuild_sentence_unit(
+                        let Some(sentence) = entry.layout.sentences.iter().find(|sentence| {
+                            sentence.paragraph_index == paragraph_index
+                                && Some(sentence.sentence_index) == sentence_index
+                        }) else {
+                            return Ok(None);
+                        };
+                        let text = load_text_slice(
+                            connection,
+                            meta.doc_key,
+                            entry.section_key,
+                            sentence.start,
+                            sentence.end,
+                        )?;
+                        Ok(Some(OwnedStreamUnit::Sentence(rebuild_sentence_unit(
                             &meta,
                             &section_id,
-                            paragraph_index,
-                            sentence_index,
-                            source_order,
-                            range_start,
-                            range_end,
-                            parent_start,
-                            parent_end,
+                            usize_to_i64(sentence.paragraph_index)?,
+                            usize_to_i64(sentence.sentence_index)?,
+                            usize_to_i64(sentence.source_order)?,
+                            usize_to_i64(sentence.start)?,
+                            usize_to_i64(sentence.end)?,
+                            Some(usize_to_i64(sentence.parent_start)?),
+                            Some(usize_to_i64(sentence.parent_end)?),
                             text,
-                        )?)
+                        )?)))
                     }
-                };
-                Ok(Some(unit))
+                }
             },
         )
         .await
@@ -1448,6 +1109,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -1458,51 +1120,29 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Ok(None);
                 }
-
-                let section = load_section(connection, meta.doc_key, &section_id)?;
-                let summary = match &section {
-                    Some(section) => connection
-                        .query_row(
-                            "SELECT total_items, coverage_json
-                             FROM text_unit_stream_summaries_v2
-                             WHERE doc_key = ?1
-                               AND section_key = ?2
-                               AND requested_kind = ?3
-                               AND coverage_policy = ?4",
-                            params![
-                                meta.doc_key,
-                                section.section_key,
-                                requested_kind_code(kind),
-                                coverage_policy_code(policy)
-                            ],
-                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                        )
-                        .optional()
-                        .map_err(text_unit_index_error)?,
-                    None => None,
-                };
-                let Some((total_items, coverage_json)) = summary else {
-                    // A section without paragraph coverage was never written (it cannot be planned), so the
-                    // planner path must report today's "paragraph coverage is unavailable" error. A section
-                    // that has coverage but no summary row is stale storage: report it as missing so the
-                    // caller asks for a reopen.
-                    let has_coverage = section
-                        .as_ref()
-                        .is_some_and(|section| section.paragraph_coverage_json.is_some());
-                    if has_coverage {
-                        return Ok(None);
-                    }
+                let Some(entry) =
+                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
+                else {
+                    // A stored document whose section has no layout row behaves like the v2 store's
+                    // section without paragraph coverage: the planner reports it as unavailable.
                     return Err(ApplicationError::InvalidRequest(format!(
                         "paragraph coverage is unavailable for section {}",
                         section_id.0
                     )));
                 };
-
-                let stored: StoredStreamCoverage = serde_json::from_str(&coverage_json)
-                    .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
+                let plan = entry.plan(kind)?;
+                let (total_items, coverage) = match policy {
+                    TextUnitCoveragePolicy::PreserveSource => {
+                        (plan.entries.len(), plan.preserve_source.clone())
+                    }
+                    TextUnitCoveragePolicy::EligibleOnly => (
+                        plan.entries.iter().filter(|entry| entry.eligible).count(),
+                        plan.eligible_only.clone(),
+                    ),
+                };
                 Ok(Some(TextUnitStreamSummary {
-                    total_items: i64_to_usize(total_items, "total_items")?,
-                    coverage: stored.into_coverage(),
+                    total_items,
+                    coverage,
                 }))
             },
         )
@@ -1520,6 +1160,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -1527,120 +1168,53 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
                     return Ok(Vec::new());
                 };
-                let Some(section) = load_section(connection, meta.doc_key, &section_id)? else {
+                let Some(entry) =
+                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
+                else {
                     return Ok(Vec::new());
                 };
-                let position_column = match policy {
-                    TextUnitCoveragePolicy::PreserveSource => "position",
-                    TextUnitCoveragePolicy::EligibleOnly => "eligible_position",
-                };
-                let order = match direction {
-                    TextUnitDirection::Forward => "ASC",
-                    TextUnitDirection::Backward => "DESC",
-                };
-                let comparison = match direction {
-                    TextUnitDirection::Forward => ">=",
-                    TextUnitDirection::Backward => "<",
-                };
-                let sql = format!(
-                    "SELECT s.{position_column}, s.unit_kind, s.content_class, s.degradation,
-                            s.char_count, i.source_order, i.paragraph_index, i.sentence_index,
-                            i.range_start, i.range_end, i.parent_start, i.parent_end, i.text
-                     FROM text_unit_streams_v2 s
-                     JOIN text_unit_items_v2 i
-                       ON i.doc_key = s.doc_key
-                      AND i.kind = s.unit_kind
-                      AND i.source_order = s.unit_source_order
-                     WHERE s.doc_key = ?1
-                       AND s.section_key = ?2
-                       AND s.requested_kind = ?3
-                       AND s.{position_column} {comparison} ?4
-                     ORDER BY s.{position_column} {order}
-                     LIMIT ?5"
-                );
-                let position = usize_to_i64(position)?;
-                let limit = usize_to_i64(limit)?;
-                let mut statement = connection.prepare(&sql).map_err(text_unit_index_error)?;
-                let rows = statement
-                    .query_map(
-                        params![
-                            meta.doc_key,
-                            section.section_key,
-                            requested_kind_code(kind),
-                            position,
-                            limit
-                        ],
-                        |row| {
-                            Ok((
-                                row.get::<_, i64>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, Option<i64>>(3)?,
-                                row.get::<_, i64>(4)?,
-                                row.get::<_, i64>(5)?,
-                                row.get::<_, i64>(6)?,
-                                row.get::<_, i64>(7)?,
-                                row.get::<_, i64>(8)?,
-                                row.get::<_, i64>(9)?,
-                                row.get::<_, Option<i64>>(10)?,
-                                row.get::<_, Option<i64>>(11)?,
-                                row.get::<_, String>(12)?,
-                            ))
-                        },
-                    )
-                    .map_err(text_unit_index_error)?;
-
-                let mut items = Vec::new();
-                for row in rows {
-                    let (
-                        position,
-                        unit_kind,
-                        content_class,
-                        degradation,
-                        char_count,
-                        source_order,
-                        paragraph_index,
-                        sentence_index,
-                        range_start,
-                        range_end,
-                        parent_start,
-                        parent_end,
-                        text,
-                    ) = row.map_err(text_unit_index_error)?;
-                    let unit = match unit_kind_from_code(unit_kind)? {
-                        UNIT_KIND_PARAGRAPH => OwnedStreamUnit::Paragraph(rebuild_paragraph_unit(
-                            &meta,
-                            &section_id,
-                            paragraph_index,
-                            source_order,
-                            range_start,
-                            range_end,
-                            text,
-                        )?),
-                        UNIT_KIND_SENTENCE => OwnedStreamUnit::Sentence(rebuild_sentence_unit(
-                            &meta,
-                            &section_id,
-                            paragraph_index,
-                            sentence_index,
-                            source_order,
-                            range_start,
-                            range_end,
-                            parent_start,
-                            parent_end,
-                            text,
-                        )?),
-                        _ => unreachable!("unit kind codes are validated"),
-                    };
-                    items.push(StoredStreamItem {
-                        position: i64_to_usize(position, "stream position")?,
-                        unit,
-                        content_class: content_class_from_code(content_class)?,
-                        degradation: degradation.map(degradation_from_code).transpose()?,
-                        char_count: i64_to_usize(char_count, "char_count")?,
-                    });
+                if entry.section_coverage.is_none() {
+                    return Ok(Vec::new());
                 }
-                if direction == TextUnitDirection::Backward {
-                    items.reverse();
+                let plan = entry.plan(kind)?;
+
+                let mut stream = Vec::with_capacity(plan.entries.len());
+                let mut eligible_position = 0usize;
+                for (preserve_position, item) in plan.entries.iter().enumerate() {
+                    let stream_position = match policy {
+                        TextUnitCoveragePolicy::PreserveSource => preserve_position,
+                        TextUnitCoveragePolicy::EligibleOnly => {
+                            if !item.eligible {
+                                continue;
+                            }
+                            let stream_position = eligible_position;
+                            eligible_position += 1;
+                            stream_position
+                        }
+                    };
+                    stream.push((stream_position, item));
+                }
+
+                let total = stream.len();
+                let (start, end) = match direction {
+                    TextUnitDirection::Forward => {
+                        (position.min(total), (position + limit).min(total))
+                    }
+                    TextUnitDirection::Backward => {
+                        let end = position.min(total);
+                        (end.saturating_sub(limit), end)
+                    }
+                };
+
+                let mut items = Vec::with_capacity(end - start);
+                for (stream_position, item) in &stream[start..end] {
+                    items.push(StoredStreamItem {
+                        position: *stream_position,
+                        unit: build_owned_unit(connection, &meta, &entry, item.unit)?,
+                        content_class: item.content_class,
+                        degradation: item.degradation.map(str::to_owned),
+                        char_count: item.char_count,
+                    });
                 }
                 Ok(items)
             },
@@ -1659,6 +1233,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
+        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -1666,48 +1241,58 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
                     return Ok(None);
                 };
-                let Some(section) = load_section(connection, meta.doc_key, &section_id)? else {
+                let Some(entry) =
+                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
+                else {
                     return Ok(None);
                 };
-                let position_column = match policy {
-                    TextUnitCoveragePolicy::PreserveSource => "position",
-                    TextUnitCoveragePolicy::EligibleOnly => "eligible_position",
-                };
-                let sql = format!(
-                    "SELECT s.{position_column}
-                     FROM text_unit_streams_v2 s
-                     JOIN text_unit_items_v2 i
-                       ON i.doc_key = s.doc_key
-                      AND i.kind = s.unit_kind
-                      AND i.source_order = s.unit_source_order
-                     WHERE s.doc_key = ?1
-                       AND s.section_key = ?2
-                       AND s.requested_kind = ?3
-                       AND s.unit_kind = ?4
-                       AND i.paragraph_index = ?5
-                       AND i.sentence_index = ?6"
-                );
-                let paragraph_index = usize_to_i64(paragraph_index)?;
-                let sentence_index = sentence_index.map(usize_to_i64).transpose()?.unwrap_or(0);
-                let found = connection
-                    .query_row(
-                        &sql,
-                        params![
-                            meta.doc_key,
-                            section.section_key,
-                            requested_kind_code(kind),
-                            effective_unit_kind_code(unit_kind),
-                            paragraph_index,
-                            sentence_index
-                        ],
-                        |row| row.get::<_, Option<i64>>(0),
-                    )
-                    .optional()
-                    .map_err(text_unit_index_error)?;
-                match found {
-                    Some(Some(position)) => Ok(Some(i64_to_usize(position, "stream position")?)),
-                    _ => Ok(None),
+                if entry.section_coverage.is_none() {
+                    return Ok(None);
                 }
+                let target = match unit_kind {
+                    EffectiveTextUnitKind::Paragraph => {
+                        if sentence_index.is_some() {
+                            return Ok(None);
+                        }
+                        entry
+                            .layout
+                            .paragraphs
+                            .iter()
+                            .position(|paragraph| paragraph.paragraph_index == paragraph_index)
+                            .map(UnitRef::Paragraph)
+                    }
+                    EffectiveTextUnitKind::Sentence => entry
+                        .layout
+                        .sentences
+                        .iter()
+                        .position(|sentence| {
+                            sentence.paragraph_index == paragraph_index
+                                && Some(sentence.sentence_index) == sentence_index
+                        })
+                        .map(UnitRef::Sentence),
+                };
+                let Some(target) = target else {
+                    return Ok(None);
+                };
+                let plan = entry.plan(kind)?;
+                let mut eligible_position = 0usize;
+                for (preserve_position, item) in plan.entries.iter().enumerate() {
+                    let stream_position = match policy {
+                        TextUnitCoveragePolicy::PreserveSource => preserve_position,
+                        TextUnitCoveragePolicy::EligibleOnly => {
+                            if !item.eligible {
+                                continue;
+                            }
+                            let stream_position = eligible_position;
+                            eligible_position += 1;
+                            stream_position
+                        }
+                    };
+                    if item.unit == target {
+                        return Ok(Some(stream_position));
+                    }
+                }
+                Ok(None)
             },
         )
         .await
@@ -1731,11 +1316,6 @@ struct StoredUnitDocument {
     segmentation_version: String,
 }
 
-struct StoredUnitSection {
-    section_key: i64,
-    paragraph_coverage_json: Option<String>,
-}
-
 fn load_stored_document(
     connection: &Connection,
     document_id: &DocumentId,
@@ -1744,7 +1324,11 @@ fn load_stored_document(
         .query_row(
             "SELECT doc_key, document_id, content_hash, normalized_document_hash, segmentation_version
              FROM text_unit_documents_v2
-             WHERE document_id = ?1",
+             WHERE document_id = ?1
+               AND EXISTS (
+                    SELECT 1 FROM section_layout_v1
+                    WHERE section_layout_v1.doc_key = text_unit_documents_v2.doc_key
+               )",
             params![&document_id.0],
             |row| {
                 Ok(StoredUnitDocument {
@@ -1760,72 +1344,551 @@ fn load_stored_document(
         .map_err(text_unit_index_error)
 }
 
-fn load_section(
+fn load_cached_section_layout(
     connection: &Connection,
-    doc_key: i64,
+    cache: &Mutex<SectionLayoutCache>,
+    meta: &StoredUnitDocument,
     section_id: &SectionId,
-) -> Result<Option<StoredUnitSection>, ApplicationError> {
-    connection
+) -> Result<Option<Arc<CachedSectionLayout>>, ApplicationError> {
+    let data_version: i64 = connection
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .map_err(text_unit_index_error)?;
+    let mut cache = cache.lock().map_err(|_| {
+        ApplicationError::TextUnitIndexFailed("section layout cache lock poisoned".into())
+    })?;
+    cache.sync_version(data_version);
+
+    let row = connection
         .query_row(
-            "SELECT section_key, paragraph_coverage_json
-             FROM text_unit_sections_v2
+            "SELECT section_key, char_len, paragraph_coverage_json
+             FROM section_layout_v1
              WHERE doc_key = ?1 AND section_id = ?2",
-            params![doc_key, &section_id.0],
+            params![meta.doc_key, &section_id.0],
             |row| {
-                Ok(StoredUnitSection {
-                    section_key: row.get(0)?,
-                    paragraph_coverage_json: row.get(1)?,
-                })
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             },
         )
         .optional()
-        .map_err(text_unit_index_error)
+        .map_err(text_unit_index_error)?;
+    let Some((section_key, char_len, coverage_json)) = row else {
+        return Ok(None);
+    };
+    if let Some(entry) = cache.get(meta.doc_key, section_key) {
+        return Ok(Some(entry));
+    }
+
+    let layout_blob: Vec<u8> = connection
+        .query_row(
+            "SELECT layout FROM section_layout_v1 WHERE doc_key = ?1 AND section_key = ?2",
+            params![meta.doc_key, section_key],
+            |row| row.get(0),
+        )
+        .map_err(text_unit_index_error)?;
+    let layout = SectionLayout::decode(&layout_blob)?;
+    let paragraph_coverage = coverage_json
+        .map(
+            |json| -> Result<ParagraphSectionCoverage, ApplicationError> {
+                let stored: StoredParagraphCoverage = serde_json::from_str(&json)
+                    .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
+                Ok(stored.into_coverage())
+            },
+        )
+        .transpose()?;
+    let entry = Arc::new(CachedSectionLayout::new(
+        meta.doc_key,
+        section_key,
+        section_id.clone(),
+        i64_to_usize(char_len, "char_len")?,
+        paragraph_coverage,
+        layout,
+    )?);
+    cache.insert(Arc::clone(&entry));
+    Ok(Some(entry))
 }
 
-fn paragraph_units_from_v2(
+fn load_section_text(
     connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+    char_len: usize,
+) -> Result<String, ApplicationError> {
+    if char_len == 0 {
+        return Ok(String::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT chunk_no, text
+             FROM section_text_v1
+             WHERE doc_key = ?1 AND section_key = ?2
+             ORDER BY chunk_no ASC",
+        )
+        .map_err(text_unit_index_error)?;
+    let rows = statement
+        .query_map(params![doc_key, section_key], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(text_unit_index_error)?;
+    let mut text = String::new();
+    let mut expected_chunk = 0i64;
+    for row in rows {
+        let (chunk_no, chunk) = row.map_err(text_unit_index_error)?;
+        if chunk_no != expected_chunk {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} is missing text chunk {expected_chunk}"
+            )));
+        }
+        expected_chunk += 1;
+        text.push_str(&chunk);
+    }
+    if text.chars().count() != char_len {
+        return Err(ApplicationError::TextUnitIndexFailed(format!(
+            "section {section_key} text has {} chars, expected {char_len}",
+            text.chars().count()
+        )));
+    }
+    Ok(text)
+}
+
+fn load_text_slice(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+    start: usize,
+    end: usize,
+) -> Result<String, ApplicationError> {
+    if start >= end {
+        return Ok(String::new());
+    }
+    let first_chunk = start / CHUNK_CHARS;
+    let last_chunk = (end - 1) / CHUNK_CHARS;
+    let mut statement = connection
+        .prepare(
+            "SELECT chunk_no, text
+             FROM section_text_v1
+             WHERE doc_key = ?1 AND section_key = ?2
+               AND chunk_no BETWEEN ?3 AND ?4
+             ORDER BY chunk_no ASC",
+        )
+        .map_err(text_unit_index_error)?;
+    let rows = statement
+        .query_map(
+            params![
+                doc_key,
+                section_key,
+                usize_to_i64(first_chunk)?,
+                usize_to_i64(last_chunk)?
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(text_unit_index_error)?;
+
+    let mut text = String::new();
+    let mut expected_chunk = first_chunk;
+    for row in rows {
+        let (chunk_no, chunk) = row.map_err(text_unit_index_error)?;
+        let chunk_no = i64_to_usize(chunk_no, "chunk_no")?;
+        if chunk_no != expected_chunk {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} is missing text chunk {expected_chunk}"
+            )));
+        }
+        expected_chunk += 1;
+        let chunk_base = chunk_no.checked_mul(CHUNK_CHARS).ok_or_else(|| {
+            ApplicationError::TextUnitIndexFailed("text chunk offset overflow".into())
+        })?;
+        let local_start = start.saturating_sub(chunk_base);
+        let local_end = end.min(chunk_base + CHUNK_CHARS) - chunk_base;
+        let chunk_len = chunk.chars().count();
+        if local_end > chunk_len {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} chunk {chunk_no} has {chunk_len} chars, expected at least {local_end}"
+            )));
+        }
+        let byte_start = char_to_byte(&chunk, local_start).ok_or_else(|| {
+            ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} chunk {chunk_no} has no char {local_start}"
+            ))
+        })?;
+        let byte_end = char_to_byte(&chunk, local_end).ok_or_else(|| {
+            ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} chunk {chunk_no} has no char {local_end}"
+            ))
+        })?;
+        text.push_str(&chunk[byte_start..byte_end]);
+    }
+    if text.chars().count() != end - start {
+        return Err(ApplicationError::TextUnitIndexFailed(format!(
+            "section {section_key} slice [{start}, {end}) has {} chars, expected {}",
+            text.chars().count(),
+            end - start
+        )));
+    }
+    Ok(text)
+}
+
+fn char_to_byte(text: &str, char_offset: usize) -> Option<usize> {
+    if char_offset == 0 {
+        return Some(0);
+    }
+    let mut count = 0usize;
+    for (byte, _) in text.char_indices() {
+        if count == char_offset {
+            return Some(byte);
+        }
+        count += 1;
+    }
+    (count == char_offset).then_some(text.len())
+}
+
+fn slice_section_text(
+    index: &NormalizedTextIndex<'_>,
+    start: usize,
+    end: usize,
+    what: &str,
+) -> Result<String, ApplicationError> {
+    let range = stored_normalized_range(start, end)?;
+    index.slice(range).map(str::to_owned).map_err(|error| {
+        ApplicationError::TextUnitIndexFailed(format!(
+            "persisted {what} range is not a valid section slice: {error}"
+        ))
+    })
+}
+
+fn paragraph_units_from_layout(
+    connection: &Connection,
+    cache: &Mutex<SectionLayoutCache>,
     meta: &StoredUnitDocument,
 ) -> Result<Vec<TextUnit>, ApplicationError> {
     let mut statement = connection
         .prepare(
-            "SELECT i.paragraph_index, i.source_order, i.range_start, i.range_end, i.text,
-                    s.section_id
-             FROM text_unit_items_v2 i
-             JOIN text_unit_sections_v2 s
-               ON s.doc_key = i.doc_key AND s.section_key = i.section_key
-             WHERE i.doc_key = ?1 AND i.kind = ?2
-             ORDER BY i.source_order ASC",
+            "SELECT section_key, section_id
+             FROM section_layout_v1
+             WHERE doc_key = ?1
+             ORDER BY section_key ASC",
         )
         .map_err(text_unit_index_error)?;
     let rows = statement
-        .query_map(params![meta.doc_key, UNIT_KIND_PARAGRAPH], |row| {
+        .query_map(params![meta.doc_key], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(text_unit_index_error)?;
+
+    let mut units = Vec::new();
+    for row in rows {
+        let (_section_key, section_id) = row.map_err(text_unit_index_error)?;
+        let section_id = SectionId(section_id);
+        let Some(entry) = load_cached_section_layout(connection, cache, meta, &section_id)? else {
+            continue;
+        };
+        let text = load_section_text(connection, meta.doc_key, entry.section_key, entry.char_len)?;
+        let index = NormalizedTextIndex::new(&text);
+        for paragraph in &entry.layout.paragraphs {
+            let unit_text =
+                slice_section_text(&index, paragraph.start, paragraph.end, "paragraph")?;
+            units.push(rebuild_paragraph_unit(
+                meta,
+                &section_id,
+                usize_to_i64(paragraph.paragraph_index)?,
+                usize_to_i64(paragraph.source_order)?,
+                usize_to_i64(paragraph.start)?,
+                usize_to_i64(paragraph.end)?,
+                unit_text,
+            )?);
+        }
+    }
+    units.sort_by_key(|unit| unit.source_order);
+    Ok(units)
+}
+
+fn legacy_list_document(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Vec<TextUnit>, ApplicationError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT
+                unit_id,
+                content_hash,
+                normalized_document_hash,
+                owner_section_id,
+                kind,
+                paragraph_index,
+                source_order,
+                range_start,
+                range_end,
+                text,
+                segmentation_version
+             FROM text_units
+             WHERE document_id = ?1
+             ORDER BY source_order ASC",
+        )
+        .map_err(text_unit_index_error)?;
+    let rows = statement
+        .query_map(params![&document_id.0], |row| {
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
             ))
         })
         .map_err(text_unit_index_error)?;
+
     let mut units = Vec::new();
     for row in rows {
-        let (paragraph_index, source_order, range_start, range_end, text, section_id) =
-            row.map_err(text_unit_index_error)?;
-        units.push(rebuild_paragraph_unit(
-            meta,
-            &SectionId(section_id),
+        let (
+            unit_id,
+            content_hash,
+            normalized_document_hash,
+            owner_section_id,
+            kind,
             paragraph_index,
             source_order,
             range_start,
             range_end,
             text,
-        )?);
+            segmentation_version,
+        ) = row.map_err(text_unit_index_error)?;
+        let kind = match kind.as_str() {
+            "paragraph" => TextUnitKind::Paragraph,
+            other => {
+                return Err(ApplicationError::TextUnitIndexFailed(format!(
+                    "unsupported persisted text unit kind {other:?}"
+                )));
+            }
+        };
+        let range_start = i64_to_usize(range_start, "range_start")?;
+        let range_end = i64_to_usize(range_end, "range_end")?;
+        let normalized_range =
+            NormalizedTextRange::new(range_start, range_end).map_err(|error| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "invalid persisted normalized range: {error}"
+                ))
+            })?;
+
+        if normalized_range.len() != text.chars().count() {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "persisted unit {unit_id} range length {} does not match text length {}",
+                normalized_range.len(),
+                text.chars().count()
+            )));
+        }
+
+        units.push(TextUnit {
+            id: TextUnitId(unit_id),
+            document_id: document_id.clone(),
+            content_hash: ContentHash(content_hash),
+            normalized_document_hash: NormalizedDocumentHash(normalized_document_hash),
+            owner_section_id: SectionId(owner_section_id),
+            kind,
+            paragraph_index: i64_to_usize(paragraph_index, "paragraph_index")?,
+            source_order: i64_to_usize(source_order, "source_order")?,
+            normalized_range,
+            text,
+            segmentation_version,
+        });
     }
     Ok(units)
 }
 
+fn collect_sections<'a>(sections: &'a [Section], out: &mut Vec<&'a Section>) {
+    for section in sections {
+        out.push(section);
+        collect_sections(&section.children, out);
+    }
+}
+
+fn insert_section_text(
+    statement: &mut rusqlite::Statement<'_>,
+    doc_key: i64,
+    section_key: i64,
+    text: &str,
+) -> Result<(), ApplicationError> {
+    let mut chunk_no = 0i64;
+    let mut start = 0usize;
+    let mut chars = 0usize;
+    for (index, _) in text.char_indices() {
+        if chars == CHUNK_CHARS {
+            statement
+                .execute(params![doc_key, section_key, chunk_no, &text[start..index]])
+                .map_err(text_unit_index_error)?;
+            chunk_no += 1;
+            start = index;
+            chars = 0;
+        }
+        chars += 1;
+    }
+    if start < text.len() {
+        statement
+            .execute(params![doc_key, section_key, chunk_no, &text[start..]])
+            .map_err(text_unit_index_error)?;
+    }
+    Ok(())
+}
+
+fn build_section_layout(group: &SectionGroups<'_>) -> Result<SectionLayout, ApplicationError> {
+    let paragraph_ranges: HashMap<usize, (usize, usize)> = group
+        .paragraphs
+        .iter()
+        .map(|unit| {
+            (
+                unit.paragraph_index,
+                (unit.normalized_range.start(), unit.normalized_range.end()),
+            )
+        })
+        .collect();
+
+    let paragraphs = group
+        .paragraphs
+        .iter()
+        .map(|unit| LayoutParagraph {
+            paragraph_index: unit.paragraph_index,
+            source_order: unit.source_order,
+            start: unit.normalized_range.start(),
+            end: unit.normalized_range.end(),
+        })
+        .collect();
+
+    let sentences = group
+        .sentences
+        .iter()
+        .map(|unit| {
+            let (parent_start, parent_end) = paragraph_ranges
+                .get(&unit.paragraph_index)
+                .copied()
+                .ok_or_else(|| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "sentence {} has no persisted parent paragraph range",
+                    unit.id.0
+                ))
+            })?;
+            Ok(LayoutSentence {
+                paragraph_index: unit.paragraph_index,
+                sentence_index: unit.sentence_index,
+                source_order: unit.source_order,
+                start: unit.normalized_range.start(),
+                end: unit.normalized_range.end(),
+                parent_start,
+                parent_end,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+
+    let coverage = group
+        .sentence_coverage
+        .iter()
+        .map(|coverage| {
+            let (paragraph_start, paragraph_end) = paragraph_ranges
+                .get(&coverage.paragraph_index)
+                .copied()
+                .ok_or_else(|| {
+                    ApplicationError::TextUnitIndexFailed(format!(
+                        "sentence coverage {} has no persisted paragraph range",
+                        coverage.paragraph_id.0
+                    ))
+                })?;
+            Ok(LayoutCoverage {
+                paragraph_index: coverage.paragraph_index,
+                paragraph_start,
+                paragraph_end,
+                content_class: u8::try_from(content_class_code(coverage.content_class)).map_err(
+                    |_| {
+                        ApplicationError::TextUnitIndexFailed(
+                            "paragraph content class code does not fit u8".into(),
+                        )
+                    },
+                )?,
+                eligibility: u8::try_from(sentence_eligibility_code(coverage.eligibility))
+                    .map_err(|_| {
+                        ApplicationError::TextUnitIndexFailed(
+                            "sentence eligibility code does not fit u8".into(),
+                        )
+                    })?,
+                paragraph_chars: coverage.paragraph_chars,
+                sentence_chars: coverage.sentence_chars,
+                separator_chars: coverage.separator_chars,
+                coarse_only_chars: coverage.coarse_only_chars,
+                sentence_count: coverage.sentence_count,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+
+    Ok(SectionLayout {
+        paragraphs,
+        sentences,
+        coverage,
+    })
+}
+
+fn build_owned_unit(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    entry: &CachedSectionLayout,
+    unit: UnitRef,
+) -> Result<OwnedStreamUnit, ApplicationError> {
+    match unit {
+        UnitRef::Paragraph(index) => {
+            let paragraph = entry.layout.paragraphs.get(index).ok_or_else(|| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "stream references missing paragraph descriptor {index}"
+                ))
+            })?;
+            let text = load_text_slice(
+                connection,
+                meta.doc_key,
+                entry.section_key,
+                paragraph.start,
+                paragraph.end,
+            )?;
+            Ok(OwnedStreamUnit::Paragraph(rebuild_paragraph_unit(
+                meta,
+                &entry.section_id,
+                usize_to_i64(paragraph.paragraph_index)?,
+                usize_to_i64(paragraph.source_order)?,
+                usize_to_i64(paragraph.start)?,
+                usize_to_i64(paragraph.end)?,
+                text,
+            )?))
+        }
+        UnitRef::Sentence(index) => {
+            let sentence = entry.layout.sentences.get(index).ok_or_else(|| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "stream references missing sentence descriptor {index}"
+                ))
+            })?;
+            let text = load_text_slice(
+                connection,
+                meta.doc_key,
+                entry.section_key,
+                sentence.start,
+                sentence.end,
+            )?;
+            Ok(OwnedStreamUnit::Sentence(rebuild_sentence_unit(
+                meta,
+                &entry.section_id,
+                usize_to_i64(sentence.paragraph_index)?,
+                usize_to_i64(sentence.sentence_index)?,
+                usize_to_i64(sentence.source_order)?,
+                usize_to_i64(sentence.start)?,
+                usize_to_i64(sentence.end)?,
+                Some(usize_to_i64(sentence.parent_start)?),
+                Some(usize_to_i64(sentence.parent_end)?),
+                text,
+            )?))
+        }
+    }
+}
 fn rebuild_paragraph_unit(
     meta: &StoredUnitDocument,
     section_id: &SectionId,
@@ -1938,35 +2001,6 @@ fn missing_parent_range() -> ApplicationError {
     )
 }
 
-// Persisted integer codes. These mappings are explicit and append-only.
-//
-// unit kind: 0 = paragraph, 1 = sentence
-const UNIT_KIND_PARAGRAPH: i64 = 0;
-const UNIT_KIND_SENTENCE: i64 = 1;
-
-fn unit_kind_from_code(code: i64) -> Result<i64, ApplicationError> {
-    match code {
-        UNIT_KIND_PARAGRAPH | UNIT_KIND_SENTENCE => Ok(code),
-        other => Err(ApplicationError::TextUnitIndexFailed(format!(
-            "unsupported persisted text unit kind code {other}"
-        ))),
-    }
-}
-
-fn unit_kind_code(unit: StreamUnit<'_>) -> i64 {
-    match unit {
-        StreamUnit::Paragraph(_) => UNIT_KIND_PARAGRAPH,
-        StreamUnit::Sentence(_) => UNIT_KIND_SENTENCE,
-    }
-}
-
-fn effective_unit_kind_code(kind: EffectiveTextUnitKind) -> i64 {
-    match kind {
-        EffectiveTextUnitKind::Paragraph => UNIT_KIND_PARAGRAPH,
-        EffectiveTextUnitKind::Sentence => UNIT_KIND_SENTENCE,
-    }
-}
-
 // ParagraphContentClass: 0 prose_or_unknown, 1 native_paragraph, 2 blockquote, 3 list_item,
 // 4 code_block, 5 preformatted, 6 table.
 fn content_class_code(class: ParagraphContentClass) -> i64 {
@@ -2014,46 +2048,7 @@ fn sentence_eligibility_from_code(code: i64) -> Result<SentenceEligibility, Appl
     }
 }
 
-// RequestedTextUnitKind: 0 paragraph, 1 sentence.
-fn requested_kind_code(kind: RequestedTextUnitKind) -> i64 {
-    match kind {
-        RequestedTextUnitKind::Paragraph => 0,
-        RequestedTextUnitKind::Sentence => 1,
-    }
-}
-
-// TextUnitCoveragePolicy: 0 preserve_source, 1 eligible_only.
-fn coverage_policy_code(policy: TextUnitCoveragePolicy) -> i64 {
-    match policy {
-        TextUnitCoveragePolicy::PreserveSource => 0,
-        TextUnitCoveragePolicy::EligibleOnly => 1,
-    }
-}
-
-// Degradation strings: 1 flat_native_container_no_nested_textunit_evidence,
-// 2 requested_sentence_but_non_prose_is_paragraph_only,
-// 3 requested_sentence_but_paragraph_is_coarse_only. NULL means no degradation.
-fn degradation_code(value: &str) -> Result<i64, ApplicationError> {
-    match value {
-        "flat_native_container_no_nested_textunit_evidence" => Ok(1),
-        "requested_sentence_but_non_prose_is_paragraph_only" => Ok(2),
-        "requested_sentence_but_paragraph_is_coarse_only" => Ok(3),
-        other => Err(ApplicationError::TextUnitIndexFailed(format!(
-            "unsupported persisted degradation {other:?}"
-        ))),
-    }
-}
-
-fn degradation_from_code(code: i64) -> Result<String, ApplicationError> {
-    match code {
-        1 => Ok("flat_native_container_no_nested_textunit_evidence".to_string()),
-        2 => Ok("requested_sentence_but_non_prose_is_paragraph_only".to_string()),
-        3 => Ok("requested_sentence_but_paragraph_is_coarse_only".to_string()),
-        other => Err(ApplicationError::TextUnitIndexFailed(format!(
-            "unsupported persisted degradation code {other}"
-        ))),
-    }
-}
+// RequestedTextUnitKind and TextUnitCoveragePolicy codes were part of the removed v2 stream rows.
 
 fn validate_paragraph_units(
     document_id: &DocumentId,
@@ -2308,64 +2303,6 @@ impl StoredParagraphCoverage {
             native_structural_container_chars: self.native_structural_container_chars,
             native_non_prose_chars: self.native_non_prose_chars,
             fallback_chars: self.fallback_chars,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredStreamCoverage {
-    owner_chars: usize,
-    section_separator_chars: usize,
-    sentence_separator_chars: usize,
-    paragraph_count: usize,
-    sentence_eligible_paragraphs: usize,
-    non_prose_paragraphs: usize,
-    coarse_structural_paragraphs: usize,
-    represented_paragraphs: usize,
-    represented_sentences: usize,
-    coarse_non_prose_items: usize,
-    coarse_structural_items: usize,
-    intentionally_skipped: usize,
-    unsupported_gaps: usize,
-    source_complete: bool,
-}
-
-impl StoredStreamCoverage {
-    fn from_coverage(coverage: &TextUnitEnumerationCoverage) -> Self {
-        Self {
-            owner_chars: coverage.owner_chars,
-            section_separator_chars: coverage.section_separator_chars,
-            sentence_separator_chars: coverage.sentence_separator_chars,
-            paragraph_count: coverage.paragraph_count,
-            sentence_eligible_paragraphs: coverage.sentence_eligible_paragraphs,
-            non_prose_paragraphs: coverage.non_prose_paragraphs,
-            coarse_structural_paragraphs: coverage.coarse_structural_paragraphs,
-            represented_paragraphs: coverage.represented_paragraphs,
-            represented_sentences: coverage.represented_sentences,
-            coarse_non_prose_items: coverage.coarse_non_prose_items,
-            coarse_structural_items: coverage.coarse_structural_items,
-            intentionally_skipped: coverage.intentionally_skipped,
-            unsupported_gaps: coverage.unsupported_gaps,
-            source_complete: coverage.source_complete,
-        }
-    }
-
-    fn into_coverage(self) -> TextUnitEnumerationCoverage {
-        TextUnitEnumerationCoverage {
-            owner_chars: self.owner_chars,
-            section_separator_chars: self.section_separator_chars,
-            sentence_separator_chars: self.sentence_separator_chars,
-            paragraph_count: self.paragraph_count,
-            sentence_eligible_paragraphs: self.sentence_eligible_paragraphs,
-            non_prose_paragraphs: self.non_prose_paragraphs,
-            coarse_structural_paragraphs: self.coarse_structural_paragraphs,
-            represented_paragraphs: self.represented_paragraphs,
-            represented_sentences: self.represented_sentences,
-            coarse_non_prose_items: self.coarse_non_prose_items,
-            coarse_structural_items: self.coarse_structural_items,
-            intentionally_skipped: self.intentionally_skipped,
-            unsupported_gaps: self.unsupported_gaps,
-            source_complete: self.source_complete,
         }
     }
 }

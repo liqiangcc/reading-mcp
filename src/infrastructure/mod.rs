@@ -12,6 +12,7 @@ mod ocr_evidence;
 mod ocr_identity;
 mod ocr_identity_process;
 mod ocr_singleflight;
+mod section_layout;
 mod sqlite;
 mod sqlite_search_index;
 mod sqlite_support;

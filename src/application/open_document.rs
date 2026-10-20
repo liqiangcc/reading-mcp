@@ -106,6 +106,7 @@ impl OpenDocumentUseCase {
 
     /// Returns the stored result when the same bytes were opened under the same fingerprint, and stores each new
     /// result. `ingest_fingerprint` must change whenever the parser or its configuration changes.
+    /// `force_refresh` skips the lookup, re-ingests and replaces the stored result.
     pub fn with_open_result_store(
         mut self,
         store: Arc<dyn OpenResultStore>,
@@ -170,7 +171,9 @@ impl OpenDocumentUseCase {
             .retrieve(&command.source, &command.options)
             .await?;
 
-        if let Some((store, ingest_fingerprint)) = &self.open_results {
+        if !command.options.force_refresh
+            && let Some((store, ingest_fingerprint)) = &self.open_results
+        {
             let content_hash = ContentHash::of_bytes(&resource.bytes);
             let id = DocumentId::derive(&resource.final_source, &content_hash);
             let fingerprint = self.open_result_fingerprint(ingest_fingerprint);

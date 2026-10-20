@@ -280,6 +280,49 @@ async fn reopening_same_bytes_returns_the_stored_result_without_reparsing() {
 }
 
 #[tokio::test]
+async fn force_refresh_reingests_and_replaces_the_stored_result() {
+    let directory = tempdir().expect("temp directory should be created");
+    let store: Arc<dyn OpenResultStore> = Arc::new(
+        SqliteOpenResultStore::open(directory.path().join("reading-mcp.sqlite"))
+            .expect("store should open"),
+    );
+    let harness = Harness::new(b"# Sample\nPage tables");
+
+    harness
+        .use_case(Some((store.clone(), "fp-a")))
+        .execute(command("/books/sample.md"))
+        .await
+        .expect("first open should succeed");
+    assert_eq!(harness.parser.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.text_units.set_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.search.index_calls.load(Ordering::SeqCst), 1);
+
+    let refreshed = harness
+        .use_case(Some((store.clone(), "fp-a")))
+        .execute(OpenDocumentCommand {
+            source: DocumentSource("/books/sample.md".into()),
+            options: RetrievalOptions {
+                force_refresh: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("forced open should succeed");
+    assert_eq!(harness.parser.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.text_units.set_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.search.index_calls.load(Ordering::SeqCst), 2);
+
+    let reopened = harness
+        .use_case(Some((store.clone(), "fp-a")))
+        .execute(command("/books/sample.md"))
+        .await
+        .expect("reopen after the forced open should succeed");
+
+    assert_eq!(harness.parser.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(reopened, refreshed);
+}
+
+#[tokio::test]
 async fn changed_bytes_at_the_same_source_are_parsed_again() {
     let directory = tempdir().expect("temp directory should be created");
     let store: Arc<dyn OpenResultStore> = Arc::new(

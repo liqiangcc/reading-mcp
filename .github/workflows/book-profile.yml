@@ -58,6 +58,22 @@ jobs:
             args+=(--documents "$docs")
           fi
           python3 scripts/memory-profile.py "${args[@]}"
+      - name: Sequential reading probe
+        if: always()
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p book
+          docs=""
+          for pair in "en-novel=$BOOKS/en-novel.epub" "zh-classic=$BOOKS/zh-classic.epub" "zh-large=$BOOKS/zh-large.epub"; do
+            label="${pair%%=*}"
+            file="${pair#*=}"
+            if [ -f "$file" ]; then
+              docs="${docs:+$docs,}$label=$file"
+            fi
+          done
+          args=(--binary target/release/reading-mcp --documents "$docs"
+            --out book/sequential.json)
+          python3 scripts/sequential-read-probe.py "${args[@]}"
       - name: Profile the largest inputs with heaptrack
         if: always()
         run: |

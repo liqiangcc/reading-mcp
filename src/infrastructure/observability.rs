@@ -390,14 +390,14 @@ impl TextUnitIndex for ObservedTextUnitIndex {
 
     async fn replace_document_sets(
         &self,
-        document_id: &DocumentId,
+        document: &Arc<Document>,
         paragraphs: Arc<ParagraphTextUnitSet>,
         sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
         let started = Instant::now();
         let result = self
             .inner
-            .replace_document_sets(document_id, paragraphs, sentences)
+            .replace_document_sets(document, paragraphs, sentences)
             .await;
         emit_text_unit_write(started, result.is_ok());
         result
@@ -560,7 +560,7 @@ mod tests {
 
         async fn replace_document_sets(
             &self,
-            _document_id: &DocumentId,
+            _document: &Arc<Document>,
             _paragraphs: Arc<ParagraphTextUnitSet>,
             _sentences: Arc<SentenceTextUnitSet>,
         ) -> Result<(), ApplicationError> {

@@ -378,10 +378,11 @@ pub trait TextUnitIndex: Send + Sync {
         document_id: &DocumentId,
     ) -> Result<Vec<TextUnit>, ApplicationError>;
 
-    /// Persists both unit sets of a document.
+    /// Persists both unit sets of a document. The document supplies the section texts and the
+    /// document-level hashes the store keeps once.
     async fn replace_document_sets(
         &self,
-        document_id: &DocumentId,
+        document: &Arc<Document>,
         paragraphs: Arc<ParagraphTextUnitSet>,
         sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError>;

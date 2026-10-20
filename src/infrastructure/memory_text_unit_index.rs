@@ -4,7 +4,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::application::ports::{ApplicationError, SectionTextUnits, TextUnitIndex};
-use crate::domain::{DocumentId, ParagraphTextUnitSet, SectionId, SentenceTextUnitSet, TextUnit};
+use crate::domain::{
+    Document, DocumentId, ParagraphTextUnitSet, SectionId, SentenceTextUnitSet, TextUnit,
+};
 
 type DocumentSets = (Arc<ParagraphTextUnitSet>, Arc<SentenceTextUnitSet>);
 
@@ -47,7 +49,7 @@ impl TextUnitIndex for InMemoryTextUnitIndex {
 
     async fn replace_document_sets(
         &self,
-        document_id: &DocumentId,
+        document: &Arc<Document>,
         paragraphs: Arc<ParagraphTextUnitSet>,
         sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
@@ -56,13 +58,13 @@ impl TextUnitIndex for InMemoryTextUnitIndex {
             .map_err(|_| {
                 ApplicationError::TextUnitIndexFailed("text unit index lock poisoned".into())
             })?
-            .insert(document_id.clone(), paragraphs.units.clone());
+            .insert(document.id.clone(), paragraphs.units.clone());
         self.sets
             .write()
             .map_err(|_| {
                 ApplicationError::TextUnitIndexFailed("text unit index lock poisoned".into())
             })?
-            .insert(document_id.clone(), (paragraphs, sentences));
+            .insert(document.id.clone(), (paragraphs, sentences));
         Ok(())
     }
 

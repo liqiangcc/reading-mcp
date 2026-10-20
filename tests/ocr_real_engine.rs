@@ -642,12 +642,12 @@ mod publication_failure {
         }
         async fn replace_document_sets(
             &self,
-            document_id: &DocumentId,
+            document: &Arc<Document>,
             paragraphs: Arc<ParagraphTextUnitSet>,
             sentences: Arc<SentenceTextUnitSet>,
         ) -> Result<(), ApplicationError> {
             self.inner
-                .replace_document_sets(document_id, paragraphs, sentences)
+                .replace_document_sets(document, paragraphs, sentences)
                 .await
         }
         async fn section_units(

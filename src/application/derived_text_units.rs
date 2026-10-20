@@ -64,7 +64,7 @@ impl TextUnitIndex for DerivedTextUnits {
 
     async fn replace_document_sets(
         &self,
-        _document_id: &DocumentId,
+        _document: &Arc<Document>,
         _paragraphs: Arc<ParagraphTextUnitSet>,
         _sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {

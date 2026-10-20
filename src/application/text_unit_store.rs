@@ -14,6 +14,10 @@ pub async fn store_text_units(
         ))
     })?;
     index
-        .replace_document_sets(&document.id, Arc::new(paragraphs), Arc::new(sentences))
+        .replace_document_sets(
+            &Arc::new(document.clone()),
+            Arc::new(paragraphs),
+            Arc::new(sentences),
+        )
         .await
 }

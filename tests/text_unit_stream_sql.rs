@@ -305,7 +305,7 @@ async fn large_section_pages_preserve_positions_and_eligible_only_is_dense() {
 }
 
 #[tokio::test]
-async fn replacing_the_unit_sets_replaces_the_stream_and_summary_rows() {
+async fn replacing_the_unit_sets_replaces_the_section_text_and_layout_rows() {
     let directory = tempdir().expect("temporary directory should be created");
     let database = directory.path().join("state.sqlite");
     let index = SqliteTextUnitIndex::open(&database).expect("index should open");
@@ -334,26 +334,27 @@ async fn replacing_the_unit_sets_replaces_the_stream_and_summary_rows() {
 
     let connection =
         rusqlite::Connection::open(&database).expect("database should open for row counts");
-    let stream_rows: i64 = connection
+    let text_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM text_unit_streams_v2
+            "SELECT COUNT(*) FROM section_text_v1
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
         )
-        .expect("stream rows should count");
-    let summary_rows: i64 = connection
+        .expect("section text rows should count");
+    let layout_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM text_unit_stream_summaries_v2
+            "SELECT COUNT(*) FROM section_layout_v1
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
         )
-        .expect("summary rows should count");
+        .expect("section layout rows should count");
 
-    // One paragraph, one sentence stream entry per kind, and four summary rows (2 kinds x 2 policies).
-    assert_eq!(stream_rows, 3);
-    assert_eq!(summary_rows, 4);
+    // The replacement keeps one text row and one layout row for the single section, and the
+    // sentence stream still has one paragraph and one sentence.
+    assert_eq!(text_rows, 1);
+    assert_eq!(layout_rows, 1);
     assert_eq!(total_items, 2);
 }
 
@@ -502,13 +503,7 @@ async fn replacing_the_unit_sets_twice_keeps_one_set_of_rows_and_the_same_doc_ke
     let database = directory.path().join("state.sqlite");
     let index = SqliteTextUnitIndex::open(&database).expect("index should open");
     let document = parse_markdown().await;
-    let tables = [
-        "text_unit_sections_v2",
-        "text_unit_items_v2",
-        "text_unit_sentence_coverage_v2",
-        "text_unit_streams_v2",
-        "text_unit_stream_summaries_v2",
-    ];
+    let tables = ["section_text_v1", "section_layout_v1"];
 
     store_text_units(&index, &document)
         .await
@@ -563,7 +558,7 @@ async fn replacing_the_unit_sets_twice_keeps_one_set_of_rows_and_the_same_doc_ke
 }
 
 #[tokio::test]
-async fn missing_stream_summary_is_reported_as_stale() {
+async fn missing_section_layout_is_reported_as_stale() {
     let directory = tempdir().expect("temporary directory should be created");
     let database = directory.path().join("state.sqlite");
     let repository: Arc<dyn DocumentRepository> =
@@ -582,11 +577,11 @@ async fn missing_stream_summary_is_reported_as_stale() {
     rusqlite::Connection::open(&database)
         .expect("database should open")
         .execute(
-            "DELETE FROM text_unit_stream_summaries_v2
+            "DELETE FROM section_layout_v1
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&document.id.0],
         )
-        .expect("summary rows should be deleted");
+        .expect("section layout rows should be deleted");
 
     let error = GetTextUnitsUseCase::new(repository, index)
         .execute(GetTextUnitsCommand {
@@ -861,17 +856,13 @@ async fn stored_context_reports_stale_instead_of_deriving_after_stream_rows_are_
         .expect("units should persist");
 
     let connection = rusqlite::Connection::open(&database).expect("database should open");
-    for table in ["text_unit_streams_v2", "text_unit_stream_summaries_v2"] {
-        connection
-            .execute(
-                &format!(
-                    "DELETE FROM {table}
-                     WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)"
-                ),
-                rusqlite::params![&document.id.0],
-            )
-            .expect("stream rows should be deleted");
-    }
+    connection
+        .execute(
+            "DELETE FROM section_layout_v1
+             WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+        )
+        .expect("section layout rows should be deleted");
 
     let section = document.root_sections[0].clone();
     let paragraph = document
@@ -1115,4 +1106,122 @@ fn document_with_content(id: &str, content: &str) -> Document {
             children: vec![],
         }],
     }
+}
+
+#[tokio::test]
+async fn opening_the_index_drops_v2_tables_and_their_documents_are_missing() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    {
+        let connection = rusqlite::Connection::open(&database).expect("database should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE text_unit_documents_v2 (
+                    doc_key INTEGER PRIMARY KEY,
+                    document_id TEXT NOT NULL UNIQUE,
+                    content_hash TEXT NOT NULL,
+                    normalized_document_hash TEXT NOT NULL,
+                    segmentation_version TEXT NOT NULL
+                 );
+                 CREATE TABLE text_unit_sections_v2 (
+                    doc_key INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    section_id TEXT NOT NULL,
+                    paragraph_coverage_json TEXT,
+                    PRIMARY KEY (doc_key, section_key)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE text_unit_items_v2 (
+                    doc_key INTEGER NOT NULL,
+                    kind INTEGER NOT NULL,
+                    source_order INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    paragraph_index INTEGER NOT NULL,
+                    sentence_index INTEGER NOT NULL,
+                    range_start INTEGER NOT NULL,
+                    range_end INTEGER NOT NULL,
+                    parent_start INTEGER,
+                    parent_end INTEGER,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY (doc_key, kind, source_order)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE text_unit_sentence_coverage_v2 (
+                    doc_key INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    paragraph_index INTEGER NOT NULL,
+                    paragraph_start INTEGER NOT NULL,
+                    paragraph_end INTEGER NOT NULL,
+                    content_class INTEGER NOT NULL,
+                    eligibility INTEGER NOT NULL,
+                    paragraph_chars INTEGER NOT NULL,
+                    sentence_chars INTEGER NOT NULL,
+                    separator_chars INTEGER NOT NULL,
+                    coarse_only_chars INTEGER NOT NULL,
+                    sentence_count INTEGER NOT NULL,
+                    PRIMARY KEY (doc_key, section_key, position)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE text_unit_streams_v2 (
+                    doc_key INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    requested_kind INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    eligible_position INTEGER,
+                    unit_kind INTEGER NOT NULL,
+                    unit_source_order INTEGER NOT NULL,
+                    content_class INTEGER NOT NULL,
+                    degradation INTEGER,
+                    char_count INTEGER NOT NULL,
+                    PRIMARY KEY (doc_key, section_key, requested_kind, position)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE text_unit_stream_summaries_v2 (
+                    doc_key INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    requested_kind INTEGER NOT NULL,
+                    coverage_policy INTEGER NOT NULL,
+                    total_items INTEGER NOT NULL,
+                    coverage_json TEXT NOT NULL,
+                    PRIMARY KEY (doc_key, section_key, requested_kind, coverage_policy)
+                 ) WITHOUT ROWID;
+                 INSERT INTO text_unit_documents_v2(
+                    doc_key, document_id, content_hash, normalized_document_hash,
+                    segmentation_version
+                 ) VALUES (1, 'doc:v2', 'sha256:content', 'sha256:normalized', 'text-segmentation/v3');
+                 INSERT INTO text_unit_sections_v2(
+                    doc_key, section_key, section_id, paragraph_coverage_json
+                 ) VALUES (1, 0, 'section://root', '{}');",
+            )
+            .expect("v2 tables should be created");
+    }
+
+    let index = SqliteTextUnitIndex::open(&database).expect("index should open");
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    for table in [
+        "text_unit_sections_v2",
+        "text_unit_items_v2",
+        "text_unit_sentence_coverage_v2",
+        "text_unit_streams_v2",
+        "text_unit_stream_summaries_v2",
+    ] {
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                rusqlite::params![table],
+                |row| row.get(0),
+            )
+            .expect("sqlite_master should be readable");
+        assert_eq!(count, 0, "v2 table {table} should be dropped");
+    }
+
+    let document_id = DocumentId("doc:v2".into());
+    let section_id = SectionId("section://root".into());
+    let summary = index
+        .section_stream_summary(TextUnitStreamKey {
+            document_id: &document_id,
+            section_id: &section_id,
+            kind: RequestedTextUnitKind::Paragraph,
+            policy: TextUnitCoveragePolicy::PreserveSource,
+        })
+        .await
+        .expect("summary lookup should succeed");
+    assert!(summary.is_none(), "v2-only documents must read as missing");
 }

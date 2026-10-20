@@ -1,0 +1,137 @@
+name: Ingest parity
+
+# `workflow_dispatch` only fires for a workflow that already exists on the default branch, so an
+# `ingest-parity-*` push is how this gate runs on the branch that introduces it.
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base git ref whose binary is compared against the head
+        required: false
+        default: main
+  push:
+    branches: ['ingest-parity-*']
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the base tree
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ inputs.base || 'main' }}"
+          git worktree add base-src FETCH_HEAD
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the head binary
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Build the base binary
+        run: |
+          cargo build --release --locked --bin reading-mcp \
+            --manifest-path base-src/Cargo.toml --target-dir base-target
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf
+      - name: Download public-domain books
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p "$BOOKS"
+          download() {
+            local url="$1" out="$2"
+            if curl -fsSL --retry 3 -o "$out" "$url"; then
+              echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+            else
+              echo "::warning::failed to download $url"
+              rm -f "$out"
+            fi
+            return 0
+          }
+          download "https://www.gutenberg.org/cache/epub/24264/pg24264-images.epub" "$BOOKS/zh-classic.epub"
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" "$BOOKS/en-novel.epub"
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$BOOKS/zh-large.epub"
+      - name: Generate the fast stress inputs
+        run: |
+          # Only the generator outputs that finish quickly: the 4 MiB CJK text and the 2000-section
+          # Markdown come from memory-profile.py's deterministic generators, the 1500-page text PDF
+          # from gen-stress-inputs.py. The 16/64 MiB texts, the CJK PDF and the 300-page scan are
+          # skipped: they need more than two minutes to generate and add nothing to this gate.
+          OUT="$RUNNER_TEMP/inputs"
+          mkdir -p "$OUT"
+          export PARITY_INPUTS="$OUT"
+          python3 - <<'EOF'
+          import importlib.util
+          import os
+
+          def load(name, path):
+              spec = importlib.util.spec_from_file_location(name, path)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              return module
+
+          out = os.environ["PARITY_INPUTS"]
+          memory = load("memory_profile", "scripts/memory-profile.py")
+          stress = load("gen_stress_inputs", "scripts/gen-stress-inputs.py")
+
+          memory.write_cjk_document(os.path.join(out, "cjk-4mib.txt"), 4 * 1024 * 1024)
+          memory.write_markdown_document(os.path.join(out, "md-2000.md"), 2000)
+
+          war = stress.read_plain_text("")
+          if not war:
+              war = " ".join(
+                  "Pierre and Natasha walked along the river while the winter light fell on the old house."
+                  for _ in range(60000)
+              )
+          stress.write_text_pdf(
+              os.path.join(out, "pdf-text-1500p.pdf"),
+              stress.paginate(war, 2000, 1500),
+              fontsize=11,
+              font_path=None,
+          )
+          for name in sorted(os.listdir(out)):
+              print(name, os.path.getsize(os.path.join(out, name)))
+          EOF
+      - name: Run the ingest parity gate
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          GEN="$RUNNER_TEMP/inputs"
+          inputs=""
+          add() { inputs="${inputs:+$inputs,}$1=$2"; }
+          for pair in "zh-classic=$BOOKS/zh-classic.epub" \
+                      "en-novel=$BOOKS/en-novel.epub" \
+                      "zh-large=$BOOKS/zh-large.epub" \
+                      "cjk-4mib=$GEN/cjk-4mib.txt" \
+                      "md-2000=$GEN/md-2000.md" \
+                      "pdf-text-1500p=$GEN/pdf-text-1500p.pdf"; do
+            label="${pair%%=*}"
+            file="${pair#*=}"
+            if [ -f "$file" ]; then
+              add "$label" "$file"
+            else
+              echo "::warning::skipping $label: $file is missing"
+            fi
+          done
+          while IFS= read -r file; do
+            add "fixture:$file" "$file"
+          done < <(find tests/fixtures -type f \
+                     \( -name '*.pdf' -o -name '*.txt' -o -name '*.md' \
+                        -o -name '*.html' -o -name '*.htm' -o -name '*.epub' \) | sort)
+          python3 scripts/ingest-parity.py \
+            --binary-a base-target/release/reading-mcp \
+            --binary-b target/release/reading-mcp \
+            --inputs "$inputs" \
+            --out parity | tee parity-table.md
+          cat parity-table.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload parity data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-parity
+          path: |
+            parity/
+            parity-table.md

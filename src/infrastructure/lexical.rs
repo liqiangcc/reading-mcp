@@ -330,6 +330,9 @@ pub(crate) struct LexicalQuery {
     fold: bool,
     /// The tokens in prefilter order: longer first, sigma-folded when `fold` is set.
     prefilter: Vec<String>,
+    /// The index of the token that equals `raw_lowered`, when one does. A `strict_match` then already
+    /// answered the phrase check `score_lowered` would repeat, because it contains-tests every token.
+    phrase_is_token: Option<usize>,
 }
 
 impl LexicalQuery {
@@ -339,6 +342,8 @@ impl LexicalQuery {
         if tokens.is_empty() {
             return None;
         }
+        let raw_lowered = query.to_lowercase();
+        let phrase_is_token = tokens.iter().position(|token| *token == raw_lowered);
         let fold = tokens
             .iter()
             .any(|token| token.contains('σ') || token.contains('ς'));
@@ -362,16 +367,29 @@ impl LexicalQuery {
         // Longer tokens are rarer, so a failing prefilter is found sooner.
         prefilter.sort_by_key(|token| std::cmp::Reverse(token.chars().count()));
         Some(Self {
-            raw_lowered: query.to_lowercase(),
+            raw_lowered,
             tokens,
             cjk,
             fold,
             prefilter,
+            phrase_is_token,
         })
     }
 
     pub(crate) fn token_count(&self) -> usize {
         self.tokens.len()
+    }
+
+    /// Every token is a CJK unigram or bigram, so `may_contain_all` on a lowered text is exactly
+    /// `strict_match` on it: `tokenize` emits every CJK char and every adjacent CJK pair of a run.
+    pub(crate) fn all_cjk(&self) -> bool {
+        self.cjk.iter().all(|&cjk| cjk)
+    }
+
+    /// The index of the token equal to `raw_lowered`, if any: `strict_match` contains-tests that very
+    /// token, so the phrase bonus of a strict match is known without searching again.
+    pub(crate) fn phrase_is_token(&self) -> Option<usize> {
+        self.phrase_is_token
     }
 
     /// Every query token is in `tokenize(text)`. `lowered` must be `lowercase_fast(text)`.
@@ -452,17 +470,104 @@ pub(crate) fn score_lowered(
     kind: SearchHitKind,
     matched: usize,
 ) -> f32 {
-    let phrase_bonus = if lowered_text.contains(raw_lowered_query) {
-        4.0
-    } else {
-        0.0
+    score_lowered_with_phrase(lowered_text, raw_lowered_query, kind, matched, None)
+}
+
+/// [`score_lowered`] with the phrase check possibly already answered by the match that produced the
+/// hit: `Some(true)` when a `strict_match` contains-tested `raw_lowered_query` itself.
+pub(crate) fn score_lowered_with_phrase(
+    lowered_text: &str,
+    raw_lowered_query: &str,
+    kind: SearchHitKind,
+    matched: usize,
+    phrase_known: Option<bool>,
+) -> f32 {
+    let phrase_matched = match phrase_known {
+        Some(known) => known,
+        None => lowered_text.contains(raw_lowered_query),
     };
+    let phrase_bonus = if phrase_matched { 4.0 } else { 0.0 };
     let kind_bonus = match kind {
         SearchHitKind::Sentence => 1.0,
         SearchHitKind::Paragraph => 0.5,
         SearchHitKind::Section => 0.25,
     };
     phrase_bonus + matched as f32 + kind_bonus
+}
+
+/// The paragraph prefilters of one section, keyed by the paragraph range a sentence belongs to.
+///
+/// Sentences arrive grouped by their parent paragraph, so a one-entry memo answers nearly every
+/// lookup. The rest are answered by a binary search over the paragraph results in paragraph order,
+/// which is only valid when those ranges strictly increase; a section that does not keep a
+/// `HashMap` instead. A parent that is no paragraph at all is computed from its slice by the caller
+/// and remembered, as it was before.
+#[derive(Debug, Default)]
+pub(crate) struct ParagraphPrefilters {
+    /// Whether `ordered` is keyed in increasing `(start, end)` order.
+    increasing: bool,
+    memo: Option<((usize, usize), bool)>,
+    ordered: Vec<(usize, usize, bool)>,
+    by_range: HashMap<(usize, usize), bool>,
+}
+
+impl ParagraphPrefilters {
+    /// `increasing` must be true only when the paragraph ranges of the section strictly increase.
+    pub(crate) fn new(increasing: bool) -> Self {
+        Self {
+            increasing,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the paragraph ranges of one section are strictly increasing, in layout order.
+    pub(crate) fn ranges_increase(ranges: impl IntoIterator<Item = (usize, usize)>) -> bool {
+        let mut previous: Option<(usize, usize)> = None;
+        for range in ranges {
+            if let Some(previous) = previous
+                && previous >= range
+            {
+                return false;
+            }
+            previous = Some(range);
+        }
+        true
+    }
+
+    /// Records the prefilter of the paragraph `start..end`.
+    pub(crate) fn insert(&mut self, start: usize, end: usize, prefilter: bool) {
+        if self.increasing {
+            self.ordered.push((start, end, prefilter));
+        } else {
+            self.by_range.insert((start, end), prefilter);
+        }
+    }
+
+    /// The prefilter of the paragraph `start..end`, when this section has a paragraph with that range.
+    pub(crate) fn get(&mut self, start: usize, end: usize) -> Option<bool> {
+        if let Some(((memo_start, memo_end), prefilter)) = self.memo
+            && (memo_start, memo_end) == (start, end)
+        {
+            return Some(prefilter);
+        }
+        if self.increasing {
+            let index = self
+                .ordered
+                .binary_search_by_key(&(start, end), |&(start, end, _)| (start, end))
+                .ok()?;
+            let (_, _, prefilter) = self.ordered[index];
+            self.memo = Some(((start, end), prefilter));
+            return Some(prefilter);
+        }
+        let prefilter = *self.by_range.get(&(start, end))?;
+        self.memo = Some(((start, end), prefilter));
+        Some(prefilter)
+    }
+
+    /// Records the prefilter of a parent range this section has no paragraph for.
+    pub(crate) fn remember(&mut self, start: usize, end: usize, prefilter: bool) {
+        self.memo = Some(((start, end), prefilter));
+    }
 }
 
 /// The total order of lexical hits: score, then kind, then section, then the start of the unit.
@@ -587,8 +692,11 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        LexicalQuery, MAX_SNIPPET_CHARS, is_caseless, lowercase_fast, match_snippet, tokenize,
+        LexicalQuery, MAX_SNIPPET_CHARS, ParagraphPrefilters, is_caseless, lowercase_fast,
+        match_snippet, score_lowered, score_lowered_with_phrase, tokenize,
     };
+    use crate::application::ports::SearchHitKind;
+    use crate::domain::{NormalizedTextIndex, NormalizedTextRange};
 
     #[test]
     fn cjk_substrings_are_represented_by_unigrams_and_bigrams() {
@@ -716,6 +824,161 @@ mod tests {
         }
     }
 
+    /// Ten samples of every query shape: CJK chars, CJK pairs, CJK phrases, Latin words and a sigma.
+    const SHORTCUT_SAMPLES: [(&str, &str); 10] = [
+        ("皇帝在朝堂上讨论虚拟内存机制与页表映射。", "皇帝"),
+        ("皇帝 内存 与页表", "皇帝 内存"),
+        ("節度使與太祖論兵於朝。", "節度使"),
+        ("虛擬內存機制，頁表。「引用」", "内存"),
+        ("宋史卷一百 皇帝", "宋史"),
+        ("皇帝", "皇"),
+        ("没有匹配的一行", "皇帝"),
+        ("Pierre Bezukhov met Andrew.", "pierre"),
+        ("ΟΔΟΣ.ΟΔΟΣ", "οδος"),
+        ("Memory Layout of the tables", "memory"),
+    ];
+
+    #[test]
+    fn all_cjk_prefilter_is_strict_match() {
+        let mut cjk_samples = 0usize;
+        for (text, query) in SHORTCUT_SAMPLES {
+            let query = LexicalQuery::new(query).expect("query tokens");
+            if !query.all_cjk() {
+                continue;
+            }
+            cjk_samples += 1;
+            let lowered = lowercase_fast(text);
+            let prefilter = query.may_contain_all(&lowered);
+            let general = if query.strict_match(text, &lowered) {
+                Some(score_lowered(
+                    &lowered,
+                    &query.raw_lowered,
+                    SearchHitKind::Paragraph,
+                    query.token_count(),
+                ))
+            } else {
+                None
+            };
+            let shortcut = if prefilter {
+                Some(score_lowered_with_phrase(
+                    &lowered,
+                    &query.raw_lowered,
+                    SearchHitKind::Paragraph,
+                    query.token_count(),
+                    query.phrase_is_token().map(|_| true),
+                ))
+            } else {
+                None
+            };
+            assert_eq!(
+                general,
+                shortcut,
+                "text {text:?} query {raw:?}",
+                raw = query.raw_lowered
+            );
+        }
+        assert!(cjk_samples >= 5, "only {cjk_samples} all-CJK samples");
+    }
+
+    #[test]
+    fn phrase_is_token_matches_the_phrase_check() {
+        let mut checked = 0usize;
+        for (text, raw_query) in SHORTCUT_SAMPLES {
+            let query = LexicalQuery::new(raw_query).expect("query tokens");
+            if query.phrase_is_token().is_none() {
+                continue;
+            }
+            let lowered = lowercase_fast(text);
+            if !query.strict_match(text, &lowered) {
+                continue;
+            }
+            checked += 1;
+            // A strict match contains-tests every token, so a token equal to the whole query proves
+            // the phrase: the known answer and the general formula must agree.
+            assert!(
+                lowered.contains(query.raw_lowered.as_str()),
+                "phrase of {raw_query:?} must match in {text:?}"
+            );
+            assert_eq!(
+                score_lowered(
+                    &lowered,
+                    &query.raw_lowered,
+                    SearchHitKind::Sentence,
+                    query.token_count()
+                ),
+                score_lowered_with_phrase(
+                    &lowered,
+                    &query.raw_lowered,
+                    SearchHitKind::Sentence,
+                    query.token_count(),
+                    query.phrase_is_token().map(|_| true),
+                ),
+                "score of {raw_query:?} in {text:?}"
+            );
+        }
+        assert!(checked >= 3, "only {checked} phrase-equals-token samples");
+    }
+
+    fn slice_lowered_of<'a>(
+        index: &NormalizedTextIndex<'a>,
+        start: usize,
+        end: usize,
+    ) -> std::borrow::Cow<'a, str> {
+        let range = NormalizedTextRange::new(start, end).expect("range");
+        lowercase_fast(index.slice(range).expect("slice"))
+    }
+
+    #[test]
+    fn paragraph_prefilters_answer_like_the_slice() {
+        let text = "皇帝在朝堂。群臣议事。節度使入朝。太祖問兵。";
+        let index = NormalizedTextIndex::new(text);
+        let ranges = [(0usize, 6usize), (6, 11), (11, 17), (17, 22)];
+        let query = LexicalQuery::new("朝").expect("query tokens");
+        let expected =
+            |start: usize, end: usize| query.may_contain_all(&slice_lowered_of(&index, start, end));
+
+        let mut increasing = ParagraphPrefilters::new(ParagraphPrefilters::ranges_increase(ranges));
+        for (start, end) in ranges {
+            increasing.insert(start, end, expected(start, end));
+        }
+        for (start, end) in ranges {
+            assert_eq!(
+                increasing.get(start, end),
+                Some(expected(start, end)),
+                "paragraph {start}..{end}"
+            );
+        }
+        // The memo answers the repeated parent without another lookup.
+        let repeated = ranges[1];
+        assert_eq!(
+            increasing.get(repeated.0, repeated.1),
+            Some(expected(repeated.0, repeated.1))
+        );
+        // A parent that is no paragraph is absent, then remembered by the caller.
+        let parent = (0usize, 11usize);
+        assert_eq!(increasing.get(parent.0, parent.1), None);
+        increasing.remember(parent.0, parent.1, expected(parent.0, parent.1));
+        assert_eq!(
+            increasing.get(parent.0, parent.1),
+            Some(expected(parent.0, parent.1))
+        );
+
+        // Ranges that do not increase keep the HashMap, and still answer like the slice.
+        let unordered_ranges = [(11usize, 17usize), (0usize, 6usize)];
+        assert!(!ParagraphPrefilters::ranges_increase(unordered_ranges));
+        let mut unordered = ParagraphPrefilters::new(false);
+        for (start, end) in unordered_ranges {
+            unordered.insert(start, end, expected(start, end));
+        }
+        for (start, end) in unordered_ranges {
+            assert_eq!(
+                unordered.get(start, end),
+                Some(expected(start, end)),
+                "unordered paragraph {start}..{end}"
+            );
+        }
+        assert_eq!(unordered.get(2, 3), None);
+    }
     #[test]
     fn match_snippet_centers_window_on_late_match() {
         let text = format!("{}{}", "padding ".repeat(80), "needle term appears late");

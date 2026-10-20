@@ -393,25 +393,33 @@ impl GetTextUnitsUseCase {
                 resolved.locator.owner_section_id.0, section.id.0
             )));
         }
-        let not_in_stream = || {
+        fn not_in_stream(
+            kind: ResolvedLocatorKind,
+            requested_kind: RequestedTextUnitKind,
+            coverage_policy: TextUnitCoveragePolicy,
+        ) -> ApplicationError {
             ApplicationError::InvalidRequest(format!(
                 "{} anchor is not part of the declared {} / {} TextUnit stream",
-                resolved.kind.as_str(),
+                kind.as_str(),
                 requested_kind.as_str(),
                 coverage_policy.as_str()
             ))
-        };
+        }
         let unit_kind = match resolved.kind {
             ResolvedLocatorKind::Paragraph => EffectiveTextUnitKind::Paragraph,
             ResolvedLocatorKind::Sentence => EffectiveTextUnitKind::Sentence,
             ResolvedLocatorKind::Section | ResolvedLocatorKind::CharacterRange => {
-                return Err(not_in_stream());
+                return Err(not_in_stream(
+                    resolved.kind,
+                    requested_kind,
+                    coverage_policy,
+                ));
             }
         };
         let paragraph_index = resolved
             .locator
             .paragraph_index
-            .ok_or_else(&not_in_stream)?;
+            .ok_or_else(|| not_in_stream(resolved.kind, requested_kind, coverage_policy))?;
         let position = self
             .text_unit_index
             .section_stream_position(
@@ -424,7 +432,7 @@ impl GetTextUnitsUseCase {
                 resolved.locator.sentence_index,
             )
             .await?
-            .ok_or_else(&not_in_stream)?;
+            .ok_or_else(|| not_in_stream(resolved.kind, requested_kind, coverage_policy))?;
         let rows = self
             .text_unit_index
             .section_stream_items(
@@ -437,10 +445,17 @@ impl GetTextUnitsUseCase {
                 1,
             )
             .await?;
-        let row = rows.into_iter().next().ok_or_else(&not_in_stream)?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| not_in_stream(resolved.kind, requested_kind, coverage_policy))?;
         let locator = reading_item(document, section, &row).locator;
         if locator != resolved.locator {
-            return Err(not_in_stream());
+            return Err(not_in_stream(
+                resolved.kind,
+                requested_kind,
+                coverage_policy,
+            ));
         }
         Ok((position, locator))
     }

@@ -6,7 +6,7 @@ use crate::domain::{
     TextUnit,
 };
 
-pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v4";
+pub(crate) const LEXICAL_SEARCH_INDEX_VERSION: &str = "lexical-search-index/v5";
 pub(crate) const MAX_SNIPPET_CHARS: usize = 320;
 
 #[derive(Clone, Debug)]

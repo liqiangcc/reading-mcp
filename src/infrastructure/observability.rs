@@ -195,6 +195,10 @@ impl SearchIndex for ObservedSearchIndex {
         self.inner.tokenizer_version()
     }
 
+    fn index_version(&self) -> &'static str {
+        self.inner.index_version()
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let started = Instant::now();
         let result = self.inner.index(document).await;

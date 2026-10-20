@@ -55,7 +55,9 @@ impl SqliteSearchIndex {
     async fn store_candidates(
         &self,
         document_id: DocumentId,
+        document_source: DocumentSource,
         normalized_document_hash: NormalizedDocumentHash,
+        content_hash: ContentHash,
         produce: impl FnOnce(
             &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
         ) -> Result<(), ApplicationError>
@@ -67,31 +69,79 @@ impl SqliteSearchIndex {
             ApplicationError::IndexFailed,
             move |connection| {
                 let transaction = connection.transaction().map_err(index_error)?;
+                let source = document_source.0.as_str();
                 transaction
                     .execute(
-                        "DELETE FROM lexical_search_units_v2 WHERE document_id = ?1",
+                        "INSERT INTO lexical_search_documents_v5(
+                            document_id,
+                            source,
+                            normalized_document_hash,
+                            content_hash,
+                            index_version,
+                            tokenizer_version
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(document_id) DO UPDATE SET
+                            source = excluded.source,
+                            normalized_document_hash = excluded.normalized_document_hash,
+                            content_hash = excluded.content_hash,
+                            index_version = excluded.index_version,
+                            tokenizer_version = excluded.tokenizer_version",
+                        params![
+                            &document_id.0,
+                            source,
+                            normalized_document_hash.0,
+                            content_hash.0,
+                            LEXICAL_SEARCH_INDEX_VERSION,
+                            LEXICAL_TOKENIZER_VERSION,
+                        ],
+                    )
+                    .map_err(index_error)?;
+                let doc_key: i64 = transaction
+                    .query_row(
+                        "SELECT doc_key FROM lexical_search_documents_v5 WHERE document_id = ?1",
                         params![&document_id.0],
+                        |row| row.get(0),
+                    )
+                    .map_err(index_error)?;
+
+                transaction
+                    .execute(
+                        "DELETE FROM lexical_search_fts_v5
+                         WHERE rowid IN (
+                            SELECT rowid FROM lexical_search_candidates_v5 WHERE doc_key = ?1
+                         )",
+                        params![doc_key],
+                    )
+                    .map_err(index_error)?;
+                transaction
+                    .execute(
+                        "DELETE FROM lexical_search_candidates_v5 WHERE doc_key = ?1",
+                        params![doc_key],
                     )
                     .map_err(index_error)?;
 
                 {
-                    let mut statement = transaction
+                    let mut candidate_statement = transaction
                         .prepare(
-                            "INSERT INTO lexical_search_units_v2(
-                                document_id,
+                            "INSERT INTO lexical_search_candidates_v5(
+                                doc_key,
+                                source_order,
                                 candidate_kind,
                                 section_id,
                                 title,
-                                source,
                                 searchable_text,
                                 location_json,
-                                locator_json,
-                                tokenizer_version,
-                                source_order,
-                                lexemes
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                locator_json
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         )
                         .map_err(index_error)?;
+                    let mut fts_statement = transaction
+                        .prepare(
+                            "INSERT INTO lexical_search_fts_v5(rowid, lexemes, doc)
+                             VALUES (?1, ?2, ?3)",
+                        )
+                        .map_err(index_error)?;
+                    let doc_token = format!("d{doc_key}");
 
                     produce(&mut |candidate| {
                         let location_json =
@@ -99,49 +149,34 @@ impl SqliteSearchIndex {
                                 .map_err(|error| {
                                     ApplicationError::IndexFailed(error.to_string())
                                 })?;
-                        let locator_json = serde_json::to_string(&StoredTextLocator::from(
+                        let locator_json = serde_json::to_string(&StoredCompactLocator::from(
                             &candidate.text_locator,
                         ))
                         .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
-                        statement
+                        candidate_statement
                             .execute(params![
-                                &document_id.0,
+                                doc_key,
+                                usize_to_i64(candidate.source_order)?,
                                 candidate.candidate_kind.as_str(),
                                 &candidate.section_id.0,
                                 &candidate.title,
-                                &candidate.source.0,
                                 &candidate.searchable_text,
                                 location_json,
                                 locator_json,
-                                LEXICAL_TOKENIZER_VERSION,
-                                usize_to_i64(candidate.source_order)?,
+                            ])
+                            .map_err(index_error)?;
+                        let rowid = transaction.last_insert_rowid();
+                        fts_statement
+                            .execute(params![
+                                rowid,
                                 encoded_lexemes(&candidate.tokens),
+                                &doc_token,
                             ])
                             .map_err(index_error)?;
                         Ok(())
                     })?;
                 }
 
-                transaction
-                    .execute(
-                        "INSERT INTO lexical_search_documents_v2(
-                            document_id,
-                            normalized_document_hash,
-                            index_version,
-                            tokenizer_version
-                         ) VALUES (?1, ?2, ?3, ?4)
-                         ON CONFLICT(document_id) DO UPDATE SET
-                            normalized_document_hash = excluded.normalized_document_hash,
-                            index_version = excluded.index_version,
-                            tokenizer_version = excluded.tokenizer_version",
-                        params![
-                            &document_id.0,
-                            normalized_document_hash.0,
-                            LEXICAL_SEARCH_INDEX_VERSION,
-                            LEXICAL_TOKENIZER_VERSION,
-                        ],
-                    )
-                    .map_err(index_error)?;
                 transaction.commit().map_err(index_error)?;
                 Ok(())
             },
@@ -156,16 +191,28 @@ impl SearchIndex for SqliteSearchIndex {
         LEXICAL_TOKENIZER_VERSION
     }
 
+    fn index_version(&self) -> &'static str {
+        LEXICAL_SEARCH_INDEX_VERSION
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let document_id = document.id.clone();
+        let document_source = document.source.clone();
         let normalized_document_hash = document.normalized_document_hash();
+        let content_hash = document.content_hash.clone();
         let candidates = build_lexical_candidates(document)?;
-        self.store_candidates(document_id, normalized_document_hash, move |sink| {
-            for candidate in candidates {
-                sink(candidate)?;
-            }
-            Ok(())
-        })
+        self.store_candidates(
+            document_id,
+            document_source,
+            normalized_document_hash,
+            content_hash,
+            move |sink| {
+                for candidate in candidates {
+                    sink(candidate)?;
+                }
+                Ok(())
+            },
+        )
         .await
     }
 
@@ -176,10 +223,18 @@ impl SearchIndex for SqliteSearchIndex {
         sentences: Arc<SentenceTextUnitSet>,
     ) -> Result<(), ApplicationError> {
         let document_id = document.id.clone();
+        let document_source = document.source.clone();
         let normalized_document_hash = document.normalized_document_hash();
-        self.store_candidates(document_id, normalized_document_hash, move |sink| {
-            for_each_lexical_candidate(&document, &paragraphs.units, &sentences.units, sink)
-        })
+        let content_hash = document.content_hash.clone();
+        self.store_candidates(
+            document_id,
+            document_source,
+            normalized_document_hash,
+            content_hash,
+            move |sink| {
+                for_each_lexical_candidate(&document, &paragraphs.units, &sentences.units, sink)
+            },
+        )
         .await
     }
 
@@ -227,20 +282,35 @@ impl SearchIndex for SqliteSearchIndex {
             &self.connection,
             ApplicationError::IndexFailed,
             move |connection| {
-                let indexed = connection
+                let document = connection
                     .query_row(
-                        "SELECT 1 FROM lexical_search_documents_v2 WHERE document_id = ?1",
+                        "SELECT doc_key, source, normalized_document_hash, content_hash, tokenizer_version
+                         FROM lexical_search_documents_v5 WHERE document_id = ?1",
                         params![&document_id.0],
-                        |_| Ok(()),
+                        |row| {
+                            Ok(StoredDocument {
+                                doc_key: row.get(0)?,
+                                source: row.get(1)?,
+                                normalized_document_hash: row.get(2)?,
+                                content_hash: row.get(3)?,
+                                tokenizer_version: row.get(4)?,
+                            })
+                        },
                     )
                     .optional()
-                    .map_err(index_error)?
-                    .is_some();
-                if !indexed {
+                    .map_err(index_error)?;
+                let Some(document) = document else {
                     return Err(ApplicationError::DocumentNotFound);
-                }
+                };
 
-                let mut hits = fts_search(connection, &fts_query, &document_id, &query, limit)?;
+                let mut hits = fts_search(
+                    connection,
+                    &fts_query,
+                    &document_id,
+                    &document,
+                    &query,
+                    limit,
+                )?;
                 // Strict AND is authoritative; only a zero-hit multi-token query falls
                 // back to a deterministic OR pass. Single-token queries never relax.
                 if hits.is_empty() {
@@ -250,6 +320,7 @@ impl SearchIndex for SqliteSearchIndex {
                             connection,
                             &encoded_relaxed_query(&query_tokens),
                             &document_id,
+                            &document,
                             &query,
                             limit,
                         )?;
@@ -262,82 +333,76 @@ impl SearchIndex for SqliteSearchIndex {
     }
 }
 
+struct StoredDocument {
+    doc_key: i64,
+    source: String,
+    normalized_document_hash: String,
+    content_hash: String,
+    tokenizer_version: String,
+}
+
 fn fts_search(
     connection: &Connection,
     fts_query: &str,
     document_id: &DocumentId,
+    document: &StoredDocument,
     raw_query: &str,
     limit: usize,
 ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+    if document.tokenizer_version != LEXICAL_TOKENIZER_VERSION {
+        return Err(ApplicationError::IndexFailed(format!(
+            "persisted tokenizer version {} does not match {LEXICAL_TOKENIZER_VERSION}",
+            document.tokenizer_version
+        )));
+    }
+    let scoped_query = format!("doc : d{} AND lexemes : ({fts_query})", document.doc_key);
     let mut statement = connection
         .prepare(
-            "SELECT
-                candidate_kind,
-                section_id,
-                title,
-                source,
-                searchable_text,
-                location_json,
-                locator_json,
-                tokenizer_version,
-                bm25(lexical_search_units_v2)
-             FROM lexical_search_units_v2
-             WHERE lexical_search_units_v2 MATCH ?1 AND document_id = ?2
-             ORDER BY bm25(lexical_search_units_v2) ASC, CAST(source_order AS INTEGER) ASC
-             LIMIT ?3",
+            "SELECT c.candidate_kind, c.section_id, c.title, c.searchable_text, c.location_json,
+                    c.locator_json, bm25(lexical_search_fts_v5, 1.0, 0.0) AS rank
+             FROM lexical_search_fts_v5
+             JOIN lexical_search_candidates_v5 c ON c.rowid = lexical_search_fts_v5.rowid
+             WHERE lexical_search_fts_v5 MATCH ?1
+             ORDER BY rank ASC, c.source_order ASC
+             LIMIT ?2",
         )
         .map_err(index_error)?;
     let rows = statement
-        .query_map(
-            params![fts_query, &document_id.0, usize_to_i64(limit)?],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, f64>(8)?,
-                ))
-            },
-        )
+        .query_map(params![scoped_query, usize_to_i64(limit)?], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, f64>(6)?,
+            ))
+        })
         .map_err(index_error)?;
 
     let mut hits = Vec::new();
     for row in rows {
-        let (
-            candidate_kind,
-            section_id,
-            title,
-            source,
-            searchable_text,
-            location_json,
-            locator_json,
-            tokenizer_version,
-            rank,
-        ) = row.map_err(index_error)?;
-        if tokenizer_version != LEXICAL_TOKENIZER_VERSION {
-            return Err(ApplicationError::IndexFailed(format!(
-                "persisted tokenizer version {tokenizer_version} does not match {LEXICAL_TOKENIZER_VERSION}"
-            )));
-        }
+        let (candidate_kind, section_id, title, searchable_text, location_json, locator_json, rank) =
+            row.map_err(index_error)?;
+        let locator: StoredCompactLocator = serde_json::from_str(&locator_json)
+            .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?;
         hits.push(LexicalSearchHit {
             section_id: SectionId(section_id),
             title,
-            source: DocumentSource(source),
+            source: DocumentSource(document.source.clone()),
             snippet: match_snippet(&searchable_text, raw_query, MAX_SNIPPET_CHARS),
             score: (1.0 / (1.0 + rank.abs())) as f32,
             location: serde_json::from_str::<StoredLocation>(&location_json)
                 .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?
                 .into(),
             candidate_kind: parse_kind(&candidate_kind)?,
-            text_locator: serde_json::from_str::<StoredTextLocator>(&locator_json)
-                .map_err(|error| ApplicationError::IndexFailed(error.to_string()))?
-                .try_into()?,
-            tokenizer_version,
+            text_locator: locator.rebuild(
+                &document_id.0,
+                &document.content_hash,
+                &document.normalized_document_hash,
+            )?,
+            tokenizer_version: document.tokenizer_version.clone(),
         });
     }
     Ok(hits)
@@ -353,31 +418,43 @@ fn ensure_schema(connection: &Connection) -> Result<(), ApplicationError> {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS lexical_search_units_v2;
-                 DROP TABLE IF EXISTS lexical_search_documents_v2;",
+                 DROP TABLE IF EXISTS lexical_search_documents_v2;
+                 DROP TABLE IF EXISTS lexical_search_fts_v5;
+                 DROP TABLE IF EXISTS lexical_search_candidates_v5;
+                 DROP TABLE IF EXISTS lexical_search_documents_v5;",
             )
             .map_err(index_error)?;
     }
 
     connection
         .execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS lexical_search_units_v2 USING fts5(
-                document_id UNINDEXED,
-                candidate_kind UNINDEXED,
-                section_id UNINDEXED,
-                title UNINDEXED,
-                source UNINDEXED,
-                searchable_text UNINDEXED,
-                location_json UNINDEXED,
-                locator_json UNINDEXED,
-                tokenizer_version UNINDEXED,
-                source_order UNINDEXED,
-                lexemes
-             );
-             CREATE TABLE IF NOT EXISTS lexical_search_documents_v2 (
-                document_id TEXT PRIMARY KEY,
+            "CREATE TABLE IF NOT EXISTS lexical_search_documents_v5 (
+                doc_key INTEGER PRIMARY KEY,
+                document_id TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL,
                 normalized_document_hash TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
                 index_version TEXT NOT NULL,
                 tokenizer_version TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS lexical_search_candidates_v5 (
+                rowid INTEGER PRIMARY KEY,
+                doc_key INTEGER NOT NULL,
+                source_order INTEGER NOT NULL,
+                candidate_kind TEXT NOT NULL,
+                section_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                searchable_text TEXT NOT NULL,
+                location_json TEXT NOT NULL,
+                locator_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_lexical_search_candidates_v5_doc
+                ON lexical_search_candidates_v5(doc_key);
+             CREATE VIRTUAL TABLE IF NOT EXISTS lexical_search_fts_v5 USING fts5(
+                lexemes,
+                doc,
+                content='',
+                contentless_delete=1
              );",
         )
         .map_err(index_error)?;
@@ -479,10 +556,7 @@ impl From<StoredLocation> for Location {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct StoredTextLocator {
-    document_id: String,
-    content_hash: String,
-    normalized_document_hash: String,
+struct StoredCompactLocator {
     owner_section_id: String,
     section_path: Vec<String>,
     paragraph_index: Option<usize>,
@@ -493,12 +567,9 @@ struct StoredTextLocator {
     native_location: Option<String>,
 }
 
-impl From<&TextLocator> for StoredTextLocator {
+impl From<&TextLocator> for StoredCompactLocator {
     fn from(value: &TextLocator) -> Self {
         Self {
-            document_id: value.document_id.0.clone(),
-            content_hash: value.content_hash.0.clone(),
-            normalized_document_hash: value.normalized_document_hash.0.clone(),
             owner_section_id: value.owner_section_id.0.clone(),
             section_path: value.section_path.clone(),
             paragraph_index: value.paragraph_index,
@@ -511,11 +582,14 @@ impl From<&TextLocator> for StoredTextLocator {
     }
 }
 
-impl TryFrom<StoredTextLocator> for TextLocator {
-    type Error = ApplicationError;
-
-    fn try_from(value: StoredTextLocator) -> Result<Self, Self::Error> {
-        let normalized_range = match (value.range_start, value.range_end) {
+impl StoredCompactLocator {
+    fn rebuild(
+        self,
+        document_id: &str,
+        content_hash: &str,
+        normalized_document_hash: &str,
+    ) -> Result<TextLocator, ApplicationError> {
+        let normalized_range = match (self.range_start, self.range_end) {
             (None, None) => None,
             (Some(start), Some(end)) => {
                 Some(NormalizedTextRange::new(start, end).map_err(|error| {
@@ -529,16 +603,100 @@ impl TryFrom<StoredTextLocator> for TextLocator {
             }
         };
         Ok(TextLocator {
-            document_id: DocumentId(value.document_id),
-            content_hash: ContentHash(value.content_hash),
-            normalized_document_hash: NormalizedDocumentHash(value.normalized_document_hash),
-            owner_section_id: SectionId(value.owner_section_id),
-            section_path: value.section_path,
-            paragraph_index: value.paragraph_index,
-            sentence_index: value.sentence_index,
+            document_id: DocumentId(document_id.to_owned()),
+            content_hash: ContentHash(content_hash.to_owned()),
+            normalized_document_hash: NormalizedDocumentHash(normalized_document_hash.to_owned()),
+            owner_section_id: SectionId(self.owner_section_id),
+            section_path: self.section_path,
+            paragraph_index: self.paragraph_index,
+            sentence_index: self.sentence_index,
             normalized_range,
-            segmentation_version: value.segmentation_version,
-            native_location: value.native_location,
+            segmentation_version: self.segmentation_version,
+            native_location: self.native_location,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use rusqlite::params;
+
+    use super::*;
+    use crate::domain::{MediaType, Section};
+
+    fn fixture() -> Document {
+        Document {
+            id: DocumentId("doc:locator-v5".into()),
+            source: DocumentSource("memory:locator-v5".into()),
+            title: "系统机制".into(),
+            media_type: MediaType("text/markdown".into()),
+            content_hash: ContentHash("sha256:locator-v5".into()),
+            metadata: BTreeMap::new(),
+            root_sections: vec![Section {
+                id: SectionId("section://virtual-memory".into()),
+                parent_id: None,
+                title: "虚拟内存机制".into(),
+                level: 1,
+                content: "地址空间隔离进程内存。页表把虚拟页映射到物理帧。\n\nUse read-cursor/v2 with std::sync::Arc safely.".into(),
+                location: Location {
+                    section_path: vec!["虚拟内存机制".into()],
+                    native_location: Some("markdown:#virtual-memory".into()),
+                    ..Location::default()
+                },
+                children: vec![],
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_locator_round_trips_every_candidate() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let database = directory.path().join("locators.sqlite");
+        let document = fixture();
+        let expected = build_lexical_candidates(&document).expect("candidates");
+        assert!(!expected.is_empty());
+
+        let index = SqliteSearchIndex::open(&database).expect("index");
+        index.index(&document).await.expect("index document");
+
+        let connection = Connection::open(&database).expect("inspect");
+        let document_row: (String, String) = connection
+            .query_row(
+                "SELECT content_hash, normalized_document_hash
+                 FROM lexical_search_documents_v5 WHERE document_id = ?1",
+                params![&document.id.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("document row");
+        let mut statement = connection
+            .prepare(
+                "SELECT locator_json, source_order FROM lexical_search_candidates_v5
+                 ORDER BY source_order",
+            )
+            .expect("candidate statement");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .expect("candidate rows");
+
+        let mut count = 0usize;
+        for row in rows {
+            let (locator_json, source_order) = row.expect("candidate row");
+            let compact: StoredCompactLocator =
+                serde_json::from_str(&locator_json).expect("compact locator");
+            let rebuilt = compact
+                .rebuild(&document.id.0, &document_row.0, &document_row.1)
+                .expect("rebuilt locator");
+            let expected_candidate = expected
+                .iter()
+                .find(|candidate| candidate.source_order == source_order as usize)
+                .expect("expected candidate");
+            assert_eq!(rebuilt, expected_candidate.text_locator);
+            count += 1;
+        }
+        assert_eq!(count, expected.len());
     }
 }

@@ -410,6 +410,119 @@ async fn long_paragraph_snippet_is_centered_on_late_match() {
     }
 }
 
+#[tokio::test]
+async fn sqlite_search_is_scoped_to_the_matched_document() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let document_a = fixture();
+    let mut document_b = fixture();
+    document_b.id = DocumentId("doc:other".into());
+    document_b.source = DocumentSource("memory:other".into());
+    document_b.title = "另一系统机制".into();
+    document_b.content_hash = ContentHash("sha256:other".into());
+    document_b.root_sections[0].id = SectionId("section://other".into());
+
+    let alone = Arc::new(
+        SqliteSearchIndex::open(directory.path().join("alone.sqlite")).expect("alone index"),
+    );
+    alone.index(&document_a).await.expect("index alone");
+    let alone_hits = alone
+        .search_lexical(&document_a.id, "物理帧", 10)
+        .await
+        .expect("search alone");
+    assert!(!alone_hits.is_empty());
+
+    let shared = Arc::new(
+        SqliteSearchIndex::open(directory.path().join("shared.sqlite")).expect("shared index"),
+    );
+    shared.index(&document_a).await.expect("index a");
+    shared.index(&document_b).await.expect("index b");
+
+    let scoped_hits = shared
+        .search_lexical(&document_a.id, "物理帧", 10)
+        .await
+        .expect("search a");
+    assert_eq!(scoped_hits.len(), alone_hits.len());
+    for (scoped, alone) in scoped_hits.iter().zip(alone_hits.iter()) {
+        assert_eq!(scoped.section_id, alone.section_id);
+        assert_eq!(scoped.candidate_kind, alone.candidate_kind);
+        assert_eq!(scoped.snippet, alone.snippet);
+        assert_eq!(scoped.text_locator, alone.text_locator);
+        assert_eq!(scoped.source, document_a.source);
+    }
+
+    let other_hits = shared
+        .search_lexical(&document_b.id, "物理帧", 10)
+        .await
+        .expect("search b");
+    assert!(!other_hits.is_empty());
+    assert!(
+        other_hits
+            .iter()
+            .all(|hit| hit.section_id == SectionId("section://other".into())),
+        "document B must only surface its own candidates"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_reindex_replaces_previous_candidate_rows() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("reindex.sqlite");
+    let document = fixture();
+    let index = Arc::new(SqliteSearchIndex::open(&database).expect("index"));
+
+    index.index(&document).await.expect("first index");
+    let connection = rusqlite::Connection::open(&database).expect("inspect");
+    let first_candidates: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM lexical_search_candidates_v5",
+            [],
+            |row| row.get(0),
+        )
+        .expect("candidate count");
+    let first_fts: i64 = connection
+        .query_row("SELECT count(*) FROM lexical_search_fts_v5", [], |row| {
+            row.get(0)
+        })
+        .expect("fts count");
+    assert!(first_candidates > 0);
+    assert_eq!(first_candidates, first_fts);
+    drop(connection);
+
+    index.index(&document).await.expect("second index");
+    let connection = rusqlite::Connection::open(&database).expect("inspect again");
+    let candidates: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM lexical_search_candidates_v5",
+            [],
+            |row| row.get(0),
+        )
+        .expect("candidate count");
+    let fts: i64 = connection
+        .query_row("SELECT count(*) FROM lexical_search_fts_v5", [], |row| {
+            row.get(0)
+        })
+        .expect("fts count");
+    assert_eq!(candidates, first_candidates);
+    assert_eq!(fts, first_fts);
+
+    let hits = index
+        .search_lexical(&document.id, "物理帧", 50)
+        .await
+        .expect("search after reindex");
+    let mut seen = std::collections::HashSet::new();
+    for hit in &hits {
+        assert!(
+            seen.insert((
+                hit.candidate_kind,
+                hit.section_id.clone(),
+                hit.location.paragraph,
+                hit.location.native_location.clone(),
+            )),
+            "re-index must not produce duplicate hits"
+        );
+    }
+}
+
 fn relaxed_fixture() -> Document {
     Document {
         id: DocumentId("doc:relaxed".into()),

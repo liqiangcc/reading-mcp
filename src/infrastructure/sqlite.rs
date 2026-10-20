@@ -1610,12 +1610,16 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 let sql = format!(
                     "SELECT s.{position_column}
                      FROM text_unit_streams_v2 s
+                     JOIN text_unit_items_v2 i
+                       ON i.doc_key = s.doc_key
+                      AND i.kind = s.unit_kind
+                      AND i.source_order = s.unit_source_order
                      WHERE s.doc_key = ?1
                        AND s.section_key = ?2
                        AND s.requested_kind = ?3
                        AND s.unit_kind = ?4
-                       AND s.paragraph_index = ?5
-                       AND s.sentence_index = ?6"
+                       AND i.paragraph_index = ?5
+                       AND i.sentence_index = ?6"
                 );
                 let paragraph_index = usize_to_i64(paragraph_index)?;
                 let sentence_index = sentence_index.map(usize_to_i64).transpose()?.unwrap_or(0);
@@ -1828,13 +1832,10 @@ fn rebuild_sentence_unit(
     }
     let parent_range = stored_normalized_range(
         i64_to_usize(
-            parent_start.ok_or_else(|| missing_parent_range())?,
+            parent_start.ok_or_else(missing_parent_range)?,
             "parent_start",
         )?,
-        i64_to_usize(
-            parent_end.ok_or_else(|| missing_parent_range())?,
-            "parent_end",
-        )?,
+        i64_to_usize(parent_end.ok_or_else(missing_parent_range)?, "parent_end")?,
     )?;
     Ok(SentenceTextUnit {
         id: sentence_text_unit_id(

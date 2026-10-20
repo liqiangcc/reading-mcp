@@ -583,15 +583,15 @@ fn context_item_from_row(
         }
         _ => None,
     };
-    let (content, locator, effective_kind) = match row.unit {
+    let (content, locator, effective_kind) = match &row.unit {
         OwnedStreamUnit::Paragraph(unit) => (
-            unit.text,
-            TextLocator::for_paragraph(document, section, &unit),
+            unit.text.clone(),
+            TextLocator::for_paragraph(document, section, unit),
             ContextItemKind::Paragraph,
         ),
         OwnedStreamUnit::Sentence(unit) => (
-            unit.text,
-            TextLocator::for_sentence(document, section, &unit),
+            unit.text.clone(),
+            TextLocator::for_sentence(document, section, unit),
             ContextItemKind::Sentence,
         ),
     };

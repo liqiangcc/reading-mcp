@@ -83,6 +83,34 @@ impl DocumentCache {
 /// How many decoded section layouts `SqliteTextUnitIndex` keeps in memory.
 const SECTION_LAYOUT_CACHE_CAPACITY: usize = 32;
 
+/// A stream plan plus the lookups that make each read cost O(page): built once per cached layout and kind.
+struct PlannedStream {
+    plan: Arc<SectionStreamPlanDesc>,
+    /// Indices into `plan.entries` of the eligible entries, ascending (EligibleOnly position k = eligible[k]).
+    eligible: Vec<u32>,
+    /// Entry index of `UnitRef::Paragraph(p)` at [p], or u32::MAX when that paragraph is not in the stream.
+    paragraph_entry: Vec<u32>,
+    /// Entry index of `UnitRef::Sentence(s)` at [s], or u32::MAX.
+    sentence_entry: Vec<u32>,
+}
+
+/// Why a kind's stream index could not be built. Cached as the message, like plan errors always were.
+enum PlannedStreamFailure {
+    /// The planner refused the section; the message is the planner's.
+    Plan(String),
+    /// The section has more entries than the `u32` index can address.
+    Index(String),
+}
+
+impl PlannedStreamFailure {
+    fn to_error(&self) -> ApplicationError {
+        match self {
+            Self::Plan(message) => ApplicationError::InvalidRequest(message.clone()),
+            Self::Index(message) => ApplicationError::TextUnitIndexFailed(message.clone()),
+        }
+    }
+}
+
 /// One decoded section layout, its planner descriptors and the stream plans built from them.
 struct CachedSectionLayout {
     doc_key: i64,
@@ -95,8 +123,12 @@ struct CachedSectionLayout {
     sentences: Vec<SentenceDesc>,
     coverage: Vec<ParagraphCoverageDesc>,
     section_coverage: Option<SectionCoverageDesc>,
-    paragraph_plan: OnceLock<Result<Arc<SectionStreamPlanDesc>, String>>,
-    sentence_plan: OnceLock<Result<Arc<SectionStreamPlanDesc>, String>>,
+    paragraph_plan: OnceLock<Result<Arc<PlannedStream>, PlannedStreamFailure>>,
+    sentence_plan: OnceLock<Result<Arc<PlannedStream>, PlannedStreamFailure>>,
+    /// `layout.paragraphs` is strictly increasing by `paragraph_index`, so a slot can be binary searched.
+    paragraphs_sorted: bool,
+    /// `layout.sentences` is strictly increasing by `(paragraph_index, sentence_index)`.
+    sentences_sorted: bool,
 }
 
 impl CachedSectionLayout {
@@ -144,6 +176,14 @@ impl CachedSectionLayout {
                 separator_chars: coverage.separator_chars,
                 paragraph_count: coverage.paragraph_count,
             });
+        let paragraphs_sorted = layout
+            .paragraphs
+            .windows(2)
+            .all(|pair| pair[0].paragraph_index < pair[1].paragraph_index);
+        let sentences_sorted = layout.sentences.windows(2).all(|pair| {
+            (pair[0].paragraph_index, pair[0].sentence_index)
+                < (pair[1].paragraph_index, pair[1].sentence_index)
+        });
         Ok(Self {
             doc_key,
             section_key,
@@ -157,19 +197,27 @@ impl CachedSectionLayout {
             section_coverage,
             paragraph_plan: OnceLock::new(),
             sentence_plan: OnceLock::new(),
+            paragraphs_sorted,
+            sentences_sorted,
         })
     }
 
+    /// The stream plan of `kind`, for callers that need only the plan.
     fn plan(
         &self,
         kind: RequestedTextUnitKind,
     ) -> Result<Arc<SectionStreamPlanDesc>, ApplicationError> {
+        Ok(Arc::clone(&self.planned(kind)?.plan))
+    }
+
+    /// The stream plan of `kind` plus the per-unit lookups the read paths use, built once per kind.
+    fn planned(&self, kind: RequestedTextUnitKind) -> Result<Arc<PlannedStream>, ApplicationError> {
         let cell = match kind {
             RequestedTextUnitKind::Paragraph => &self.paragraph_plan,
             RequestedTextUnitKind::Sentence => &self.sentence_plan,
         };
-        let plan = cell.get_or_init(|| {
-            plan_section_stream_desc(
+        let planned = cell.get_or_init(|| {
+            build_planned_stream(
                 &self.section_id,
                 &self.paragraphs,
                 self.section_coverage.as_ref(),
@@ -178,13 +226,104 @@ impl CachedSectionLayout {
                 kind,
             )
             .map(Arc::new)
-            .map_err(|error| error.to_string())
         });
-        match plan {
-            Ok(plan) => Ok(Arc::clone(plan)),
-            Err(error) => Err(ApplicationError::InvalidRequest(error.clone())),
+        match planned {
+            Ok(planned) => Ok(Arc::clone(planned)),
+            Err(failure) => Err(failure.to_error()),
         }
     }
+
+    /// The slot of the paragraph with `paragraph_index` in `layout.paragraphs`, or `None` when absent.
+    fn paragraph_slot(&self, paragraph_index: usize) -> Option<usize> {
+        if self.paragraphs_sorted {
+            self.layout
+                .paragraphs
+                .binary_search_by_key(&paragraph_index, |paragraph| paragraph.paragraph_index)
+                .ok()
+        } else {
+            self.layout
+                .paragraphs
+                .iter()
+                .position(|paragraph| paragraph.paragraph_index == paragraph_index)
+        }
+    }
+
+    /// The slot of the sentence at `(paragraph_index, sentence_index)` in `layout.sentences`.
+    fn sentence_slot(&self, paragraph_index: usize, sentence_index: usize) -> Option<usize> {
+        if self.sentences_sorted {
+            self.layout
+                .sentences
+                .binary_search_by_key(&(paragraph_index, sentence_index), |sentence| {
+                    (sentence.paragraph_index, sentence.sentence_index)
+                })
+                .ok()
+        } else {
+            self.layout.sentences.iter().position(|sentence| {
+                sentence.paragraph_index == paragraph_index
+                    && sentence.sentence_index == sentence_index
+            })
+        }
+    }
+}
+
+/// Builds one kind's stream index in a single pass over the planned entries.
+fn build_planned_stream(
+    section_id: &SectionId,
+    paragraphs: &[ParagraphDesc],
+    section_coverage: Option<&SectionCoverageDesc>,
+    sentences: &[SentenceDesc],
+    coverage: &[ParagraphCoverageDesc],
+    kind: RequestedTextUnitKind,
+) -> Result<PlannedStream, PlannedStreamFailure> {
+    let plan = plan_section_stream_desc(
+        section_id,
+        paragraphs,
+        section_coverage,
+        sentences,
+        coverage,
+        kind,
+    )
+    .map_err(|error| PlannedStreamFailure::Plan(error.to_string()))?;
+    // `u32::MAX` is the "not in this stream" sentinel, so at most `u32::MAX - 1` entries are addressable.
+    let max_entries = u32::MAX as usize - 1;
+    if plan.entries.len() > max_entries {
+        return Err(PlannedStreamFailure::Index(format!(
+            "section {} has {} {} stream entries, more than the {max_entries} the index can address",
+            section_id.0,
+            plan.entries.len(),
+            kind.as_str()
+        )));
+    }
+    let mut eligible = Vec::new();
+    let mut paragraph_entry = vec![u32::MAX; paragraphs.len()];
+    let mut sentence_entry = vec![u32::MAX; sentences.len()];
+    for (position, entry) in plan.entries.iter().enumerate() {
+        let index = u32::try_from(position).map_err(|_| {
+            PlannedStreamFailure::Index(format!(
+                "section {} {} stream entry {position} does not fit in u32",
+                section_id.0,
+                kind.as_str()
+            ))
+        })?;
+        if entry.eligible {
+            eligible.push(index);
+        }
+        let (table, slot) = match entry.unit {
+            UnitRef::Paragraph(slot) => (&mut paragraph_entry, slot),
+            UnitRef::Sentence(slot) => (&mut sentence_entry, slot),
+        };
+        // The first entry of a unit wins, exactly like the linear `position` scan the reads used before.
+        match table.get_mut(slot) {
+            Some(cell) if *cell == u32::MAX => *cell = index,
+            _ => {}
+        }
+    }
+    Ok(PlannedStream {
+        plan: Arc::new(plan),
+        eligible,
+        paragraph_entry,
+        sentence_entry,
+    })
 }
 
 /// Most recently used section layouts, front first. `data_version` is `PRAGMA data_version` at the
@@ -1353,12 +1492,10 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
                 match unit_kind {
                     EffectiveTextUnitKind::Paragraph => {
-                        let Some(paragraph) = entry
-                            .layout
-                            .paragraphs
-                            .iter()
-                            .find(|paragraph| paragraph.paragraph_index == paragraph_index)
-                        else {
+                        let Some(slot) = entry.paragraph_slot(paragraph_index) else {
+                            return Ok(None);
+                        };
+                        let Some(paragraph) = entry.layout.paragraphs.get(slot) else {
                             return Ok(None);
                         };
                         let text = load_text_slice(
@@ -1379,10 +1516,14 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         )?)))
                     }
                     EffectiveTextUnitKind::Sentence => {
-                        let Some(sentence) = entry.layout.sentences.iter().find(|sentence| {
-                            sentence.paragraph_index == paragraph_index
-                                && Some(sentence.sentence_index) == sentence_index
-                        }) else {
+                        let Some(sentence_index) = sentence_index else {
+                            return Ok(None);
+                        };
+                        let Some(slot) = entry.sentence_slot(paragraph_index, sentence_index)
+                        else {
+                            return Ok(None);
+                        };
+                        let Some(sentence) = entry.layout.sentences.get(slot) else {
                             return Ok(None);
                         };
                         let text = load_text_slice(
@@ -1446,7 +1587,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         (plan.entries.len(), plan.preserve_source.clone())
                     }
                     TextUnitCoveragePolicy::EligibleOnly => (
-                        plan.entries.iter().filter(|entry| entry.eligible).count(),
+                        entry.planned(kind)?.eligible.len(),
                         plan.eligible_only.clone(),
                     ),
                 };
@@ -1486,26 +1627,13 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 if entry.section_coverage.is_none() {
                     return Ok(Vec::new());
                 }
-                let plan = entry.plan(kind)?;
+                let planned = entry.planned(kind)?;
+                let entries = &planned.plan.entries;
 
-                let mut stream = Vec::with_capacity(plan.entries.len());
-                let mut eligible_position = 0usize;
-                for (preserve_position, item) in plan.entries.iter().enumerate() {
-                    let stream_position = match policy {
-                        TextUnitCoveragePolicy::PreserveSource => preserve_position,
-                        TextUnitCoveragePolicy::EligibleOnly => {
-                            if !item.eligible {
-                                continue;
-                            }
-                            let stream_position = eligible_position;
-                            eligible_position += 1;
-                            stream_position
-                        }
-                    };
-                    stream.push((stream_position, item));
-                }
-
-                let total = stream.len();
+                let total = match policy {
+                    TextUnitCoveragePolicy::PreserveSource => entries.len(),
+                    TextUnitCoveragePolicy::EligibleOnly => planned.eligible.len(),
+                };
                 let (start, end) = match direction {
                     TextUnitDirection::Forward => {
                         (position.min(total), (position + limit).min(total))
@@ -1515,10 +1643,17 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         (end.saturating_sub(limit), end)
                     }
                 };
+                // Stream position k of the chosen policy maps to entry `planned.entry_index(k)`.
+                let entry_index = |stream_position: usize| match policy {
+                    TextUnitCoveragePolicy::PreserveSource => stream_position,
+                    TextUnitCoveragePolicy::EligibleOnly => {
+                        planned.eligible[stream_position] as usize
+                    }
+                };
 
-                let range = stream[start..end].iter().try_fold(
-                    None::<(usize, usize)>,
-                    |range, (_, item)| {
+                let range =
+                    (start..end).try_fold(None::<(usize, usize)>, |range, stream_position| {
+                        let item = &entries[entry_index(stream_position)];
                         let (unit_start, unit_end) = unit_char_range(&entry.layout, item.unit)?;
                         Ok::<_, ApplicationError>(Some(match range {
                             None => (unit_start, unit_end),
@@ -1526,8 +1661,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                                 (range_start.min(unit_start), range_end.max(unit_end))
                             }
                         }))
-                    },
-                )?;
+                    })?;
                 let (range_start, range_text) = match range {
                     Some((range_start, range_end)) => (
                         range_start,
@@ -1543,9 +1677,10 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 };
                 let text_index = NormalizedTextIndex::new(&range_text);
                 let mut items = Vec::with_capacity(end - start);
-                for (stream_position, item) in &stream[start..end] {
+                for stream_position in start..end {
+                    let item = &entries[entry_index(stream_position)];
                     items.push(StoredStreamItem {
-                        position: *stream_position,
+                        position: stream_position,
                         unit: build_owned_unit(&meta, &entry, item.unit, &text_index, range_start)?,
                         content_class: item.content_class,
                         degradation: item.degradation.map(str::to_owned),
@@ -1591,44 +1726,40 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                             return Ok(None);
                         }
                         entry
-                            .layout
-                            .paragraphs
-                            .iter()
-                            .position(|paragraph| paragraph.paragraph_index == paragraph_index)
+                            .paragraph_slot(paragraph_index)
                             .map(UnitRef::Paragraph)
                     }
-                    EffectiveTextUnitKind::Sentence => entry
-                        .layout
-                        .sentences
-                        .iter()
-                        .position(|sentence| {
-                            sentence.paragraph_index == paragraph_index
-                                && Some(sentence.sentence_index) == sentence_index
-                        })
-                        .map(UnitRef::Sentence),
+                    EffectiveTextUnitKind::Sentence => {
+                        let Some(sentence_index) = sentence_index else {
+                            return Ok(None);
+                        };
+                        entry
+                            .sentence_slot(paragraph_index, sentence_index)
+                            .map(UnitRef::Sentence)
+                    }
                 };
                 let Some(target) = target else {
                     return Ok(None);
                 };
-                let plan = entry.plan(kind)?;
-                let mut eligible_position = 0usize;
-                for (preserve_position, item) in plan.entries.iter().enumerate() {
-                    let stream_position = match policy {
-                        TextUnitCoveragePolicy::PreserveSource => preserve_position,
-                        TextUnitCoveragePolicy::EligibleOnly => {
-                            if !item.eligible {
-                                continue;
-                            }
-                            let stream_position = eligible_position;
-                            eligible_position += 1;
-                            stream_position
+                let planned = entry.planned(kind)?;
+                let entry_index = match target {
+                    UnitRef::Paragraph(slot) => planned.paragraph_entry.get(slot),
+                    UnitRef::Sentence(slot) => planned.sentence_entry.get(slot),
+                }
+                .copied()
+                .filter(|index| *index != u32::MAX);
+                let Some(entry_index) = entry_index else {
+                    return Ok(None);
+                };
+                match policy {
+                    TextUnitCoveragePolicy::PreserveSource => Ok(Some(entry_index as usize)),
+                    TextUnitCoveragePolicy::EligibleOnly => {
+                        if !planned.plan.entries[entry_index as usize].eligible {
+                            return Ok(None);
                         }
-                    };
-                    if item.unit == target {
-                        return Ok(Some(stream_position));
+                        Ok(planned.eligible.binary_search(&entry_index).ok())
                     }
                 }
-                Ok(None)
             },
         )
         .await
@@ -2681,6 +2812,111 @@ impl StoredParagraphCoverage {
             native_structural_container_chars: self.native_structural_container_chars,
             native_non_prose_chars: self.native_non_prose_chars,
             fallback_chars: self.fallback_chars,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout_paragraph(paragraph_index: usize, start: usize, end: usize) -> LayoutParagraph {
+        LayoutParagraph {
+            paragraph_index,
+            source_order: paragraph_index,
+            start,
+            end,
+        }
+    }
+
+    fn layout_sentence(
+        paragraph_index: usize,
+        sentence_index: usize,
+        start: usize,
+        end: usize,
+    ) -> LayoutSentence {
+        LayoutSentence {
+            paragraph_index,
+            sentence_index,
+            source_order: paragraph_index * 10 + sentence_index,
+            start,
+            end,
+            parent_start: start,
+            parent_end: end,
+        }
+    }
+
+    fn cached(layout: SectionLayout) -> CachedSectionLayout {
+        CachedSectionLayout::new(0, 0, SectionId("section://slots".into()), 64, None, layout)
+            .expect("the synthetic layout should cache")
+    }
+
+    /// The slot lookups must return the first match, whatever the layout order: the binary search is only
+    /// allowed to answer when the layout is strictly increasing, and the linear scan must answer otherwise.
+    #[test]
+    fn slot_lookups_match_a_linear_scan_for_sorted_and_unsorted_layouts() {
+        let sorted = cached(SectionLayout {
+            paragraphs: vec![
+                layout_paragraph(0, 0, 10),
+                layout_paragraph(2, 10, 20),
+                layout_paragraph(5, 20, 30),
+            ],
+            sentences: vec![
+                layout_sentence(0, 0, 0, 5),
+                layout_sentence(0, 1, 5, 10),
+                layout_sentence(2, 0, 10, 20),
+            ],
+            coverage: vec![],
+        });
+        let unsorted = cached(SectionLayout {
+            paragraphs: vec![
+                layout_paragraph(5, 20, 30),
+                layout_paragraph(0, 0, 10),
+                layout_paragraph(2, 10, 20),
+            ],
+            sentences: vec![
+                layout_sentence(2, 0, 10, 20),
+                layout_sentence(0, 1, 5, 10),
+                layout_sentence(0, 0, 0, 5),
+            ],
+            coverage: vec![],
+        });
+
+        assert!(
+            sorted.paragraphs_sorted && sorted.sentences_sorted,
+            "the ascending layout must be detected as sorted"
+        );
+        assert!(
+            !unsorted.paragraphs_sorted && !unsorted.sentences_sorted,
+            "the shuffled layout must not be detected as sorted"
+        );
+
+        for entry in [&sorted, &unsorted] {
+            for paragraph_index in 0..8 {
+                let expected = entry
+                    .layout
+                    .paragraphs
+                    .iter()
+                    .position(|paragraph| paragraph.paragraph_index == paragraph_index);
+                assert_eq!(
+                    entry.paragraph_slot(paragraph_index),
+                    expected,
+                    "paragraph slot disagreement for paragraph {paragraph_index}"
+                );
+            }
+            for paragraph_index in 0..4 {
+                for sentence_index in 0..3 {
+                    let expected = entry.layout.sentences.iter().position(|sentence| {
+                        sentence.paragraph_index == paragraph_index
+                            && sentence.sentence_index == sentence_index
+                    });
+                    assert_eq!(
+                        entry.sentence_slot(paragraph_index, sentence_index),
+                        expected,
+                        "sentence slot disagreement for {paragraph_index}.{sentence_index}"
+                    );
+                }
+            }
         }
     }
 }

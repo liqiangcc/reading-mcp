@@ -1076,7 +1076,7 @@ fn strip_line_ending(line: &str) -> &str {
     line.strip_suffix('\r').unwrap_or(line)
 }
 
-fn paragraph_text_unit_id(
+pub(crate) fn paragraph_text_unit_id(
     document_id: &DocumentId,
     normalized_document_hash: &NormalizedDocumentHash,
     owner_section_id: &SectionId,
@@ -1096,7 +1096,7 @@ fn paragraph_text_unit_id(
     TextUnitId(format!("tu1:{:x}", hasher.finalize()))
 }
 
-fn sentence_text_unit_id(
+pub(crate) fn sentence_text_unit_id(
     document_id: &DocumentId,
     normalized_document_hash: &NormalizedDocumentHash,
     owner_section_id: &SectionId,

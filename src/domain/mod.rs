@@ -44,6 +44,7 @@ pub use text_unit::{
     SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
     TEXT_UNIT_ID_VERSION, TextUnit, TextUnitId, TextUnitKind,
 };
+pub(crate) use text_unit::{paragraph_text_unit_id, sentence_text_unit_id};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct DocumentId(pub String);

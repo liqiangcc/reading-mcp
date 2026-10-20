@@ -77,6 +77,19 @@ async fn compare_indexes(
 ) {
     for section in all_sections(document) {
         let units = SectionTextUnits::from_sets(paragraphs, sentences, &section.id);
+        let sqlite_units = sqlite
+            .section_units(&document.id, &section.id)
+            .await
+            .expect("sqlite section units should load");
+        let memory_units = memory
+            .section_units(&document.id, &section.id)
+            .await
+            .expect("memory section units should load");
+        assert_eq!(
+            sqlite_units, memory_units,
+            "section units disagreement for section {}",
+            section.id.0
+        );
         for kind in [
             RequestedTextUnitKind::Paragraph,
             RequestedTextUnitKind::Sentence,
@@ -319,14 +332,16 @@ async fn replacing_the_unit_sets_replaces_the_stream_and_summary_rows() {
         rusqlite::Connection::open(&database).expect("database should open for row counts");
     let stream_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM text_unit_streams_v1 WHERE document_id = ?1",
+            "SELECT COUNT(*) FROM text_unit_streams_v2
+             WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
         )
         .expect("stream rows should count");
     let summary_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM text_unit_stream_summaries_v1 WHERE document_id = ?1",
+            "SELECT COUNT(*) FROM text_unit_stream_summaries_v2
+             WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
         )
@@ -336,6 +351,211 @@ async fn replacing_the_unit_sets_replaces_the_stream_and_summary_rows() {
     assert_eq!(stream_rows, 3);
     assert_eq!(summary_rows, 4);
     assert_eq!(total_items, 2);
+}
+
+#[tokio::test]
+async fn replacing_the_unit_sets_leaves_the_legacy_table_empty_and_list_document_reads_v2() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let index = SqliteTextUnitIndex::open(&database).expect("index should open");
+    let document = parse_markdown().await;
+    store_text_units(&index, &document)
+        .await
+        .expect("units should persist");
+
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let legacy_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM text_units WHERE document_id = ?1",
+            rusqlite::params![&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("legacy rows should count");
+    assert_eq!(legacy_rows, 0);
+
+    let expected = document
+        .try_paragraph_text_units()
+        .expect("valid paragraph set")
+        .units;
+    assert_eq!(
+        index
+            .list_document(&document.id)
+            .await
+            .expect("list_document should read v2"),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn opening_the_index_drops_v1_tables_and_their_documents_are_missing() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    {
+        let connection = rusqlite::Connection::open(&database).expect("database should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE text_unit_sets_v1 (
+                    document_id TEXT PRIMARY KEY,
+                    segmentation_version TEXT NOT NULL
+                 );
+                 CREATE TABLE text_unit_sections_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    paragraph_coverage_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id)
+                 );
+                 CREATE TABLE text_unit_items_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source_order INTEGER NOT NULL,
+                    unit_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, kind, source_order)
+                 );
+                 CREATE INDEX idx_text_unit_items_v1_section
+                    ON text_unit_items_v1(document_id, owner_section_id, kind, source_order);
+                 CREATE TABLE text_unit_sentence_coverage_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    coverage_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id, position)
+                 );
+                 CREATE TABLE text_unit_streams_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    requested_kind TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    eligible_position INTEGER,
+                    unit_kind TEXT NOT NULL,
+                    unit_source_order INTEGER NOT NULL,
+                    paragraph_index INTEGER NOT NULL,
+                    sentence_index INTEGER,
+                    content_class TEXT NOT NULL,
+                    degradation TEXT,
+                    char_count INTEGER NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id, requested_kind, position)
+                 );
+                 CREATE TABLE text_unit_stream_summaries_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    requested_kind TEXT NOT NULL,
+                    coverage_policy TEXT NOT NULL,
+                    total_items INTEGER NOT NULL,
+                    coverage_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id, requested_kind, coverage_policy)
+                 );
+                 INSERT INTO text_unit_sets_v1(document_id, segmentation_version)
+                    VALUES ('doc:v1', 'text-segmentation/v3');
+                 INSERT INTO text_unit_sections_v1(
+                    document_id, owner_section_id, paragraph_coverage_json
+                 ) VALUES ('doc:v1', 'section://root', '{}');
+                 INSERT INTO text_unit_stream_summaries_v1(
+                    document_id, owner_section_id, requested_kind, coverage_policy,
+                    total_items, coverage_json
+                 ) VALUES ('doc:v1', 'section://root', 'paragraph', 'preserve_source', 0, '{}');",
+            )
+            .expect("v1 tables should be created");
+    }
+
+    let index = SqliteTextUnitIndex::open(&database).expect("index should open");
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    for table in [
+        "text_unit_sets_v1",
+        "text_unit_sections_v1",
+        "text_unit_items_v1",
+        "text_unit_sentence_coverage_v1",
+        "text_unit_streams_v1",
+        "text_unit_stream_summaries_v1",
+    ] {
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                rusqlite::params![table],
+                |row| row.get(0),
+            )
+            .expect("sqlite_master should be readable");
+        assert_eq!(count, 0, "v1 table {table} should be dropped");
+    }
+
+    let document_id = DocumentId("doc:v1".into());
+    let section_id = SectionId("section://root".into());
+    let summary = index
+        .section_stream_summary(TextUnitStreamKey {
+            document_id: &document_id,
+            section_id: &section_id,
+            kind: RequestedTextUnitKind::Paragraph,
+            policy: TextUnitCoveragePolicy::PreserveSource,
+        })
+        .await
+        .expect("summary lookup should succeed");
+    assert!(summary.is_none(), "v1-only documents must read as missing");
+}
+
+#[tokio::test]
+async fn replacing_the_unit_sets_twice_keeps_one_set_of_rows_and_the_same_doc_key() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let index = SqliteTextUnitIndex::open(&database).expect("index should open");
+    let document = parse_markdown().await;
+    let tables = [
+        "text_unit_sections_v2",
+        "text_unit_items_v2",
+        "text_unit_sentence_coverage_v2",
+        "text_unit_streams_v2",
+        "text_unit_stream_summaries_v2",
+    ];
+
+    store_text_units(&index, &document)
+        .await
+        .expect("first sets should persist");
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let doc_key: i64 = connection
+        .query_row(
+            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+            rusqlite::params![&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("doc_key should exist");
+    let mut first_counts = Vec::new();
+    for table in tables {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE doc_key = ?1"),
+                rusqlite::params![doc_key],
+                |row| row.get(0),
+            )
+            .expect("rows should count");
+        assert!(count > 0, "{table} should have rows after the first write");
+        first_counts.push(count);
+    }
+    drop(connection);
+
+    store_text_units(&index, &document)
+        .await
+        .expect("second sets should replace the first");
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let doc_key_after: i64 = connection
+        .query_row(
+            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+            rusqlite::params![&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("doc_key should still exist");
+    assert_eq!(doc_key_after, doc_key, "doc_key must be stable");
+    for (table, expected) in tables.iter().zip(first_counts) {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE doc_key = ?1"),
+                rusqlite::params![doc_key],
+                |row| row.get(0),
+            )
+            .expect("rows should count");
+        assert_eq!(
+            count, expected,
+            "{table} should keep exactly one set of rows"
+        );
+    }
 }
 
 #[tokio::test]
@@ -358,7 +578,8 @@ async fn missing_stream_summary_is_reported_as_stale() {
     rusqlite::Connection::open(&database)
         .expect("database should open")
         .execute(
-            "DELETE FROM text_unit_stream_summaries_v1 WHERE document_id = ?1",
+            "DELETE FROM text_unit_stream_summaries_v2
+             WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&document.id.0],
         )
         .expect("summary rows should be deleted");
@@ -636,10 +857,13 @@ async fn stored_context_reports_stale_instead_of_deriving_after_stream_rows_are_
         .expect("units should persist");
 
     let connection = rusqlite::Connection::open(&database).expect("database should open");
-    for table in ["text_unit_streams_v1", "text_unit_stream_summaries_v1"] {
+    for table in ["text_unit_streams_v2", "text_unit_stream_summaries_v2"] {
         connection
             .execute(
-                &format!("DELETE FROM {table} WHERE document_id = ?1"),
+                &format!(
+                    "DELETE FROM {table}
+                     WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)"
+                ),
                 rusqlite::params![&document.id.0],
             )
             .expect("stream rows should be deleted");

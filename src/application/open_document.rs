@@ -11,6 +11,7 @@ use crate::application::ports::{
 use crate::application::reading_profile::{
     READING_PROFILE_SCHEMA_VERSION, ReadingProfile, ReliabilitySummary, build_reading_profile,
 };
+use crate::application::text_unit_stream::TEXT_UNIT_STREAM_VERSION;
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, MediaType, NORMALIZATION_VERSION,
     NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE, NormalizedDocumentHash,
@@ -119,7 +120,7 @@ impl OpenDocumentUseCase {
     /// The single source of the open-result key fingerprint, so the hit and miss paths cannot drift.
     fn open_result_fingerprint(&self, ingest_fingerprint: &str) -> String {
         format!(
-            "{OPEN_RESULT_VERSION}|{}|{NORMALIZATION_VERSION}|{NORMALIZED_DOCUMENT_HASH_VERSION}|{TEXT_SEGMENTATION_VERSION}|{READING_PROFILE_SCHEMA_VERSION}|{}|precise={}|reliability={}|{ingest_fingerprint}",
+            "{OPEN_RESULT_VERSION}|{}|{NORMALIZATION_VERSION}|{NORMALIZED_DOCUMENT_HASH_VERSION}|{TEXT_SEGMENTATION_VERSION}|{READING_PROFILE_SCHEMA_VERSION}|{}|precise={}|reliability={}|{ingest_fingerprint}|{TEXT_UNIT_STREAM_VERSION}",
             env!("CARGO_PKG_VERSION"),
             self.search_index.tokenizer_version(),
             self.search_index.supports_precise_lexical_candidates(),

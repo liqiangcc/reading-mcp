@@ -521,14 +521,14 @@ async fn paragraph_container_result(
     let position = units
         .section_stream_position(key, EffectiveTextUnitKind::Paragraph, paragraph_index, None)
         .await?
-        .ok_or_else(|| missing_paragraph())?;
+        .ok_or_else(&missing_paragraph)?;
     let content_class = units
         .section_stream_items(key, TextUnitDirection::Forward, position, 1)
         .await?
         .into_iter()
         .next()
         .map(|row| row.content_class)
-        .ok_or_else(|| missing_paragraph())?;
+        .ok_or_else(&missing_paragraph)?;
     let paragraph = match units
         .section_unit(
             &document.id,

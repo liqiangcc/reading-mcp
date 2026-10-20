@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use reading_mcp::application::derived_text_units::DerivedTextUnits;
+use reading_mcp::application::get_context::{
+    ContextContainerKind, ContextRelation, ContextTarget, ContextUnit, GetContextUseCase,
+    GetStructuredContextCommand,
+};
 use reading_mcp::application::get_text_units::{
     EffectiveTextUnitKind, GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind,
     TextUnitCoveragePolicy, TextUnitDirection,
@@ -12,7 +17,7 @@ use reading_mcp::application::ports::{
 use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, ParagraphTextUnitSet,
-    Section, SectionId, SentenceTextUnitSet,
+    Section, SectionId, SentenceTextUnitSet, TextLocator,
 };
 use reading_mcp::infrastructure::{
     InMemoryTextUnitIndex, SqliteDocumentRepository, SqliteTextUnitIndex,
@@ -371,6 +376,299 @@ async fn missing_stream_summary_is_reported_as_stale() {
         })
         .await
         .expect_err("a missing summary must fail closed");
+    assert!(matches!(error, ApplicationError::StaleDocument(_)));
+}
+
+#[tokio::test]
+async fn sqlite_section_unit_matches_memory_and_derived_for_every_unit() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let sqlite = SqliteTextUnitIndex::open(&database).expect("sqlite index should open");
+    let memory = InMemoryTextUnitIndex::default();
+
+    for document in [
+        parse_plain().await,
+        parse_markdown().await,
+        parse_html().await,
+    ] {
+        store_text_units(&sqlite, &document)
+            .await
+            .expect("sqlite units should persist");
+        store_text_units(&memory, &document)
+            .await
+            .expect("memory units should persist");
+        let derived = DerivedTextUnits::new(Arc::new(document.clone()));
+        let paragraphs = document
+            .try_paragraph_text_units()
+            .expect("valid paragraph set");
+        let sentences = document
+            .try_sentence_text_units()
+            .expect("valid sentence set");
+
+        for section in all_sections(&document) {
+            let units = SectionTextUnits::from_sets(&paragraphs, &sentences, &section.id);
+            for paragraph in &units.paragraphs {
+                let probe = (
+                    EffectiveTextUnitKind::Paragraph,
+                    paragraph.paragraph_index,
+                    None,
+                );
+                let expected = memory
+                    .section_unit(&document.id, &section.id, probe.0, probe.1, probe.2)
+                    .await
+                    .expect("memory lookup should succeed");
+                assert_eq!(
+                    sqlite
+                        .section_unit(&document.id, &section.id, probe.0, probe.1, probe.2)
+                        .await
+                        .expect("sqlite lookup should succeed"),
+                    expected,
+                    "paragraph lookup disagreement for {}/{}",
+                    section.id.0,
+                    paragraph.paragraph_index
+                );
+                assert_eq!(
+                    derived
+                        .section_unit(&document.id, &section.id, probe.0, probe.1, probe.2)
+                        .await
+                        .expect("derived lookup should succeed"),
+                    expected,
+                    "derived paragraph lookup disagreement for {}/{}",
+                    section.id.0,
+                    paragraph.paragraph_index
+                );
+            }
+            for sentence in &units.sentences {
+                let probe = (
+                    EffectiveTextUnitKind::Sentence,
+                    sentence.paragraph_index,
+                    Some(sentence.sentence_index),
+                );
+                let expected = memory
+                    .section_unit(&document.id, &section.id, probe.0, probe.1, probe.2)
+                    .await
+                    .expect("memory lookup should succeed");
+                assert_eq!(
+                    sqlite
+                        .section_unit(&document.id, &section.id, probe.0, probe.1, probe.2)
+                        .await
+                        .expect("sqlite lookup should succeed"),
+                    expected,
+                    "sentence lookup disagreement for {}/{}.{}",
+                    section.id.0,
+                    sentence.paragraph_index,
+                    sentence.sentence_index
+                );
+                assert_eq!(
+                    derived
+                        .section_unit(&document.id, &section.id, probe.0, probe.1, probe.2)
+                        .await
+                        .expect("derived lookup should succeed"),
+                    expected,
+                    "derived sentence lookup disagreement for {}/{}.{}",
+                    section.id.0,
+                    sentence.paragraph_index,
+                    sentence.sentence_index
+                );
+            }
+            let missing = (
+                EffectiveTextUnitKind::Paragraph,
+                units.paragraphs.len() + 1,
+                None,
+            );
+            let indexes: [&dyn TextUnitIndex; 3] = [&sqlite, &memory, &derived];
+            for index in indexes {
+                assert_eq!(
+                    index
+                        .section_unit(&document.id, &section.id, missing.0, missing.1, missing.2)
+                        .await
+                        .expect("missing paragraph lookup should succeed"),
+                    None,
+                    "missing paragraph must be absent in section {}",
+                    section.id.0
+                );
+            }
+            for index in indexes {
+                assert_eq!(
+                    index
+                        .section_unit(
+                            &document.id,
+                            &section.id,
+                            EffectiveTextUnitKind::Sentence,
+                            1,
+                            Some(99)
+                        )
+                        .await
+                        .expect("missing sentence lookup should succeed"),
+                    None,
+                    "missing sentence must be absent in section {}",
+                    section.id.0
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn get_context_matches_derived_mode_for_every_anchor_and_window() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let repository: Arc<dyn DocumentRepository> =
+        Arc::new(SqliteDocumentRepository::open(&database).expect("repository should open"));
+    let index: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("index should open"));
+
+    for document in [
+        parse_plain().await,
+        parse_markdown().await,
+        parse_html().await,
+    ] {
+        repository
+            .save(document.clone())
+            .await
+            .expect("document should persist");
+        store_text_units(&*index, &document)
+            .await
+            .expect("units should persist");
+        let derived: Arc<dyn TextUnitIndex> =
+            Arc::new(DerivedTextUnits::new(Arc::new(document.clone())));
+        let stored_context =
+            GetContextUseCase::new(repository.clone()).with_text_unit_index(Arc::clone(&index));
+        let derived_context =
+            GetContextUseCase::new(repository.clone()).with_text_unit_index(derived);
+        let paragraphs = document
+            .try_paragraph_text_units()
+            .expect("valid paragraph set");
+        let sentences = document
+            .try_sentence_text_units()
+            .expect("valid sentence set");
+
+        for section in all_sections(&document) {
+            let units = SectionTextUnits::from_sets(&paragraphs, &sentences, &section.id);
+            let mut anchors = Vec::new();
+            for paragraph in &units.paragraphs {
+                anchors.push((
+                    ContextUnit::Paragraph,
+                    TextLocator::for_paragraph(&document, &section, paragraph),
+                ));
+            }
+            for sentence in &units.sentences {
+                anchors.push((
+                    ContextUnit::Sentence,
+                    TextLocator::for_sentence(&document, &section, sentence),
+                ));
+            }
+
+            for (unit, locator) in &anchors {
+                for before in [0usize, 1, 2] {
+                    for after in [0usize, 1, 2] {
+                        let command = GetStructuredContextCommand {
+                            document_id: document.id.clone(),
+                            target: ContextTarget::Locator(locator.clone()),
+                            relation: ContextRelation::Neighbor {
+                                unit: *unit,
+                                before,
+                                after,
+                            },
+                            max_chars: None,
+                        };
+                        let stored = stored_context
+                            .execute_structured(command.clone())
+                            .await
+                            .expect("stored context should succeed");
+                        let derived = derived_context
+                            .execute_structured(command)
+                            .await
+                            .expect("derived context should succeed");
+                        assert_eq!(
+                            stored, derived,
+                            "neighbor disagreement for {}/{:?} before {before} after {after}",
+                            section.id.0, unit
+                        );
+                    }
+                }
+            }
+
+            for (_, locator) in &anchors {
+                let command = GetStructuredContextCommand {
+                    document_id: document.id.clone(),
+                    target: ContextTarget::Locator(locator.clone()),
+                    relation: ContextRelation::Container {
+                        kind: ContextContainerKind::Paragraph,
+                    },
+                    max_chars: None,
+                };
+                let stored = stored_context
+                    .execute_structured(command.clone())
+                    .await
+                    .expect("stored paragraph container should succeed");
+                let derived = derived_context
+                    .execute_structured(command)
+                    .await
+                    .expect("derived paragraph container should succeed");
+                assert_eq!(
+                    stored,
+                    derived,
+                    "paragraph container disagreement for {}/{}",
+                    section.id.0,
+                    locator.paragraph_index.unwrap_or(0)
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn stored_context_reports_stale_instead_of_deriving_after_stream_rows_are_deleted() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let repository: Arc<dyn DocumentRepository> =
+        Arc::new(SqliteDocumentRepository::open(&database).expect("repository should open"));
+    let index: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("index should open"));
+    let document = parse_plain().await;
+    repository
+        .save(document.clone())
+        .await
+        .expect("document should persist");
+    store_text_units(&*index, &document)
+        .await
+        .expect("units should persist");
+
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    for table in ["text_unit_streams_v1", "text_unit_stream_summaries_v1"] {
+        connection
+            .execute(
+                &format!("DELETE FROM {table} WHERE document_id = ?1"),
+                rusqlite::params![&document.id.0],
+            )
+            .expect("stream rows should be deleted");
+    }
+
+    let section = document.root_sections[0].clone();
+    let paragraph = document
+        .try_paragraph_text_units()
+        .expect("valid paragraph set")
+        .units
+        .into_iter()
+        .find(|unit| unit.owner_section_id == section.id)
+        .expect("paragraph should exist");
+    let error = GetContextUseCase::new(repository)
+        .with_text_unit_index(index)
+        .execute_structured(GetStructuredContextCommand {
+            document_id: document.id.clone(),
+            target: ContextTarget::Locator(TextLocator::for_paragraph(
+                &document, &section, &paragraph,
+            )),
+            relation: ContextRelation::Neighbor {
+                unit: ContextUnit::Paragraph,
+                before: 2,
+                after: 2,
+            },
+            max_chars: None,
+        })
+        .await
+        .expect_err("missing stored units must fail closed");
     assert!(matches!(error, ApplicationError::StaleDocument(_)));
 }
 

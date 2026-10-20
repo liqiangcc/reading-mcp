@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::locator_resolution::{ResolvedTextLocator, resolve_text_locator};
-use crate::application::ports::{ApplicationError, DocumentRepository};
+use crate::application::ports::{ApplicationError, DocumentRepository, TextUnitIndex};
 use crate::application::read_cursor::{ReadCursorClaims, decode_read_cursor, encode_read_cursor};
 use crate::application::reading_support::{
     SECTION_TREE_READ_MODE, SECTION_TREE_RENDERING_VERSION, SECTION_TREE_STREAM_COORDINATE_SPACE,
@@ -73,11 +74,20 @@ pub struct ReadSectionResult {
 
 pub struct ReadDocumentUseCase {
     repository: Arc<dyn DocumentRepository>,
+    text_unit_index: Option<Arc<dyn TextUnitIndex>>,
 }
 
 impl ReadDocumentUseCase {
     pub fn new(repository: Arc<dyn DocumentRepository>) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            text_unit_index: None,
+        }
+    }
+
+    pub fn with_text_unit_index(mut self, index: Arc<dyn TextUnitIndex>) -> Self {
+        self.text_unit_index = Some(index);
+        self
     }
 
     pub async fn execute(
@@ -129,7 +139,14 @@ impl ReadDocumentUseCase {
     ) -> Result<ReadSectionResult, ApplicationError> {
         let document = self.load_document(&command.document_id).await?;
         let normalized_hash = document.normalized_document_hash();
-        let target = resolve_text_locator(&document, &command.target_locator, &normalized_hash)?;
+        let units = self.text_units(&document);
+        let target = resolve_text_locator(
+            &document,
+            &command.target_locator,
+            &normalized_hash,
+            units.as_ref(),
+        )
+        .await?;
         read_exact_segment(&document, target, &normalized_hash, 0, command.max_chars)
     }
 
@@ -149,7 +166,14 @@ impl ReadDocumentUseCase {
         let document = self.load_document(&command.document_id).await?;
         let normalized_hash = document.normalized_document_hash();
         validate_cursor_document_identity(&claims, &document, &normalized_hash)?;
-        let target = resolve_text_locator(&document, &command.target_locator, &normalized_hash)?;
+        let units = self.text_units(&document);
+        let target = resolve_text_locator(
+            &document,
+            &command.target_locator,
+            &normalized_hash,
+            units.as_ref(),
+        )
+        .await?;
         validate_exact_cursor_binding(&claims, &target)?;
 
         let target_chars = target.range.len();
@@ -168,6 +192,13 @@ impl ReadDocumentUseCase {
             .get(id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)
+    }
+
+    fn text_units(&self, document: &Arc<Document>) -> Arc<dyn TextUnitIndex> {
+        match &self.text_unit_index {
+            Some(index) => Arc::clone(index),
+            None => Arc::new(DerivedTextUnits::new(Arc::clone(document))),
+        }
     }
 }
 

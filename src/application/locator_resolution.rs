@@ -1,4 +1,5 @@
-use crate::application::ports::ApplicationError;
+use crate::application::get_text_units::EffectiveTextUnitKind;
+use crate::application::ports::{ApplicationError, OwnedStreamUnit, TextUnitIndex};
 use crate::domain::{
     Document, NormalizedDocumentHash, NormalizedTextRange, TEXT_SEGMENTATION_VERSION, TextLocator,
 };
@@ -29,10 +30,11 @@ pub(crate) struct ResolvedTextLocator {
     pub(crate) range: NormalizedTextRange,
 }
 
-pub(crate) fn resolve_text_locator(
+pub(crate) async fn resolve_text_locator(
     document: &Document,
     locator: &TextLocator,
     normalized_document_hash: &NormalizedDocumentHash,
+    units: &dyn TextUnitIndex,
 ) -> Result<ResolvedTextLocator, ApplicationError> {
     if locator.document_id != document.id {
         return Err(ApplicationError::InvalidLocator(format!(
@@ -104,21 +106,24 @@ pub(crate) fn resolve_text_locator(
                     "paragraph_index must be 1-based".into(),
                 ));
             }
-            let paragraph = document
-                .try_paragraph_text_units()
-                .map_err(text_unit_materialization_error)?
-                .units
-                .into_iter()
-                .find(|unit| {
-                    unit.owner_section_id == locator.owner_section_id
-                        && unit.paragraph_index == paragraph_index
-                })
-                .ok_or_else(|| {
-                    ApplicationError::StaleLocator(format!(
+            let paragraph = match units
+                .section_unit(
+                    &document.id,
+                    &locator.owner_section_id,
+                    EffectiveTextUnitKind::Paragraph,
+                    paragraph_index,
+                    None,
+                )
+                .await?
+            {
+                Some(OwnedStreamUnit::Paragraph(paragraph)) => paragraph,
+                _ => {
+                    return Err(ApplicationError::StaleLocator(format!(
                         "paragraph {paragraph_index} no longer exists in section {}",
                         locator.owner_section_id.0
-                    ))
-                })?;
+                    )));
+                }
+            };
             if paragraph.normalized_range != range {
                 return Err(ApplicationError::StaleLocator(format!(
                     "paragraph {paragraph_index} normalized range changed"
@@ -137,22 +142,24 @@ pub(crate) fn resolve_text_locator(
                     "paragraph_index and sentence_index must be 1-based".into(),
                 ));
             }
-            let sentence = document
-                .try_sentence_text_units()
-                .map_err(text_unit_materialization_error)?
-                .units
-                .into_iter()
-                .find(|unit| {
-                    unit.owner_section_id == locator.owner_section_id
-                        && unit.paragraph_index == paragraph_index
-                        && unit.sentence_index == sentence_index
-                })
-                .ok_or_else(|| {
-                    ApplicationError::StaleLocator(format!(
+            let sentence = match units
+                .section_unit(
+                    &document.id,
+                    &locator.owner_section_id,
+                    EffectiveTextUnitKind::Sentence,
+                    paragraph_index,
+                    Some(sentence_index),
+                )
+                .await?
+            {
+                Some(OwnedStreamUnit::Sentence(sentence)) => sentence,
+                _ => {
+                    return Err(ApplicationError::StaleLocator(format!(
                         "sentence {paragraph_index}.{sentence_index} no longer exists in section {}",
                         locator.owner_section_id.0
-                    ))
-                })?;
+                    )));
+                }
+            };
             if sentence.normalized_range != range {
                 return Err(ApplicationError::StaleLocator(format!(
                     "sentence {paragraph_index}.{sentence_index} normalized range changed"
@@ -177,10 +184,4 @@ fn validate_segmentation_version(version: &str) -> Result<(), ApplicationError> 
         )));
     }
     Ok(())
-}
-
-fn text_unit_materialization_error(error: impl std::fmt::Display) -> ApplicationError {
-    ApplicationError::TextUnitIndexFailed(format!(
-        "cannot resolve locator against persisted block evidence: {error}"
-    ))
 }

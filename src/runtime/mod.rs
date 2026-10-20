@@ -201,12 +201,15 @@ pub fn build_server(
         source_view_renderer = source_view_renderer.with_pymupdf(python.clone());
     }
     let source_view_renderer = Arc::new(source_view_renderer);
-    let source_view = Arc::new(SourceViewUseCase::new(
-        repository.clone(),
-        retriever.clone(),
-        source_view_renderer,
-        config.source_view,
-    ));
+    let source_view = Arc::new(
+        SourceViewUseCase::new(
+            repository.clone(),
+            retriever.clone(),
+            source_view_renderer,
+            config.source_view,
+        )
+        .with_text_unit_index(text_unit_index.clone()),
+    );
     let open_document = Arc::new(
         OpenDocumentUseCase::with_text_unit_index(
             source_policy,
@@ -227,9 +230,15 @@ pub fn build_server(
         repository.clone(),
         text_unit_index.clone(),
     ));
-    let search_document = Arc::new(SearchDocumentUseCase::new(search_index, repository.clone()));
-    let read_document = Arc::new(ReadDocumentUseCase::new(repository.clone()));
-    let get_context = Arc::new(GetContextUseCase::new(repository));
+    let search_document = Arc::new(
+        SearchDocumentUseCase::new(search_index, repository.clone())
+            .with_text_unit_index(text_unit_index.clone()),
+    );
+    let read_document = Arc::new(
+        ReadDocumentUseCase::new(repository.clone()).with_text_unit_index(text_unit_index.clone()),
+    );
+    let get_context =
+        Arc::new(GetContextUseCase::new(repository).with_text_unit_index(text_unit_index.clone()));
 
     Ok(ReadingMcpServer::from_use_cases(
         open_document,

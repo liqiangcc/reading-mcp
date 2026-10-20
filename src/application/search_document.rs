@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
+use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
-use crate::application::ports::{ApplicationError, DocumentRepository, SearchHitKind, SearchIndex};
+use crate::application::ports::{
+    ApplicationError, DocumentRepository, SearchHitKind, SearchIndex, TextUnitIndex,
+};
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, SectionId, TextLocator,
 };
@@ -44,6 +47,7 @@ pub struct SearchDocumentResult {
 pub struct SearchDocumentUseCase {
     search_index: Arc<dyn SearchIndex>,
     repository: Arc<dyn DocumentRepository>,
+    text_unit_index: Option<Arc<dyn TextUnitIndex>>,
 }
 
 impl SearchDocumentUseCase {
@@ -54,7 +58,13 @@ impl SearchDocumentUseCase {
         Self {
             search_index,
             repository,
+            text_unit_index: None,
         }
+    }
+
+    pub fn with_text_unit_index(mut self, index: Arc<dyn TextUnitIndex>) -> Self {
+        self.text_unit_index = Some(index);
+        self
     }
 
     pub async fn execute(
@@ -80,10 +90,20 @@ impl SearchDocumentUseCase {
             .ok_or(ApplicationError::DocumentNotFound)?;
         let tokenizer_version = self.search_index.tokenizer_version();
         let normalized_document_hash = document.normalized_document_hash();
+        let units: Arc<dyn TextUnitIndex> = match &self.text_unit_index {
+            Some(index) => Arc::clone(index),
+            None => Arc::new(DerivedTextUnits::new(Arc::clone(&document))),
+        };
 
         let hits = if self.search_index.supports_precise_lexical_candidates() {
-            self.precise_hits(&document, query, command.limit, &normalized_document_hash)
-                .await?
+            self.precise_hits(
+                &document,
+                query,
+                command.limit,
+                &normalized_document_hash,
+                units.as_ref(),
+            )
+            .await?
         } else {
             self.legacy_hits(&document, query, command.limit, &normalized_document_hash)
                 .await?
@@ -102,6 +122,7 @@ impl SearchDocumentUseCase {
         query: &str,
         limit: usize,
         normalized_document_hash: &NormalizedDocumentHash,
+        units: &dyn TextUnitIndex,
     ) -> Result<Vec<LocatedSearchHit>, ApplicationError> {
         let expected_tokenizer_version = self.search_index.tokenizer_version();
         let index_hits = match self
@@ -135,7 +156,8 @@ impl SearchDocumentUseCase {
             }
 
             let resolved =
-                resolve_text_locator(document, &hit.text_locator, normalized_document_hash)
+                resolve_text_locator(document, &hit.text_locator, normalized_document_hash, units)
+                    .await
                     .map_err(|error| {
                         ApplicationError::IndexFailed(format!(
                             "search hit carries an invalid canonical locator: {error}"

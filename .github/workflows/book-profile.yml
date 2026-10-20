@@ -50,7 +50,8 @@ jobs:
           done
           args=(--binary target/release/reading-mcp --states dir --sizes-mb 4
             --cjk-sizes-mb 1,4 --markdown-sections 2000 --reopen
-            --parse-timeout-seconds 900 --run-timeout-seconds 900 --out book/runs.json)
+            --parse-timeout-seconds 900 --run-timeout-seconds 900 --out book/runs.json
+            --probe-query "en-novel=Pierre" --probe-query "zh-classic=寶玉")
           if [ -n "$docs" ]; then
             args+=(--documents "$docs")
           fi

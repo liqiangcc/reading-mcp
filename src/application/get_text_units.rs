@@ -388,7 +388,13 @@ impl GetTextUnitsUseCase {
         coverage_policy: TextUnitCoveragePolicy,
         normalized_document_hash: &NormalizedDocumentHash,
     ) -> Result<(usize, TextLocator), ApplicationError> {
-        let resolved = resolve_text_locator(document, anchor_locator, normalized_document_hash)?;
+        let resolved = resolve_text_locator(
+            document,
+            anchor_locator,
+            normalized_document_hash,
+            self.text_unit_index.as_ref(),
+        )
+        .await?;
         if resolved.locator.owner_section_id != section.id {
             return Err(ApplicationError::InvalidRequest(format!(
                 "get_text_units anchor belongs to section {}, requested section is {}",

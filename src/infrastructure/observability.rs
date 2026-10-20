@@ -4,9 +4,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::application::get_text_units::{
-    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
-};
+use crate::application::get_text_units::{EffectiveTextUnitKind, TextUnitDirection};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, LexicalSearchHit, OwnedStreamUnit, ParsedCacheKey,
     ParsedDocumentCache, Parser, RawResourceCache, RetrievalOptions, RetrievedResource, Retriever,
@@ -511,6 +509,8 @@ fn error_class(error: &ApplicationError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::application::get_text_units::{RequestedTextUnitKind, TextUnitCoveragePolicy};
 
     use super::*;
 

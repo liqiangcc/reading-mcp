@@ -5,13 +5,18 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, ParagraphSectionCoverage,
-    ParagraphTextUnitSet, SectionId, SentenceParagraphCoverage, SentenceTextUnit,
-    SentenceTextUnitSet, TextLocator, TextUnit,
+    Document, DocumentId, DocumentSource, Location, MediaType, ParagraphContentClass,
+    ParagraphSectionCoverage, ParagraphTextUnitSet, SectionId, SentenceParagraphCoverage,
+    SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
 };
 
+use super::get_text_units::{
+    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
+    TextUnitEnumerationCoverage,
+};
 use super::open_document::OpenDocumentResult;
 use super::reading_profile::ReliabilitySummary;
+use super::text_unit_stream::{SectionStreamPlan, StreamUnit, plan_section_stream};
 
 pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
 pub const LEGACY_SEARCH_TOKENIZER_VERSION: &str = "legacy-search-tokenizer/unversioned";
@@ -314,6 +319,39 @@ impl SectionTextUnits {
     }
 }
 
+/// An owned unit of a section stream, decoded from a stored stream row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnedStreamUnit {
+    Paragraph(TextUnit),
+    Sentence(SentenceTextUnit),
+}
+
+/// One stored stream item: its absolute position in the chosen policy's stream and the referenced unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredStreamItem {
+    pub position: usize,
+    pub unit: OwnedStreamUnit,
+    pub content_class: ParagraphContentClass,
+    pub degradation: Option<String>,
+    pub char_count: usize,
+}
+
+/// The size and coverage of one section stream under one policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextUnitStreamSummary {
+    pub total_items: usize,
+    pub coverage: TextUnitEnumerationCoverage,
+}
+
+/// Which declared stream: one section's stream for one requested kind and coverage policy.
+#[derive(Clone, Copy, Debug)]
+pub struct TextUnitStreamKey<'a> {
+    pub document_id: &'a DocumentId,
+    pub section_id: &'a SectionId,
+    pub kind: RequestedTextUnitKind,
+    pub policy: TextUnitCoveragePolicy,
+}
+
 #[async_trait]
 pub trait TextUnitIndex: Send + Sync {
     async fn replace_document(
@@ -342,6 +380,181 @@ pub trait TextUnitIndex: Send + Sync {
         document_id: &DocumentId,
         section_id: &SectionId,
     ) -> Result<Option<SectionTextUnits>, ApplicationError>;
+
+    /// `None` when the section's stream is not stored (open the document again).
+    async fn section_stream_summary(
+        &self,
+        key: TextUnitStreamKey<'_>,
+    ) -> Result<Option<TextUnitStreamSummary>, ApplicationError> {
+        let TextUnitStreamKey {
+            document_id,
+            section_id,
+            kind,
+            policy,
+        } = key;
+        let Some(units) = self.section_units(document_id, section_id).await? else {
+            return Ok(None);
+        };
+        let plan = plan_units(&units, section_id, kind)?;
+        Ok(Some(TextUnitStreamSummary {
+            total_items: match policy {
+                TextUnitCoveragePolicy::PreserveSource => plan.entries.len(),
+                TextUnitCoveragePolicy::EligibleOnly => {
+                    plan.entries.iter().filter(|entry| entry.eligible).count()
+                }
+            },
+            coverage: match policy {
+                TextUnitCoveragePolicy::PreserveSource => plan.preserve_source,
+                TextUnitCoveragePolicy::EligibleOnly => plan.eligible_only,
+            },
+        }))
+    }
+
+    /// Up to `limit` stream items. Forward: positions `position..` ascending. Backward: positions `..position`,
+    /// returned in ascending order (the last `limit` items before `position`).
+    async fn section_stream_items(
+        &self,
+        key: TextUnitStreamKey<'_>,
+        direction: TextUnitDirection,
+        position: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredStreamItem>, ApplicationError> {
+        let TextUnitStreamKey {
+            document_id,
+            section_id,
+            kind,
+            policy,
+        } = key;
+        let Some(units) = self.section_units(document_id, section_id).await? else {
+            return Err(stale_text_units(document_id));
+        };
+        let plan = plan_units(&units, section_id, kind)?;
+        // Number the chosen policy's stream densely, so PreserveSource and EligibleOnly positions are
+        // both 0..total-1.
+        let mut stream = Vec::new();
+        let mut eligible_position = 0usize;
+        for (preserve_position, entry) in plan.entries.iter().enumerate() {
+            let stream_position = match policy {
+                TextUnitCoveragePolicy::PreserveSource => preserve_position,
+                TextUnitCoveragePolicy::EligibleOnly => {
+                    if !entry.eligible {
+                        continue;
+                    }
+                    let stream_position = eligible_position;
+                    eligible_position += 1;
+                    stream_position
+                }
+            };
+            stream.push((stream_position, entry));
+        }
+        let total = stream.len();
+        let (start, end) = match direction {
+            TextUnitDirection::Forward => (position.min(total), (position + limit).min(total)),
+            TextUnitDirection::Backward => {
+                let end = position.min(total);
+                (end.saturating_sub(limit), end)
+            }
+        };
+        Ok(stream[start..end]
+            .iter()
+            .map(|(stream_position, entry)| StoredStreamItem {
+                position: *stream_position,
+                unit: owned_unit(entry.unit),
+                content_class: entry.content_class,
+                degradation: entry.degradation.map(str::to_owned),
+                char_count: entry.char_count,
+            })
+            .collect())
+    }
+
+    /// The stream position of the unit with this kind and indices, if it is in the stream.
+    async fn section_stream_position(
+        &self,
+        key: TextUnitStreamKey<'_>,
+        unit_kind: EffectiveTextUnitKind,
+        paragraph_index: usize,
+        sentence_index: Option<usize>,
+    ) -> Result<Option<usize>, ApplicationError> {
+        let TextUnitStreamKey {
+            document_id,
+            section_id,
+            kind,
+            policy,
+        } = key;
+        let Some(units) = self.section_units(document_id, section_id).await? else {
+            return Ok(None);
+        };
+        let plan = plan_units(&units, section_id, kind)?;
+        let mut eligible_position = 0usize;
+        for (preserve_position, entry) in plan.entries.iter().enumerate() {
+            if policy == TextUnitCoveragePolicy::EligibleOnly && !entry.eligible {
+                continue;
+            }
+            let position = match policy {
+                TextUnitCoveragePolicy::PreserveSource => preserve_position,
+                TextUnitCoveragePolicy::EligibleOnly => {
+                    let position = eligible_position;
+                    eligible_position += 1;
+                    position
+                }
+            };
+            if unit_matches(entry.unit, unit_kind, paragraph_index, sentence_index) {
+                return Ok(Some(position));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Plans a section stream from one section's persisted units.
+fn plan_units<'a>(
+    units: &'a SectionTextUnits,
+    section_id: &SectionId,
+    kind: RequestedTextUnitKind,
+) -> Result<SectionStreamPlan<'a>, ApplicationError> {
+    let paragraphs = units.paragraphs.iter().collect::<Vec<_>>();
+    let sentences = units.sentences.iter().collect::<Vec<_>>();
+    let sentence_coverage = units.sentence_coverage.iter().collect::<Vec<_>>();
+    plan_section_stream(
+        section_id,
+        &paragraphs,
+        units.paragraph_coverage.as_ref(),
+        &sentences,
+        &sentence_coverage,
+        kind,
+    )
+}
+
+fn owned_unit(unit: StreamUnit<'_>) -> OwnedStreamUnit {
+    match unit {
+        StreamUnit::Paragraph(unit) => OwnedStreamUnit::Paragraph(unit.clone()),
+        StreamUnit::Sentence(unit) => OwnedStreamUnit::Sentence(unit.clone()),
+    }
+}
+
+fn unit_matches(
+    unit: StreamUnit<'_>,
+    kind: EffectiveTextUnitKind,
+    paragraph_index: usize,
+    sentence_index: Option<usize>,
+) -> bool {
+    if unit.paragraph_index() != paragraph_index {
+        return false;
+    }
+    match (kind, unit) {
+        (EffectiveTextUnitKind::Paragraph, StreamUnit::Paragraph(_)) => sentence_index.is_none(),
+        (EffectiveTextUnitKind::Sentence, StreamUnit::Sentence(unit)) => {
+            Some(unit.sentence_index) == sentence_index
+        }
+        _ => false,
+    }
+}
+
+fn stale_text_units(document_id: &DocumentId) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "text units of document {} are not stored for {TEXT_SEGMENTATION_VERSION}; open the document again",
+        document_id.0
+    ))
 }
 
 #[async_trait]

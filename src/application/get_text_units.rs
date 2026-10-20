@@ -1,17 +1,17 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::application::locator_resolution::resolve_text_locator;
+use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, SectionTextUnits, TextUnitIndex,
+    ApplicationError, DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex,
+    TextUnitStreamKey,
 };
 use crate::application::text_unit_cursor::{
     TextUnitCursorClaims, decode_text_unit_cursor, encode_text_unit_cursor,
 };
+use crate::application::text_unit_stream::content_class;
 use crate::domain::{
     Document, DocumentId, NormalizedDocumentHash, ParagraphContentClass, Section, SectionId,
-    SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit, TEXT_SEGMENTATION_VERSION,
-    TextLocator, TextUnit,
+    SentenceTextUnit, TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
 };
 
 pub const DEFAULT_TEXT_UNIT_MAX_ITEMS: usize = 32;
@@ -236,31 +236,43 @@ impl GetTextUnitsUseCase {
             }
         }
 
-        let units = self.declared_section_text_units(&document, section).await?;
-        let (stream_items, coverage) = build_declared_stream(
-            &document,
-            section,
-            &units,
-            command.requested_kind,
-            command.coverage_policy,
-        )?;
-        let total_items = stream_items.len();
+        let summary = self
+            .text_unit_index
+            .section_stream_summary(TextUnitStreamKey {
+                document_id: &document.id,
+                section_id: &section.id,
+                kind: command.requested_kind,
+                policy: command.coverage_policy,
+            })
+            .await?
+            .ok_or_else(|| stale_text_units(&document))?;
+        let total_items = summary.total_items;
+        let coverage = summary.coverage;
 
-        let origin_anchor_index = if let Some(claims) = &cursor_claims {
+        let (origin_anchor_index, start_anchor_locator) = if let Some(claims) = &cursor_claims {
             validate_cursor_origin_anchor(claims.origin_anchor_index, total_items)?;
-            claims.origin_anchor_index
+            let locator = match claims.origin_anchor_index {
+                Some(index) => {
+                    self.stream_item_locator(&document, section, &command, index)
+                        .await?
+                }
+                None => None,
+            };
+            (claims.origin_anchor_index, locator)
         } else if let Some(anchor_locator) = anchor_locator.as_ref() {
-            Some(resolve_anchor_index(
-                &document,
-                section,
-                &stream_items,
-                anchor_locator,
-                command.requested_kind,
-                command.coverage_policy,
-                &normalized_hash,
-            )?)
+            let (index, locator) = self
+                .resolve_anchor_index(
+                    &document,
+                    section,
+                    anchor_locator,
+                    command.requested_kind,
+                    command.coverage_policy,
+                    &normalized_hash,
+                )
+                .await?;
+            (Some(index), Some(locator))
         } else {
-            None
+            (None, None)
         };
 
         let position = if let Some(claims) = &cursor_claims {
@@ -289,13 +301,9 @@ impl GetTextUnitsUseCase {
             }
         };
 
-        let page = paginate(
-            &stream_items,
-            command.direction,
-            position,
-            command.max_items,
-            command.max_chars.unwrap_or(DEFAULT_TEXT_UNIT_MAX_CHARS),
-        )?;
+        let page = self
+            .page(&document, section, &command, position, total_items)
+            .await?;
         let next_cursor = if page.complete {
             None
         } else {
@@ -317,9 +325,6 @@ impl GetTextUnitsUseCase {
         };
         let section_complete =
             page.complete && coverage.source_complete && origin_anchor_index.is_none();
-        let start_anchor_locator = origin_anchor_index
-            .and_then(|index| stream_items.get(index))
-            .map(|item| item.locator.clone());
 
         Ok(GetTextUnitsResult {
             document_id: document.id.clone(),
@@ -346,21 +351,237 @@ impl GetTextUnitsUseCase {
         })
     }
 
-    async fn declared_section_text_units(
+    /// The locator of the single stream item at `index`, or `None` when it is not readable.
+    async fn stream_item_locator(
         &self,
         document: &Document,
         section: &Section,
-    ) -> Result<SectionTextUnits, ApplicationError> {
-        self.text_unit_index
-            .section_units(&document.id, &section.id)
-            .await?
-            .ok_or_else(|| {
-                ApplicationError::StaleDocument(format!(
-                    "text units of document {} are not stored for {TEXT_SEGMENTATION_VERSION}; open the document again",
-                    document.id.0
-                ))
-            })
+        command: &GetTextUnitsCommand,
+        index: usize,
+    ) -> Result<Option<TextLocator>, ApplicationError> {
+        let rows = self
+            .text_unit_index
+            .section_stream_items(
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: command.requested_kind,
+                    policy: command.coverage_policy,
+                },
+                TextUnitDirection::Forward,
+                index,
+                1,
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|row| reading_item(document, section, row).locator))
     }
+
+    async fn resolve_anchor_index(
+        &self,
+        document: &Document,
+        section: &Section,
+        anchor_locator: &TextLocator,
+        requested_kind: RequestedTextUnitKind,
+        coverage_policy: TextUnitCoveragePolicy,
+        normalized_document_hash: &NormalizedDocumentHash,
+    ) -> Result<(usize, TextLocator), ApplicationError> {
+        let resolved = resolve_text_locator(document, anchor_locator, normalized_document_hash)?;
+        if resolved.locator.owner_section_id != section.id {
+            return Err(ApplicationError::InvalidRequest(format!(
+                "get_text_units anchor belongs to section {}, requested section is {}",
+                resolved.locator.owner_section_id.0, section.id.0
+            )));
+        }
+        fn not_in_stream(
+            kind: ResolvedLocatorKind,
+            requested_kind: RequestedTextUnitKind,
+            coverage_policy: TextUnitCoveragePolicy,
+        ) -> ApplicationError {
+            ApplicationError::InvalidRequest(format!(
+                "{} anchor is not part of the declared {} / {} TextUnit stream",
+                kind.as_str(),
+                requested_kind.as_str(),
+                coverage_policy.as_str()
+            ))
+        }
+        let unit_kind = match resolved.kind {
+            ResolvedLocatorKind::Paragraph => EffectiveTextUnitKind::Paragraph,
+            ResolvedLocatorKind::Sentence => EffectiveTextUnitKind::Sentence,
+            ResolvedLocatorKind::Section | ResolvedLocatorKind::CharacterRange => {
+                return Err(not_in_stream(
+                    resolved.kind,
+                    requested_kind,
+                    coverage_policy,
+                ));
+            }
+        };
+        let paragraph_index = resolved
+            .locator
+            .paragraph_index
+            .ok_or_else(|| not_in_stream(resolved.kind, requested_kind, coverage_policy))?;
+        let position = self
+            .text_unit_index
+            .section_stream_position(
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: requested_kind,
+                    policy: coverage_policy,
+                },
+                unit_kind,
+                paragraph_index,
+                resolved.locator.sentence_index,
+            )
+            .await?
+            .ok_or_else(|| not_in_stream(resolved.kind, requested_kind, coverage_policy))?;
+        let rows = self
+            .text_unit_index
+            .section_stream_items(
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: requested_kind,
+                    policy: coverage_policy,
+                },
+                TextUnitDirection::Forward,
+                position,
+                1,
+            )
+            .await?;
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| not_in_stream(resolved.kind, requested_kind, coverage_policy))?;
+        let locator = reading_item(document, section, row).locator;
+        if locator != resolved.locator {
+            return Err(not_in_stream(
+                resolved.kind,
+                requested_kind,
+                coverage_policy,
+            ));
+        }
+        Ok((position, locator))
+    }
+
+    async fn page(
+        &self,
+        document: &Document,
+        section: &Section,
+        command: &GetTextUnitsCommand,
+        position: usize,
+        total_items: usize,
+    ) -> Result<Page, ApplicationError> {
+        let max_chars = command.max_chars.unwrap_or(DEFAULT_TEXT_UNIT_MAX_CHARS);
+        if command.direction == TextUnitDirection::Forward && position > total_items {
+            return Err(ApplicationError::InvalidCursor(format!(
+                "forward text-unit start {position} exceeds stream length {total_items}"
+            )));
+        }
+        if command.direction == TextUnitDirection::Backward && position > total_items {
+            return Err(ApplicationError::InvalidCursor(format!(
+                "backward text-unit end {position} exceeds stream length {total_items}"
+            )));
+        }
+        let rows = self
+            .text_unit_index
+            .section_stream_items(
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: command.requested_kind,
+                    policy: command.coverage_policy,
+                },
+                command.direction,
+                position,
+                command.max_items,
+            )
+            .await?;
+        let char_counts = rows.iter().map(|row| row.char_count).collect::<Vec<_>>();
+
+        match command.direction {
+            TextUnitDirection::Forward => {
+                let kept = forward_page_len(&char_counts, max_chars)?;
+                let items = rows
+                    .into_iter()
+                    .take(kept)
+                    .map(|row| reading_item(document, section, row))
+                    .collect();
+                let end_index = position + kept;
+                Ok(Page {
+                    items,
+                    start_index: position,
+                    end_index,
+                    next_index: end_index,
+                    complete: end_index == total_items,
+                })
+            }
+            TextUnitDirection::Backward => {
+                let kept = backward_page_len(&char_counts, max_chars)?;
+                let start = char_counts.len() - kept;
+                let items = rows
+                    .into_iter()
+                    .skip(start)
+                    .map(|row| reading_item(document, section, row))
+                    .collect();
+                let start_index = position - kept;
+                Ok(Page {
+                    items,
+                    start_index,
+                    end_index: position,
+                    next_index: start_index,
+                    complete: start_index == 0,
+                })
+            }
+        }
+    }
+}
+
+fn stale_text_units(document: &Document) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "text units of document {} are not stored for {TEXT_SEGMENTATION_VERSION}; open the document again",
+        document.id.0
+    ))
+}
+
+/// How many fetched rows the forward char budget keeps, from the start.
+fn forward_page_len(char_counts: &[usize], max_chars: usize) -> Result<usize, ApplicationError> {
+    let mut chars = 0usize;
+    let mut kept = 0usize;
+    for (index, item_chars) in char_counts.iter().enumerate() {
+        if index == 0 && *item_chars > max_chars {
+            return Err(ApplicationError::ResourceLimitExceeded(format!(
+                "next text unit contains {item_chars} characters, exceeding max_chars {max_chars}"
+            )));
+        }
+        if chars + *item_chars > max_chars {
+            break;
+        }
+        chars += *item_chars;
+        kept += 1;
+    }
+    Ok(kept)
+}
+
+/// How many fetched rows the backward char budget keeps, counting from the end.
+fn backward_page_len(char_counts: &[usize], max_chars: usize) -> Result<usize, ApplicationError> {
+    let mut chars = 0usize;
+    let mut kept = 0usize;
+    for (index, item_chars) in char_counts.iter().rev().enumerate() {
+        if index == 0 && *item_chars > max_chars {
+            return Err(ApplicationError::ResourceLimitExceeded(format!(
+                "next text unit contains {item_chars} characters, exceeding max_chars {max_chars}"
+            )));
+        }
+        if chars + *item_chars > max_chars {
+            break;
+        }
+        chars += *item_chars;
+        kept += 1;
+    }
+    Ok(kept)
 }
 
 fn validate_budget(max_items: usize, max_chars: Option<usize>) -> Result<(), ApplicationError> {
@@ -473,199 +694,29 @@ fn validate_cursor_position(
     Ok(())
 }
 
-fn resolve_anchor_index(
+fn reading_item(
     document: &Document,
     section: &Section,
-    stream_items: &[TextUnitReadingItem],
-    anchor_locator: &TextLocator,
-    requested_kind: RequestedTextUnitKind,
-    coverage_policy: TextUnitCoveragePolicy,
-    normalized_document_hash: &NormalizedDocumentHash,
-) -> Result<usize, ApplicationError> {
-    let resolved = resolve_text_locator(document, anchor_locator, normalized_document_hash)?;
-    if resolved.locator.owner_section_id != section.id {
-        return Err(ApplicationError::InvalidRequest(format!(
-            "get_text_units anchor belongs to section {}, requested section is {}",
-            resolved.locator.owner_section_id.0, section.id.0
-        )));
-    }
-    stream_items
-        .iter()
-        .position(|item| item.locator == resolved.locator)
-        .ok_or_else(|| {
-            ApplicationError::InvalidRequest(format!(
-                "{} anchor is not part of the declared {} / {} TextUnit stream",
-                resolved.kind.as_str(),
-                requested_kind.as_str(),
-                coverage_policy.as_str()
-            ))
-        })
-}
-
-fn build_declared_stream(
-    document: &Document,
-    section: &Section,
-    units: &SectionTextUnits,
-    requested_kind: RequestedTextUnitKind,
-    coverage_policy: TextUnitCoveragePolicy,
-) -> Result<(Vec<TextUnitReadingItem>, TextUnitEnumerationCoverage), ApplicationError> {
-    let paragraphs = units.paragraphs.iter().collect::<Vec<_>>();
-    let section_coverage = units.paragraph_coverage.as_ref().ok_or_else(|| {
-        ApplicationError::InvalidRequest(format!(
-            "paragraph coverage is unavailable for section {}",
-            section.id.0
-        ))
-    })?;
-
-    let coverage_by_paragraph = units
-        .sentence_coverage
-        .iter()
-        .filter(|coverage| coverage.owner_section_id == section.id)
-        .map(|coverage| (coverage.paragraph_index, coverage))
-        .collect::<HashMap<_, _>>();
-    let mut sentences_by_paragraph: HashMap<usize, Vec<&SentenceTextUnit>> = HashMap::new();
-    for sentence in units
-        .sentences
-        .iter()
-        .filter(|unit| unit.owner_section_id == section.id)
-    {
-        sentences_by_paragraph
-            .entry(sentence.paragraph_index)
-            .or_default()
-            .push(sentence);
-    }
-
-    let sentence_eligible_paragraphs = coverage_by_paragraph
-        .values()
-        .filter(|coverage| coverage.eligibility == SentenceEligibility::Eligible)
-        .count();
-    let non_prose_paragraphs = coverage_by_paragraph
-        .values()
-        .filter(|coverage| is_non_prose_class(coverage.content_class))
-        .count();
-    let coarse_structural_paragraphs = coverage_by_paragraph
-        .values()
-        .filter(|coverage| is_coarse_structural_class(coverage.content_class))
-        .count();
-    let sentence_separator_chars = coverage_by_paragraph
-        .values()
-        .map(|coverage| coverage.separator_chars)
-        .sum::<usize>();
-
-    let mut items = Vec::new();
-    let mut represented_paragraphs = 0usize;
-    let mut represented_sentences = 0usize;
-    let mut coarse_non_prose_items = 0usize;
-    let mut coarse_structural_items = 0usize;
-    let mut intentionally_skipped = 0usize;
-
-    for paragraph in paragraphs {
-        let paragraph_coverage = coverage_by_paragraph
-            .get(&paragraph.paragraph_index)
-            .copied()
-            .ok_or_else(|| {
-                ApplicationError::InvalidRequest(format!(
-                    "sentence coverage is unavailable for paragraph {} in section {}",
-                    paragraph.paragraph_index, section.id.0
-                ))
-            })?;
-        let is_coarse = paragraph_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly;
-
-        match requested_kind {
-            RequestedTextUnitKind::Paragraph => {
-                if coverage_policy == TextUnitCoveragePolicy::EligibleOnly && is_coarse {
-                    intentionally_skipped += 1;
-                    continue;
-                }
-                items.push(paragraph_item(
-                    document,
-                    section,
-                    paragraph,
-                    paragraph_coverage,
-                    None,
-                ));
-                represented_paragraphs += 1;
-            }
-            RequestedTextUnitKind::Sentence if is_coarse => {
-                if coverage_policy == TextUnitCoveragePolicy::EligibleOnly {
-                    intentionally_skipped += 1;
-                    continue;
-                }
-                let degradation = match paragraph_coverage.content_class {
-                    ParagraphContentClass::BlockQuote | ParagraphContentClass::ListItem => {
-                        coarse_structural_items += 1;
-                        "flat_native_container_no_nested_textunit_evidence"
-                    }
-                    ParagraphContentClass::CodeBlock
-                    | ParagraphContentClass::Preformatted
-                    | ParagraphContentClass::Table => {
-                        coarse_non_prose_items += 1;
-                        "requested_sentence_but_non_prose_is_paragraph_only"
-                    }
-                    ParagraphContentClass::ProseOrUnknown
-                    | ParagraphContentClass::NativeParagraph => {
-                        coarse_non_prose_items += 1;
-                        "requested_sentence_but_paragraph_is_coarse_only"
-                    }
-                };
-                items.push(paragraph_item(
-                    document,
-                    section,
-                    paragraph,
-                    paragraph_coverage,
-                    Some(degradation.into()),
-                ));
-                represented_paragraphs += 1;
-            }
-            RequestedTextUnitKind::Sentence => {
-                for sentence in sentences_by_paragraph
-                    .get(&paragraph.paragraph_index)
-                    .into_iter()
-                    .flatten()
-                {
-                    items.push(sentence_item(
-                        document,
-                        section,
-                        sentence,
-                        paragraph_coverage.content_class,
-                    ));
-                    represented_sentences += 1;
-                }
-            }
+    row: StoredStreamItem,
+) -> TextUnitReadingItem {
+    match row.unit {
+        OwnedStreamUnit::Paragraph(unit) => {
+            paragraph_item(document, section, &unit, row.content_class, row.degradation)
+        }
+        OwnedStreamUnit::Sentence(unit) => {
+            sentence_item(document, section, &unit, row.content_class)
         }
     }
-
-    let source_complete =
-        coverage_policy == TextUnitCoveragePolicy::PreserveSource && intentionally_skipped == 0;
-    Ok((
-        items,
-        TextUnitEnumerationCoverage {
-            owner_chars: section_coverage.owner_chars,
-            section_separator_chars: section_coverage.separator_chars,
-            sentence_separator_chars,
-            paragraph_count: section_coverage.paragraph_count,
-            sentence_eligible_paragraphs,
-            non_prose_paragraphs,
-            coarse_structural_paragraphs,
-            represented_paragraphs,
-            represented_sentences,
-            coarse_non_prose_items,
-            coarse_structural_items,
-            intentionally_skipped,
-            unsupported_gaps: 0,
-            source_complete,
-        },
-    ))
 }
 
 fn paragraph_item(
     document: &Document,
     section: &Section,
     paragraph: &TextUnit,
-    coverage: &SentenceParagraphCoverage,
+    paragraph_class: ParagraphContentClass,
     degradation: Option<String>,
 ) -> TextUnitReadingItem {
-    let (content_class, detail) = content_class(coverage.content_class);
+    let (content_class, detail) = content_class(paragraph_class);
     TextUnitReadingItem {
         text: paragraph.text.clone(),
         locator: TextLocator::for_paragraph(document, section, paragraph),
@@ -693,34 +744,6 @@ fn sentence_item(
     }
 }
 
-fn content_class(class: ParagraphContentClass) -> (TextUnitContentClass, &'static str) {
-    match class {
-        ParagraphContentClass::ProseOrUnknown
-        | ParagraphContentClass::NativeParagraph
-        | ParagraphContentClass::BlockQuote
-        | ParagraphContentClass::ListItem => (TextUnitContentClass::Unknown, class.as_str()),
-        ParagraphContentClass::CodeBlock
-        | ParagraphContentClass::Preformatted
-        | ParagraphContentClass::Table => (TextUnitContentClass::NonProse, class.as_str()),
-    }
-}
-
-fn is_non_prose_class(class: ParagraphContentClass) -> bool {
-    matches!(
-        class,
-        ParagraphContentClass::CodeBlock
-            | ParagraphContentClass::Preformatted
-            | ParagraphContentClass::Table
-    )
-}
-
-fn is_coarse_structural_class(class: ParagraphContentClass) -> bool {
-    matches!(
-        class,
-        ParagraphContentClass::BlockQuote | ParagraphContentClass::ListItem
-    )
-}
-
 #[derive(Debug)]
 struct Page {
     items: Vec<TextUnitReadingItem>,
@@ -728,90 +751,4 @@ struct Page {
     end_index: usize,
     next_index: usize,
     complete: bool,
-}
-
-fn paginate(
-    items: &[TextUnitReadingItem],
-    direction: TextUnitDirection,
-    position: usize,
-    max_items: usize,
-    max_chars: usize,
-) -> Result<Page, ApplicationError> {
-    match direction {
-        TextUnitDirection::Forward => paginate_forward(items, position, max_items, max_chars),
-        TextUnitDirection::Backward => paginate_backward(items, position, max_items, max_chars),
-    }
-}
-
-fn paginate_forward(
-    items: &[TextUnitReadingItem],
-    start: usize,
-    max_items: usize,
-    max_chars: usize,
-) -> Result<Page, ApplicationError> {
-    if start > items.len() {
-        return Err(ApplicationError::InvalidCursor(format!(
-            "forward text-unit start {start} exceeds stream length {}",
-            items.len()
-        )));
-    }
-    let mut end = start;
-    let mut chars = 0usize;
-    while end < items.len() && end - start < max_items {
-        let item_chars = items[end].text.chars().count();
-        if end == start && item_chars > max_chars {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "next text unit contains {item_chars} characters, exceeding max_chars {max_chars}"
-            )));
-        }
-        if chars + item_chars > max_chars {
-            break;
-        }
-        chars += item_chars;
-        end += 1;
-    }
-    Ok(Page {
-        items: items[start..end].to_vec(),
-        start_index: start,
-        end_index: end,
-        next_index: end,
-        complete: end == items.len(),
-    })
-}
-
-fn paginate_backward(
-    items: &[TextUnitReadingItem],
-    end: usize,
-    max_items: usize,
-    max_chars: usize,
-) -> Result<Page, ApplicationError> {
-    if end > items.len() {
-        return Err(ApplicationError::InvalidCursor(format!(
-            "backward text-unit end {end} exceeds stream length {}",
-            items.len()
-        )));
-    }
-    let mut start = end;
-    let mut chars = 0usize;
-    while start > 0 && end - start < max_items {
-        let candidate = start - 1;
-        let item_chars = items[candidate].text.chars().count();
-        if start == end && item_chars > max_chars {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "next text unit contains {item_chars} characters, exceeding max_chars {max_chars}"
-            )));
-        }
-        if chars + item_chars > max_chars {
-            break;
-        }
-        chars += item_chars;
-        start = candidate;
-    }
-    Ok(Page {
-        items: items[start..end].to_vec(),
-        start_index: start,
-        end_index: end,
-        next_index: start,
-        complete: start == 0,
-    })
 }

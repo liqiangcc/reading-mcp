@@ -9,10 +9,16 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::sqlite_support::{open_connection, run_sqlite};
+use crate::application::get_text_units::{
+    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
+    TextUnitEnumerationCoverage,
+};
 use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, OpenResultStore, SectionTextUnits, TextUnitIndex,
+    ApplicationError, DocumentRepository, OpenResultStore, OwnedStreamUnit, SectionTextUnits,
+    StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
+use crate::application::text_unit_stream::plan_section_stream;
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
     NormalizedDocumentHash, NormalizedTextRange, ParagraphContentClass, ParagraphSectionCoverage,
@@ -346,6 +352,35 @@ impl SqliteTextUnitIndex {
                     position INTEGER NOT NULL,
                     coverage_json TEXT NOT NULL,
                     PRIMARY KEY (document_id, owner_section_id, position)
+                 );
+                 CREATE TABLE IF NOT EXISTS text_unit_streams_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    requested_kind TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    eligible_position INTEGER,
+                    unit_kind TEXT NOT NULL,
+                    unit_source_order INTEGER NOT NULL,
+                    paragraph_index INTEGER NOT NULL,
+                    sentence_index INTEGER,
+                    content_class TEXT NOT NULL,
+                    degradation TEXT,
+                    char_count INTEGER NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id, requested_kind, position)
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_text_unit_streams_v1_eligible
+                    ON text_unit_streams_v1(document_id, owner_section_id, requested_kind, eligible_position)
+                    WHERE eligible_position IS NOT NULL;
+                 CREATE INDEX IF NOT EXISTS idx_text_unit_streams_v1_unit
+                    ON text_unit_streams_v1(document_id, owner_section_id, requested_kind, unit_kind, paragraph_index, sentence_index);
+                 CREATE TABLE IF NOT EXISTS text_unit_stream_summaries_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    requested_kind TEXT NOT NULL,
+                    coverage_policy TEXT NOT NULL,
+                    total_items INTEGER NOT NULL,
+                    coverage_json TEXT NOT NULL,
+                    PRIMARY KEY (document_id, owner_section_id, requested_kind, coverage_policy)
                  );",
             )
             .map_err(text_unit_index_error)?;
@@ -358,6 +393,15 @@ impl SqliteTextUnitIndex {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// One section's borrowed units and coverages, grouped in a single pass over the unit sets.
+#[derive(Default)]
+struct SectionGroups<'a> {
+    paragraphs: Vec<&'a TextUnit>,
+    paragraph_coverage: Option<&'a ParagraphSectionCoverage>,
+    sentences: Vec<&'a SentenceTextUnit>,
+    sentence_coverage: Vec<&'a SentenceParagraphCoverage>,
 }
 
 #[async_trait]
@@ -626,6 +670,8 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     "text_unit_sections_v1",
                     "text_unit_items_v1",
                     "text_unit_sentence_coverage_v1",
+                    "text_unit_streams_v1",
+                    "text_unit_stream_summaries_v1",
                 ] {
                     transaction
                         .execute(
@@ -740,6 +786,156 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                             ])
                             .map_err(text_unit_index_error)?;
                         *position += 1;
+                    }
+                }
+
+                // Group the section's units and coverages in one pass, then plan and store each section's
+                // stream. Never call `SectionTextUnits::from_sets` per section (that would be O(units x
+                // sections)) and never clone unit text.
+                let mut groups: HashMap<SectionId, SectionGroups<'_>> = HashMap::new();
+                for unit in &paragraphs.units {
+                    groups
+                        .entry(unit.owner_section_id.clone())
+                        .or_default()
+                        .paragraphs
+                        .push(unit);
+                }
+                for coverage in &paragraphs.coverage {
+                    groups
+                        .entry(coverage.owner_section_id.clone())
+                        .or_default()
+                        .paragraph_coverage = Some(coverage);
+                }
+                for unit in &sentences.units {
+                    groups
+                        .entry(unit.owner_section_id.clone())
+                        .or_default()
+                        .sentences
+                        .push(unit);
+                }
+                for coverage in &sentences.coverage {
+                    groups
+                        .entry(coverage.owner_section_id.clone())
+                        .or_default()
+                        .sentence_coverage
+                        .push(coverage);
+                }
+
+                {
+                    let mut stream_statement = transaction
+                        .prepare(
+                            "INSERT INTO text_unit_streams_v1(
+                                document_id,
+                                owner_section_id,
+                                requested_kind,
+                                position,
+                                eligible_position,
+                                unit_kind,
+                                unit_source_order,
+                                paragraph_index,
+                                sentence_index,
+                                content_class,
+                                degradation,
+                                char_count
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        )
+                        .map_err(text_unit_index_error)?;
+                    let mut summary_statement = transaction
+                        .prepare(
+                            "INSERT INTO text_unit_stream_summaries_v1(
+                                document_id,
+                                owner_section_id,
+                                requested_kind,
+                                coverage_policy,
+                                total_items,
+                                coverage_json
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        )
+                        .map_err(text_unit_index_error)?;
+
+                    for (section_id, group) in &groups {
+                        let Some(_) = group.paragraph_coverage else {
+                            continue;
+                        };
+                        for requested_kind in [
+                            RequestedTextUnitKind::Paragraph,
+                            RequestedTextUnitKind::Sentence,
+                        ] {
+                            let plan = plan_section_stream(
+                                section_id,
+                                &group.paragraphs,
+                                group.paragraph_coverage,
+                                &group.sentences,
+                                &group.sentence_coverage,
+                                requested_kind,
+                            )
+                            .map_err(|error| {
+                                ApplicationError::TextUnitIndexFailed(format!(
+                                    "cannot plan the text unit stream of section {}: {error}",
+                                    section_id.0
+                                ))
+                            })?;
+
+                            let mut eligible_position = 0i64;
+                            for (position, entry) in plan.entries.iter().enumerate() {
+                                let eligible_position_value = if entry.eligible {
+                                    Some(eligible_position)
+                                } else {
+                                    None
+                                };
+                                if entry.eligible {
+                                    eligible_position += 1;
+                                }
+                                let sentence_index =
+                                    entry.unit.sentence_index().map(usize_to_i64).transpose()?;
+                                stream_statement
+                                    .execute(params![
+                                        &document_id.0,
+                                        &section_id.0,
+                                        requested_kind.as_str(),
+                                        usize_to_i64(position)?,
+                                        eligible_position_value,
+                                        entry.unit.kind_str(),
+                                        usize_to_i64(entry.unit.source_order())?,
+                                        usize_to_i64(entry.unit.paragraph_index())?,
+                                        sentence_index,
+                                        entry.content_class.as_str(),
+                                        entry.degradation,
+                                        usize_to_i64(entry.char_count)?,
+                                    ])
+                                    .map_err(text_unit_index_error)?;
+                            }
+
+                            for (policy, coverage, total_items) in [
+                                (
+                                    TextUnitCoveragePolicy::PreserveSource,
+                                    &plan.preserve_source,
+                                    plan.entries.len(),
+                                ),
+                                (
+                                    TextUnitCoveragePolicy::EligibleOnly,
+                                    &plan.eligible_only,
+                                    eligible_position as usize,
+                                ),
+                            ] {
+                                let coverage_json = serde_json::to_string(
+                                    &StoredStreamCoverage::from_coverage(coverage),
+                                )
+                                .map_err(|error| {
+                                    ApplicationError::TextUnitIndexFailed(error.to_string())
+                                })?;
+                                summary_statement
+                                    .execute(params![
+                                        &document_id.0,
+                                        &section_id.0,
+                                        requested_kind.as_str(),
+                                        policy.as_str(),
+                                        usize_to_i64(total_items)?,
+                                        coverage_json,
+                                    ])
+                                    .map_err(text_unit_index_error)?;
+                            }
+                        }
                     }
                 }
 
@@ -875,6 +1071,248 @@ impl TextUnitIndex for SqliteTextUnitIndex {
             },
         )
         .await
+    }
+
+    async fn section_stream_summary(
+        &self,
+        key: TextUnitStreamKey<'_>,
+    ) -> Result<Option<TextUnitStreamSummary>, ApplicationError> {
+        let document_id = key.document_id.clone();
+        let section_id = key.section_id.clone();
+        let kind = key.kind;
+        let policy = key.policy;
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let set = connection
+                    .query_row(
+                        "SELECT segmentation_version
+                         FROM text_unit_sets_v1
+                         WHERE document_id = ?1",
+                        params![&document_id.0],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?;
+                let Some(stored_version) = set else {
+                    return Ok(None);
+                };
+                if stored_version != TEXT_SEGMENTATION_VERSION {
+                    return Ok(None);
+                }
+
+                let summary = connection
+                    .query_row(
+                        "SELECT total_items, coverage_json
+                         FROM text_unit_stream_summaries_v1
+                         WHERE document_id = ?1
+                           AND owner_section_id = ?2
+                           AND requested_kind = ?3
+                           AND coverage_policy = ?4",
+                        params![
+                            &document_id.0,
+                            &section_id.0,
+                            kind.as_str(),
+                            policy.as_str()
+                        ],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?;
+                let Some((total_items, coverage_json)) = summary else {
+                    // A section without paragraph coverage was never written (it cannot be planned), so the
+                    // planner path must report today's "paragraph coverage is unavailable" error. A section
+                    // that has coverage but no summary row is stale storage: report it as missing so the
+                    // caller asks for a reopen.
+                    let has_coverage = connection
+                        .query_row(
+                            "SELECT 1
+                             FROM text_unit_sections_v1
+                             WHERE document_id = ?1 AND owner_section_id = ?2",
+                            params![&document_id.0, &section_id.0],
+                            |_| Ok(()),
+                        )
+                        .optional()
+                        .map_err(text_unit_index_error)?
+                        .is_some();
+                    if has_coverage {
+                        return Ok(None);
+                    }
+                    return Err(ApplicationError::InvalidRequest(format!(
+                        "paragraph coverage is unavailable for section {}",
+                        section_id.0
+                    )));
+                };
+
+                let stored: StoredStreamCoverage = serde_json::from_str(&coverage_json)
+                    .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
+                Ok(Some(TextUnitStreamSummary {
+                    total_items: i64_to_usize(total_items, "total_items")?,
+                    coverage: stored.into_coverage(),
+                }))
+            },
+        )
+        .await
+    }
+
+    async fn section_stream_items(
+        &self,
+        key: TextUnitStreamKey<'_>,
+        direction: TextUnitDirection,
+        position: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredStreamItem>, ApplicationError> {
+        let document_id = key.document_id.clone();
+        let section_id = key.section_id.clone();
+        let kind = key.kind;
+        let policy = key.policy;
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let position_column = match policy {
+                    TextUnitCoveragePolicy::PreserveSource => "position",
+                    TextUnitCoveragePolicy::EligibleOnly => "eligible_position",
+                };
+                let order = match direction {
+                    TextUnitDirection::Forward => "ASC",
+                    TextUnitDirection::Backward => "DESC",
+                };
+                let comparison = match direction {
+                    TextUnitDirection::Forward => ">=",
+                    TextUnitDirection::Backward => "<",
+                };
+                let sql = format!(
+                    "SELECT s.{position_column}, s.unit_kind, s.content_class, s.degradation, s.char_count, i.unit_json
+                     FROM text_unit_streams_v1 s
+                     JOIN text_unit_items_v1 i
+                       ON i.document_id = s.document_id
+                      AND i.kind = s.unit_kind
+                      AND i.source_order = s.unit_source_order
+                     WHERE s.document_id = ?1
+                       AND s.owner_section_id = ?2
+                       AND s.requested_kind = ?3
+                       AND s.{position_column} {comparison} ?4
+                     ORDER BY s.{position_column} {order}
+                     LIMIT ?5"
+                );
+                let position = usize_to_i64(position)?;
+                let limit = usize_to_i64(limit)?;
+                let mut statement = connection.prepare(&sql).map_err(text_unit_index_error)?;
+                let rows = statement
+                    .query_map(
+                        params![&document_id.0, &section_id.0, kind.as_str(), position, limit],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                                row.get::<_, i64>(4)?,
+                                row.get::<_, String>(5)?,
+                            ))
+                        },
+                    )
+                    .map_err(text_unit_index_error)?;
+
+                let mut items = Vec::new();
+                for row in rows {
+                    let (position, unit_kind, content_class, degradation, char_count, unit_json) =
+                        row.map_err(text_unit_index_error)?;
+                    let unit = decode_stream_unit(&unit_kind, &unit_json)?;
+                    items.push(StoredStreamItem {
+                        position: i64_to_usize(position, "stream position")?,
+                        unit,
+                        content_class: parse_paragraph_content_class(&content_class)?,
+                        degradation,
+                        char_count: i64_to_usize(char_count, "char_count")?,
+                    });
+                }
+                if direction == TextUnitDirection::Backward {
+                    items.reverse();
+                }
+                Ok(items)
+            },
+        )
+        .await
+    }
+
+    async fn section_stream_position(
+        &self,
+        key: TextUnitStreamKey<'_>,
+        unit_kind: EffectiveTextUnitKind,
+        paragraph_index: usize,
+        sentence_index: Option<usize>,
+    ) -> Result<Option<usize>, ApplicationError> {
+        let document_id = key.document_id.clone();
+        let section_id = key.section_id.clone();
+        let kind = key.kind;
+        let policy = key.policy;
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let position_column = match policy {
+                    TextUnitCoveragePolicy::PreserveSource => "position",
+                    TextUnitCoveragePolicy::EligibleOnly => "eligible_position",
+                };
+                let sql = format!(
+                    "SELECT s.{position_column}
+                     FROM text_unit_streams_v1 s
+                     WHERE s.document_id = ?1
+                       AND s.owner_section_id = ?2
+                       AND s.requested_kind = ?3
+                       AND s.unit_kind = ?4
+                       AND s.paragraph_index = ?5
+                       AND s.sentence_index IS ?6"
+                );
+                let paragraph_index = usize_to_i64(paragraph_index)?;
+                let sentence_index = sentence_index.map(usize_to_i64).transpose()?;
+                let found = connection
+                    .query_row(
+                        &sql,
+                        params![
+                            &document_id.0,
+                            &section_id.0,
+                            kind.as_str(),
+                            unit_kind.as_str(),
+                            paragraph_index,
+                            sentence_index
+                        ],
+                        |row| row.get::<_, Option<i64>>(0),
+                    )
+                    .optional()
+                    .map_err(text_unit_index_error)?;
+                match found {
+                    Some(Some(position)) => Ok(Some(i64_to_usize(position, "stream position")?)),
+                    _ => Ok(None),
+                }
+            },
+        )
+        .await
+    }
+}
+
+/// Decodes one stream row's unit with the same decoding the section read path uses.
+fn decode_stream_unit(
+    unit_kind: &str,
+    unit_json: &str,
+) -> Result<OwnedStreamUnit, ApplicationError> {
+    match unit_kind {
+        "paragraph" => {
+            let stored: StoredParagraphUnit = serde_json::from_str(unit_json)
+                .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
+            Ok(OwnedStreamUnit::Paragraph(stored.into_unit()?))
+        }
+        "sentence" => {
+            let stored: StoredSentenceUnit = serde_json::from_str(unit_json)
+                .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
+            Ok(OwnedStreamUnit::Sentence(stored.into_unit()?))
+        }
+        other => Err(ApplicationError::TextUnitIndexFailed(format!(
+            "unsupported persisted text unit kind {other:?}"
+        ))),
     }
 }
 
@@ -1273,6 +1711,64 @@ impl StoredParagraphCoverage {
             native_structural_container_chars: self.native_structural_container_chars,
             native_non_prose_chars: self.native_non_prose_chars,
             fallback_chars: self.fallback_chars,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredStreamCoverage {
+    owner_chars: usize,
+    section_separator_chars: usize,
+    sentence_separator_chars: usize,
+    paragraph_count: usize,
+    sentence_eligible_paragraphs: usize,
+    non_prose_paragraphs: usize,
+    coarse_structural_paragraphs: usize,
+    represented_paragraphs: usize,
+    represented_sentences: usize,
+    coarse_non_prose_items: usize,
+    coarse_structural_items: usize,
+    intentionally_skipped: usize,
+    unsupported_gaps: usize,
+    source_complete: bool,
+}
+
+impl StoredStreamCoverage {
+    fn from_coverage(coverage: &TextUnitEnumerationCoverage) -> Self {
+        Self {
+            owner_chars: coverage.owner_chars,
+            section_separator_chars: coverage.section_separator_chars,
+            sentence_separator_chars: coverage.sentence_separator_chars,
+            paragraph_count: coverage.paragraph_count,
+            sentence_eligible_paragraphs: coverage.sentence_eligible_paragraphs,
+            non_prose_paragraphs: coverage.non_prose_paragraphs,
+            coarse_structural_paragraphs: coverage.coarse_structural_paragraphs,
+            represented_paragraphs: coverage.represented_paragraphs,
+            represented_sentences: coverage.represented_sentences,
+            coarse_non_prose_items: coverage.coarse_non_prose_items,
+            coarse_structural_items: coverage.coarse_structural_items,
+            intentionally_skipped: coverage.intentionally_skipped,
+            unsupported_gaps: coverage.unsupported_gaps,
+            source_complete: coverage.source_complete,
+        }
+    }
+
+    fn into_coverage(self) -> TextUnitEnumerationCoverage {
+        TextUnitEnumerationCoverage {
+            owner_chars: self.owner_chars,
+            section_separator_chars: self.section_separator_chars,
+            sentence_separator_chars: self.sentence_separator_chars,
+            paragraph_count: self.paragraph_count,
+            sentence_eligible_paragraphs: self.sentence_eligible_paragraphs,
+            non_prose_paragraphs: self.non_prose_paragraphs,
+            coarse_structural_paragraphs: self.coarse_structural_paragraphs,
+            represented_paragraphs: self.represented_paragraphs,
+            represented_sentences: self.represented_sentences,
+            coarse_non_prose_items: self.coarse_non_prose_items,
+            coarse_structural_items: self.coarse_structural_items,
+            intentionally_skipped: self.intentionally_skipped,
+            unsupported_gaps: self.unsupported_gaps,
+            source_complete: self.source_complete,
         }
     }
 }

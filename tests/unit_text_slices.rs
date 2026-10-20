@@ -1,14 +1,16 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary, text_string};
-use reading_mcp::application::ports::{Parser, RetrievedResource};
+use reading_mcp::application::ports::{Parser, RetrievedResource, TextUnitIndex};
 use reading_mcp::domain::{
     Document, DocumentSource, MediaType, NormalizedTextRangeError, Section, SentenceTextUnit,
     TextUnit,
 };
+use reading_mcp::infrastructure::SqliteTextUnitIndex;
 use reading_mcp::parsing::{ArchiveLimits, ParserRouter};
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -432,6 +434,7 @@ async fn real_books_unit_text_equals_range_slice() {
 
     let mut total_units = 0usize;
     let mut total_mismatches = 0usize;
+    let mut total_sections_compared = 0usize;
 
     for path in &entries {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -458,7 +461,7 @@ async fn real_books_unit_text_equals_range_slice() {
             }
         };
         let document = match router.parse(resource(name, media_type, bytes)).await {
-            Ok(document) => document,
+            Ok(document) => Arc::new(document),
             Err(error) => {
                 println!("{name} units_checked=0 mismatch_counts=parse-error");
                 println!("  parse error: {error}");
@@ -466,6 +469,9 @@ async fn real_books_unit_text_equals_range_slice() {
             }
         };
         let report = check_document(&document);
+        let sections_compared = compare_section_layouts(&document).await;
+        total_sections_compared += sections_compared;
+        println!("{name} sections_compared={sections_compared}");
         let mismatches: usize = report.mismatch_counts.values().sum();
         total_units += report.units_checked;
         total_mismatches += mismatches;
@@ -488,9 +494,62 @@ async fn real_books_unit_text_equals_range_slice() {
         }
     }
 
-    println!("TOTAL units_checked={total_units} mismatches={total_mismatches}");
+    println!(
+        "TOTAL units_checked={total_units} mismatches={total_mismatches} sections_compared={total_sections_compared}"
+    );
     assert_eq!(
         total_mismatches, 0,
         "real books had unit text / range slice mismatches"
     );
+}
+
+/// Stores the same document through the unit path and through the boundary path and asserts that
+/// every stored `section_layout_v1` row is byte-identical. Returns the number of sections compared.
+async fn compare_section_layouts(document: &Arc<Document>) -> usize {
+    let segmentation = Arc::new(
+        document
+            .try_segmentation()
+            .expect("real book should segment into boundaries"),
+    );
+    let hash = document.normalized_document_hash();
+    let (paragraphs, sentences) = segmentation.materialize(document, &hash);
+
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let units = SqliteTextUnitIndex::open(directory.path().join("units.sqlite"))
+        .expect("unit index should open");
+    let boundaries = SqliteTextUnitIndex::open(directory.path().join("boundaries.sqlite"))
+        .expect("boundary index should open");
+
+    units
+        .replace_document_sets(document, Arc::new(paragraphs), Arc::new(sentences))
+        .await
+        .expect("unit sets should persist");
+    boundaries
+        .replace_document_segmentation(document, segmentation)
+        .await
+        .expect("boundaries should persist");
+
+    let from_units = units
+        .stored_section_layouts(&document.id)
+        .await
+        .expect("unit layouts should read back");
+    let from_boundaries = boundaries
+        .stored_section_layouts(&document.id)
+        .await
+        .expect("boundary layouts should read back");
+
+    assert_eq!(
+        from_units.len(),
+        from_boundaries.len(),
+        "document {} stored a different number of sections",
+        document.id.0
+    );
+    for (unit_layout, boundary_layout) in from_units.iter().zip(from_boundaries.iter()) {
+        assert_eq!(
+            unit_layout, boundary_layout,
+            "document {} section {} layout differs",
+            document.id.0, unit_layout.0
+        );
+    }
+    from_units.len()
 }

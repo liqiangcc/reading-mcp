@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use crate::application::ports::{
     ApplicationError, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit, SearchHit, SearchIndex,
 };
-use crate::domain::{Document, DocumentId, ParagraphTextUnitSet, SentenceTextUnitSet};
+use crate::domain::{Document, DocumentId, DocumentSegmentation, NormalizedDocumentHash};
 
 use super::lexical::{
     LexicalCandidate, MAX_SNIPPET_CHARS, build_lexical_candidates, compare_hits,
@@ -48,12 +48,14 @@ impl SearchIndex for InMemorySearchIndex {
         self.store_candidates(&document.id, candidates)
     }
 
-    async fn index_with_units(
+    async fn index_with_segmentation(
         &self,
         document: Arc<Document>,
-        paragraphs: Arc<ParagraphTextUnitSet>,
-        sentences: Arc<SentenceTextUnitSet>,
+        normalized_document_hash: NormalizedDocumentHash,
+        segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
+        let (paragraphs, sentences) =
+            segmentation.materialize(&document, &normalized_document_hash);
         let candidates =
             lexical_candidates_from_units(&document, &paragraphs.units, &sentences.units);
         self.store_candidates(&document.id, candidates)

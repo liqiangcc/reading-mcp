@@ -8,6 +8,7 @@ mod normalized_text;
 mod ocr;
 mod ocr_observations;
 mod original_source;
+mod segmentation;
 mod text_locator;
 mod text_unit;
 
@@ -37,6 +38,10 @@ pub use original_source::{
     ORIGINAL_SOURCE_BINDING_MODEL_VERSION, ORIGINAL_SOURCE_BINDING_VERSION_METADATA_KEY,
     OriginalSourceBinding, OriginalSourceBindingError, OriginalSourceBindingMap,
     OriginalSourceTarget,
+};
+pub use segmentation::{
+    DocumentSegmentation, ParagraphBoundary, SectionSegmentation, SentenceBoundary,
+    SentenceCoverageBoundary,
 };
 pub use text_locator::TextLocator;
 pub use text_unit::{

@@ -28,21 +28,17 @@ async fn parsed_document() -> Document {
 #[tokio::test]
 async fn in_memory_index_reuses_caller_units() {
     let document = Arc::new(parsed_document().await);
-    let paragraphs = Arc::new(
-        document
-            .try_paragraph_text_units()
-            .expect("paragraph units"),
-    );
-    let sentences = Arc::new(document.try_sentence_text_units().expect("sentence units"));
+    let segmentation = Arc::new(document.segmentation());
+    let hash = document.normalized_document_hash();
 
     let rebuilt = InMemorySearchIndex::default();
     let reused = InMemorySearchIndex::default();
     rebuilt.index(&document).await.expect("index");
     reused
-        .index_with_units(
+        .index_with_segmentation(
             Arc::clone(&document),
-            Arc::clone(&paragraphs),
-            Arc::clone(&sentences),
+            hash.clone(),
+            Arc::clone(&segmentation),
         )
         .await
         .expect("index with units");
@@ -65,12 +61,8 @@ async fn in_memory_index_reuses_caller_units() {
 #[tokio::test]
 async fn sqlite_index_reuses_caller_units() {
     let document = Arc::new(parsed_document().await);
-    let paragraphs = Arc::new(
-        document
-            .try_paragraph_text_units()
-            .expect("paragraph units"),
-    );
-    let sentences = Arc::new(document.try_sentence_text_units().expect("sentence units"));
+    let segmentation = Arc::new(document.segmentation());
+    let hash = document.normalized_document_hash();
 
     let directory = tempfile::tempdir().expect("temp directory");
     let rebuilt_path = directory.path().join("rebuilt.sqlite");
@@ -89,10 +81,10 @@ async fn sqlite_index_reuses_caller_units() {
     let reused = SqliteSearchIndex::open(&reused_path).expect("reused index");
     rebuilt.index(&document).await.expect("index");
     reused
-        .index_with_units(
+        .index_with_segmentation(
             Arc::clone(&document),
-            Arc::clone(&paragraphs),
-            Arc::clone(&sentences),
+            hash.clone(),
+            Arc::clone(&segmentation),
         )
         .await
         .expect("index with units");

@@ -81,14 +81,10 @@ async fn assert_parity(document: &Document) {
         .expect("save reused document");
     let reused = SqliteSearchIndex::open(&reused_database).expect("reused index");
     reused
-        .index_with_units(
+        .index_with_segmentation(
             Arc::new(document.clone()),
-            Arc::new(
-                document
-                    .try_paragraph_text_units()
-                    .expect("paragraph units"),
-            ),
-            Arc::new(document.try_sentence_text_units().expect("sentence units")),
+            document.normalized_document_hash(),
+            Arc::new(document.segmentation()),
         )
         .await
         .expect("index caller units");

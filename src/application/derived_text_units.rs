@@ -4,12 +4,14 @@ use async_trait::async_trait;
 
 use crate::application::ports::{ApplicationError, SectionTextUnits, TextUnitIndex};
 use crate::domain::{
-    Document, DocumentId, ParagraphTextUnitSet, SectionId, SentenceTextUnitSet, TextUnit,
+    Document, DocumentId, DocumentSegmentation, ParagraphTextUnitSet, SectionId,
+    SentenceTextUnitSet, TextUnit,
 };
 
-/// A read-only TextUnitIndex over one decoded document: derives the unit sets once (lazily) with
-/// `document.try_text_unit_sets()`. Use cases built without a stored text-unit index (tests) use it; the runtime
-/// always passes the stored SQLite index, so production never re-segments a document on read.
+/// A read-only TextUnitIndex over one decoded document: segments it once (lazily) with
+/// `document.try_segmentation()` and materializes units only where a read needs them. Use cases built
+/// without a stored text-unit index (tests) use it; the runtime always passes the stored SQLite index,
+/// so production never re-segments a document on read.
 pub struct DerivedTextUnits {
     document: Arc<Document>,
     sets: OnceLock<Result<(ParagraphTextUnitSet, SentenceTextUnitSet), String>>,
@@ -25,9 +27,12 @@ impl DerivedTextUnits {
 
     fn sets(&self) -> Result<&(ParagraphTextUnitSet, SentenceTextUnitSet), ApplicationError> {
         match self.sets.get_or_init(|| {
-            self.document
-                .try_text_unit_sets()
-                .map_err(|error| error.to_string())
+            let segmentation: DocumentSegmentation = self
+                .document
+                .try_segmentation()
+                .map_err(|error| error.to_string())?;
+            let normalized_document_hash = self.document.normalized_document_hash();
+            Ok(segmentation.materialize(&self.document, &normalized_document_hash))
         }) {
             Ok(sets) => Ok(sets),
             Err(error) => Err(derived_error(error)),
@@ -67,6 +72,14 @@ impl TextUnitIndex for DerivedTextUnits {
         _document: &Arc<Document>,
         _paragraphs: Arc<ParagraphTextUnitSet>,
         _sentences: Arc<SentenceTextUnitSet>,
+    ) -> Result<(), ApplicationError> {
+        Err(read_only())
+    }
+
+    async fn replace_document_segmentation(
+        &self,
+        _document: &Arc<Document>,
+        _segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
         Err(read_only())
     }

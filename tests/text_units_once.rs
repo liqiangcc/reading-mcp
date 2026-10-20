@@ -4,7 +4,7 @@ use reading_mcp::application::ports::{DocumentReliabilityInspector, Parser, Retr
 use reading_mcp::domain::{Document, DocumentSource, MediaType};
 use reading_mcp::parsing::{
     ArchiveLimits, EpubParser, MarkdownParser, PdfParser, PersistedDocumentReliabilityInspector,
-    TextParser, validate_epub_document, validate_epub_document_with_units,
+    TextParser, validate_epub_document, validate_epub_document_with_segmentation,
 };
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -36,10 +36,9 @@ async fn try_text_unit_sets_matches_the_individual_builders() {
 #[tokio::test]
 async fn epub_validation_with_units_matches_full_validation() {
     let document = parse_epub().await;
-    let (paragraphs, sentences) = document.try_text_unit_sets().expect("combined unit sets");
 
     assert_eq!(
-        validate_epub_document_with_units(&document, &paragraphs, &sentences),
+        validate_epub_document_with_segmentation(&document, &document.segmentation()),
         validate_epub_document(&document)
     );
 }
@@ -68,11 +67,10 @@ async fn inspector_with_units_matches_inspect_for_fallback_pdf_fixture() {
 }
 
 fn assert_inspector_parity(document: &Document) {
-    let (paragraphs, sentences) = document.try_text_unit_sets().expect("combined unit sets");
     let inspector = PersistedDocumentReliabilityInspector;
 
     assert_eq!(
-        inspector.inspect_with_units(document, &paragraphs, &sentences),
+        inspector.inspect_with_segmentation(document, &document.segmentation()),
         inspector.inspect(document)
     );
 }

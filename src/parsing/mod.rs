@@ -32,7 +32,7 @@ pub use epub_validator::{
     EPUB_VALIDATION_REPORT_VERSION_METADATA_KEY, EpubBlockCoverage, EpubNavigationCoverage,
     EpubPackageSpineCoverage, EpubStructureCoverage, EpubTextUnitCoverage, EpubValidationCoverage,
     EpubValidationFinding, EpubValidationIntegrity, EpubValidationReport, EpubValidationSeverity,
-    validate_epub_document, validate_epub_document_with_units,
+    validate_epub_document, validate_epub_document_with_segmentation,
 };
 pub use html::HtmlParser;
 pub use layout_pdf::{

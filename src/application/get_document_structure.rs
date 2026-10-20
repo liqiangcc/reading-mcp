@@ -169,12 +169,11 @@ impl GetDocumentStructureUseCase {
         &self,
         command: ResolveNamedSectionCommand,
     ) -> Result<ResolveNamedSectionResult, ApplicationError> {
-        let document = self
+        let (document, normalized_hash) = self
             .repository
-            .get(&command.document_id)
+            .get_with_hash(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
-        let normalized_hash = document.normalized_document_hash();
         let body_order = section_body_order(&document)?;
         let resolution = resolve_named_section(&document, &body_order, &command, &normalized_hash)?;
         Ok(ResolveNamedSectionResult {
@@ -200,12 +199,11 @@ impl GetDocumentStructureUseCase {
             .transpose()?;
         let scope = resolve_scope(&command, cursor_claims.as_ref())?;
 
-        let document = self
+        let (document, normalized_hash) = self
             .repository
-            .get(&command.document_id)
+            .get_with_hash(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
-        let normalized_hash = document.normalized_document_hash();
         let body_order = section_body_order(&document)?;
 
         if let Some(claims) = &cursor_claims {

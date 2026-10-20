@@ -36,7 +36,7 @@ const DOCUMENT_CACHE_CAPACITY: usize = 8;
 #[derive(Default)]
 struct DocumentCache {
     data_version: Option<i64>,
-    entries: VecDeque<(DocumentId, Arc<Document>)>,
+    entries: VecDeque<(DocumentId, Arc<Document>, NormalizedDocumentHash)>,
 }
 
 impl DocumentCache {
@@ -47,22 +47,31 @@ impl DocumentCache {
         }
     }
 
-    fn get(&mut self, id: &DocumentId) -> Option<Arc<Document>> {
-        let index = self.entries.iter().position(|(cached, _)| cached == id)?;
+    fn get(&mut self, id: &DocumentId) -> Option<(Arc<Document>, NormalizedDocumentHash)> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(cached, _, _)| cached == id)?;
         let entry = self.entries.remove(index)?;
-        let document = Arc::clone(&entry.1);
+        let result = (Arc::clone(&entry.1), entry.2.clone());
         self.entries.push_front(entry);
-        Some(document)
+        Some(result)
     }
 
-    fn insert(&mut self, id: DocumentId, document: Arc<Document>) {
+    fn insert(
+        &mut self,
+        id: DocumentId,
+        document: Arc<Document>,
+        normalized_document_hash: NormalizedDocumentHash,
+    ) {
         self.remove(&id);
-        self.entries.push_front((id, document));
+        self.entries
+            .push_front((id, document, normalized_document_hash));
         self.entries.truncate(DOCUMENT_CACHE_CAPACITY);
     }
 
     fn remove(&mut self, id: &DocumentId) {
-        self.entries.retain(|(cached, _)| cached != id);
+        self.entries.retain(|(cached, _, _)| cached != id);
     }
 }
 
@@ -86,6 +95,7 @@ impl SqliteDocumentRepository {
                  );",
             )
             .map_err(repository_error)?;
+        ensure_normalized_document_hash_column(&connection)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
@@ -108,6 +118,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::RepositoryFailed)?;
+        let normalized_document_hash = document.normalized_document_hash();
         let json = serde_json::to_string(&StoredDocument::from_document(&document))
             .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
         let cache = Arc::clone(&self.cache);
@@ -117,17 +128,19 @@ impl DocumentRepository for SqliteDocumentRepository {
             move |connection| {
                 connection
                     .execute(
-                        "INSERT INTO documents(id, source, content_hash, document_json)
-                         VALUES (?1, ?2, ?3, ?4)
+                        "INSERT INTO documents(id, source, content_hash, document_json, normalized_document_hash)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
                          ON CONFLICT(id) DO UPDATE SET
                             source = excluded.source,
                             content_hash = excluded.content_hash,
-                            document_json = excluded.document_json",
+                            document_json = excluded.document_json,
+                            normalized_document_hash = excluded.normalized_document_hash",
                         params![
                             document.id.0,
                             document.source.0,
                             document.content_hash.0,
-                            json
+                            json,
+                            normalized_document_hash.0
                         ],
                     )
                     .map_err(repository_error)?;
@@ -142,6 +155,13 @@ impl DocumentRepository for SqliteDocumentRepository {
     }
 
     async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
+        Ok(self.get_with_hash(id).await?.map(|(document, _)| document))
+    }
+
+    async fn get_with_hash(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
         let id = id.clone();
         let cache = Arc::clone(&self.cache);
         run_sqlite(
@@ -155,33 +175,79 @@ impl DocumentRepository for SqliteDocumentRepository {
                     ApplicationError::RepositoryFailed("document cache lock poisoned".into())
                 })?;
                 cache.sync_version(data_version);
-                if let Some(document) = cache.get(&id) {
-                    return Ok(Some(document));
+                if let Some(cached) = cache.get(&id) {
+                    return Ok(Some(cached));
                 }
-                let json = connection
+                let row = connection
                     .query_row(
-                        "SELECT document_json FROM documents WHERE id = ?1",
+                        "SELECT document_json, normalized_document_hash FROM documents WHERE id = ?1",
                         params![&id.0],
-                        |row| row.get::<_, String>(0),
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                            ))
+                        },
                     )
                     .optional()
                     .map_err(repository_error)?;
-                json.map(|json| {
-                    let stored = serde_json::from_str::<StoredDocument>(&json)
-                        .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
-                    let document = stored.into_document()?;
-                    document
-                        .validate_ocr_publication()
-                        .map_err(ApplicationError::RepositoryFailed)?;
-                    let document = Arc::new(document);
-                    cache.insert(id.clone(), Arc::clone(&document));
-                    Ok(document)
-                })
-                .transpose()
+                let Some((json, stored_hash)) = row else {
+                    return Ok(None);
+                };
+                let stored = serde_json::from_str::<StoredDocument>(&json)
+                    .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+                let document = stored.into_document()?;
+                document
+                    .validate_ocr_publication()
+                    .map_err(ApplicationError::RepositoryFailed)?;
+                let document = Arc::new(document);
+                let normalized_document_hash = match stored_hash {
+                    Some(hash) => NormalizedDocumentHash(hash),
+                    None => {
+                        let hash = document.normalized_document_hash();
+                        connection
+                            .execute(
+                                "UPDATE documents SET normalized_document_hash = ?1 WHERE id = ?2",
+                                params![&hash.0, &id.0],
+                            )
+                            .map_err(repository_error)?;
+                        hash
+                    }
+                };
+                cache.insert(
+                    id.clone(),
+                    Arc::clone(&document),
+                    normalized_document_hash.clone(),
+                );
+                Ok(Some((document, normalized_document_hash)))
             },
         )
         .await
     }
+}
+
+fn ensure_normalized_document_hash_column(connection: &Connection) -> Result<(), ApplicationError> {
+    let has_column = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(documents)")
+            .map_err(repository_error)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(repository_error)?;
+        let mut has_column = false;
+        for column in columns {
+            if column.map_err(repository_error)? == "normalized_document_hash" {
+                has_column = true;
+            }
+        }
+        has_column
+    };
+    if !has_column {
+        connection
+            .execute_batch("ALTER TABLE documents ADD COLUMN normalized_document_hash TEXT")
+            .map_err(repository_error)?;
+    }
+    Ok(())
 }
 
 /// Stores the open result of each document, keyed by document id and checked against a fingerprint on read.

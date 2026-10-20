@@ -143,8 +143,7 @@ impl GetContextUseCase {
         command: GetContextCommand,
     ) -> Result<GetContextResult, ApplicationError> {
         validate_window(command.before, command.after)?;
-        let document = self.load_document(&command.document_id).await?;
-        let normalized_document_hash = document.normalized_document_hash();
+        let (document, normalized_document_hash) = self.load_document(&command.document_id).await?;
         section_neighbor_result(
             &document,
             &command.section_id,
@@ -163,8 +162,7 @@ impl GetContextUseCase {
             validate_window(*before, *after)?;
         }
 
-        let document = self.load_document(&command.document_id).await?;
-        let normalized_document_hash = document.normalized_document_hash();
+        let (document, normalized_document_hash) = self.load_document(&command.document_id).await?;
         let units = self.text_units(&document);
         let resolved = resolve_target(
             &document,
@@ -248,9 +246,12 @@ impl GetContextUseCase {
         }
     }
 
-    async fn load_document(&self, id: &DocumentId) -> Result<Arc<Document>, ApplicationError> {
+    async fn load_document(
+        &self,
+        id: &DocumentId,
+    ) -> Result<(Arc<Document>, NormalizedDocumentHash), ApplicationError> {
         self.repository
-            .get(id)
+            .get_with_hash(id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)
     }

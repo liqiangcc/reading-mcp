@@ -36,12 +36,13 @@ jobs:
           }
           download "https://www.gutenberg.org/cache/epub/24264/pg24264-images.epub" "$BOOKS/zh-classic.epub"
           download "https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" "$BOOKS/en-novel.epub"
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$BOOKS/zh-large.epub"
       - name: Profile book scenarios
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p book
           docs=""
-          for pair in "zh-classic=$BOOKS/zh-classic.epub" "en-novel=$BOOKS/en-novel.epub"; do
+          for pair in "zh-classic=$BOOKS/zh-classic.epub" "en-novel=$BOOKS/en-novel.epub" "zh-large=$BOOKS/zh-large.epub"; do
             label="${pair%%=*}"
             file="${pair#*=}"
             if [ -f "$file" ]; then
@@ -49,9 +50,10 @@ jobs:
             fi
           done
           args=(--binary target/release/reading-mcp --states dir --sizes-mb 4
-            --cjk-sizes-mb 1,4 --markdown-sections 2000 --reopen
+            --cjk-sizes-mb 1,4 --markdown-sections 2000 --reopen --telemetry --disk
             --parse-timeout-seconds 900 --run-timeout-seconds 900 --out book/runs.json
-            --probe-query "en-novel=Pierre" --probe-query "zh-classic=寶玉")
+            --probe-query "en-novel=Pierre" --probe-query "zh-classic=寶玉"
+            --probe-query "zh-large=皇帝")
           if [ -n "$docs" ]; then
             args+=(--documents "$docs")
           fi
@@ -62,10 +64,19 @@ jobs:
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p book
           args=(--binary target/release/reading-mcp --states dir --markdown-sections 2000
+            --cjk-sizes-mb 4
             --parse-timeout-seconds 900 --run-timeout-seconds 900
             --wrapper "heaptrack -o book/{label}" --out book/runs-heap.json)
-          if [ -f "$BOOKS/zh-classic.epub" ]; then
-            args+=(--documents "zh-classic=$BOOKS/zh-classic.epub")
+          docs=""
+          for pair in "zh-classic=$BOOKS/zh-classic.epub" "en-novel=$BOOKS/en-novel.epub"; do
+            label="${pair%%=*}"
+            file="${pair#*=}"
+            if [ -f "$file" ]; then
+              docs="${docs:+$docs,}$label=$file"
+            fi
+          done
+          if [ -n "$docs" ]; then
+            args+=(--documents "$docs")
           fi
           python3 scripts/memory-profile.py "${args[@]}"
       - name: Summarize heap profiles

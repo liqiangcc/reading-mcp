@@ -38,6 +38,7 @@ import os
 import queue
 import random
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -154,10 +155,15 @@ def write_markdown_document(path: str, sections: int) -> None:
         handle.write("\n".join(lines))
 
 
-def server_environment(roots: list[str], state_dir: str, parse_timeout: float | None) -> dict:
+def server_environment(
+    roots: list[str],
+    state_dir: str,
+    parse_timeout: float | None,
+    telemetry: bool = False,
+) -> dict:
     env = dict(os.environ)
     env["READING_MCP_LOCAL_ROOTS"] = os.pathsep.join(roots)
-    env["READING_MCP_TELEMETRY"] = "false"
+    env["READING_MCP_TELEMETRY"] = "1" if telemetry else "false"
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = (
@@ -348,6 +354,7 @@ def run_one(
     source: str | None,
     run_timeout: float,
     probe_query: str | None = None,
+    stderr_path: str | None = None,
 ) -> tuple[
     int,
     float | None,
@@ -366,11 +373,12 @@ def run_one(
     search_seconds, hit_count, context_seconds, probe_error). The probe runs before stdin is
     closed, so the returned peak RSS includes it.
     """
+    stderr_handle = open(stderr_path, "wb") if stderr_path else subprocess.DEVNULL
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_handle,
         env=env,
     )
     responses: queue.Queue = queue.Queue()
@@ -439,6 +447,8 @@ def run_one(
             usage = None
             process.returncode = 0
         reader.join(timeout=1.0)
+        if stderr_path:
+            stderr_handle.close()
     peak_rss_kib = usage.ru_maxrss if usage is not None else 0
     return (
         peak_rss_kib,
@@ -623,6 +633,233 @@ def make_row(
     return row
 
 
+PHASE_EVENTS = (
+    ("Retrieve s", "retrieve"),
+    ("Parse s", "parse"),
+    ("Save doc s", "repository_save"),
+    ("Unit sets + streams s", "text_unit_sets_write"),
+    ("FTS index s", "index"),
+)
+
+
+def telemetry_path(directory: str, label: str, phase: str) -> str:
+    safe = label.replace(os.sep, "_")
+    return os.path.join(directory, f"{safe}.{phase}.telemetry.jsonl")
+
+
+def read_telemetry_events(path: str | None) -> list[dict]:
+    if not path or not os.path.exists(path):
+        return []
+    events: list[dict] = []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                events.append(item)
+    return events
+
+
+def telemetry_sums(events: list[dict], success_only: bool) -> dict[str, tuple[int, float]]:
+    sums: dict[str, tuple[int, float]] = {}
+    for item in events:
+        if success_only and item.get("success") is not True:
+            continue
+        event = item.get("event")
+        duration = item.get("duration_ms")
+        if not isinstance(event, str) or not isinstance(duration, (int, float)):
+            continue
+        count, total = sums.get(event, (0, 0.0))
+        sums[event] = (count + 1, total + float(duration))
+    return sums
+
+
+def telemetry_phase_seconds(events: list[dict]) -> dict[str, float]:
+    sums = telemetry_sums(events, success_only=True)
+    return {event: sums.get(event, (0, 0.0))[1] / 1000.0 for _, event in PHASE_EVENTS}
+
+
+def telemetry_read_totals(events: list[dict]) -> dict[str, tuple[int, float]]:
+    sums = telemetry_sums(events, success_only=False)
+    return {
+        event: (sums.get(event, (0, 0.0))[0], sums.get(event, (0, 0.0))[1] / 1000.0)
+        for event in ("repository_get", "text_unit_read")
+    }
+
+
+def directory_bytes(path: str) -> int:
+    total = 0
+    for dirpath, _, filenames in os.walk(path):
+        for name in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total
+
+
+def measure_disk(state_dir: str) -> dict:
+    database = os.path.join(state_dir, "reading-mcp.sqlite")
+    dbstat: list[tuple[str, int]] | None = None
+    dbstat_unavailable = False
+    if os.path.exists(database):
+        try:
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.commit()
+                try:
+                    dbstat = [
+                        (str(name), int(size or 0))
+                        for name, size in connection.execute(
+                            "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name"
+                        )
+                    ]
+                except sqlite3.Error:
+                    dbstat_unavailable = True
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            dbstat_unavailable = True
+
+    sqlite_bytes = 0
+    for suffix in ("", "-wal", "-shm"):
+        path = database + suffix
+        if os.path.exists(path):
+            sqlite_bytes += os.path.getsize(path)
+
+    cache_bytes = 0
+    cache_split: dict[str, int] = {}
+    cache_dir = os.path.join(state_dir, "cache")
+    if os.path.isdir(cache_dir):
+        cache_bytes = directory_bytes(cache_dir)
+        for name in sorted(os.listdir(cache_dir)):
+            path = os.path.join(cache_dir, name)
+            if os.path.isdir(path):
+                cache_split[name] = directory_bytes(path)
+
+    sqlite_names = {
+        "reading-mcp.sqlite",
+        "reading-mcp.sqlite-wal",
+        "reading-mcp.sqlite-shm",
+    }
+    other_bytes = 0
+    if os.path.isdir(state_dir):
+        for name in os.listdir(state_dir):
+            if name == "cache" or name in sqlite_names:
+                continue
+            path = os.path.join(state_dir, name)
+            if os.path.isdir(path):
+                other_bytes += directory_bytes(path)
+            elif os.path.isfile(path):
+                try:
+                    other_bytes += os.path.getsize(path)
+                except OSError:
+                    pass
+
+    top_objects = [
+        f"{name} {size / MIB:.1f}"
+        for name, size in sorted(dbstat or [], key=lambda entry: entry[1], reverse=True)[:6]
+    ]
+    return {
+        "sqlite_bytes": sqlite_bytes,
+        "cache_bytes": cache_bytes,
+        "cache_split": cache_split,
+        "other_bytes": other_bytes,
+        "total_bytes": sqlite_bytes + cache_bytes + other_bytes,
+        "top_objects": top_objects,
+        "dbstat_unavailable": dbstat_unavailable,
+    }
+
+
+def telemetry_table(rows: list[dict]) -> str:
+    columns = ["Label", "Open s"] + [label for label, _ in PHASE_EVENTS] + ["Other s"]
+    alignments = ["---", "---:"] + ["---:" for _ in PHASE_EVENTS] + ["---:"]
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join(alignments) + " |",
+    ]
+    for row in rows:
+        phases = row.get("telemetry_phases")
+        if phases is None:
+            continue
+        open_seconds = row.get("open_seconds") or 0.0
+        listed = sum(phases.get(event, 0.0) for _, event in PHASE_EVENTS)
+        cells = [
+            table_cell(row.get("label")),
+            format_number(row.get("open_seconds")),
+        ]
+        cells += [format_number(phases.get(event, 0.0)) for _, event in PHASE_EVENTS]
+        cells.append(format_number(open_seconds - listed))
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def telemetry_read_lines(rows: list[dict]) -> list[str]:
+    lines = []
+    for row in rows:
+        reads = row.get("telemetry_reads")
+        if reads is None:
+            continue
+        get_count, get_seconds = reads.get("repository_get", (0, 0.0))
+        read_count, read_seconds = reads.get("text_unit_read", (0, 0.0))
+        lines.append(
+            f"{row.get('label')}: repository_get {get_count} in {get_seconds:.2f} s, "
+            f"text_unit_read {read_count} in {read_seconds:.2f} s"
+        )
+    return lines
+
+
+def disk_table(rows: list[dict]) -> str:
+    columns = [
+        "Label",
+        "Source MiB",
+        "SQLite MiB",
+        "Cache MiB",
+        "Other MiB",
+        "Total MiB",
+        "× source",
+        "Top objects",
+    ]
+    alignments = ["---", "---:", "---:", "---:", "---:", "---:", "---:", "---"]
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join(alignments) + " |",
+    ]
+    for row in rows:
+        disk = row.get("disk")
+        if disk is None:
+            continue
+        source_mb = row.get("size_mb") or 0
+        total_mb = disk["total_bytes"] / MIB
+        ratio = f"{total_mb / source_mb:.1f}" if source_mb else "-"
+        top = "; ".join(disk["top_objects"])
+        if not top and disk.get("dbstat_unavailable"):
+            top = "dbstat unavailable"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    table_cell(row.get("label")),
+                    format_number(source_mb),
+                    f"{disk['sqlite_bytes'] / MIB:.1f}",
+                    f"{disk['cache_bytes'] / MIB:.1f}",
+                    f"{disk['other_bytes'] / MIB:.1f}",
+                    f"{total_mb:.1f}",
+                    ratio,
+                    table_cell(top),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
 def run_input_group(
     state: str,
     env: dict,
@@ -636,6 +873,12 @@ def run_input_group(
     out_path: str,
     reopen: bool = False,
     probe_queries: dict[str, str] | None = None,
+    telemetry: bool = False,
+    telemetry_dir: str | None = None,
+    disk: bool = False,
+    temp_root: str | None = None,
+    roots: list[str] | None = None,
+    parse_timeout: float | None = None,
 ) -> None:
     skip = False
     for entry in inputs:
@@ -659,6 +902,25 @@ def run_input_group(
 
         probe_query = (probe_queries or {}).get(entry["label"])
         command = server_command(binary, wrapper, entry["label"])
+        entry_env = env
+        entry_state_dir: str | None = None
+        if disk and state != "memory" and temp_root is not None:
+            entry_state_dir = tempfile.mkdtemp(
+                prefix=f"state-{entry['label'].replace(os.sep, '_')}-", dir=temp_root
+            )
+            entry_env = server_environment(
+                roots or [], entry_state_dir, parse_timeout, telemetry=telemetry
+            )
+        open_stderr = (
+            telemetry_path(telemetry_dir, entry["label"], "open")
+            if telemetry and telemetry_dir
+            else None
+        )
+        reopen_stderr = (
+            telemetry_path(telemetry_dir, entry["label"], "reopen")
+            if telemetry and telemetry_dir
+            else None
+        )
         (
             peak,
             open_seconds,
@@ -670,7 +932,14 @@ def run_input_group(
             hit_count,
             context_seconds,
             probe_error,
-        ) = run_one(command, env, entry["source"], run_timeout, probe_query)
+        ) = run_one(
+            command,
+            entry_env,
+            entry["source"],
+            run_timeout,
+            probe_query,
+            stderr_path=open_stderr,
+        )
         row = make_row(
             state,
             entry["label"],
@@ -688,6 +957,10 @@ def run_input_group(
             row["hit_count"] = hit_count
             row["context_seconds"] = context_seconds
             row["probe_error"] = probe_error
+        if telemetry and open_stderr:
+            row["telemetry_phases"] = telemetry_phase_seconds(
+                read_telemetry_events(open_stderr)
+            )
         if reopen and row["ok"]:
             # A second server process on the same state directory: the restart-and-reopen case.
             (
@@ -701,11 +974,24 @@ def run_input_group(
                 _,
                 _,
                 _,
-            ) = run_one(command, env, entry["source"], run_timeout)
+            ) = run_one(
+                command,
+                entry_env,
+                entry["source"],
+                run_timeout,
+                stderr_path=reopen_stderr,
+            )
             row["reopen_seconds"] = reopen_seconds if reopen_error is None else None
             row["reopen_extra_kib"] = (
                 reopen_peak - baseline_peak if reopen_error is None else None
             )
+        if telemetry and open_stderr:
+            probe_events = read_telemetry_events(open_stderr)
+            if reopen and row["ok"]:
+                probe_events += read_telemetry_events(reopen_stderr)
+            row["telemetry_reads"] = telemetry_read_totals(probe_events)
+        if entry_state_dir is not None:
+            row["disk"] = measure_disk(entry_state_dir)
         rows.append(row)
         log_row(row)
         dump_rows(out_path, rows)
@@ -737,6 +1023,16 @@ def main() -> int:
         metavar="LABEL=QUERY",
         help="after opening this label, time search_document and get_context (repeatable)",
     )
+    parser.add_argument(
+        "--telemetry",
+        action="store_true",
+        help="record each input run's stderr and print the first-open phase breakdown",
+    )
+    parser.add_argument(
+        "--disk",
+        action="store_true",
+        help="give each input a fresh state dir and print its disk footprint",
+    )
     args = parser.parse_args()
 
     sizes = parse_floats(args.sizes_mb)
@@ -753,6 +1049,9 @@ def main() -> int:
     if not os.path.exists(binary):
         print(f"binary not found: {binary}", file=sys.stderr)
         return 2
+
+    telemetry_dir = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(telemetry_dir, exist_ok=True)
 
     rows: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="memory-profile-") as root:
@@ -786,6 +1085,9 @@ def main() -> int:
             else:
                 state_dir = os.path.abspath(tempfile.mkdtemp(prefix="state-dir-", dir=root))
             env = server_environment(roots, state_dir, args.parse_timeout_seconds)
+            input_env = server_environment(
+                roots, state_dir, args.parse_timeout_seconds, telemetry=args.telemetry
+            )
 
             baseline_label = f"{state}-baseline"
             baseline_command = server_command(binary, args.wrapper, baseline_label)
@@ -821,9 +1123,17 @@ def main() -> int:
                 {"label": f"{state}-{size:g}mib", "size_mb": size, "source": size_documents[size]}
                 for size in sizes
             ]
+            common = dict(
+                telemetry=args.telemetry,
+                telemetry_dir=telemetry_dir,
+                disk=args.disk,
+                temp_root=root,
+                roots=roots,
+                parse_timeout=args.parse_timeout_seconds,
+            )
             run_input_group(
-                state, env, binary, args.wrapper, run_timeout, size_inputs,
-                baseline_peak, True, rows, args.out, args.reopen, probe_queries,
+                state, input_env, binary, args.wrapper, run_timeout, size_inputs,
+                baseline_peak, True, rows, args.out, args.reopen, probe_queries, **common,
             )
 
             if cjk_documents:
@@ -832,8 +1142,8 @@ def main() -> int:
                     for size in cjk_sizes
                 ]
                 run_input_group(
-                    state, env, binary, args.wrapper, run_timeout, cjk_inputs,
-                    baseline_peak, True, rows, args.out, args.reopen, probe_queries,
+                    state, input_env, binary, args.wrapper, run_timeout, cjk_inputs,
+                    baseline_peak, True, rows, args.out, args.reopen, probe_queries, **common,
                 )
 
             if markdown_path is not None:
@@ -845,8 +1155,8 @@ def main() -> int:
                     }
                 ]
                 run_input_group(
-                    state, env, binary, args.wrapper, run_timeout, markdown_inputs,
-                    baseline_peak, False, rows, args.out, args.reopen, probe_queries,
+                    state, input_env, binary, args.wrapper, run_timeout, markdown_inputs,
+                    baseline_peak, False, rows, args.out, args.reopen, probe_queries, **common,
                 )
 
             if document_entries:
@@ -859,16 +1169,35 @@ def main() -> int:
                     for label, path in document_entries
                 ]
                 run_input_group(
-                    state, env, binary, args.wrapper, run_timeout, document_inputs,
-                    baseline_peak, False, rows, args.out, args.reopen, probe_queries,
+                    state, input_env, binary, args.wrapper, run_timeout, document_inputs,
+                    baseline_peak, False, rows, args.out, args.reopen, probe_queries, **common,
                 )
 
     table = markdown_table(rows, args.reopen, bool(probe_queries))
     print(table, flush=True)
+    outputs = [table]
+    if args.telemetry:
+        phases = telemetry_table(rows)
+        print(phases, flush=True)
+        outputs.append(phases)
+        for line in telemetry_read_lines(rows):
+            print(line, flush=True)
+            outputs.append(line)
+    if args.disk:
+        disk = disk_table(rows)
+        print(disk, flush=True)
+        outputs.append(disk)
+        for row in rows:
+            split = (row.get("disk") or {}).get("cache_split") or {}
+            if split:
+                parts = [f"{name} {size / MIB:.1f} MiB" for name, size in split.items()]
+                line = f"cache {row.get('label')}: " + "; ".join(parts)
+                print(line, flush=True)
+                outputs.append(line)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as handle:
-            handle.write(table + "\n")
+            handle.write("\n".join(outputs) + "\n")
 
     fatal = [row for row in rows if row.get("fatal")]
     if fatal:

@@ -524,10 +524,10 @@ impl ParagraphPrefilters {
     pub(crate) fn ranges_increase(ranges: impl IntoIterator<Item = (usize, usize)>) -> bool {
         let mut previous: Option<(usize, usize)> = None;
         for range in ranges {
-            if let Some(previous) = previous {
-                if previous >= range {
-                    return false;
-                }
+            if let Some(previous) = previous
+                && previous >= range
+            {
+                return false;
             }
             previous = Some(range);
         }
@@ -545,10 +545,10 @@ impl ParagraphPrefilters {
 
     /// The prefilter of the paragraph `start..end`, when this section has a paragraph with that range.
     pub(crate) fn get(&mut self, start: usize, end: usize) -> Option<bool> {
-        if let Some(((memo_start, memo_end), prefilter)) = self.memo {
-            if (memo_start, memo_end) == (start, end) {
-                return Some(prefilter);
-            }
+        if let Some(((memo_start, memo_end), prefilter)) = self.memo
+            && (memo_start, memo_end) == (start, end)
+        {
+            return Some(prefilter);
         }
         if self.increasing {
             let index = self

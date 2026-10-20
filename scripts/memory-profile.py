@@ -21,6 +21,13 @@ skipped.
 With `--reopen`, every successful input is opened a second time by a new server process on the
 same state directory, which measures the restart-and-reopen case. The row then gains `Reopen s`
 and `Reopen extra KiB` columns; without the flag the table is unchanged.
+
+With `--probe-query label=query` (repeatable), an input whose label has a query runs
+`search_document` on its opened `document_id` and then `get_context` around the first hit, in the
+same server process, and the row gains `Search s`, `Hits` and `Context s` columns. The probe runs
+before stdin is closed, so that row's peak RSS includes the probe work. Probe tool errors are
+recorded in `probe_error` and never change the open row's `ok`. With no `--probe-query` the table
+is byte-identical to before.
 """
 
 from __future__ import annotations
@@ -221,15 +228,21 @@ def extract_error(response: dict) -> str | None:
     return None
 
 
-def extract_metadata(response: dict) -> tuple[object | None, str | None]:
-    """Return `(section_count, title_truncated)` from a tool result's structured content."""
+def extract_structured(response: dict) -> dict | None:
+    """Return the tool result's structured content object, if it has one."""
     result = response.get("result")
     if not isinstance(result, dict):
-        return None, None
+        return None
     structured = result.get("structuredContent")
     if not isinstance(structured, dict):
         structured = result.get("structured_content")
-    if not isinstance(structured, dict):
+    return structured if isinstance(structured, dict) else None
+
+
+def extract_metadata(response: dict) -> tuple[object | None, str | None]:
+    """Return `(section_count, title_truncated)` from a tool result's structured content."""
+    structured = extract_structured(response)
+    if structured is None:
         return None, None
     sections = structured.get("section_count")
     title = structured.get("title")
@@ -248,12 +261,110 @@ def server_command(binary: str, wrapper: str | None, label: str) -> list[str]:
     return parts + [binary]
 
 
-def run_one(
-    command: list[str], env: dict, source: str | None, run_timeout: float
-) -> tuple[int, float | None, str | None, bool, object | None, str | None]:
-    """Run one open_document call.
+def probe(
+    process: subprocess.Popen,
+    responses: queue.Queue,
+    response: dict,
+    query: str,
+    run_timeout: float,
+) -> tuple[float | None, int | None, float | None, str | None]:
+    """Time search_document and get_context for one successful open, in the same process.
 
-    Returns (peak_rss_kib, open_seconds, error, timed_out, section_count, title).
+    Returns (search_seconds, hit_count, context_seconds, probe_error). A probe timeout or tool
+    error is reported in `probe_error`; it never changes the open result.
+    """
+    structured = extract_structured(response)
+    document_id = structured.get("document_id") if structured is not None else None
+    if not isinstance(document_id, str):
+        return None, None, None, "open_document result did not include a document_id"
+
+    search_message = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "search_document",
+            "arguments": {"document_id": document_id, "query": query},
+        },
+    }
+    start = time.monotonic()
+    try:
+        send(process, search_message)
+        search_response = read_response(responses, 3, run_timeout)
+    except TimeoutError:
+        process.kill()
+        return float(run_timeout), None, None, f"search_document timeout after {run_timeout:g}s"
+    search_seconds = time.monotonic() - start
+    probe_error = extract_error(search_response)
+    if probe_error is not None:
+        return search_seconds, None, None, probe_error
+
+    hits = extract_structured(search_response)
+    hits = hits.get("hits") if hits is not None else None
+    if not isinstance(hits, list):
+        return search_seconds, None, None, "search_document result did not include hits"
+    hit_count = len(hits)
+    if not hits:
+        return search_seconds, hit_count, None, None
+
+    first = hits[0] if isinstance(hits[0], dict) else {}
+    locator = first.get("text_locator")
+    if not isinstance(locator, dict):
+        return search_seconds, hit_count, None, "search hit did not include a text_locator"
+    unit = "sentence" if locator.get("sentence_index") is not None else "paragraph"
+    context_message = {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "get_context",
+            "arguments": {
+                "document_id": document_id,
+                "target_locator": locator,
+                "relation": {"type": "neighbor", "unit": unit, "before": 2, "after": 2},
+            },
+        },
+    }
+    start = time.monotonic()
+    try:
+        send(process, context_message)
+        context_response = read_response(responses, 4, run_timeout)
+    except TimeoutError:
+        process.kill()
+        return (
+            search_seconds,
+            hit_count,
+            float(run_timeout),
+            f"get_context timeout after {run_timeout:g}s",
+        )
+    context_seconds = time.monotonic() - start
+    probe_error = extract_error(context_response)
+    return search_seconds, hit_count, context_seconds, probe_error
+
+
+def run_one(
+    command: list[str],
+    env: dict,
+    source: str | None,
+    run_timeout: float,
+    probe_query: str | None = None,
+) -> tuple[
+    int,
+    float | None,
+    str | None,
+    bool,
+    object | None,
+    str | None,
+    float | None,
+    int | None,
+    float | None,
+    str | None,
+]:
+    """Run one open_document call, then optionally its read probe.
+
+    Returns (peak_rss_kib, open_seconds, error, timed_out, section_count, title,
+    search_seconds, hit_count, context_seconds, probe_error). The probe runs before stdin is
+    closed, so the returned peak RSS includes it.
     """
     process = subprocess.Popen(
         command,
@@ -271,6 +382,10 @@ def run_one(
     timed_out = False
     section_count: object | None = None
     title: str | None = None
+    search_seconds: float | None = None
+    hit_count: int | None = None
+    context_seconds: float | None = None
+    probe_error: str | None = None
     usage = None
     try:
         send(process, INITIALIZE_MESSAGE)
@@ -297,6 +412,13 @@ def run_one(
                 open_seconds = time.monotonic() - start
                 error = extract_error(response)
                 section_count, title = extract_metadata(response)
+                if probe_query is not None and error is None:
+                    (
+                        search_seconds,
+                        hit_count,
+                        context_seconds,
+                        probe_error,
+                    ) = probe(process, responses, response, probe_query, run_timeout)
     except TimeoutError:
         timed_out = True
         open_seconds = float(run_timeout)
@@ -318,7 +440,18 @@ def run_one(
             process.returncode = 0
         reader.join(timeout=1.0)
     peak_rss_kib = usage.ru_maxrss if usage is not None else 0
-    return peak_rss_kib, open_seconds, error, timed_out, section_count, title
+    return (
+        peak_rss_kib,
+        open_seconds,
+        error,
+        timed_out,
+        section_count,
+        title,
+        search_seconds,
+        hit_count,
+        context_seconds,
+        probe_error,
+    )
 
 
 def format_number(value: float | None, digits: int = 2) -> str:
@@ -330,20 +463,45 @@ def table_cell(value: object) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def markdown_table(rows: list[dict], reopen: bool = False) -> str:
-    header = (
-        "| State | Label | Size MiB | Sections | Title | Peak RSS KiB | Open s | MiB/s | "
-        "Extra KiB | Copies | OK | Error |\n"
-        "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :--: | --- |"
-    )
+def markdown_table(rows: list[dict], reopen: bool = False, probes: bool = False) -> str:
+    columns = [
+        "State",
+        "Label",
+        "Size MiB",
+        "Sections",
+        "Title",
+        "Peak RSS KiB",
+        "Open s",
+        "MiB/s",
+        "Extra KiB",
+        "Copies",
+        "OK",
+        "Error",
+    ]
+    alignments = [
+        "---",
+        "---",
+        "---:",
+        "---:",
+        "---",
+        "---:",
+        "---:",
+        "---:",
+        "---:",
+        "---:",
+        ":--:",
+        "---",
+    ]
     if reopen:
-        header = (
-            "| State | Label | Size MiB | Sections | Title | Peak RSS KiB | Open s | MiB/s | "
-            "Extra KiB | Copies | OK | Error | Reopen s | Reopen extra KiB |\n"
-            "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :--: | --- "
-            "| ---: | ---: |"
-        )
-    lines = [header]
+        columns += ["Reopen s", "Reopen extra KiB"]
+        alignments += ["---:", "---:"]
+    if probes:
+        columns += ["Search s", "Hits", "Context s"]
+        alignments += ["---:", "---:", "---:"]
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join(alignments) + " |",
+    ]
     for row in rows:
         text = (
             "| {state} | {label} | {size} | {sections} | {title} | {peak} | {open} | {rate} | "
@@ -366,6 +524,12 @@ def markdown_table(rows: list[dict], reopen: bool = False) -> str:
             text += " {seconds} | {extra} |".format(
                 seconds=format_number(row.get("reopen_seconds")),
                 extra=table_cell(row.get("reopen_extra_kib", "-")),
+            )
+        if probes:
+            text += " {search} | {hits} | {context} |".format(
+                search=format_number(row.get("search_seconds")),
+                hits=table_cell(row.get("hit_count")),
+                context=format_number(row.get("context_seconds")),
             )
         lines.append(text)
     return "\n".join(lines)
@@ -409,6 +573,19 @@ def parse_documents(spec: str) -> list[tuple[str, str]]:
         label, path = item.split("=", 1)
         entries.append((label.strip(), os.path.abspath(path.strip())))
     return entries
+
+
+def parse_probe_queries(values: list[str]) -> dict[str, str]:
+    queries: dict[str, str] = {}
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"--probe-query entry must be label=query: {item}")
+        label, query = item.split("=", 1)
+        label = label.strip()
+        if not label:
+            raise ValueError(f"--probe-query entry must name a label: {item}")
+        queries[label] = query
+    return queries
 
 
 def make_row(
@@ -458,6 +635,7 @@ def run_input_group(
     rows: list[dict],
     out_path: str,
     reopen: bool = False,
+    probe_queries: dict[str, str] | None = None,
 ) -> None:
     skip = False
     for entry in inputs:
@@ -479,10 +657,20 @@ def run_input_group(
             dump_rows(out_path, rows)
             continue
 
+        probe_query = (probe_queries or {}).get(entry["label"])
         command = server_command(binary, wrapper, entry["label"])
-        peak, open_seconds, error, timed_out, sections, title = run_one(
-            command, env, entry["source"], run_timeout
-        )
+        (
+            peak,
+            open_seconds,
+            error,
+            timed_out,
+            sections,
+            title,
+            search_seconds,
+            hit_count,
+            context_seconds,
+            probe_error,
+        ) = run_one(command, env, entry["source"], run_timeout, probe_query)
         row = make_row(
             state,
             entry["label"],
@@ -495,11 +683,25 @@ def run_input_group(
             timed_out,
             baseline_peak,
         )
+        if probe_query is not None:
+            row["search_seconds"] = search_seconds
+            row["hit_count"] = hit_count
+            row["context_seconds"] = context_seconds
+            row["probe_error"] = probe_error
         if reopen and row["ok"]:
             # A second server process on the same state directory: the restart-and-reopen case.
-            reopen_peak, reopen_seconds, reopen_error, _, _, _ = run_one(
-                command, env, entry["source"], run_timeout
-            )
+            (
+                reopen_peak,
+                reopen_seconds,
+                reopen_error,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+            ) = run_one(command, env, entry["source"], run_timeout)
             row["reopen_seconds"] = reopen_seconds if reopen_error is None else None
             row["reopen_extra_kib"] = (
                 reopen_peak - baseline_peak if reopen_error is None else None
@@ -528,6 +730,13 @@ def main() -> int:
         action="store_true",
         help="also open each successful input again in a new process on the same state dir",
     )
+    parser.add_argument(
+        "--probe-query",
+        action="append",
+        default=[],
+        metavar="LABEL=QUERY",
+        help="after opening this label, time search_document and get_context (repeatable)",
+    )
     args = parser.parse_args()
 
     sizes = parse_floats(args.sizes_mb)
@@ -535,6 +744,7 @@ def main() -> int:
     states = [value.strip() for value in args.states.split(",") if value.strip()]
     try:
         document_entries = parse_documents(args.documents)
+        probe_queries = parse_probe_queries(args.probe_query)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -579,9 +789,18 @@ def main() -> int:
 
             baseline_label = f"{state}-baseline"
             baseline_command = server_command(binary, args.wrapper, baseline_label)
-            baseline_peak, _, baseline_error, baseline_timed_out, _, _ = run_one(
-                baseline_command, env, None, run_timeout
-            )
+            (
+                baseline_peak,
+                _,
+                baseline_error,
+                baseline_timed_out,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+            ) = run_one(baseline_command, env, None, run_timeout)
             baseline_row = make_row(
                 state,
                 baseline_label,
@@ -604,7 +823,7 @@ def main() -> int:
             ]
             run_input_group(
                 state, env, binary, args.wrapper, run_timeout, size_inputs,
-                baseline_peak, True, rows, args.out, args.reopen,
+                baseline_peak, True, rows, args.out, args.reopen, probe_queries,
             )
 
             if cjk_documents:
@@ -614,7 +833,7 @@ def main() -> int:
                 ]
                 run_input_group(
                     state, env, binary, args.wrapper, run_timeout, cjk_inputs,
-                    baseline_peak, True, rows, args.out, args.reopen,
+                    baseline_peak, True, rows, args.out, args.reopen, probe_queries,
                 )
 
             if markdown_path is not None:
@@ -627,7 +846,7 @@ def main() -> int:
                 ]
                 run_input_group(
                     state, env, binary, args.wrapper, run_timeout, markdown_inputs,
-                    baseline_peak, False, rows, args.out, args.reopen,
+                    baseline_peak, False, rows, args.out, args.reopen, probe_queries,
                 )
 
             if document_entries:
@@ -641,10 +860,10 @@ def main() -> int:
                 ]
                 run_input_group(
                     state, env, binary, args.wrapper, run_timeout, document_inputs,
-                    baseline_peak, False, rows, args.out, args.reopen,
+                    baseline_peak, False, rows, args.out, args.reopen, probe_queries,
                 )
 
-    table = markdown_table(rows, args.reopen)
+    table = markdown_table(rows, args.reopen, bool(probe_queries))
     print(table, flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

@@ -147,6 +147,20 @@ def result_structured(result: dict):
     return structured if isinstance(structured, (dict, list)) else None
 
 
+def tool_payload(result: dict):
+    """Return the tool's JSON payload, from structuredContent or content[0].text."""
+    structured = result_structured(result)
+    if structured is not None:
+        return structured
+    text = result_text(result)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
 def compact_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -374,7 +388,7 @@ def make_call_record(
     **extra,
 ) -> dict:
     measurement = measure_result(result)
-    items = item_stats(result, measurement)
+    items = item_stats(tool_payload(result), measurement)
     record = {
         "pass": pass_name,
         "section_id": section_id,
@@ -502,10 +516,13 @@ def read_structure(server: Server, document_id: str, deadline: float) -> tuple[l
             "get_document_structure", arguments, deadline_timeout(deadline)
         )
         calls += 1
-        for node in flatten_structure(result):
+        payload = tool_payload(result)
+        if not isinstance(payload, dict):
+            raise ProbeError("get_document_structure returned no JSON object")
+        for node in flatten_structure(payload):
             sections.setdefault(node["section_id"], node)
-        cursor = result.get("next_cursor")
-        if not cursor or result.get("complete") is True:
+        cursor = payload.get("next_cursor")
+        if not cursor or payload.get("complete") is True:
             break
         if calls > 10000:
             raise ProbeError("structure pagination did not terminate")
@@ -550,7 +567,7 @@ def run_page_pass(
                 )
                 records.append(record)
                 section_items += record["items"]
-                cursor = result.get("next_cursor")
+                cursor = (tool_payload(result) or {}).get("next_cursor")
                 if not cursor:
                     break
                 if cursor in seen_cursors:
@@ -625,7 +642,7 @@ def run_item_pass(
                 )
                 records.append(record)
                 total_items += record["items"]
-                cursor = result.get("next_cursor")
+                cursor = (tool_payload(result) or {}).get("next_cursor")
                 if not cursor:
                     if total_items < item_cap and index + 1 < len(sections):
                         switches += 1
@@ -797,7 +814,7 @@ def representative_calls(
         search_result = None
 
     if search_result is not None:
-        hits = search_result.get("hits")
+        hits = (tool_payload(search_result) or {}).get("hits")
         if isinstance(hits, list) and hits:
             first = hits[0] if isinstance(hits[0], dict) else {}
             locator = first.get("text_locator")
@@ -1046,14 +1063,7 @@ def probe_book(
             {"source": os.path.abspath(path)},
             max(30.0, max_seconds),
         )
-        open_measurement = measure_result(open_result)
-        if open_measurement["text"] is not None:
-            try:
-                opened = json.loads(open_measurement["text"])
-            except json.JSONDecodeError:
-                opened = result_structured(open_result)
-        else:
-            opened = result_structured(open_result)
+        opened = tool_payload(open_result)
         if not isinstance(opened, dict):
             raise ProbeError("open_document did not return an object")
         document_id = opened.get("document_id")

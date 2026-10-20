@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut http_config = StreamableHttpServerConfig::default()
         .with_json_response(true)
-        .with_stateful_mode(true)
+        .with_legacy_session_mode(true)
         .with_allowed_origins(default_loopback_origins(address.port()));
 
     if let Ok(value) = env::var("READING_MCP_HTTP_ALLOWED_HOSTS") {

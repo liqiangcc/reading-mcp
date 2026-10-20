@@ -6,8 +6,8 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary, text_string};
 use reading_mcp::application::ports::{Parser, RetrievedResource};
 use reading_mcp::domain::{
-    Document, DocumentSource, MediaType, NormalizedTextRangeError, Section, SectionId,
-    SentenceTextUnit, TextUnit,
+    Document, DocumentSource, MediaType, NormalizedTextRangeError, Section, SentenceTextUnit,
+    TextUnit,
 };
 use reading_mcp::parsing::{ArchiveLimits, ParserRouter};
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -73,8 +73,8 @@ fn check_document(document: &Document) -> Report {
     for root in &document.root_sections {
         collect(root, &mut sections);
     }
-    let sections_by_id: BTreeMap<&SectionId, &Section> =
-        sections.iter().map(|s| (&s.id, *s)).collect();
+    let sections_by_id: BTreeMap<&str, &Section> =
+        sections.iter().map(|s| (s.id.0.as_str(), *s)).collect();
 
     let (paragraphs, sentences) = match document.try_text_unit_sets() {
         Ok(sets) => sets,
@@ -136,7 +136,7 @@ fn check_document(document: &Document) -> Report {
             paragraph_index,
             ..
         } = paragraph;
-        if let Some(section) = sections_by_id.get(owner_section_id) {
+        if let Some(section) = sections_by_id.get(owner_section_id.0.as_str()) {
             let slice = section.normalized_text_slice(*normalized_range);
             record(&mut report, section, *paragraph_index, None, slice, text);
         }
@@ -151,7 +151,7 @@ fn check_document(document: &Document) -> Report {
             sentence_index,
             ..
         } = sentence;
-        if let Some(section) = sections_by_id.get(owner_section_id) {
+        if let Some(section) = sections_by_id.get(owner_section_id.0.as_str()) {
             let slice = section.normalized_text_slice(*normalized_range);
             record(
                 &mut report,

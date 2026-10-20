@@ -850,12 +850,25 @@ fn unit_score(
     kind: SearchHitKind,
 ) -> Option<f32> {
     match mode {
-        MatchMode::Strict => query
-            .strict_match(text, lowered)
-            .then(|| score_lowered(lowered, &query.raw_lowered, kind, query.token_count())),
+        MatchMode::Strict => {
+            if query.strict_match(text, lowered) {
+                Some(score_lowered(
+                    lowered,
+                    &query.raw_lowered,
+                    kind,
+                    query.token_count(),
+                ))
+            } else {
+                None
+            }
+        }
         MatchMode::Relaxed => {
             let matched = query.relaxed_count(text, lowered);
-            (matched > 0).then(|| score_lowered(lowered, &query.raw_lowered, kind, matched))
+            if matched > 0 {
+                Some(score_lowered(lowered, &query.raw_lowered, kind, matched))
+            } else {
+                None
+            }
         }
     }
 }

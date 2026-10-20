@@ -153,24 +153,30 @@ fn collect_section_hits(
 ) {
     let lowered = lowercase_fast(&section.title);
     let score = match mode {
-        MatchMode::Strict => query.strict_match(&section.title, &lowered).then(|| {
-            score_lowered(
-                &lowered,
-                &query.raw_lowered,
-                SearchHitKind::Section,
-                query.token_count(),
-            )
-        }),
+        MatchMode::Strict => {
+            if query.strict_match(&section.title, &lowered) {
+                Some(score_lowered(
+                    &lowered,
+                    &query.raw_lowered,
+                    SearchHitKind::Section,
+                    query.token_count(),
+                ))
+            } else {
+                None
+            }
+        }
         MatchMode::Relaxed => {
             let matched = query.relaxed_count(&section.title, &lowered);
-            (matched > 0).then(|| {
-                score_lowered(
+            if matched > 0 {
+                Some(score_lowered(
                     &lowered,
                     &query.raw_lowered,
                     SearchHitKind::Section,
                     matched,
-                )
-            })
+                ))
+            } else {
+                None
+            }
         }
     };
     if let Some(score) = score {

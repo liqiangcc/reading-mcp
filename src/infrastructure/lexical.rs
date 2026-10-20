@@ -21,7 +21,6 @@ pub(crate) struct LexicalCandidate {
     pub(crate) text_locator: TextLocator,
     pub(crate) searchable_text: String,
     pub(crate) tokens: Vec<String>,
-    pub(crate) source_order: usize,
 }
 
 pub(crate) fn build_lexical_candidates(
@@ -66,7 +65,6 @@ pub(crate) fn for_each_lexical_candidate(
             .push(sentence);
     }
 
-    let mut source_order = 0usize;
     let normalized_document_hash = document.normalized_document_hash();
 
     for section in &document.root_sections {
@@ -77,7 +75,6 @@ pub(crate) fn for_each_lexical_candidate(
             &paragraphs_by_section,
             &sentences_by_section,
             sink,
-            &mut source_order,
         )?;
     }
 
@@ -106,7 +103,6 @@ fn collect_section_candidates(
     paragraphs: &HashMap<&SectionId, Vec<&TextUnit>>,
     sentences: &HashMap<&SectionId, Vec<&SentenceTextUnit>>,
     sink: &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
-    source_order: &mut usize,
 ) -> Result<(), ApplicationError> {
     push_candidate(
         document,
@@ -116,7 +112,6 @@ fn collect_section_candidates(
         section.location.clone(),
         TextLocator::for_section_with_hash(document, section, normalized_document_hash),
         sink,
-        source_order,
     )?;
 
     for paragraph in paragraphs.get(&section.id).into_iter().flatten().copied() {
@@ -128,7 +123,6 @@ fn collect_section_candidates(
             text_unit_location(section, paragraph.paragraph_index, None),
             TextLocator::for_paragraph(document, section, paragraph),
             sink,
-            source_order,
         )?;
     }
 
@@ -145,7 +139,6 @@ fn collect_section_candidates(
             ),
             TextLocator::for_sentence(document, section, sentence),
             sink,
-            source_order,
         )?;
     }
 
@@ -157,7 +150,6 @@ fn collect_section_candidates(
             paragraphs,
             sentences,
             sink,
-            source_order,
         )?;
     }
 
@@ -193,7 +185,6 @@ fn push_candidate(
     location: Location,
     text_locator: TextLocator,
     sink: &mut dyn FnMut(LexicalCandidate) -> Result<(), ApplicationError>,
-    source_order: &mut usize,
 ) -> Result<(), ApplicationError> {
     let tokens = tokenize(&searchable_text);
     if tokens.is_empty() {
@@ -208,9 +199,7 @@ fn push_candidate(
         text_locator,
         searchable_text,
         tokens,
-        source_order: *source_order,
     })?;
-    *source_order += 1;
     Ok(())
 }
 
@@ -371,7 +360,7 @@ impl LexicalQuery {
             })
             .collect::<Vec<_>>();
         // Longer tokens are rarer, so a failing prefilter is found sooner.
-        prefilter.sort_by(|left, right| right.chars().count().cmp(&left.chars().count()));
+        prefilter.sort_by_key(|token| std::cmp::Reverse(token.chars().count()));
         Some(Self {
             raw_lowered: query.to_lowercase(),
             tokens,
@@ -598,8 +587,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        LexicalQuery, MAX_SNIPPET_CHARS, is_caseless, is_cjk, lowercase_fast, match_snippet,
-        tokenize,
+        LexicalQuery, MAX_SNIPPET_CHARS, is_caseless, lowercase_fast, match_snippet, tokenize,
     };
 
     #[test]

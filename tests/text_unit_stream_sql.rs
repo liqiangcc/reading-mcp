@@ -496,8 +496,11 @@ fn resource(source: &str, media_type: &str, body: &str) -> RetrievedResource {
 }
 
 fn large_document(sentence_count: usize) -> Document {
-    let content = (1..=sentence_count)
-        .map(|index| format!("Sentence {index}."))
+    // Alpha-only sentences keep the fallback paragraph classifier from mistaking a run of consecutive
+    // four-digit numbers for bibliographic metadata, which would make the paragraph coarse.
+    let words = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let content = (0..sentence_count)
+        .map(|index| format!("{} prose.", words[index % words.len()]))
         .collect::<Vec<_>>()
         .join(" ");
     document_with_content("doc:large-stream", &content)

@@ -130,12 +130,11 @@ impl SourceViewUseCase {
             )));
         }
 
-        let document = self
+        let (document, normalized_document_hash) = self
             .repository
-            .get(&command.document_id)
+            .get_with_hash(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
-        let normalized_document_hash = document.normalized_document_hash();
         let units: Arc<dyn TextUnitIndex> = match &self.text_unit_index {
             Some(index) => Arc::clone(index),
             None => Arc::new(DerivedTextUnits::new(Arc::clone(&document))),

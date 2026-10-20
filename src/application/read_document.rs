@@ -94,11 +94,10 @@ impl ReadDocumentUseCase {
         &self,
         command: ReadSectionCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
-        let document = self.load_document(&command.document_id).await?;
+        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
         let section = document
             .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
-        let normalized_hash = document.normalized_document_hash();
 
         read_section_segment(&document, section, normalized_hash, 0, command.max_chars)
     }
@@ -112,8 +111,7 @@ impl ReadDocumentUseCase {
         validate_cursor_target(&claims, &command.document_id, &command.section_id)?;
         validate_section_tree_cursor_contract(&claims)?;
 
-        let document = self.load_document(&command.document_id).await?;
-        let normalized_hash = document.normalized_document_hash();
+        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
         validate_cursor_document_identity(&claims, &document, &normalized_hash)?;
 
         let section = document
@@ -137,8 +135,7 @@ impl ReadDocumentUseCase {
         &self,
         command: ReadExactTargetCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
-        let document = self.load_document(&command.document_id).await?;
-        let normalized_hash = document.normalized_document_hash();
+        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
         let units = self.text_units(&document);
         let target = resolve_text_locator(
             &document,
@@ -163,8 +160,7 @@ impl ReadDocumentUseCase {
         )?;
         validate_exact_cursor_contract(&claims)?;
 
-        let document = self.load_document(&command.document_id).await?;
-        let normalized_hash = document.normalized_document_hash();
+        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
         validate_cursor_document_identity(&claims, &document, &normalized_hash)?;
         let units = self.text_units(&document);
         let target = resolve_text_locator(
@@ -187,9 +183,12 @@ impl ReadDocumentUseCase {
         )
     }
 
-    async fn load_document(&self, id: &DocumentId) -> Result<Arc<Document>, ApplicationError> {
+    async fn load_document(
+        &self,
+        id: &DocumentId,
+    ) -> Result<(Arc<Document>, NormalizedDocumentHash), ApplicationError> {
         self.repository
-            .get(id)
+            .get_with_hash(id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)
     }

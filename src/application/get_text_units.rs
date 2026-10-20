@@ -211,15 +211,14 @@ impl GetTextUnitsUseCase {
             validate_cursor_scope(claims, &command)?;
         }
 
-        let document = self
+        let (document, normalized_hash) = self
             .repository
-            .get(&command.document_id)
+            .get_with_hash(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let section = document
             .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
-        let normalized_hash = document.normalized_document_hash();
 
         if let Some(claims) = &cursor_claims {
             if claims.content_hash != document.content_hash.0 {

@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use reading_mcp::application::ports::{ApplicationError, DocumentRepository};
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
     Section, SectionId,
 };
 use reading_mcp::infrastructure::SqliteDocumentRepository;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -92,6 +94,110 @@ async fn legacy_row_without_normalization_version_fails_closed() {
     let message = error.to_string();
     assert!(message.contains(NORMALIZATION_VERSION));
     assert!(message.contains("explicit source reopen required"));
+}
+
+#[tokio::test]
+async fn get_with_hash_returns_the_computed_hash_on_cache_miss_and_hit() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let document = fixture_document();
+    let expected = document.normalized_document_hash();
+
+    let repository = SqliteDocumentRepository::open(&database).expect("repository should open");
+    repository
+        .save(document.clone())
+        .await
+        .expect("document should save");
+    let (loaded, loaded_hash) = repository
+        .get_with_hash(&document.id)
+        .await
+        .expect("cache miss should load")
+        .expect("document should exist");
+    assert_eq!(loaded_hash, expected);
+    assert_eq!(*loaded, document);
+    drop(repository);
+
+    let reopened = SqliteDocumentRepository::open(&database).expect("repository should reopen");
+    let (loaded, loaded_hash) = reopened
+        .get_with_hash(&document.id)
+        .await
+        .expect("fresh repository should load")
+        .expect("document should exist");
+    assert_eq!(loaded_hash, expected);
+    assert_eq!(*loaded, document);
+
+    let (cached, cached_hash) = reopened
+        .get_with_hash(&document.id)
+        .await
+        .expect("cache hit should load")
+        .expect("document should exist");
+    assert_eq!(cached_hash, expected);
+    assert!(Arc::ptr_eq(&loaded, &cached));
+}
+
+#[tokio::test]
+async fn legacy_row_without_hash_is_backfilled_on_get_with_hash() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let seed_database = directory.path().join("seed.sqlite");
+    let database = directory.path().join("legacy.sqlite");
+    let document = fixture_document();
+
+    let seed = SqliteDocumentRepository::open(&seed_database).expect("seed should open");
+    seed.save(document.clone()).await.expect("seed should save");
+    drop(seed);
+    let seed_connection = Connection::open(&seed_database).expect("seed should open directly");
+    let stored_json: String = seed_connection
+        .query_row(
+            "SELECT document_json FROM documents WHERE id = ?1",
+            [&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("seed document should exist");
+    drop(seed_connection);
+
+    let legacy = Connection::open(&database).expect("legacy database should open");
+    legacy
+        .execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                document_json TEXT NOT NULL
+             );",
+        )
+        .expect("legacy schema should be created");
+    legacy
+        .execute(
+            "INSERT INTO documents(id, source, content_hash, document_json) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                &document.id.0,
+                &document.source.0,
+                &document.content_hash.0,
+                &stored_json
+            ],
+        )
+        .expect("legacy row should be written");
+    drop(legacy);
+
+    let repository = SqliteDocumentRepository::open(&database).expect("legacy should open");
+    let expected = document.normalized_document_hash();
+    let (restored, hash) = repository
+        .get_with_hash(&document.id)
+        .await
+        .expect("legacy row should load")
+        .expect("legacy row should exist");
+    assert_eq!(hash, expected);
+    assert_eq!(*restored, document);
+
+    let connection = Connection::open(&database).expect("legacy database should reopen");
+    let backfilled: Option<String> = connection
+        .query_row(
+            "SELECT normalized_document_hash FROM documents WHERE id = ?1",
+            [&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("backfilled hash should be readable");
+    assert_eq!(backfilled, Some(expected.0));
 }
 
 fn fixture_document() -> Document {

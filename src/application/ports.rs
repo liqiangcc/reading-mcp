@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSource, Location, MediaType, ParagraphContentClass,
-    ParagraphSectionCoverage, ParagraphTextUnitSet, SectionId, SentenceParagraphCoverage,
-    SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
+    Document, DocumentId, DocumentSource, Location, MediaType, NormalizedDocumentHash,
+    ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet, SectionId,
+    SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
+    TextLocator, TextUnit,
 };
 
 use super::get_text_units::{
@@ -272,6 +273,18 @@ pub trait DocumentRepository: Send + Sync {
     }
 
     async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError>;
+
+    /// The document and its normalized document hash. The default computes the hash (O(document));
+    /// stores override it to return a hash saved when the document was stored.
+    async fn get_with_hash(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        Ok(self.get(id).await?.map(|document| {
+            let hash = document.normalized_document_hash();
+            (document, hash)
+        }))
+    }
 }
 
 /// The persisted paragraph and sentence units of one section, in source order, with their coverage records.

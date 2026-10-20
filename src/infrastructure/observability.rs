@@ -12,8 +12,8 @@ use crate::application::ports::{
     TextUnitStreamSummary,
 };
 use crate::domain::{
-    Document, DocumentId, DocumentSource, ParagraphTextUnitSet, SectionId, SentenceTextUnitSet,
-    TextUnit,
+    Document, DocumentId, DocumentSource, NormalizedDocumentHash, ParagraphTextUnitSet, SectionId,
+    SentenceTextUnitSet, TextUnit,
 };
 
 fn emit(value: serde_json::Value) {
@@ -313,6 +313,21 @@ impl DocumentRepository for ObservedDocumentRepository {
     async fn get(&self, id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
         let started = Instant::now();
         let result = self.inner.get(id).await;
+        emit(json!({
+            "event": "repository_get",
+            "duration_ms": started.elapsed().as_millis(),
+            "hit": result.as_ref().is_ok_and(|value| value.is_some()),
+            "success": result.is_ok()
+        }));
+        result
+    }
+
+    async fn get_with_hash(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.get_with_hash(id).await;
         emit(json!({
             "event": "repository_get",
             "duration_ms": started.elapsed().as_millis(),

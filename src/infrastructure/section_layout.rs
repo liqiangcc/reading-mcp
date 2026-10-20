@@ -312,7 +312,7 @@ fn decode_u8(input: &mut &[u8], field: &str) -> Result<u8, ApplicationError> {
     })
 }
 
-fn take_byte<'a>(input: &mut &'a [u8], field: &str) -> Result<u8, ApplicationError> {
+fn take_byte(input: &mut &[u8], field: &str) -> Result<u8, ApplicationError> {
     let Some((&byte, rest)) = input.split_first() else {
         return Err(ApplicationError::TextUnitIndexFailed(format!(
             "section layout is missing its {field}"

@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1433,15 +1432,14 @@ fn load_section_text(
         })
         .map_err(text_unit_index_error)?;
     let mut text = String::new();
-    let mut expected_chunk = 0i64;
-    for row in rows {
+    for (expected_chunk, row) in rows.enumerate() {
         let (chunk_no, chunk) = row.map_err(text_unit_index_error)?;
+        let chunk_no = i64_to_usize(chunk_no, "chunk_no")?;
         if chunk_no != expected_chunk {
             return Err(ApplicationError::TextUnitIndexFailed(format!(
                 "section {section_key} is missing text chunk {expected_chunk}"
             )));
         }
-        expected_chunk += 1;
         text.push_str(&chunk);
     }
     if text.chars().count() != char_len {
@@ -1487,16 +1485,15 @@ fn load_text_slice(
         .map_err(text_unit_index_error)?;
 
     let mut text = String::new();
-    let mut expected_chunk = first_chunk;
-    for row in rows {
+    for (offset, row) in rows.enumerate() {
         let (chunk_no, chunk) = row.map_err(text_unit_index_error)?;
         let chunk_no = i64_to_usize(chunk_no, "chunk_no")?;
+        let expected_chunk = first_chunk + offset;
         if chunk_no != expected_chunk {
             return Err(ApplicationError::TextUnitIndexFailed(format!(
                 "section {section_key} is missing text chunk {expected_chunk}"
             )));
         }
-        expected_chunk += 1;
         let chunk_base = chunk_no.checked_mul(CHUNK_CHARS).ok_or_else(|| {
             ApplicationError::TextUnitIndexFailed("text chunk offset overflow".into())
         })?;

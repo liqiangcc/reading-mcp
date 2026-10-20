@@ -1205,11 +1205,36 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     }
                 };
 
+                let range = stream[start..end]
+                    .iter()
+                    .try_fold(None, |range, (_, item)| {
+                        let (unit_start, unit_end) = unit_char_range(&entry.layout, item.unit)?;
+                        Ok::<_, ApplicationError>(Some(match range {
+                            None => (unit_start, unit_end),
+                            Some((range_start, range_end)) => {
+                                (range_start.min(unit_start), range_end.max(unit_end))
+                            }
+                        }))
+                    })?;
+                let (range_start, range_text) = match range {
+                    Some((range_start, range_end)) => (
+                        range_start,
+                        load_text_slice(
+                            connection,
+                            meta.doc_key,
+                            entry.section_key,
+                            range_start,
+                            range_end,
+                        )?,
+                    ),
+                    None => (0, String::new()),
+                };
+                let text_index = NormalizedTextIndex::new(&range_text);
                 let mut items = Vec::with_capacity(end - start);
                 for (stream_position, item) in &stream[start..end] {
                     items.push(StoredStreamItem {
                         position: *stream_position,
-                        unit: build_owned_unit(connection, &meta, &entry, item.unit)?,
+                        unit: build_owned_unit(&meta, &entry, item.unit, &text_index, range_start)?,
                         content_class: item.content_class,
                         degradation: item.degradation.map(str::to_owned),
                         char_count: item.char_count,
@@ -1828,26 +1853,67 @@ fn build_section_layout(group: &SectionGroups<'_>) -> Result<SectionLayout, Appl
     })
 }
 
-fn build_owned_unit(
-    connection: &Connection,
-    meta: &StoredUnitDocument,
-    entry: &CachedSectionLayout,
+fn unit_char_range(
+    layout: &SectionLayout,
     unit: UnitRef,
-) -> Result<OwnedStreamUnit, ApplicationError> {
+) -> Result<(usize, usize), ApplicationError> {
     match unit {
-        UnitRef::Paragraph(index) => {
-            let paragraph = entry.layout.paragraphs.get(index).ok_or_else(|| {
+        UnitRef::Paragraph(index) => layout
+            .paragraphs
+            .get(index)
+            .map(|paragraph| (paragraph.start, paragraph.end))
+            .ok_or_else(|| {
                 ApplicationError::TextUnitIndexFailed(format!(
                     "stream references missing paragraph descriptor {index}"
                 ))
+            }),
+        UnitRef::Sentence(index) => layout
+            .sentences
+            .get(index)
+            .map(|sentence| (sentence.start, sentence.end))
+            .ok_or_else(|| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "stream references missing sentence descriptor {index}"
+                ))
+            }),
+    }
+}
+
+fn slice_loaded_text(
+    index: &NormalizedTextIndex<'_>,
+    base: usize,
+    start: usize,
+    end: usize,
+    what: &str,
+) -> Result<String, ApplicationError> {
+    let local_start = start.checked_sub(base).ok_or_else(|| {
+        ApplicationError::TextUnitIndexFailed(format!(
+            "persisted {what} range starts before the loaded section text"
+        ))
+    })?;
+    let local_end = end.checked_sub(base).ok_or_else(|| {
+        ApplicationError::TextUnitIndexFailed(format!(
+            "persisted {what} range ends before the loaded section text"
+        ))
+    })?;
+    slice_section_text(index, local_start, local_end, what)
+}
+
+fn build_owned_unit(
+    meta: &StoredUnitDocument,
+    entry: &CachedSectionLayout,
+    unit: UnitRef,
+    index: &NormalizedTextIndex<'_>,
+    base: usize,
+) -> Result<OwnedStreamUnit, ApplicationError> {
+    match unit {
+        UnitRef::Paragraph(unit_index) => {
+            let paragraph = entry.layout.paragraphs.get(unit_index).ok_or_else(|| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "stream references missing paragraph descriptor {unit_index}"
+                ))
             })?;
-            let text = load_text_slice(
-                connection,
-                meta.doc_key,
-                entry.section_key,
-                paragraph.start,
-                paragraph.end,
-            )?;
+            let text = slice_loaded_text(index, base, paragraph.start, paragraph.end, "paragraph")?;
             Ok(OwnedStreamUnit::Paragraph(rebuild_paragraph_unit(
                 meta,
                 &entry.section_id,
@@ -1858,19 +1924,13 @@ fn build_owned_unit(
                 text,
             )?))
         }
-        UnitRef::Sentence(index) => {
-            let sentence = entry.layout.sentences.get(index).ok_or_else(|| {
+        UnitRef::Sentence(unit_index) => {
+            let sentence = entry.layout.sentences.get(unit_index).ok_or_else(|| {
                 ApplicationError::TextUnitIndexFailed(format!(
-                    "stream references missing sentence descriptor {index}"
+                    "stream references missing sentence descriptor {unit_index}"
                 ))
             })?;
-            let text = load_text_slice(
-                connection,
-                meta.doc_key,
-                entry.section_key,
-                sentence.start,
-                sentence.end,
-            )?;
+            let text = slice_loaded_text(index, base, sentence.start, sentence.end, "sentence")?;
             Ok(OwnedStreamUnit::Sentence(rebuild_sentence_unit(
                 meta,
                 &entry.section_id,

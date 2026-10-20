@@ -1205,8 +1205,9 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if not os.path.isfile(args.binary):
-        print(f"error: binary not found: {args.binary}", file=sys.stderr)
+    binary = os.path.abspath(args.binary)
+    if not os.path.isfile(binary):
+        print(f"error: binary not found: {binary}", file=sys.stderr)
         return 2
 
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
@@ -1218,7 +1219,7 @@ def main() -> int:
     os.makedirs(state_root, exist_ok=True)
 
     data: dict = {
-        "binary": os.path.abspath(args.binary),
+        "binary": binary,
         "documents": documents,
         "max_seconds_per_book": args.max_seconds_per_book,
         "state_dir": state_root,
@@ -1231,7 +1232,7 @@ def main() -> int:
     tools_server: Server | None = None
     try:
         tools_server = Server(
-            args.binary,
+            binary,
             server_environment(state_root, tools_state),
             os.path.join(tools_state, "server.log"),
             request_timeout=max(30.0, args.max_seconds_per_book),
@@ -1258,7 +1259,7 @@ def main() -> int:
     for label, path in documents:
         print(f"probing {label}: {path}", file=sys.stderr)
         book = probe_book(
-            args.binary, label, path, state_root, args.max_seconds_per_book
+            binary, label, path, state_root, args.max_seconds_per_book
         )
         data["books"].append(book)
         book["passes"] = [

@@ -53,3 +53,6 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[patch.crates-io]
+rmcp = { path = "vendor/rmcp-2.2.0" }

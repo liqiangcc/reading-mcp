@@ -1205,9 +1205,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     }
                 };
 
-                let range = stream[start..end]
-                    .iter()
-                    .try_fold(None, |range, (_, item)| {
+                let range = stream[start..end].iter().try_fold(
+                    None::<(usize, usize)>,
+                    |range, (_, item)| {
                         let (unit_start, unit_end) = unit_char_range(&entry.layout, item.unit)?;
                         Ok::<_, ApplicationError>(Some(match range {
                             None => (unit_start, unit_end),
@@ -1215,7 +1215,8 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                                 (range_start.min(unit_start), range_end.max(unit_end))
                             }
                         }))
-                    })?;
+                    },
+                )?;
                 let (range_start, range_text) = match range {
                     Some((range_start, range_end)) => (
                         range_start,

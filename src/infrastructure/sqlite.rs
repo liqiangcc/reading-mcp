@@ -16,7 +16,7 @@ use crate::application::get_text_units::{
 use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
     ApplicationError, DocumentRepository, OpenResultStore, OwnedStreamUnit, SectionTextUnits,
-    StoredStreamItem, TextUnitIndex, TextUnitStreamSummary,
+    StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use crate::application::text_unit_stream::plan_section_stream;
 use crate::domain::{
@@ -1075,13 +1075,12 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
     async fn section_stream_summary(
         &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-        kind: RequestedTextUnitKind,
-        policy: TextUnitCoveragePolicy,
+        key: TextUnitStreamKey<'_>,
     ) -> Result<Option<TextUnitStreamSummary>, ApplicationError> {
-        let document_id = document_id.clone();
-        let section_id = section_id.clone();
+        let document_id = key.document_id.clone();
+        let section_id = key.section_id.clone();
+        let kind = key.kind;
+        let policy = key.policy;
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -1159,16 +1158,15 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
     async fn section_stream_items(
         &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-        kind: RequestedTextUnitKind,
-        policy: TextUnitCoveragePolicy,
+        key: TextUnitStreamKey<'_>,
         direction: TextUnitDirection,
         position: usize,
         limit: usize,
     ) -> Result<Vec<StoredStreamItem>, ApplicationError> {
-        let document_id = document_id.clone();
-        let section_id = section_id.clone();
+        let document_id = key.document_id.clone();
+        let section_id = key.section_id.clone();
+        let kind = key.kind;
+        let policy = key.policy;
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -1242,16 +1240,15 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
     async fn section_stream_position(
         &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-        kind: RequestedTextUnitKind,
-        policy: TextUnitCoveragePolicy,
+        key: TextUnitStreamKey<'_>,
         unit_kind: EffectiveTextUnitKind,
         paragraph_index: usize,
         sentence_index: Option<usize>,
     ) -> Result<Option<usize>, ApplicationError> {
-        let document_id = document_id.clone();
-        let section_id = section_id.clone();
+        let document_id = key.document_id.clone();
+        let section_id = key.section_id.clone();
+        let kind = key.kind;
+        let policy = key.policy;
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,

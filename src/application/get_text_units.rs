@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex,
+    TextUnitStreamKey,
 };
 use crate::application::text_unit_cursor::{
     TextUnitCursorClaims, decode_text_unit_cursor, encode_text_unit_cursor,
@@ -237,12 +238,12 @@ impl GetTextUnitsUseCase {
 
         let summary = self
             .text_unit_index
-            .section_stream_summary(
-                &document.id,
-                &section.id,
-                command.requested_kind,
-                command.coverage_policy,
-            )
+            .section_stream_summary(TextUnitStreamKey {
+                document_id: &document.id,
+                section_id: &section.id,
+                kind: command.requested_kind,
+                policy: command.coverage_policy,
+            })
             .await?
             .ok_or_else(|| stale_text_units(&document))?;
         let total_items = summary.total_items;
@@ -361,10 +362,12 @@ impl GetTextUnitsUseCase {
         let rows = self
             .text_unit_index
             .section_stream_items(
-                &document.id,
-                &section.id,
-                command.requested_kind,
-                command.coverage_policy,
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: command.requested_kind,
+                    policy: command.coverage_policy,
+                },
                 TextUnitDirection::Forward,
                 index,
                 1,
@@ -373,10 +376,9 @@ impl GetTextUnitsUseCase {
         Ok(rows
             .into_iter()
             .next()
-            .map(|row| reading_item(document, section, &row).locator))
+            .map(|row| reading_item(document, section, row).locator))
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn resolve_anchor_index(
         &self,
         document: &Document,
@@ -423,10 +425,12 @@ impl GetTextUnitsUseCase {
         let position = self
             .text_unit_index
             .section_stream_position(
-                &document.id,
-                &section.id,
-                requested_kind,
-                coverage_policy,
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: requested_kind,
+                    policy: coverage_policy,
+                },
                 unit_kind,
                 paragraph_index,
                 resolved.locator.sentence_index,
@@ -436,10 +440,12 @@ impl GetTextUnitsUseCase {
         let rows = self
             .text_unit_index
             .section_stream_items(
-                &document.id,
-                &section.id,
-                requested_kind,
-                coverage_policy,
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: requested_kind,
+                    policy: coverage_policy,
+                },
                 TextUnitDirection::Forward,
                 position,
                 1,
@@ -449,7 +455,7 @@ impl GetTextUnitsUseCase {
             .into_iter()
             .next()
             .ok_or_else(|| not_in_stream(resolved.kind, requested_kind, coverage_policy))?;
-        let locator = reading_item(document, section, &row).locator;
+        let locator = reading_item(document, section, row).locator;
         if locator != resolved.locator {
             return Err(not_in_stream(
                 resolved.kind,
@@ -482,27 +488,27 @@ impl GetTextUnitsUseCase {
         let rows = self
             .text_unit_index
             .section_stream_items(
-                &document.id,
-                &section.id,
-                command.requested_kind,
-                command.coverage_policy,
+                TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind: command.requested_kind,
+                    policy: command.coverage_policy,
+                },
                 command.direction,
                 position,
                 command.max_items,
             )
             .await?;
-        let rows = rows
-            .into_iter()
-            .map(|row| {
-                let item = reading_item(document, section, &row);
-                (row.char_count, item)
-            })
-            .collect::<Vec<_>>();
+        let char_counts = rows.iter().map(|row| row.char_count).collect::<Vec<_>>();
 
         match command.direction {
             TextUnitDirection::Forward => {
-                let kept = forward_page_len(&rows, max_chars)?;
-                let items = rows[..kept].iter().map(|(_, item)| item.clone()).collect();
+                let kept = forward_page_len(&char_counts, max_chars)?;
+                let items = rows
+                    .into_iter()
+                    .take(kept)
+                    .map(|row| reading_item(document, section, row))
+                    .collect();
                 let end_index = position + kept;
                 Ok(Page {
                     items,
@@ -513,9 +519,13 @@ impl GetTextUnitsUseCase {
                 })
             }
             TextUnitDirection::Backward => {
-                let kept = backward_page_len(&rows, max_chars)?;
-                let start = rows.len() - kept;
-                let items = rows[start..].iter().map(|(_, item)| item.clone()).collect();
+                let kept = backward_page_len(&char_counts, max_chars)?;
+                let start = char_counts.len() - kept;
+                let items = rows
+                    .into_iter()
+                    .skip(start)
+                    .map(|row| reading_item(document, section, row))
+                    .collect();
                 let start_index = position - kept;
                 Ok(Page {
                     items,
@@ -537,44 +547,38 @@ fn stale_text_units(document: &Document) -> ApplicationError {
 }
 
 /// How many fetched rows the forward char budget keeps, from the start.
-fn forward_page_len(
-    rows: &[(usize, TextUnitReadingItem)],
-    max_chars: usize,
-) -> Result<usize, ApplicationError> {
+fn forward_page_len(char_counts: &[usize], max_chars: usize) -> Result<usize, ApplicationError> {
     let mut chars = 0usize;
     let mut kept = 0usize;
-    for (index, (item_chars, _)) in rows.iter().enumerate() {
+    for (index, item_chars) in char_counts.iter().enumerate() {
         if index == 0 && *item_chars > max_chars {
             return Err(ApplicationError::ResourceLimitExceeded(format!(
                 "next text unit contains {item_chars} characters, exceeding max_chars {max_chars}"
             )));
         }
-        if chars + item_chars > max_chars {
+        if chars + *item_chars > max_chars {
             break;
         }
-        chars += item_chars;
+        chars += *item_chars;
         kept += 1;
     }
     Ok(kept)
 }
 
 /// How many fetched rows the backward char budget keeps, counting from the end.
-fn backward_page_len(
-    rows: &[(usize, TextUnitReadingItem)],
-    max_chars: usize,
-) -> Result<usize, ApplicationError> {
+fn backward_page_len(char_counts: &[usize], max_chars: usize) -> Result<usize, ApplicationError> {
     let mut chars = 0usize;
     let mut kept = 0usize;
-    for (index, (item_chars, _)) in rows.iter().rev().enumerate() {
+    for (index, item_chars) in char_counts.iter().rev().enumerate() {
         if index == 0 && *item_chars > max_chars {
             return Err(ApplicationError::ResourceLimitExceeded(format!(
                 "next text unit contains {item_chars} characters, exceeding max_chars {max_chars}"
             )));
         }
-        if chars + item_chars > max_chars {
+        if chars + *item_chars > max_chars {
             break;
         }
-        chars += item_chars;
+        chars += *item_chars;
         kept += 1;
     }
     Ok(kept)
@@ -693,18 +697,14 @@ fn validate_cursor_position(
 fn reading_item(
     document: &Document,
     section: &Section,
-    row: &StoredStreamItem,
+    row: StoredStreamItem,
 ) -> TextUnitReadingItem {
-    match &row.unit {
-        OwnedStreamUnit::Paragraph(unit) => paragraph_item(
-            document,
-            section,
-            unit,
-            row.content_class,
-            row.degradation.clone(),
-        ),
+    match row.unit {
+        OwnedStreamUnit::Paragraph(unit) => {
+            paragraph_item(document, section, &unit, row.content_class, row.degradation)
+        }
         OwnedStreamUnit::Sentence(unit) => {
-            sentence_item(document, section, unit, row.content_class)
+            sentence_item(document, section, &unit, row.content_class)
         }
     }
 }

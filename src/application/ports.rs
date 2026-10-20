@@ -1,7 +1,3 @@
-// The TextUnitIndex stream methods take the section, kind, policy and range coordinates explicitly, as
-// the R1d design specifies; that is one argument over clippy's default threshold.
-#![allow(clippy::too_many_arguments)]
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -347,6 +343,15 @@ pub struct TextUnitStreamSummary {
     pub coverage: TextUnitEnumerationCoverage,
 }
 
+/// Which declared stream: one section's stream for one requested kind and coverage policy.
+#[derive(Clone, Copy, Debug)]
+pub struct TextUnitStreamKey<'a> {
+    pub document_id: &'a DocumentId,
+    pub section_id: &'a SectionId,
+    pub kind: RequestedTextUnitKind,
+    pub policy: TextUnitCoveragePolicy,
+}
+
 #[async_trait]
 pub trait TextUnitIndex: Send + Sync {
     async fn replace_document(
@@ -379,11 +384,14 @@ pub trait TextUnitIndex: Send + Sync {
     /// `None` when the section's stream is not stored (open the document again).
     async fn section_stream_summary(
         &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-        kind: RequestedTextUnitKind,
-        policy: TextUnitCoveragePolicy,
+        key: TextUnitStreamKey<'_>,
     ) -> Result<Option<TextUnitStreamSummary>, ApplicationError> {
+        let TextUnitStreamKey {
+            document_id,
+            section_id,
+            kind,
+            policy,
+        } = key;
         let Some(units) = self.section_units(document_id, section_id).await? else {
             return Ok(None);
         };
@@ -406,14 +414,17 @@ pub trait TextUnitIndex: Send + Sync {
     /// returned in ascending order (the last `limit` items before `position`).
     async fn section_stream_items(
         &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-        kind: RequestedTextUnitKind,
-        policy: TextUnitCoveragePolicy,
+        key: TextUnitStreamKey<'_>,
         direction: TextUnitDirection,
         position: usize,
         limit: usize,
     ) -> Result<Vec<StoredStreamItem>, ApplicationError> {
+        let TextUnitStreamKey {
+            document_id,
+            section_id,
+            kind,
+            policy,
+        } = key;
         let Some(units) = self.section_units(document_id, section_id).await? else {
             return Err(stale_text_units(document_id));
         };
@@ -459,14 +470,17 @@ pub trait TextUnitIndex: Send + Sync {
     /// The stream position of the unit with this kind and indices, if it is in the stream.
     async fn section_stream_position(
         &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-        kind: RequestedTextUnitKind,
-        policy: TextUnitCoveragePolicy,
+        key: TextUnitStreamKey<'_>,
         unit_kind: EffectiveTextUnitKind,
         paragraph_index: usize,
         sentence_index: Option<usize>,
     ) -> Result<Option<usize>, ApplicationError> {
+        let TextUnitStreamKey {
+            document_id,
+            section_id,
+            kind,
+            policy,
+        } = key;
         let Some(units) = self.section_units(document_id, section_id).await? else {
             return Ok(None);
         };

@@ -7,7 +7,7 @@ use reading_mcp::application::get_text_units::{
 };
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievedResource, SectionTextUnits,
-    StoredStreamItem, TextUnitIndex, TextUnitStreamSummary,
+    StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
@@ -80,16 +80,14 @@ async fn compare_indexes(
                 TextUnitCoveragePolicy::PreserveSource,
                 TextUnitCoveragePolicy::EligibleOnly,
             ] {
-                let sqlite_summary = summarize(
-                    sqlite
-                        .section_stream_summary(&document.id, &section.id, kind, policy)
-                        .await,
-                );
-                let memory_summary = summarize(
-                    memory
-                        .section_stream_summary(&document.id, &section.id, kind, policy)
-                        .await,
-                );
+                let key = TextUnitStreamKey {
+                    document_id: &document.id,
+                    section_id: &section.id,
+                    kind,
+                    policy,
+                };
+                let sqlite_summary = summarize(sqlite.section_stream_summary(key).await);
+                let memory_summary = summarize(memory.section_stream_summary(key).await);
                 assert_eq!(
                     sqlite_summary, memory_summary,
                     "summary disagreement for section {}/{:?}/{policy:?}",
@@ -101,28 +99,12 @@ async fn compare_indexes(
 
                 for limit in [1usize, 3, 256] {
                     for direction in [TextUnitDirection::Forward, TextUnitDirection::Backward] {
-                        let sqlite_items = collect_stream(
-                            sqlite,
-                            &document.id,
-                            &section.id,
-                            kind,
-                            policy,
-                            direction,
-                            limit,
-                            summary.total_items,
-                        )
-                        .await;
-                        let memory_items = collect_stream(
-                            memory,
-                            &document.id,
-                            &section.id,
-                            kind,
-                            policy,
-                            direction,
-                            limit,
-                            summary.total_items,
-                        )
-                        .await;
+                        let sqlite_items =
+                            collect_stream(sqlite, key, direction, limit, summary.total_items)
+                                .await;
+                        let memory_items =
+                            collect_stream(memory, key, direction, limit, summary.total_items)
+                                .await;
                         assert_eq!(
                             sqlite_items, memory_items,
                             "page disagreement for section {}/{:?}/{policy:?}/{direction:?} limit {limit}",
@@ -139,7 +121,7 @@ async fn compare_indexes(
                     }
                 }
 
-                compare_positions(sqlite, memory, document, &section, &units, kind, policy).await;
+                compare_positions(sqlite, memory, &units, key).await;
             }
         }
     }
@@ -148,12 +130,11 @@ async fn compare_indexes(
 async fn compare_positions(
     sqlite: &dyn TextUnitIndex,
     memory: &dyn TextUnitIndex,
-    document: &Document,
-    section: &Section,
     units: &SectionTextUnits,
-    kind: RequestedTextUnitKind,
-    policy: TextUnitCoveragePolicy,
+    key: TextUnitStreamKey<'_>,
 ) {
+    let kind = key.kind;
+    let policy = key.policy;
     let mut probes = Vec::new();
     for paragraph in &units.paragraphs {
         probes.push((
@@ -174,44 +155,24 @@ async fn compare_positions(
 
     for (unit_kind, paragraph_index, sentence_index) in probes {
         let sqlite_position = sqlite
-            .section_stream_position(
-                &document.id,
-                &section.id,
-                kind,
-                policy,
-                unit_kind,
-                paragraph_index,
-                sentence_index,
-            )
+            .section_stream_position(key, unit_kind, paragraph_index, sentence_index)
             .await
             .expect("sqlite position lookup should succeed");
         let memory_position = memory
-            .section_stream_position(
-                &document.id,
-                &section.id,
-                kind,
-                policy,
-                unit_kind,
-                paragraph_index,
-                sentence_index,
-            )
+            .section_stream_position(key, unit_kind, paragraph_index, sentence_index)
             .await
             .expect("memory position lookup should succeed");
         assert_eq!(
             sqlite_position, memory_position,
             "position disagreement for section {}/{:?}/{policy:?} probe ({unit_kind:?}, {paragraph_index}, {sentence_index:?})",
-            section.id.0, kind
+            key.section_id.0, kind
         );
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn collect_stream(
     index: &dyn TextUnitIndex,
-    document_id: &DocumentId,
-    section_id: &SectionId,
-    kind: RequestedTextUnitKind,
-    policy: TextUnitCoveragePolicy,
+    key: TextUnitStreamKey<'_>,
     direction: TextUnitDirection,
     limit: usize,
     total_items: usize,
@@ -223,15 +184,7 @@ async fn collect_stream(
     };
     loop {
         let batch = index
-            .section_stream_items(
-                document_id,
-                section_id,
-                kind,
-                policy,
-                direction,
-                position,
-                limit,
-            )
+            .section_stream_items(key, direction, position, limit)
             .await
             .expect("stream page should load");
         if batch.is_empty() {
@@ -268,13 +221,15 @@ async fn large_section_pages_preserve_positions_and_eligible_only_is_dense() {
         .expect("units should persist");
     let section_id = document.root_sections[0].id.clone();
 
+    let preserve_key = TextUnitStreamKey {
+        document_id: &document.id,
+        section_id: &section_id,
+        kind: RequestedTextUnitKind::Sentence,
+        policy: TextUnitCoveragePolicy::PreserveSource,
+    };
+
     let summary = index
-        .section_stream_summary(
-            &document.id,
-            &section_id,
-            RequestedTextUnitKind::Sentence,
-            TextUnitCoveragePolicy::PreserveSource,
-        )
+        .section_stream_summary(preserve_key)
         .await
         .expect("summary should load")
         .expect("stream should be stored");
@@ -282,15 +237,7 @@ async fn large_section_pages_preserve_positions_and_eligible_only_is_dense() {
 
     for start in [0usize, 2_500, 4_990] {
         let page = index
-            .section_stream_items(
-                &document.id,
-                &section_id,
-                RequestedTextUnitKind::Sentence,
-                TextUnitCoveragePolicy::PreserveSource,
-                TextUnitDirection::Forward,
-                start,
-                10,
-            )
+            .section_stream_items(preserve_key, TextUnitDirection::Forward, start, 10)
             .await
             .expect("forward page should load");
         let expected: Vec<usize> = (start..(start + 10).min(5_000)).collect();
@@ -302,15 +249,7 @@ async fn large_section_pages_preserve_positions_and_eligible_only_is_dense() {
 
     for end in [10usize, 2_500, 5_000] {
         let page = index
-            .section_stream_items(
-                &document.id,
-                &section_id,
-                RequestedTextUnitKind::Sentence,
-                TextUnitCoveragePolicy::PreserveSource,
-                TextUnitDirection::Backward,
-                end,
-                10,
-            )
+            .section_stream_items(preserve_key, TextUnitDirection::Backward, end, 10)
             .await
             .expect("backward page should load");
         let expected: Vec<usize> = ((end - 10)..end).collect();
@@ -320,27 +259,18 @@ async fn large_section_pages_preserve_positions_and_eligible_only_is_dense() {
         );
     }
 
+    let eligible_key = TextUnitStreamKey {
+        policy: TextUnitCoveragePolicy::EligibleOnly,
+        ..preserve_key
+    };
     let eligible = index
-        .section_stream_summary(
-            &document.id,
-            &section_id,
-            RequestedTextUnitKind::Sentence,
-            TextUnitCoveragePolicy::EligibleOnly,
-        )
+        .section_stream_summary(eligible_key)
         .await
         .expect("eligible summary should load")
         .expect("eligible stream should be stored");
     assert_eq!(eligible.total_items, 5_000);
     let first_page = index
-        .section_stream_items(
-            &document.id,
-            &section_id,
-            RequestedTextUnitKind::Sentence,
-            TextUnitCoveragePolicy::EligibleOnly,
-            TextUnitDirection::Forward,
-            0,
-            256,
-        )
+        .section_stream_items(eligible_key, TextUnitDirection::Forward, 0, 256)
         .await
         .expect("eligible page should load");
     assert_eq!(
@@ -369,12 +299,12 @@ async fn replacing_the_unit_sets_replaces_the_stream_and_summary_rows() {
 
     let section_id = SectionId("section://root".into());
     let summary = index
-        .section_stream_summary(
-            &second.id,
-            &section_id,
-            RequestedTextUnitKind::Sentence,
-            TextUnitCoveragePolicy::PreserveSource,
-        )
+        .section_stream_summary(TextUnitStreamKey {
+            document_id: &second.id,
+            section_id: &section_id,
+            kind: RequestedTextUnitKind::Sentence,
+            policy: TextUnitCoveragePolicy::PreserveSource,
+        })
         .await
         .expect("summary should load")
         .expect("summary should exist");

@@ -92,12 +92,12 @@ fn check_document(document: &Document) -> Report {
         }
     };
 
-    let mut record = |report: &mut Report,
-                      section: &Section,
-                      paragraph_index: usize,
-                      sentence_index: Option<usize>,
-                      slice: Result<&str, NormalizedTextRangeError>,
-                      actual: &str| {
+    let record = |report: &mut Report,
+                  section: &Section,
+                  paragraph_index: usize,
+                  sentence_index: Option<usize>,
+                  slice: Result<&str, NormalizedTextRangeError>,
+                  actual: &str| {
         report.units_checked += 1;
         let mismatch = match slice {
             Ok(expected) => {
@@ -196,14 +196,6 @@ fn resource(name: &str, media_type: &str, bytes: Vec<u8>) -> RetrievedResource {
         last_modified: None,
         metadata: Default::default(),
     }
-}
-
-fn flatten<'a>(section: &'a Section) -> Vec<&'a Section> {
-    let mut sections = vec![section];
-    for child in &section.children {
-        sections.extend(flatten(child));
-    }
-    sections
 }
 
 fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {

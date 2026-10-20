@@ -370,10 +370,13 @@ def probe(args: argparse.Namespace) -> int:
     log_path = os.path.join(scratch_root, "long-read-server.log")
 
     wrapper_parts = shlex.split(args.wrapper) if args.wrapper else []
-    command = wrapper_parts + [args.binary] if wrapper_parts else [args.binary]
+    binary = os.path.abspath(args.binary)
+    if not os.path.isfile(binary):
+        raise ProbeError(f"binary not found: {binary}")
+    command = wrapper_parts + [binary] if wrapper_parts else [binary]
     env = server_environment(state_dir, os.path.dirname(document), args.env)
 
-    server = Server(command, env, log_path, REQUEST_TIMEOUT, cwd=os.path.dirname(document))
+    server = Server(command, env, log_path, REQUEST_TIMEOUT)
     samples: list[dict] = []
     calls = 0
     try:

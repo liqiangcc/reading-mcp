@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -8,7 +9,10 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use super::lexical::{LexicalQuery, candidate_kind_order, lowercase_fast, score_lowered};
+use super::lexical::{
+    LexicalQuery, ParagraphPrefilters, candidate_kind_order, lowercase_fast,
+    score_lowered_with_phrase,
+};
 use super::section_layout::{
     CHUNK_CHARS, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
 };
@@ -799,132 +803,336 @@ impl SqliteTextUnitIndex {
                     return Ok(None);
                 }
 
-                let sections = stored_sections(connection, meta.doc_key)?;
-                let mut layout_statement = connection
-                    .prepare(
-                        "SELECT layout FROM section_layout_v1
-                         WHERE doc_key = ?1 AND section_key = ?2",
-                    )
-                    .map_err(text_unit_index_error)?;
-                let mut section_ids: Vec<SectionId> = Vec::new();
-                let mut hits: Vec<ScannedUnitHit> = Vec::new();
-                let flush_at = limit.saturating_mul(4).saturating_add(64);
-
-                for (section_key, section_id, char_len) in sections {
-                    if char_len == 0 {
-                        continue;
-                    }
-                    let text = load_section_text(connection, meta.doc_key, section_key, char_len)?;
-                    let lowered = lowercase_fast(&text);
-                    let worth_scanning = match mode {
-                        MatchMode::Strict => query.may_contain_all(&lowered),
-                        MatchMode::Relaxed => query.may_contain_any(&lowered),
-                    };
-                    if !worth_scanning {
-                        continue;
-                    }
-
-                    let layout_blob: Vec<u8> = layout_statement
-                        .query_row(params![meta.doc_key, section_key], |row| row.get(0))
-                        .map_err(text_unit_index_error)?;
-                    let layout = SectionLayout::decode(&layout_blob)?;
-                    let index = NormalizedTextIndex::new(&text);
-                    let section = section_ids.len();
-                    section_ids.push(section_id);
-                    let mut prefilters: HashMap<(usize, usize), bool> = HashMap::new();
-
-                    for paragraph in &layout.paragraphs {
-                        let slice = slice_section_text_str(
-                            &index,
-                            paragraph.start,
-                            paragraph.end,
-                            "paragraph",
-                        )?;
-                        let lowered = lowercase_fast(slice);
-                        let prefilter = match mode {
-                            MatchMode::Strict => query.may_contain_all(&lowered),
-                            MatchMode::Relaxed => query.may_contain_any(&lowered),
-                        };
-                        prefilters.insert((paragraph.start, paragraph.end), prefilter);
-                        if !prefilter {
-                            continue;
-                        }
-                        let Some(score) =
-                            unit_score(&query, mode, slice, &lowered, SearchHitKind::Paragraph)
-                        else {
-                            continue;
-                        };
-                        hits.push(ScannedUnitHit {
-                            section,
-                            kind: SearchHitKind::Paragraph,
-                            paragraph_index: paragraph.paragraph_index,
-                            sentence_index: None,
-                            start: paragraph.start,
-                            score,
-                        });
-                        if hits.len() >= flush_at {
-                            sort_scanned_hits(&mut hits, &section_ids);
-                            hits.truncate(limit);
-                        }
-                    }
-
-                    for sentence in &layout.sentences {
-                        let parent = (sentence.parent_start, sentence.parent_end);
-                        let prefilter = match prefilters.get(&parent) {
-                            Some(&prefilter) => prefilter,
-                            None => {
-                                let parent_slice = slice_section_text_str(
-                                    &index,
-                                    parent.0,
-                                    parent.1,
-                                    "paragraph",
-                                )?;
-                                let parent_lowered = lowercase_fast(parent_slice);
-                                let prefilter = match mode {
-                                    MatchMode::Strict => query.may_contain_all(&parent_lowered),
-                                    MatchMode::Relaxed => query.may_contain_any(&parent_lowered),
-                                };
-                                prefilters.insert(parent, prefilter);
-                                prefilter
-                            }
-                        };
-                        if !prefilter {
-                            continue;
-                        }
-                        let slice = slice_section_text_str(
-                            &index,
-                            sentence.start,
-                            sentence.end,
-                            "sentence",
-                        )?;
-                        let lowered = lowercase_fast(slice);
-                        let Some(score) =
-                            unit_score(&query, mode, slice, &lowered, SearchHitKind::Sentence)
-                        else {
-                            continue;
-                        };
-                        hits.push(ScannedUnitHit {
-                            section,
-                            kind: SearchHitKind::Sentence,
-                            paragraph_index: sentence.paragraph_index,
-                            sentence_index: Some(sentence.sentence_index),
-                            start: sentence.start,
-                            score,
-                        });
-                        if hits.len() >= flush_at {
-                            sort_scanned_hits(&mut hits, &section_ids);
-                            hits.truncate(limit);
-                        }
-                    }
-                }
-
-                sort_scanned_hits(&mut hits, &section_ids);
-                hits.truncate(limit);
+                let (section_ids, hits, _timings) =
+                    scan_stored_sections(connection, &meta, &query, mode, limit, false)?;
                 Ok(Some((section_ids, hits)))
             },
         )
         .await
     }
+
+    /// Benchmark only: the phase timings and unit counts of one Strict scan pass, with the hash the
+    /// document's units are stored for. `Ok(None)` when the units are not stored for the current
+    /// `TEXT_SEGMENTATION_VERSION`.
+    #[doc(hidden)]
+    pub async fn scan_lexical_profile(
+        &self,
+        document_id: &DocumentId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Option<ScanTimings>, ApplicationError> {
+        let Some(lexical) = LexicalQuery::new(query) else {
+            return Err(ApplicationError::InvalidRequest(
+                "search query must contain searchable terms".into(),
+            ));
+        };
+        let lexical = Arc::new(lexical);
+        let document_id = document_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let Some(meta) = load_stored_document(connection, &document_id)? else {
+                    return Ok(None);
+                };
+                if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
+                    return Ok(None);
+                }
+                let (_section_ids, _hits, timings) = scan_stored_sections(
+                    connection,
+                    &meta,
+                    &lexical,
+                    MatchMode::Strict,
+                    limit,
+                    true,
+                )?;
+                Ok(Some(timings))
+            },
+        )
+        .await
+    }
+}
+
+/// Which phase of a scan pass a duration belongs to.
+#[derive(Clone, Copy)]
+enum ScanPhase {
+    ReadText,
+    SectionPrefilter,
+    LayoutDecode,
+    Paragraphs,
+    Sentences,
+    Sort,
+}
+
+/// Where the time of one scan pass went, plus the counts of the work it did. Benchmarks read this;
+/// the search path itself passes `false` for `collect_timings` and records nothing.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScanTimings {
+    /// `load_section_text`, per section.
+    pub read_text: std::time::Duration,
+    /// `lowercase_fast` plus the prefilter over the whole section, per section.
+    pub section_prefilter: std::time::Duration,
+    /// The layout blob read and `SectionLayout::decode`, per scanned section.
+    pub layout_decode: std::time::Duration,
+    /// The paragraph loop, excluding the sorts inside it.
+    pub paragraphs: std::time::Duration,
+    /// The sentence loop, excluding the sorts inside it.
+    pub sentences: std::time::Duration,
+    /// Every `sort_scanned_hits` call, wherever it happens.
+    pub sort: std::time::Duration,
+    /// Sections with text, which the scan read.
+    pub sections_scanned: usize,
+    /// Sections whose whole-text prefilter passed.
+    pub sections_passed_prefilter: usize,
+    /// Paragraphs the scan evaluated, whether or not they were hits.
+    pub paragraphs_evaluated: usize,
+    /// Sentences the scan evaluated, whether or not they were hits.
+    pub sentences_evaluated: usize,
+    /// Hits pushed, before the final truncate to `limit`.
+    pub hits_pushed: usize,
+}
+
+impl ScanTimings {
+    fn add(&mut self, phase: ScanPhase, elapsed: std::time::Duration) {
+        let slot = match phase {
+            ScanPhase::ReadText => &mut self.read_text,
+            ScanPhase::SectionPrefilter => &mut self.section_prefilter,
+            ScanPhase::LayoutDecode => &mut self.layout_decode,
+            ScanPhase::Paragraphs => &mut self.paragraphs,
+            ScanPhase::Sentences => &mut self.sentences,
+            ScanPhase::Sort => &mut self.sort,
+        };
+        *slot += elapsed;
+    }
+}
+
+/// Accumulates the phase durations of a scan pass when enabled. Disabled, `begin` stores nothing and
+/// `end` takes nothing, so the search path pays one branch per phase and per unit, never a clock read.
+struct ScanTimer {
+    enabled: bool,
+    phase_start: Option<std::time::Instant>,
+    timings: ScanTimings,
+}
+
+impl ScanTimer {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            phase_start: None,
+            timings: ScanTimings::default(),
+        }
+    }
+
+    /// Starts a phase, or nothing when the timer is disabled.
+    fn begin(&mut self) {
+        if self.enabled {
+            self.phase_start = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Ends the running phase and adds its duration to `phase`.
+    fn end(&mut self, phase: ScanPhase) {
+        if let Some(start) = self.phase_start.take() {
+            self.timings.add(phase, start.elapsed());
+        }
+    }
+
+    /// A nested phase inside the running one: end the outer phase first, then `add_since`.
+    fn now(&self) -> Option<std::time::Instant> {
+        if self.enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        }
+    }
+
+    fn add_since(&mut self, phase: ScanPhase, start: Option<std::time::Instant>) {
+        if let Some(start) = start {
+            self.timings.add(phase, start.elapsed());
+        }
+    }
+
+    fn tally(&mut self, tally: impl FnOnce(&mut ScanTimings)) {
+        if self.enabled {
+            tally(&mut self.timings);
+        }
+    }
+
+    fn finish(self) -> ScanTimings {
+        self.timings
+    }
+}
+
+/// One pass over the stored section text: the paragraphs and sentences of `meta`'s document that
+/// `mode` accepts, best `limit` first, and the section ids they index.
+fn scan_stored_sections(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    query: &LexicalQuery,
+    mode: MatchMode,
+    limit: usize,
+    collect_timings: bool,
+) -> Result<(Vec<SectionId>, Vec<ScannedUnitHit>, ScanTimings), ApplicationError> {
+    let mut timer = ScanTimer::new(collect_timings);
+    let sections = stored_sections(connection, meta.doc_key)?;
+    let mut layout_statement = connection
+        .prepare_cached(
+            "SELECT layout FROM section_layout_v1
+             WHERE doc_key = ?1 AND section_key = ?2",
+        )
+        .map_err(text_unit_index_error)?;
+    let mut section_ids: Vec<SectionId> = Vec::new();
+    let mut hits: Vec<ScannedUnitHit> = Vec::new();
+    let flush_at = limit.saturating_mul(4).saturating_add(64);
+
+    for (section_key, section_id, char_len) in sections {
+        if char_len == 0 {
+            continue;
+        }
+        timer.tally(|timings| timings.sections_scanned += 1);
+        timer.begin();
+        let text = load_section_text_unchecked(connection, meta.doc_key, section_key)?;
+        timer.end(ScanPhase::ReadText);
+        let index = NormalizedTextIndex::new(&text);
+        if index.char_len() != char_len {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} text has {} chars, expected {char_len}",
+                index.char_len()
+            )));
+        }
+        timer.begin();
+        let section_lowered = lowercase_fast(&text);
+        // A borrowed whole-section lowercase means every char of the section lowercases to itself, so
+        // every slice of it does too and the per-slice lowercasing can be skipped.
+        let borrowed = matches!(section_lowered, Cow::Borrowed(_));
+        let worth_scanning = match mode {
+            MatchMode::Strict => query.may_contain_all(&section_lowered),
+            MatchMode::Relaxed => query.may_contain_any(&section_lowered),
+        };
+        timer.end(ScanPhase::SectionPrefilter);
+        if !worth_scanning {
+            continue;
+        }
+        timer.tally(|timings| timings.sections_passed_prefilter += 1);
+
+        timer.begin();
+        let layout_blob: Vec<u8> = layout_statement
+            .query_row(params![meta.doc_key, section_key], |row| row.get(0))
+            .map_err(text_unit_index_error)?;
+        let layout = SectionLayout::decode(&layout_blob)?;
+        timer.end(ScanPhase::LayoutDecode);
+        let section = section_ids.len();
+        section_ids.push(section_id);
+        let mut prefilters = ParagraphPrefilters::new(ParagraphPrefilters::ranges_increase(
+            layout
+                .paragraphs
+                .iter()
+                .map(|paragraph| (paragraph.start, paragraph.end)),
+        ));
+
+        timer.begin();
+        for paragraph in &layout.paragraphs {
+            timer.tally(|timings| timings.paragraphs_evaluated += 1);
+            let slice =
+                slice_section_text_str(&index, paragraph.start, paragraph.end, "paragraph")?;
+            let lowered = slice_lowered(slice, borrowed);
+            let prefilter = match mode {
+                MatchMode::Strict => query.may_contain_all(&lowered),
+                MatchMode::Relaxed => query.may_contain_any(&lowered),
+            };
+            prefilters.insert(paragraph.start, paragraph.end, prefilter);
+            if !prefilter {
+                continue;
+            }
+            let score = match mode {
+                // The prefilter ran on this very paragraph, so a strict all-CJK query is answered.
+                MatchMode::Strict => {
+                    unit_score_after_all_prefilter(query, slice, &lowered, SearchHitKind::Paragraph)
+                }
+                MatchMode::Relaxed => {
+                    unit_score(query, mode, slice, &lowered, SearchHitKind::Paragraph)
+                }
+            };
+            let Some(score) = score else {
+                continue;
+            };
+            timer.tally(|timings| timings.hits_pushed += 1);
+            hits.push(ScannedUnitHit {
+                section,
+                kind: SearchHitKind::Paragraph,
+                paragraph_index: paragraph.paragraph_index,
+                sentence_index: None,
+                start: paragraph.start,
+                score,
+            });
+            if hits.len() >= flush_at {
+                timer.end(ScanPhase::Paragraphs);
+                let sort_start = timer.now();
+                sort_scanned_hits(&mut hits, &section_ids);
+                timer.add_since(ScanPhase::Sort, sort_start);
+                hits.truncate(limit);
+                timer.begin();
+            }
+        }
+        timer.end(ScanPhase::Paragraphs);
+
+        timer.begin();
+        for sentence in &layout.sentences {
+            timer.tally(|timings| timings.sentences_evaluated += 1);
+            let prefilter = match prefilters.get(sentence.parent_start, sentence.parent_end) {
+                Some(prefilter) => prefilter,
+                None => {
+                    let parent_slice = slice_section_text_str(
+                        &index,
+                        sentence.parent_start,
+                        sentence.parent_end,
+                        "paragraph",
+                    )?;
+                    let parent_lowered = slice_lowered(parent_slice, borrowed);
+                    let prefilter = match mode {
+                        MatchMode::Strict => query.may_contain_all(&parent_lowered),
+                        MatchMode::Relaxed => query.may_contain_any(&parent_lowered),
+                    };
+                    prefilters.remember(sentence.parent_start, sentence.parent_end, prefilter);
+                    prefilter
+                }
+            };
+            if !prefilter {
+                continue;
+            }
+            let slice = slice_section_text_str(&index, sentence.start, sentence.end, "sentence")?;
+            let lowered = slice_lowered(slice, borrowed);
+            let Some(score) = unit_score(query, mode, slice, &lowered, SearchHitKind::Sentence)
+            else {
+                continue;
+            };
+            timer.tally(|timings| timings.hits_pushed += 1);
+            hits.push(ScannedUnitHit {
+                section,
+                kind: SearchHitKind::Sentence,
+                paragraph_index: sentence.paragraph_index,
+                sentence_index: Some(sentence.sentence_index),
+                start: sentence.start,
+                score,
+            });
+            if hits.len() >= flush_at {
+                timer.end(ScanPhase::Sentences);
+                let sort_start = timer.now();
+                sort_scanned_hits(&mut hits, &section_ids);
+                timer.add_since(ScanPhase::Sort, sort_start);
+                hits.truncate(limit);
+                timer.begin();
+            }
+        }
+        timer.end(ScanPhase::Sentences);
+    }
+
+    let sort_start = timer.now();
+    sort_scanned_hits(&mut hits, &section_ids);
+    timer.add_since(ScanPhase::Sort, sort_start);
+    hits.truncate(limit);
+    Ok((section_ids, hits, timer.finish()))
 }
 
 /// Which candidates a lexical scan accepts.
@@ -989,26 +1197,78 @@ fn unit_score(
     kind: SearchHitKind,
 ) -> Option<f32> {
     match mode {
-        MatchMode::Strict => {
-            if query.strict_match(text, lowered) {
-                Some(score_lowered(
+        MatchMode::Strict => strict_score(query, text, lowered, kind),
+        MatchMode::Relaxed => {
+            let matched = query.relaxed_count(text, lowered);
+            if matched > 0 {
+                Some(score_lowered_with_phrase(
                     lowered,
                     &query.raw_lowered,
                     kind,
-                    query.token_count(),
+                    matched,
+                    None,
                 ))
             } else {
                 None
             }
         }
-        MatchMode::Relaxed => {
-            let matched = query.relaxed_count(text, lowered);
-            if matched > 0 {
-                Some(score_lowered(lowered, &query.raw_lowered, kind, matched))
-            } else {
-                None
-            }
-        }
+    }
+}
+
+/// The strict score of one unit, or `None` when a query token is missing from it.
+fn strict_score(
+    query: &LexicalQuery,
+    text: &str,
+    lowered: &str,
+    kind: SearchHitKind,
+) -> Option<f32> {
+    if !query.strict_match(text, lowered) {
+        return None;
+    }
+    Some(score_lowered_with_phrase(
+        lowered,
+        &query.raw_lowered,
+        kind,
+        query.token_count(),
+        strict_phrase_known(query),
+    ))
+}
+
+/// The strict score of a paragraph whose `may_contain_all` prefilter passed on the paragraph's own
+/// lowered slice.
+fn unit_score_after_all_prefilter(
+    query: &LexicalQuery,
+    text: &str,
+    lowered: &str,
+    kind: SearchHitKind,
+) -> Option<f32> {
+    if query.all_cjk() {
+        // Every token is a CJK char or an adjacent CJK pair, which `tokenize` emits from the lowered
+        // text itself, so the prefilter that passed is exactly `strict_match`.
+        return Some(score_lowered_with_phrase(
+            lowered,
+            &query.raw_lowered,
+            kind,
+            query.token_count(),
+            strict_phrase_known(query),
+        ));
+    }
+    strict_score(query, text, lowered, kind)
+}
+
+/// The phrase answer a `strict_match` already gave: it contains-tests every token, so a token equal to
+/// the whole lowered query proves the phrase.
+fn strict_phrase_known(query: &LexicalQuery) -> Option<bool> {
+    query.phrase_is_token().map(|_| true)
+}
+
+/// The lowercase form of one unit slice. A whole section that lowercased to itself (`borrowed_section`)
+/// lowercases every slice of it to itself too.
+fn slice_lowered<'a>(slice: &'a str, borrowed_section: bool) -> Cow<'a, str> {
+    if borrowed_section {
+        Cow::Borrowed(slice)
+    } else {
+        lowercase_fast(slice)
     }
 }
 
@@ -1886,8 +2146,25 @@ fn load_section_text(
     if char_len == 0 {
         return Ok(String::new());
     }
+    let text = load_section_text_unchecked(connection, doc_key, section_key)?;
+    let text_chars = text.chars().count();
+    if text_chars != char_len {
+        return Err(ApplicationError::TextUnitIndexFailed(format!(
+            "section {section_key} text has {text_chars} chars, expected {char_len}"
+        )));
+    }
+    Ok(text)
+}
+
+/// The stored text of one section, without counting its chars. The scan counts them once through the
+/// `NormalizedTextIndex` it builds anyway, and reports the same error `load_section_text` would.
+fn load_section_text_unchecked(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+) -> Result<String, ApplicationError> {
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT chunk_no, text
              FROM section_text_v1
              WHERE doc_key = ?1 AND section_key = ?2
@@ -1909,12 +2186,6 @@ fn load_section_text(
             )));
         }
         text.push_str(&chunk);
-    }
-    if text.chars().count() != char_len {
-        return Err(ApplicationError::TextUnitIndexFailed(format!(
-            "section {section_key} text has {} chars, expected {char_len}",
-            text.chars().count()
-        )));
     }
     Ok(text)
 }

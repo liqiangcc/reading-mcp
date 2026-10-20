@@ -13,13 +13,15 @@ use reading_mcp::infrastructure::{
 use reading_mcp::parsing::{MarkdownParser, TextParser};
 
 /// One query of every shape the lexical contract distinguishes.
-const QUERIES: [&str; 13] = [
+const QUERIES: [&str; 14] = [
     // A single CJK char.
     "皇",
-    // A CJK bigram.
+    // A CJK bigram whose phrase equals the query token, on a document with caseless and cased sections.
     "皇帝",
     // A CJK phrase of four chars.
     "虚拟内存",
+    // Two CJK tokens, so the all-CJK prefilter shortcut has to agree with the general path.
+    "皇帝 内存",
     // An English word.
     "memory",
     // Two English words.
@@ -50,6 +52,7 @@ async fn scan_search_matches_the_in_memory_index() {
         english_document().await,
         mixed_document().await,
         markdown_document().await,
+        mixed_case_sections_document().await,
     ];
     for document in &documents {
         assert_parity(document).await;
@@ -202,4 +205,18 @@ async fn markdown_document() -> Document {
         .parse(resource("memory:sections.md", "text/markdown", text))
         .await
         .expect("parse markdown")
+}
+
+/// One section is all caseless CJK, so its whole-section lowercase is borrowed and every slice of it
+/// skips lowercasing; another section holds uppercase Latin and a sigma, so it takes the owned path.
+async fn mixed_case_sections_document() -> Document {
+    let text = "# 宋史\n\n\
+                皇帝在朝堂上讨论内存与页表。群臣议事，節度使入朝。\n\n\
+                ## Notes\n\n\
+                ΣΟΦΟΣ reads ΟΔΟΣ.ΟΔΟΣ beside the Uppercase Latin Layout.\n"
+        .to_string();
+    MarkdownParser
+        .parse(resource("memory:cases.md", "text/markdown", text))
+        .await
+        .expect("parse mixed-case sections")
 }

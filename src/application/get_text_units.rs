@@ -411,7 +411,7 @@ impl GetTextUnitsUseCase {
         let paragraph_index = resolved
             .locator
             .paragraph_index
-            .ok_or_else(|| not_in_stream())?;
+            .ok_or_else(&not_in_stream)?;
         let position = self
             .text_unit_index
             .section_stream_position(
@@ -424,7 +424,7 @@ impl GetTextUnitsUseCase {
                 resolved.locator.sentence_index,
             )
             .await?
-            .ok_or_else(|| not_in_stream())?;
+            .ok_or_else(&not_in_stream)?;
         let rows = self
             .text_unit_index
             .section_stream_items(
@@ -437,7 +437,7 @@ impl GetTextUnitsUseCase {
                 1,
             )
             .await?;
-        let row = rows.into_iter().next().ok_or_else(|| not_in_stream())?;
+        let row = rows.into_iter().next().ok_or_else(&not_in_stream)?;
         let locator = reading_item(document, section, &row).locator;
         if locator != resolved.locator {
             return Err(not_in_stream());

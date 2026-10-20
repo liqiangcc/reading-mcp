@@ -1,3 +1,7 @@
+// The TextUnitIndex stream methods take the section, kind, policy and range coordinates explicitly, as
+// the R1d design specifies; that is one argument over clippy's default threshold.
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

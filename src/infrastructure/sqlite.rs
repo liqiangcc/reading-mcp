@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -8,7 +9,10 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use super::lexical::{LexicalQuery, candidate_kind_order, lowercase_fast, score_lowered};
+use super::lexical::{
+    LexicalQuery, ParagraphPrefilters, candidate_kind_order, lowercase_fast,
+    score_lowered_with_phrase,
+};
 use super::section_layout::{
     CHUNK_CHARS, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
 };
@@ -834,7 +838,7 @@ fn scan_stored_sections(
     let mut timer = ScanTimer::new(collect_timings);
     let sections = stored_sections(connection, meta.doc_key)?;
     let mut layout_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT layout FROM section_layout_v1
              WHERE doc_key = ?1 AND section_key = ?2",
         )
@@ -859,10 +863,13 @@ fn scan_stored_sections(
             )));
         }
         timer.begin();
-        let lowered = lowercase_fast(&text);
+        let section_lowered = lowercase_fast(&text);
+        // A borrowed whole-section lowercase means every char of the section lowercases to itself, so
+        // every slice of it does too and the per-slice lowercasing can be skipped.
+        let borrowed = matches!(section_lowered, Cow::Borrowed(_));
         let worth_scanning = match mode {
-            MatchMode::Strict => query.may_contain_all(&lowered),
-            MatchMode::Relaxed => query.may_contain_any(&lowered),
+            MatchMode::Strict => query.may_contain_all(&section_lowered),
+            MatchMode::Relaxed => query.may_contain_any(&section_lowered),
         };
         timer.end(ScanPhase::SectionPrefilter);
         if !worth_scanning {
@@ -878,24 +885,37 @@ fn scan_stored_sections(
         timer.end(ScanPhase::LayoutDecode);
         let section = section_ids.len();
         section_ids.push(section_id);
-        let mut prefilters: HashMap<(usize, usize), bool> = HashMap::new();
+        let mut prefilters = ParagraphPrefilters::new(ParagraphPrefilters::ranges_increase(
+            layout
+                .paragraphs
+                .iter()
+                .map(|paragraph| (paragraph.start, paragraph.end)),
+        ));
 
         timer.begin();
         for paragraph in &layout.paragraphs {
             timer.tally(|timings| timings.paragraphs_evaluated += 1);
             let slice =
                 slice_section_text_str(&index, paragraph.start, paragraph.end, "paragraph")?;
-            let lowered = lowercase_fast(slice);
+            let lowered = slice_lowered(slice, borrowed);
             let prefilter = match mode {
                 MatchMode::Strict => query.may_contain_all(&lowered),
                 MatchMode::Relaxed => query.may_contain_any(&lowered),
             };
-            prefilters.insert((paragraph.start, paragraph.end), prefilter);
+            prefilters.insert(paragraph.start, paragraph.end, prefilter);
             if !prefilter {
                 continue;
             }
-            let Some(score) = unit_score(query, mode, slice, &lowered, SearchHitKind::Paragraph)
-            else {
+            let score = match mode {
+                // The prefilter ran on this very paragraph, so a strict all-CJK query is answered.
+                MatchMode::Strict => {
+                    unit_score_after_all_prefilter(query, slice, &lowered, SearchHitKind::Paragraph)
+                }
+                MatchMode::Relaxed => {
+                    unit_score(query, mode, slice, &lowered, SearchHitKind::Paragraph)
+                }
+            };
+            let Some(score) = score else {
                 continue;
             };
             timer.tally(|timings| timings.hits_pushed += 1);
@@ -921,18 +941,21 @@ fn scan_stored_sections(
         timer.begin();
         for sentence in &layout.sentences {
             timer.tally(|timings| timings.sentences_evaluated += 1);
-            let parent = (sentence.parent_start, sentence.parent_end);
-            let prefilter = match prefilters.get(&parent) {
-                Some(&prefilter) => prefilter,
+            let prefilter = match prefilters.get(sentence.parent_start, sentence.parent_end) {
+                Some(prefilter) => prefilter,
                 None => {
-                    let parent_slice =
-                        slice_section_text_str(&index, parent.0, parent.1, "paragraph")?;
-                    let parent_lowered = lowercase_fast(parent_slice);
+                    let parent_slice = slice_section_text_str(
+                        &index,
+                        sentence.parent_start,
+                        sentence.parent_end,
+                        "paragraph",
+                    )?;
+                    let parent_lowered = slice_lowered(parent_slice, borrowed);
                     let prefilter = match mode {
                         MatchMode::Strict => query.may_contain_all(&parent_lowered),
                         MatchMode::Relaxed => query.may_contain_any(&parent_lowered),
                     };
-                    prefilters.insert(parent, prefilter);
+                    prefilters.remember(sentence.parent_start, sentence.parent_end, prefilter);
                     prefilter
                 }
             };
@@ -940,7 +963,7 @@ fn scan_stored_sections(
                 continue;
             }
             let slice = slice_section_text_str(&index, sentence.start, sentence.end, "sentence")?;
-            let lowered = lowercase_fast(slice);
+            let lowered = slice_lowered(slice, borrowed);
             let Some(score) = unit_score(query, mode, slice, &lowered, SearchHitKind::Sentence)
             else {
                 continue;
@@ -1035,26 +1058,78 @@ fn unit_score(
     kind: SearchHitKind,
 ) -> Option<f32> {
     match mode {
-        MatchMode::Strict => {
-            if query.strict_match(text, lowered) {
-                Some(score_lowered(
+        MatchMode::Strict => strict_score(query, text, lowered, kind),
+        MatchMode::Relaxed => {
+            let matched = query.relaxed_count(text, lowered);
+            if matched > 0 {
+                Some(score_lowered_with_phrase(
                     lowered,
                     &query.raw_lowered,
                     kind,
-                    query.token_count(),
+                    matched,
+                    None,
                 ))
             } else {
                 None
             }
         }
-        MatchMode::Relaxed => {
-            let matched = query.relaxed_count(text, lowered);
-            if matched > 0 {
-                Some(score_lowered(lowered, &query.raw_lowered, kind, matched))
-            } else {
-                None
-            }
-        }
+    }
+}
+
+/// The strict score of one unit, or `None` when a query token is missing from it.
+fn strict_score(
+    query: &LexicalQuery,
+    text: &str,
+    lowered: &str,
+    kind: SearchHitKind,
+) -> Option<f32> {
+    if !query.strict_match(text, lowered) {
+        return None;
+    }
+    Some(score_lowered_with_phrase(
+        lowered,
+        &query.raw_lowered,
+        kind,
+        query.token_count(),
+        strict_phrase_known(query),
+    ))
+}
+
+/// The strict score of a paragraph whose `may_contain_all` prefilter passed on the paragraph's own
+/// lowered slice.
+fn unit_score_after_all_prefilter(
+    query: &LexicalQuery,
+    text: &str,
+    lowered: &str,
+    kind: SearchHitKind,
+) -> Option<f32> {
+    if query.all_cjk() {
+        // Every token is a CJK char or an adjacent CJK pair, which `tokenize` emits from the lowered
+        // text itself, so the prefilter that passed is exactly `strict_match`.
+        return Some(score_lowered_with_phrase(
+            lowered,
+            &query.raw_lowered,
+            kind,
+            query.token_count(),
+            strict_phrase_known(query),
+        ));
+    }
+    strict_score(query, text, lowered, kind)
+}
+
+/// The phrase answer a `strict_match` already gave: it contains-tests every token, so a token equal to
+/// the whole lowered query proves the phrase.
+fn strict_phrase_known(query: &LexicalQuery) -> Option<bool> {
+    query.phrase_is_token().map(|_| true)
+}
+
+/// The lowercase form of one unit slice. A whole section that lowercased to itself (`borrowed_section`)
+/// lowercases every slice of it to itself too.
+fn slice_lowered<'a>(slice: &'a str, borrowed_section: bool) -> Cow<'a, str> {
+    if borrowed_section {
+        Cow::Borrowed(slice)
+    } else {
+        lowercase_fast(slice)
     }
 }
 
@@ -1958,7 +2033,7 @@ fn load_section_text_unchecked(
     section_key: i64,
 ) -> Result<String, ApplicationError> {
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT chunk_no, text
              FROM section_text_v1
              WHERE doc_key = ?1 AND section_key = ?2

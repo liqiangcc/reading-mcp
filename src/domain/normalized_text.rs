@@ -12,7 +12,7 @@ pub const NORMALIZED_TEXT_COORDINATE_SPACE: &str = "section-content-unicode-scal
 
 const NORMALIZED_DOCUMENT_HASH_DOMAIN: &[u8] = b"reading-mcp/normalized-document-hash/v3\0";
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct NormalizedDocumentHash(pub String);
 
 impl fmt::Display for NormalizedDocumentHash {

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 mod normalized_block;
 mod normalized_text;
@@ -44,16 +45,28 @@ pub use text_unit::{
     TEXT_UNIT_ID_VERSION, TextUnit, TextUnitId, TextUnitKind,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct DocumentId(pub String);
+
+impl DocumentId {
+    /// The identity of a document: `doc:sha256:` over the source, a NUL byte and the content hash.
+    pub fn derive(source: &DocumentSource, content_hash: &ContentHash) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(source.0.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(content_hash.0.as_bytes());
+        let digest = hasher.finalize();
+        DocumentId(format!("doc:sha256:{digest:x}"))
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SectionId(pub String);
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct DocumentSource(pub String);
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct MediaType(pub String);
 
 impl MediaType {
@@ -68,8 +81,16 @@ impl MediaType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ContentHash(pub String);
+
+impl ContentHash {
+    /// The content hash of raw bytes: `sha256:` followed by the lowercase hex digest.
+    pub fn of_bytes(bytes: &[u8]) -> Self {
+        let digest = Sha256::digest(bytes);
+        ContentHash(format!("sha256:{digest:x}"))
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Location {

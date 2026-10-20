@@ -1,19 +1,11 @@
-use sha2::{Digest, Sha256};
-
 use crate::domain::{ContentHash, DocumentId, DocumentSource};
 
 pub fn content_hash(bytes: &[u8]) -> ContentHash {
-    let digest = Sha256::digest(bytes);
-    ContentHash(format!("sha256:{digest:x}"))
+    ContentHash::of_bytes(bytes)
 }
 
 pub fn document_id(source: &DocumentSource, content_hash: &ContentHash) -> DocumentId {
-    let mut hasher = Sha256::new();
-    hasher.update(source.0.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(content_hash.0.as_bytes());
-    let digest = hasher.finalize();
-    DocumentId(format!("doc:sha256:{digest:x}"))
+    DocumentId::derive(source, content_hash)
 }
 
 pub fn title_from_metadata(

@@ -1,18 +1,24 @@
 use std::sync::Arc;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 use tokio::time::{Instant, timeout_at};
 
 use crate::application::ports::{
-    ApplicationError, DocumentReliabilityInspector, DocumentRepository, Parser, RetrievalOptions,
-    RetrievedResource, Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
+    ApplicationError, DocumentReliabilityInspector, DocumentRepository, OpenResultStore, Parser,
+    RetrievalOptions, RetrievedResource, Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
 };
 use crate::application::reading_profile::{
-    ReadingProfile, ReliabilitySummary, build_reading_profile,
+    READING_PROFILE_SCHEMA_VERSION, ReadingProfile, ReliabilitySummary, build_reading_profile,
 };
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, MediaType, NORMALIZATION_VERSION,
     NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE, NormalizedDocumentHash,
+    TEXT_SEGMENTATION_VERSION,
 };
+
+/// Version of the stored open result. Bump it when the result shape or its meaning changes.
+const OPEN_RESULT_VERSION: &str = "open-result/v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenDocumentCommand {
@@ -20,7 +26,7 @@ pub struct OpenDocumentCommand {
     pub options: RetrievalOptions,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenDocumentResult {
     pub document_id: DocumentId,
     pub source: DocumentSource,
@@ -44,6 +50,8 @@ pub struct OpenDocumentUseCase {
     search_index: Arc<dyn SearchIndex>,
     reliability_inspector: Option<Arc<dyn DocumentReliabilityInspector>>,
     ocr_enabled: bool,
+    /// The store of open results and the ingest fingerprint (OCR and layout backend identity) they are keyed by.
+    open_results: Option<(Arc<dyn OpenResultStore>, String)>,
 }
 
 impl OpenDocumentUseCase {
@@ -63,6 +71,7 @@ impl OpenDocumentUseCase {
             search_index,
             reliability_inspector: None,
             ocr_enabled: false,
+            open_results: None,
         }
     }
 
@@ -83,6 +92,7 @@ impl OpenDocumentUseCase {
             search_index,
             reliability_inspector: None,
             ocr_enabled: false,
+            open_results: None,
         }
     }
 
@@ -92,6 +102,28 @@ impl OpenDocumentUseCase {
     ) -> Self {
         self.reliability_inspector = Some(reliability_inspector);
         self
+    }
+
+    /// Returns the stored result when the same bytes were opened under the same fingerprint, and stores each new
+    /// result. `ingest_fingerprint` must change whenever the parser or its configuration changes.
+    pub fn with_open_result_store(
+        mut self,
+        store: Arc<dyn OpenResultStore>,
+        ingest_fingerprint: String,
+    ) -> Self {
+        self.open_results = Some((store, ingest_fingerprint));
+        self
+    }
+
+    /// The single source of the open-result key fingerprint, so the hit and miss paths cannot drift.
+    fn open_result_fingerprint(&self, ingest_fingerprint: &str) -> String {
+        format!(
+            "{OPEN_RESULT_VERSION}|{}|{NORMALIZATION_VERSION}|{NORMALIZED_DOCUMENT_HASH_VERSION}|{TEXT_SEGMENTATION_VERSION}|{READING_PROFILE_SCHEMA_VERSION}|{}|precise={}|reliability={}|{ingest_fingerprint}",
+            env!("CARGO_PKG_VERSION"),
+            self.search_index.tokenizer_version(),
+            self.search_index.supports_precise_lexical_candidates(),
+            self.reliability_inspector.is_some(),
+        )
     }
 
     pub async fn execute(
@@ -137,6 +169,15 @@ impl OpenDocumentUseCase {
             .retriever
             .retrieve(&command.source, &command.options)
             .await?;
+
+        if let Some((store, ingest_fingerprint)) = &self.open_results {
+            let content_hash = ContentHash::of_bytes(&resource.bytes);
+            let id = DocumentId::derive(&resource.final_source, &content_hash);
+            let fingerprint = self.open_result_fingerprint(ingest_fingerprint);
+            if let Some(result) = store.get(&id, &fingerprint).await? {
+                return Ok(result);
+            }
+        }
 
         let is_pdf = resource.media_type.is_pdf();
         if self.ocr_enabled && is_pdf {
@@ -206,6 +247,11 @@ impl OpenDocumentUseCase {
         let document = Arc::new(document);
         let paragraph_units = Arc::new(paragraph_units);
         let sentence_units = Arc::new(sentence_units);
+        // Drop any stored result before re-indexing, so a crash part way through can never leave a row that
+        // claims the document is complete.
+        if let Some((store, _)) = &self.open_results {
+            store.remove(&document.id).await?;
+        }
         self.repository.save_shared(Arc::clone(&document)).await?;
         if let Some(index) = &self.text_unit_index {
             index
@@ -224,6 +270,10 @@ impl OpenDocumentUseCase {
             )
             .await?;
 
+        if let Some((store, ingest_fingerprint)) = &self.open_results {
+            let fingerprint = self.open_result_fingerprint(ingest_fingerprint);
+            store.put(&result, &fingerprint).await?;
+        }
         Ok(result)
     }
 }

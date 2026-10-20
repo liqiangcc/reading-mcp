@@ -10,6 +10,7 @@ use crate::domain::{
     SentenceTextUnitSet, TextLocator, TextUnit,
 };
 
+use super::open_document::OpenDocumentResult;
 use super::reading_profile::ReliabilitySummary;
 
 pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
@@ -234,6 +235,26 @@ pub trait ParsedDocumentCache: Send + Sync {
     async fn get(&self, key: &ParsedCacheKey) -> Result<Option<Document>, ApplicationError>;
 
     async fn put(&self, key: ParsedCacheKey, document: Document) -> Result<(), ApplicationError>;
+}
+
+/// Stores the result of opening a document, keyed by its id and an open-result fingerprint.
+#[async_trait]
+pub trait OpenResultStore: Send + Sync {
+    /// The stored result for `id`, only if it was stored under exactly `fingerprint`.
+    /// A row that no longer deserializes is a miss (Ok(None)), not an error.
+    async fn get(
+        &self,
+        id: &DocumentId,
+        fingerprint: &str,
+    ) -> Result<Option<OpenDocumentResult>, ApplicationError>;
+
+    async fn put(
+        &self,
+        result: &OpenDocumentResult,
+        fingerprint: &str,
+    ) -> Result<(), ApplicationError>;
+
+    async fn remove(&self, id: &DocumentId) -> Result<(), ApplicationError>;
 }
 
 #[async_trait]

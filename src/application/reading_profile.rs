@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::application::ports::ApplicationError;
 use crate::domain::{
     Document, ParagraphTextUnitSet, SentenceEligibility, SentenceTextUnitSet,
@@ -6,43 +8,43 @@ use crate::domain::{
 
 pub const READING_PROFILE_SCHEMA_VERSION: &str = "reading-profile/v1";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReadingCapabilityAvailability {
     Available,
     Unavailable,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StructureCapability {
     pub availability: ReadingCapabilityAvailability,
     pub section_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentedReadingCapability {
     pub availability: ReadingCapabilityAvailability,
     pub segmentation_version: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SentenceFirstCapability {
     pub availability: ReadingCapabilityAvailability,
     pub segmentation_version: String,
     pub source_preserving_coarse_regions: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimpleReadingCapability {
     pub availability: ReadingCapabilityAvailability,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LexicalSearchCapability {
     pub availability: ReadingCapabilityAvailability,
     pub precise_candidates: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadingCapabilities {
     pub structural_navigation: StructureCapability,
     pub paragraph_enumeration: SegmentedReadingCapability,
@@ -52,7 +54,7 @@ pub struct ReadingCapabilities {
     pub lexical_search: LexicalSearchCapability,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalTextCoverage {
     pub owner_chars: usize,
     pub paragraph_chars: usize,
@@ -70,14 +72,14 @@ pub struct CanonicalTextCoverage {
     pub sentence_coarse_only_chars: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReliabilityIntegrity {
     Valid,
     Invalid,
     NotApplicable,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliabilityEvidence {
     pub kind: String,
     pub schema_version: Option<String>,
@@ -86,7 +88,7 @@ pub struct ReliabilityEvidence {
     pub degradation_codes: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicationCoverage {
     pub source_units_total: usize,
     pub source_units_represented: usize,
@@ -94,7 +96,7 @@ pub struct PublicationCoverage {
     pub source_units_unsupported: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StructureProvenanceCoverage {
     pub native_navigation_sections: usize,
     pub legacy_navigation_sections: usize,
@@ -102,14 +104,14 @@ pub struct StructureProvenanceCoverage {
     pub source_item_fallback_sections: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NavigationResolutionCoverage {
     pub targets_total: usize,
     pub targets_resolved: usize,
     pub targets_unresolved_or_unsupported: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliabilitySummary {
     pub evidence: Vec<ReliabilityEvidence>,
     pub publication_coverage: Option<PublicationCoverage>,
@@ -134,7 +136,7 @@ impl ReliabilitySummary {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadingProfile {
     pub schema_version: String,
     pub capabilities: ReadingCapabilities,

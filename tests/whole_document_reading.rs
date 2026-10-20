@@ -199,6 +199,47 @@ async fn saved_text_locator_resumes_after_mcp_restart_and_questions_do_not_advan
         .expect("second client should stop");
 }
 
+#[tokio::test]
+async fn reopening_after_restart_returns_the_stored_open_result_and_text_units_still_work() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let state_dir = directory.path().join("state");
+    let document_path = directory.path().join("reopen.md");
+    tokio::fs::write(
+        &document_path,
+        "# Reopen\n\nFirst sentence. Second sentence.\n",
+    )
+    .await
+    .expect("reopen fixture should be written");
+
+    let first_client = start_client(directory.path(), &state_dir).await;
+    let opened = open(&first_client, &document_path).await;
+    first_client
+        .cancel()
+        .await
+        .expect("first client should stop");
+
+    let second_client = start_client(directory.path(), &state_dir).await;
+    let reopened = open(&second_client, &document_path).await;
+    assert_eq!(reopened, opened);
+    let units = call_units(
+        &second_client,
+        &reopened.document_id,
+        "section://reopen",
+        json!({
+            "requested_kind": "sentence",
+            "coverage_policy": "preserve_source",
+            "max_items": 1
+        }),
+    )
+    .await;
+    assert_eq!(units.items[0].text, "First sentence.");
+
+    second_client
+        .cancel()
+        .await
+        .expect("second client should stop");
+}
+
 async fn open(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
     path: &std::path::Path,

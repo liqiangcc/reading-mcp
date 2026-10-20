@@ -12,8 +12,8 @@ use crate::application::list_directories::ListDirectoryUseCase;
 use crate::application::list_documents::ListDocumentsUseCase;
 use crate::application::open_document::OpenDocumentUseCase;
 use crate::application::ports::{
-    DocumentRepository, ParsedDocumentCache, Parser, RawResourceCache, Retriever, SearchIndex,
-    SourcePolicy, TextUnitIndex,
+    DocumentRepository, OpenResultStore, ParsedDocumentCache, Parser, RawResourceCache, Retriever,
+    SearchIndex, SourcePolicy, TextUnitIndex,
 };
 use crate::application::read_document::ReadDocumentUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
@@ -21,8 +21,8 @@ use crate::application::source_view::SourceViewUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
     FileRawResourceCache, ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache,
-    ObservedRetriever, ObservedSearchIndex, SqliteDocumentRepository, SqliteSearchIndex,
-    SqliteTextUnitIndex,
+    ObservedRetriever, ObservedSearchIndex, SqliteDocumentRepository, SqliteOpenResultStore,
+    SqliteSearchIndex, SqliteTextUnitIndex,
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::{
@@ -43,6 +43,7 @@ struct RuntimeComponents {
     repository: Arc<dyn DocumentRepository>,
     text_unit_index: Arc<dyn TextUnitIndex>,
     search_index: Arc<dyn SearchIndex>,
+    open_results: Arc<dyn OpenResultStore>,
 }
 
 impl RuntimeComponents {
@@ -53,6 +54,7 @@ impl RuntimeComponents {
             repository: self.repository,
             text_unit_index: self.text_unit_index,
             search_index: Arc::new(ObservedSearchIndex::new(self.search_index)),
+            open_results: self.open_results,
         }
     }
 }
@@ -163,6 +165,15 @@ pub fn build_server(
         .as_ref()
         .map(|i| i.sha256.clone())
         .unwrap_or_else(|| "ocr-disabled/v1".into());
+    // Everything that changes what the parser publishes for the same bytes; keys the stored open results.
+    let ingest_fingerprint = format!(
+        "{fingerprint}|pdf-layout={}",
+        if config.pdf_layout_python.is_some() {
+            crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE
+        } else {
+            "off"
+        }
+    );
     let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache)
         .with_ocr_fingerprint(fingerprint)
         .with_ocr_admission(config.ocr_enabled);
@@ -183,6 +194,7 @@ pub fn build_server(
     let repository = components.repository;
     let text_unit_index = components.text_unit_index;
     let search_index = components.search_index;
+    let open_results = components.open_results;
     let mut source_view_renderer =
         FileProcessIsolatedPdfSourceViewRenderer::current_executable(config.source_view.timeout)?;
     if let Some(python) = &config.pdf_layout_python {
@@ -205,7 +217,8 @@ pub fn build_server(
             search_index.clone(),
         )
         .with_reliability_inspector(Arc::new(PersistedDocumentReliabilityInspector))
-        .with_ocr_budget(config.ocr_enabled),
+        .with_ocr_budget(config.ocr_enabled)
+        .with_open_result_store(open_results, ingest_fingerprint),
     );
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
     let list_directory = Arc::new(ListDirectoryUseCase::new(config.local_roots.clone()));
@@ -297,6 +310,7 @@ fn build_state_components(
             repository: Arc::new(SqliteDocumentRepository::open(&database)?),
             text_unit_index: Arc::new(SqliteTextUnitIndex::open(&database)?),
             search_index: Arc::new(SqliteSearchIndex::open(&database)?),
+            open_results: Arc::new(SqliteOpenResultStore::open(&database)?),
         },
         ephemeral_state,
     ))

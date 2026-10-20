@@ -9,8 +9,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::sqlite_support::{open_connection, run_sqlite};
+use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, SectionTextUnits, TextUnitIndex,
+    ApplicationError, DocumentRepository, OpenResultStore, SectionTextUnits, TextUnitIndex,
 };
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NORMALIZATION_VERSION,
@@ -170,6 +171,110 @@ impl DocumentRepository for SqliteDocumentRepository {
                     Ok(document)
                 })
                 .transpose()
+            },
+        )
+        .await
+    }
+}
+
+/// Stores the open result of each document, keyed by document id and checked against a fingerprint on read.
+pub struct SqliteOpenResultStore {
+    connection: Arc<Mutex<Connection>>,
+}
+
+impl SqliteOpenResultStore {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
+        let connection = open_connection(path.as_ref(), ApplicationError::RepositoryFailed)?;
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS open_results_v1 (
+                    document_id TEXT PRIMARY KEY,
+                    fingerprint TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                 );",
+            )
+            .map_err(repository_error)?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+}
+
+#[async_trait]
+impl OpenResultStore for SqliteOpenResultStore {
+    async fn get(
+        &self,
+        id: &DocumentId,
+        fingerprint: &str,
+    ) -> Result<Option<OpenDocumentResult>, ApplicationError> {
+        let id = id.0.clone();
+        let fingerprint = fingerprint.to_owned();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let row = connection
+                    .query_row(
+                        "SELECT fingerprint, result_json FROM open_results_v1 WHERE document_id = ?1",
+                        params![id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .map_err(repository_error)?;
+                Ok(row.and_then(|(stored_fingerprint, json)| {
+                    if stored_fingerprint != fingerprint {
+                        return None;
+                    }
+                    // A row that no longer deserializes is a miss; the document is simply re-opened.
+                    serde_json::from_str::<OpenDocumentResult>(&json).ok()
+                }))
+            },
+        )
+        .await
+    }
+
+    async fn put(
+        &self,
+        result: &OpenDocumentResult,
+        fingerprint: &str,
+    ) -> Result<(), ApplicationError> {
+        let json = serde_json::to_string(result)
+            .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+        let id = result.document_id.0.clone();
+        let fingerprint = fingerprint.to_owned();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO open_results_v1(document_id, fingerprint, result_json)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(document_id) DO UPDATE SET
+                            fingerprint = excluded.fingerprint,
+                            result_json = excluded.result_json",
+                        params![id, fingerprint, json],
+                    )
+                    .map_err(repository_error)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    async fn remove(&self, id: &DocumentId) -> Result<(), ApplicationError> {
+        let id = id.0.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                connection
+                    .execute(
+                        "DELETE FROM open_results_v1 WHERE document_id = ?1",
+                        params![id],
+                    )
+                    .map_err(repository_error)?;
+                Ok(())
             },
         )
         .await

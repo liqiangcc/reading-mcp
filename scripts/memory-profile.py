@@ -17,6 +17,10 @@ deadline the server is killed, its rusage is still collected, and the run is rec
 timeout. Rows are printed and the `--out` file is rewritten after every run so partial results
 survive a job timeout. Once a size times out or fails, the larger sizes for that state are
 skipped.
+
+With `--reopen`, every successful input is opened a second time by a new server process on the
+same state directory, which measures the restart-and-reopen case. The row then gains `Reopen s`
+and `Reopen extra KiB` columns; without the flag the table is unchanged.
 """
 
 from __future__ import annotations
@@ -326,15 +330,22 @@ def table_cell(value: object) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def markdown_table(rows: list[dict]) -> str:
+def markdown_table(rows: list[dict], reopen: bool = False) -> str:
     header = (
         "| State | Label | Size MiB | Sections | Title | Peak RSS KiB | Open s | MiB/s | "
         "Extra KiB | Copies | OK | Error |\n"
         "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :--: | --- |"
     )
+    if reopen:
+        header = (
+            "| State | Label | Size MiB | Sections | Title | Peak RSS KiB | Open s | MiB/s | "
+            "Extra KiB | Copies | OK | Error | Reopen s | Reopen extra KiB |\n"
+            "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :--: | --- "
+            "| ---: | ---: |"
+        )
     lines = [header]
     for row in rows:
-        lines.append(
+        text = (
             "| {state} | {label} | {size} | {sections} | {title} | {peak} | {open} | {rate} | "
             "{extra} | {copies} | {ok} | {error} |".format(
                 state=table_cell(row["state"]),
@@ -351,6 +362,12 @@ def markdown_table(rows: list[dict]) -> str:
                 error=table_cell(row["error"]),
             )
         )
+        if reopen:
+            text += " {seconds} | {extra} |".format(
+                seconds=format_number(row.get("reopen_seconds")),
+                extra=table_cell(row.get("reopen_extra_kib", "-")),
+            )
+        lines.append(text)
     return "\n".join(lines)
 
 
@@ -440,6 +457,7 @@ def run_input_group(
     skip_on_failure: bool,
     rows: list[dict],
     out_path: str,
+    reopen: bool = False,
 ) -> None:
     skip = False
     for entry in inputs:
@@ -477,6 +495,15 @@ def run_input_group(
             timed_out,
             baseline_peak,
         )
+        if reopen and row["ok"]:
+            # A second server process on the same state directory: the restart-and-reopen case.
+            reopen_peak, reopen_seconds, reopen_error, _, _, _ = run_one(
+                command, env, entry["source"], run_timeout
+            )
+            row["reopen_seconds"] = reopen_seconds if reopen_error is None else None
+            row["reopen_extra_kib"] = (
+                reopen_peak - baseline_peak if reopen_error is None else None
+            )
         rows.append(row)
         log_row(row)
         dump_rows(out_path, rows)
@@ -496,6 +523,11 @@ def main() -> int:
     parser.add_argument("--cjk-sizes-mb", default="")
     parser.add_argument("--markdown-sections", type=int, default=None)
     parser.add_argument("--parse-timeout-seconds", type=float, default=None)
+    parser.add_argument(
+        "--reopen",
+        action="store_true",
+        help="also open each successful input again in a new process on the same state dir",
+    )
     args = parser.parse_args()
 
     sizes = parse_floats(args.sizes_mb)
@@ -572,7 +604,7 @@ def main() -> int:
             ]
             run_input_group(
                 state, env, binary, args.wrapper, run_timeout, size_inputs,
-                baseline_peak, True, rows, args.out,
+                baseline_peak, True, rows, args.out, args.reopen,
             )
 
             if cjk_documents:
@@ -582,7 +614,7 @@ def main() -> int:
                 ]
                 run_input_group(
                     state, env, binary, args.wrapper, run_timeout, cjk_inputs,
-                    baseline_peak, True, rows, args.out,
+                    baseline_peak, True, rows, args.out, args.reopen,
                 )
 
             if markdown_path is not None:
@@ -595,7 +627,7 @@ def main() -> int:
                 ]
                 run_input_group(
                     state, env, binary, args.wrapper, run_timeout, markdown_inputs,
-                    baseline_peak, False, rows, args.out,
+                    baseline_peak, False, rows, args.out, args.reopen,
                 )
 
             if document_entries:
@@ -609,10 +641,10 @@ def main() -> int:
                 ]
                 run_input_group(
                     state, env, binary, args.wrapper, run_timeout, document_inputs,
-                    baseline_peak, False, rows, args.out,
+                    baseline_peak, False, rows, args.out, args.reopen,
                 )
 
-    table = markdown_table(rows)
+    table = markdown_table(rows, args.reopen)
     print(table, flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

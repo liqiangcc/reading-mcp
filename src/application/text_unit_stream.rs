@@ -18,6 +18,10 @@ use crate::domain::{
 /// Version of the stored per-section TextUnit stream. Bump it when the stream shape or its meaning changes.
 pub const TEXT_UNIT_STREAM_VERSION: &str = "text-unit-stream/v1";
 
+/// Version of the whole stored TextUnit index (documents, sections, items, coverage, streams, summaries).
+/// Bump it when the store layout or its meaning changes so documents are re-ingested on reopen.
+pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v2";
+
 /// A borrowed unit of a section stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamUnit<'a> {
@@ -26,7 +30,7 @@ pub enum StreamUnit<'a> {
 }
 
 impl<'a> StreamUnit<'a> {
-    /// The kind string persisted in `text_unit_items_v1.kind` for this unit.
+    /// The kind this unit is persisted as in the TextUnit store.
     pub fn kind_str(self) -> &'static str {
         match self {
             Self::Paragraph(_) => "paragraph",

@@ -74,11 +74,11 @@ jobs:
       - name: Summarize heaptrack
         if: always()
         run: |
-          if ! compgen -G "leak/en-novel.*.zst" > /dev/null; then
+          if ! compgen -G "leak/en-novel*.zst" > /dev/null; then
             echo "no heaptrack profile found"
             exit 0
           fi
-          heaptrack_print --file leak/en-novel.*.zst --print-leaks=1 --print-peaks=1 \
+          heaptrack_print --file leak/en-novel*.zst --print-leaks=1 --print-peaks=1 \
             --peak-limit=25 --sub-peak-limit=6 --print-allocators=0 --print-temporary=0 \
             --print-histogram=0 > leak/en-novel.txt
           echo "=== MOST CALLS / PEAK MEMORY CONSUMERS / MEMORY LEAKS"

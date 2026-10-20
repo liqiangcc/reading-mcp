@@ -309,14 +309,38 @@ def child_pids(pid: int) -> list[int]:
     return pids
 
 
-def resolve_server_pid(process: subprocess.Popen, wrapped: bool) -> int:
+def process_exe(pid: int) -> str | None:
+    try:
+        return os.path.realpath(f"/proc/{pid}/exe")
+    except OSError:
+        return None
+
+
+def descendants(pid: int) -> list[int]:
+    found: list[int] = []
+    stack = [pid]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for child in child_pids(current):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def resolve_server_pid(process: subprocess.Popen, wrapped: bool, binary: str) -> int:
     if not wrapped:
         return process.pid
+    target = os.path.realpath(binary)
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
-        children = child_pids(process.pid)
-        if children:
-            return children[0]
+        # The wrapper may exec the server itself or start it one or more levels down.
+        for pid in [process.pid, *descendants(process.pid)]:
+            if process_exe(pid) == target:
+                return pid
         time.sleep(0.05)
     try:
         output = subprocess.check_output(
@@ -391,7 +415,7 @@ def probe(args: argparse.Namespace) -> int:
         if not sections:
             raise ProbeError("document has no sections")
 
-        pid = resolve_server_pid(server.process, bool(wrapper_parts))
+        pid = resolve_server_pid(server.process, bool(wrapper_parts), binary)
         start_rss, start_hwm = read_rss_mib(pid)
         samples.append(
             {"calls": 0, "rss_mib": round(start_rss, 1), "hwm_mib": round(start_hwm, 1)}

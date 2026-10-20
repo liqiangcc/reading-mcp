@@ -1,0 +1,93 @@
+name: Leak profile
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/leak-**']
+jobs:
+  leak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install heaptrack
+        run: sudo apt-get update && sudo apt-get install -y heaptrack
+      - name: Build release binary with line tables
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Download public-domain books
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p "$BOOKS"
+          download() {
+            local url="$1" out="$2"
+            if curl -fsSL --retry 3 -o "$out" "$url"; then
+              echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+            else
+              echo "::warning::failed to download $url"
+              rm -f "$out"
+            fi
+            return 0
+          }
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" "$BOOKS/en-novel.epub"
+          download "https://www.gutenberg.org/cache/epub/24264/pg24264-images.epub" "$BOOKS/zh-classic.epub"
+      - name: Long read baseline
+        if: always()
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p leak
+          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+            --document "$BOOKS/en-novel.epub" --calls 100000 \
+            --out leak/en-novel-baseline.json
+      - name: Long read with MALLOC_ARENA_MAX=2
+        if: always()
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p leak
+          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+            --document "$BOOKS/en-novel.epub" --calls 100000 \
+            --env MALLOC_ARENA_MAX=2 \
+            --out leak/en-novel-arena2.json
+      - name: Long read with telemetry off
+        if: always()
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p leak
+          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+            --document "$BOOKS/en-novel.epub" --calls 100000 \
+            --env READING_MCP_TELEMETRY=0 \
+            --out leak/en-novel-no-telemetry.json
+      - name: Long read under heaptrack
+        if: always()
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p leak
+          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+            --document "$BOOKS/en-novel.epub" --calls 30000 \
+            --wrapper "heaptrack -o leak/en-novel" \
+            --out leak/en-novel-heaptrack.json
+      - name: Summarize heaptrack
+        if: always()
+        run: |
+          if ! compgen -G "leak/en-novel*.zst" > /dev/null; then
+            echo "no heaptrack profile found"
+            exit 0
+          fi
+          heaptrack_print --file leak/en-novel*.zst --print-leaks=1 --print-peaks=1 \
+            --peak-limit=25 --sub-peak-limit=6 --print-allocators=0 --print-temporary=0 \
+            --print-histogram=0 > leak/en-novel.txt
+          echo "=== MOST CALLS / PEAK MEMORY CONSUMERS / MEMORY LEAKS"
+          grep -A80 -E "MOST CALLS|PEAK MEMORY CONSUMERS|MEMORY LEAKS" leak/en-novel.txt | head -300 || true
+          echo "=== total memory leaked"
+          grep -i "total memory leaked" leak/en-novel.txt || true
+      - name: Upload leak data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leak-profile
+          path: leak/

@@ -15,6 +15,10 @@ use reading_mcp::application::ports::{
     StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use reading_mcp::application::text_unit_store::store_text_units;
+use reading_mcp::application::text_unit_stream::{
+    ParagraphCoverageDesc, ParagraphDesc, SectionCoverageDesc, SentenceDesc, StreamEntryDesc,
+    StreamUnit, UnitRef, plan_section_stream, plan_section_stream_desc,
+};
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, ParagraphTextUnitSet,
     Section, SectionId, SentenceTextUnitSet, TextLocator,
@@ -894,6 +898,141 @@ async fn stored_context_reports_stale_instead_of_deriving_after_stream_rows_are_
         .await
         .expect_err("missing stored units must fail closed");
     assert!(matches!(error, ApplicationError::StaleDocument(_)));
+}
+
+#[tokio::test]
+async fn desc_planner_with_range_lengths_equals_text_planner() {
+    for document in [
+        parse_plain().await,
+        parse_markdown().await,
+        parse_html().await,
+    ] {
+        let paragraphs = document
+            .try_paragraph_text_units()
+            .expect("valid paragraph set");
+        let sentences = document
+            .try_sentence_text_units()
+            .expect("valid sentence set");
+
+        for section in all_sections(&document) {
+            let section_paragraphs = paragraphs
+                .units
+                .iter()
+                .filter(|unit| unit.owner_section_id == section.id)
+                .collect::<Vec<_>>();
+            let section_sentences = sentences
+                .units
+                .iter()
+                .filter(|unit| unit.owner_section_id == section.id)
+                .collect::<Vec<_>>();
+            let paragraph_coverage = paragraphs
+                .coverage
+                .iter()
+                .find(|coverage| coverage.owner_section_id == section.id);
+            let sentence_coverage = sentences
+                .coverage
+                .iter()
+                .filter(|coverage| coverage.owner_section_id == section.id)
+                .collect::<Vec<_>>();
+
+            for kind in [
+                RequestedTextUnitKind::Paragraph,
+                RequestedTextUnitKind::Sentence,
+            ] {
+                let text_plan = plan_section_stream(
+                    &section.id,
+                    &section_paragraphs,
+                    paragraph_coverage,
+                    &section_sentences,
+                    &sentence_coverage,
+                    kind,
+                )
+                .expect("text planner should plan");
+
+                let paragraph_descs = section_paragraphs
+                    .iter()
+                    .map(|unit| ParagraphDesc {
+                        paragraph_index: unit.paragraph_index,
+                        char_count: unit.normalized_range.len(),
+                    })
+                    .collect::<Vec<_>>();
+                let sentence_descs = section_sentences
+                    .iter()
+                    .map(|unit| SentenceDesc {
+                        paragraph_index: unit.paragraph_index,
+                        sentence_index: unit.sentence_index,
+                        char_count: unit.normalized_range.len(),
+                    })
+                    .collect::<Vec<_>>();
+                let coverage_descs = sentence_coverage
+                    .iter()
+                    .map(|coverage| ParagraphCoverageDesc {
+                        paragraph_index: coverage.paragraph_index,
+                        content_class: coverage.content_class,
+                        eligibility: coverage.eligibility,
+                        separator_chars: coverage.separator_chars,
+                    })
+                    .collect::<Vec<_>>();
+                let section_coverage_desc =
+                    paragraph_coverage.map(|coverage| SectionCoverageDesc {
+                        owner_chars: coverage.owner_chars,
+                        separator_chars: coverage.separator_chars,
+                        paragraph_count: coverage.paragraph_count,
+                    });
+
+                let desc_plan = plan_section_stream_desc(
+                    &section.id,
+                    &paragraph_descs,
+                    section_coverage_desc.as_ref(),
+                    &sentence_descs,
+                    &coverage_descs,
+                    kind,
+                )
+                .expect("descriptor planner should plan");
+
+                let text_entries = text_plan
+                    .entries
+                    .iter()
+                    .map(|entry| StreamEntryDesc {
+                        unit: match entry.unit {
+                            StreamUnit::Paragraph(unit) => UnitRef::Paragraph(
+                                section_paragraphs
+                                    .iter()
+                                    .position(|candidate| std::ptr::eq(*candidate, unit))
+                                    .expect("paragraph should come from the section slice"),
+                            ),
+                            StreamUnit::Sentence(unit) => UnitRef::Sentence(
+                                section_sentences
+                                    .iter()
+                                    .position(|candidate| std::ptr::eq(*candidate, unit))
+                                    .expect("sentence should come from the section slice"),
+                            ),
+                        },
+                        content_class: entry.content_class,
+                        degradation: entry.degradation,
+                        char_count: entry.char_count,
+                        eligible: entry.eligible,
+                    })
+                    .collect::<Vec<_>>();
+
+                assert_eq!(
+                    text_entries, desc_plan.entries,
+                    "entries disagree for section {}/{:?}",
+                    section.id.0, kind
+                );
+                assert_eq!(
+                    text_plan.preserve_source, desc_plan.preserve_source,
+                    "preserve coverage disagrees for section {}/{:?}",
+                    section.id.0, kind
+                );
+                assert_eq!(
+                    text_plan.eligible_only, desc_plan.eligible_only,
+                    "eligible coverage disagrees for section {}/{:?}",
+                    section.id.0, kind
+                );
+            }
+        }
+    }
 }
 
 fn summarize(

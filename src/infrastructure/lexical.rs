@@ -932,7 +932,7 @@ mod tests {
     fn paragraph_prefilters_answer_like_the_slice() {
         let text = "皇帝在朝堂。群臣议事。節度使入朝。太祖問兵。";
         let index = NormalizedTextIndex::new(text);
-        let ranges = [(0usize, 6usize), (6, 11), (11, 18), (18, 23)];
+        let ranges = [(0usize, 6usize), (6, 11), (11, 17), (17, 22)];
         let query = LexicalQuery::new("朝").expect("query tokens");
         let expected =
             |start: usize, end: usize| query.may_contain_all(&slice_lowered_of(&index, start, end));
@@ -964,7 +964,7 @@ mod tests {
         );
 
         // Ranges that do not increase keep the HashMap, and still answer like the slice.
-        let unordered_ranges = [(11usize, 18usize), (0usize, 6usize)];
+        let unordered_ranges = [(11usize, 17usize), (0usize, 6usize)];
         assert!(!ParagraphPrefilters::ranges_increase(unordered_ranges));
         let mut unordered = ParagraphPrefilters::new(false);
         for (start, end) in unordered_ranges {

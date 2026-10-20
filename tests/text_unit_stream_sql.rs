@@ -42,6 +42,9 @@ const HTML: &str = r#"<html><body>
 <table><tr><td>A.</td><td>B.</td></tr></table>
 </body></html>"#;
 
+/// Prose paragraphs interleaved with coarse-only ones, so EligibleOnly drops items PreserveSource keeps.
+const MIXED: &str = "# Mixed\n\nProse one. Prose two.\n\n```text\ncode one. code two.\n```\n\n- Item one. Item two.\n\n> Quote one. Quote two.\n\nClosing prose. Another closing sentence.\n";
+
 #[tokio::test]
 async fn sqlite_streams_match_the_default_planner_for_every_section_kind_and_policy() {
     let directory = tempdir().expect("temporary directory should be created");
@@ -144,6 +147,92 @@ async fn compare_indexes(
                 }
 
                 compare_positions(sqlite, memory, &units, key).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn sqlite_stream_windows_match_the_default_planner_for_every_section_kind_and_policy() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let sqlite: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("sqlite index should open"));
+    let memory: Arc<dyn TextUnitIndex> = Arc::new(InMemoryTextUnitIndex::default());
+
+    for document in [
+        parse_plain().await,
+        parse_markdown().await,
+        parse_html().await,
+        parse_mixed().await,
+    ] {
+        let paragraphs = document
+            .try_paragraph_text_units()
+            .expect("valid paragraph set");
+        let sentences = document
+            .try_sentence_text_units()
+            .expect("valid sentence set");
+        store_text_units(&*sqlite, &document)
+            .await
+            .expect("sqlite units should persist");
+        store_text_units(&*memory, &document)
+            .await
+            .expect("memory units should persist");
+
+        for section in all_sections(&document) {
+            let units = SectionTextUnits::from_sets(&paragraphs, &sentences, &section.id);
+            for kind in [
+                RequestedTextUnitKind::Paragraph,
+                RequestedTextUnitKind::Sentence,
+            ] {
+                for policy in [
+                    TextUnitCoveragePolicy::PreserveSource,
+                    TextUnitCoveragePolicy::EligibleOnly,
+                ] {
+                    let key = TextUnitStreamKey {
+                        document_id: &document.id,
+                        section_id: &section.id,
+                        kind,
+                        policy,
+                    };
+                    let sqlite_summary = summarize(sqlite.section_stream_summary(key).await);
+                    let memory_summary = summarize(memory.section_stream_summary(key).await);
+                    assert_eq!(
+                        sqlite_summary, memory_summary,
+                        "summary disagreement for section {}/{:?}/{policy:?}",
+                        section.id.0, kind
+                    );
+                    let Ok(Some(summary)) = sqlite_summary else {
+                        continue;
+                    };
+                    let total = summary.total_items;
+
+                    for (direction, position, limit) in [
+                        (TextUnitDirection::Forward, 0usize, 1usize),
+                        (TextUnitDirection::Forward, total / 2, 7),
+                        (TextUnitDirection::Forward, total.saturating_sub(5), 5),
+                        (TextUnitDirection::Forward, total + 3, 5),
+                        (TextUnitDirection::Backward, total, 7),
+                        (TextUnitDirection::Backward, 3, 7),
+                        (TextUnitDirection::Forward, 0, total),
+                    ] {
+                        let sqlite_items = sqlite
+                            .section_stream_items(key, direction, position, limit)
+                            .await
+                            .expect("sqlite page should load");
+                        let memory_items = memory
+                            .section_stream_items(key, direction, position, limit)
+                            .await
+                            .expect("memory page should load");
+                        assert_eq!(
+                            sqlite_items, memory_items,
+                            "page disagreement for section {}/{:?}/{policy:?}/{direction:?} position {position} limit {limit}",
+                            section.id.0, kind
+                        );
+                    }
+
+                    compare_positions(&*sqlite, &*memory, &units, key).await;
+                }
             }
         }
     }
@@ -1063,6 +1152,13 @@ async fn parse_html() -> Document {
         .parse(resource("memory:blocks.html", "text/html", HTML))
         .await
         .expect("html should parse")
+}
+
+async fn parse_mixed() -> Document {
+    MarkdownParser
+        .parse(resource("memory:mixed.md", "text/markdown", MIXED))
+        .await
+        .expect("mixed markdown should parse")
 }
 
 fn resource(source: &str, media_type: &str, body: &str) -> RetrievedResource {

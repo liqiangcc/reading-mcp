@@ -512,6 +512,7 @@ fn collect_section_segmentation(
         // strict callers can fail closed instead of trusting the over-claim.
         if eligibility == SentenceEligibility::Eligible
             && content_class == ParagraphContentClass::ProseOrUnknown
+            && fallback_guard_can_fire(text)
             && looks_like_unreliable_fallback_text(text)
         {
             eligibility = SentenceEligibility::CoarseParagraphOnly;
@@ -953,6 +954,49 @@ const MIN_MISSING_SPACE_GLUE_EVENTS: usize = 3;
 const MIN_DOUBLED_RUN_CHARS: usize = 6;
 const MIN_BIBLIOGRAPHIC_MARKERS: usize = 4;
 const BIBLIOGRAPHIC_WINDOW_WORDS: usize = 10;
+
+/// Proves the fallback guard cannot fire, without running its Unicode-heavy work.
+///
+/// Every signal needs at least one of:
+/// - an ASCII letter or digit (the bibliographic markers, the year and link markers, the
+///   digit/uppercase and digit/month glue events);
+/// - `)` (the `)provided` glue event);
+/// - a cased letter, upper- or lowercase (the punctuation/uppercase, uppercase-run and
+///   lowercase/uppercase glue events);
+/// - two adjacent equal alphabetic characters (the doubled-character token needs a run of
+///   exactly two to count as a doubled run).
+///
+/// When none is present, all three signals are impossible and skipping the guard cannot
+/// change a verdict. CJK text without repeated adjacent characters therefore skips the
+/// per-character case lookups and the per-word lowercasing that the guard would do.
+#[doc(hidden)]
+pub fn fallback_guard_can_fire(text: &str) -> bool {
+    if text
+        .as_bytes()
+        .iter()
+        .any(|byte| byte.is_ascii_alphanumeric() || *byte == b')')
+    {
+        return true;
+    }
+
+    let mut previous = None;
+    for ch in text.chars() {
+        if ch.is_uppercase() || ch.is_lowercase() {
+            return true;
+        }
+        if ch.is_alphabetic() && previous == Some(ch) {
+            return true;
+        }
+        previous = Some(ch);
+    }
+    false
+}
+
+/// The pre-R5b guard verdict, kept for the differential and real-book comparisons.
+#[doc(hidden)]
+pub fn looks_like_unreliable_fallback_text_unguarded(text: &str) -> bool {
+    looks_like_unreliable_fallback_text(text)
+}
 
 /// A fallback paragraph that merges heterogeneous fragments (masthead, title, byline,
 /// bibliographic metadata) or carries extraction corruption (missing spaces, doubled

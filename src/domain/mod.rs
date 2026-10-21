@@ -47,7 +47,8 @@ pub use segmentation::{
 };
 #[doc(hidden)]
 pub use segmentation::{
-    ParagraphBoundarySource, ParagraphCandidate, paragraph_content_class_in_section,
+    ParagraphBoundarySource, ParagraphCandidate, fallback_guard_can_fire,
+    looks_like_unreliable_fallback_text_unguarded, paragraph_content_class_in_section,
     paragraph_content_class_whole_map_scan, section_paragraph_candidates_indexed,
     section_paragraph_candidates_linear_scan,
 };

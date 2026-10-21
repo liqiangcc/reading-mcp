@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use reading_mcp::application::ports::{ApplicationError, Parser, RetrievedResource};
 use reading_mcp::domain::{
-    Document, DocumentSource, MediaType, Section, paragraph_content_class_in_section,
+    Document, DocumentSource, MediaType, Section, fallback_guard_can_fire,
+    looks_like_unreliable_fallback_text_unguarded, paragraph_content_class_in_section,
     paragraph_content_class_whole_map_scan, section_paragraph_candidates_indexed,
     section_paragraph_candidates_linear_scan,
 };
@@ -119,6 +120,16 @@ fn compare_document(label: &str, document: &Document, comparisons: &mut Comparis
             if in_section != whole_map {
                 comparisons.mismatch(format!(
                     "{label} section={} paragraph={} content class differs: in-section {in_section:?} vs whole-map {whole_map:?}",
+                    section.id.0,
+                    paragraph.paragraph_index()
+                ));
+            }
+
+            let unguarded = looks_like_unreliable_fallback_text_unguarded(text);
+            let guarded = fallback_guard_can_fire(text) && unguarded;
+            if guarded != unguarded {
+                comparisons.mismatch(format!(
+                    "{label} section={} paragraph={} fallback guard verdict differs: guarded {guarded} vs unguarded {unguarded}",
                     section.id.0,
                     paragraph.paragraph_index()
                 ));
@@ -404,6 +415,119 @@ async fn epub_parse_with_segmentation_returns_the_segmentation_the_document_rebu
 
     assert!(checked > 0, "no EPUB fixture was checked");
     println!("epub fixtures: {checked} compared, 0 mismatches");
+}
+
+fn guarded_verdict(text: &str) -> bool {
+    fallback_guard_can_fire(text) && looks_like_unreliable_fallback_text_unguarded(text)
+}
+
+fn generated_corpus() -> Vec<String> {
+    const CJK: &[char] = &[
+        '的', '一', '是', '了', '我', '不', '人', '在', '他', '有', '这', '个', '上', '们', '来',
+        '到', '时', '大', '地', '为', '子', '中', '你', '说', '生', '国', '年', '着', '就', '那',
+        '和', '要', '她', '出', '也', '得', '里', '后', '自', '以',
+    ];
+    const LATIN: &[&str] = &[
+        "the",
+        "river",
+        "Vol.",
+        "No.",
+        "pp.",
+        "1901",
+        "http://example.com",
+        "(c)",
+        "SCIENCE",
+        "StrongInference",
+        "JohnR.Platt",
+        "others.John",
+        ")provided",
+        "NewSeries",
+        "iPhone",
+        "McDonald",
+        "committee",
+        "bookkeeping",
+        "NNoottee",
+    ];
+    const ENDINGS: &[char] = &['。', '！', '？', '.', '!', '?', ' ', '\n'];
+
+    let mut state = 0x5eed_u64;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        state
+    };
+
+    let mut corpus = Vec::new();
+    for _ in 0..200 {
+        let len = (next() % 12 + 1) as usize;
+        let mut text = String::new();
+        for _ in 0..len {
+            text.push(CJK[(next() as usize) % CJK.len()]);
+        }
+        text.push(ENDINGS[(next() as usize) % ENDINGS.len()]);
+        corpus.push(text);
+    }
+    for _ in 0..200 {
+        let words = (next() % 8 + 1) as usize;
+        let mut text = String::new();
+        for _ in 0..words {
+            text.push_str(LATIN[(next() as usize) % LATIN.len()]);
+            text.push(' ');
+        }
+        corpus.push(text);
+    }
+    for _ in 0..200 {
+        let tokens = (next() % 8 + 1) as usize;
+        let mut text = String::new();
+        for _ in 0..tokens {
+            if next() % 2 == 0 {
+                let len = (next() % 4 + 1) as usize;
+                for _ in 0..len {
+                    text.push(CJK[(next() as usize) % CJK.len()]);
+                }
+            } else {
+                text.push_str(LATIN[(next() as usize) % LATIN.len()]);
+            }
+            text.push(ENDINGS[(next() as usize) % ENDINGS.len()]);
+        }
+        corpus.push(text);
+    }
+    corpus.extend(
+        [
+            "",
+            "。，！？——",
+            "天地玄黄，宇宙洪荒。",
+            "天天地地人人",
+            "谢谢谢谢谢谢",
+            "СЛОВОслово",
+            "مرحبا بالعالم שלום עולם",
+            "สวัสดีชาวโลก",
+            "ÉLÉGANTcafé",
+            ")provided",
+            "StrongInference JohnR.Platt 3642SCIENCE ,NewSeries others.John )provided",
+            "Vol. 4, No. 2, pp. 100-110, Jan 1901 http://example.com (c) 1901",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    corpus
+}
+
+#[test]
+fn fallback_guard_pre_scan_keeps_the_verdict_on_generated_text() {
+    let mut checked = 0usize;
+    for text in generated_corpus() {
+        let unguarded = looks_like_unreliable_fallback_text_unguarded(&text);
+        let guarded = guarded_verdict(&text);
+        assert_eq!(
+            guarded, unguarded,
+            "pre-scan changed the fallback guard verdict for {text:?}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no generated text was checked");
+    println!("generated corpus: {checked} texts, 0 mismatches");
 }
 
 /// The same check on real books. `book-profile.yml` points `READING_MCP_SEGMENTATION_CHECK_DIR` at

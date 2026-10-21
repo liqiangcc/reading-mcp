@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ use rusqlite::{Connection, params};
 const CALLS: usize = 200;
 const TARGET_MS: f64 = 3.0;
 
-fn media_type_for(path: &PathBuf) -> Option<&'static str> {
+fn media_type_for(path: &Path) -> Option<&'static str> {
     match path.extension().and_then(|extension| extension.to_str())? {
         "epub" => Some("application/epub+zip"),
         "txt" => Some("text/plain"),

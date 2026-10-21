@@ -422,7 +422,7 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
 
     let section_id = document.root_sections[0].id.clone();
     let index = SqliteTextUnitIndex::open(&database).expect("old database should open");
-    let removed_layout = index
+    let summary = index
         .section_stream_summary(TextUnitStreamKey {
             document_id: &document.id,
             section_id: &section_id,
@@ -430,13 +430,10 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
             policy: TextUnitCoveragePolicy::PreserveSource,
         })
         .await
-        .expect_err("the dropped layout must not answer");
-    assert_eq!(
-        removed_layout,
-        ApplicationError::InvalidRequest(format!(
-            "paragraph coverage is unavailable for section {}",
-            section_id.0
-        ))
+        .expect("an old database must still answer");
+    assert!(
+        summary.is_none(),
+        "a document without layout rows must read as not stored"
     );
     drop(index);
 

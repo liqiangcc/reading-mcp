@@ -46,6 +46,9 @@ jobs:
       - name: Scan search parity (real books)
         if: always()
         run: READING_MCP_SEARCH_PROFILE_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test search_scan_parity_books -- --ignored --nocapture
+      - name: Segmentation speed-ups (real books)
+        if: always()
+        run: READING_MCP_SEGMENTATION_CHECK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test segmentation_speedups -- --ignored --nocapture
       - name: Profile book scenarios
         run: |
           BOOKS="$RUNNER_TEMP/books"

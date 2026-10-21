@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
-use crate::domain::Document;
+use crate::domain::{Document, DocumentSegmentation, MediaType};
 
 use super::{
     ArchiveLimits, DocxParser, EpubParser, HtmlParser, LimitedPdfParser, MarkdownParser,
@@ -108,11 +108,26 @@ impl ParserRouter {
 #[async_trait]
 impl Parser for ParserRouter {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let media_type = resource.media_type.essence().to_ascii_lowercase();
+        self.select(&resource.media_type)?.parse(resource).await
+    }
 
-        let parser = match media_type.as_str() {
-            "text/markdown" | "text/x-markdown" => return self.markdown.parse(resource).await,
-            "text/plain" => return self.text.parse(resource).await,
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        self.select(&resource.media_type)?
+            .parse_with_segmentation(resource)
+            .await
+    }
+}
+
+impl ParserRouter {
+    fn select(&self, media_type: &MediaType) -> Result<&Arc<dyn Parser>, ApplicationError> {
+        let essence = media_type.essence().to_ascii_lowercase();
+
+        let parser = match essence.as_str() {
+            "text/markdown" | "text/x-markdown" => Some(&self.markdown),
+            "text/plain" => Some(&self.text),
             "text/html" | "application/xhtml+xml" => self.html.as_ref(),
             "application/pdf" => self.pdf.as_ref(),
             "application/epub+zip" => self.epub.as_ref(),
@@ -128,14 +143,8 @@ impl Parser for ParserRouter {
             _ => None,
         };
 
-        parser
-            .ok_or_else(|| {
-                ApplicationError::ParseFailed(format!(
-                    "unsupported media type: {}",
-                    resource.media_type.0
-                ))
-            })?
-            .parse(resource)
-            .await
+        parser.ok_or_else(|| {
+            ApplicationError::ParseFailed(format!("unsupported media type: {}", media_type.0))
+        })
     }
 }

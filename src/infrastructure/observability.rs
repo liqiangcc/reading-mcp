@@ -184,16 +184,14 @@ impl ObservedParser {
     pub fn new(inner: Arc<dyn Parser>) -> Self {
         Self { inner }
     }
-}
 
-#[async_trait]
-impl Parser for ObservedParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let started = Instant::now();
-        let bytes = resource.bytes.len();
-        let media_type = resource.media_type.0.clone();
-        let result = self.inner.parse(resource).await;
-        match &result {
+    fn emit_parse_event(
+        started: Instant,
+        bytes: usize,
+        media_type: &str,
+        result: Result<&Document, &ApplicationError>,
+    ) {
+        match result {
             Ok(document) => emit(json!({
                 "event": "parse",
                 "duration_ms": started.elapsed().as_millis(),
@@ -212,6 +210,34 @@ impl Parser for ObservedParser {
                 "success": false
             })),
         }
+    }
+}
+
+#[async_trait]
+impl Parser for ObservedParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let started = Instant::now();
+        let bytes = resource.bytes.len();
+        let media_type = resource.media_type.0.clone();
+        let result = self.inner.parse(resource).await;
+        Self::emit_parse_event(started, bytes, &media_type, result.as_ref());
+        result
+    }
+
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        let started = Instant::now();
+        let bytes = resource.bytes.len();
+        let media_type = resource.media_type.0.clone();
+        let result = self.inner.parse_with_segmentation(resource).await;
+        Self::emit_parse_event(
+            started,
+            bytes,
+            &media_type,
+            result.as_ref().map(|(document, _)| document),
+        );
         result
     }
 }

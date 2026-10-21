@@ -195,6 +195,17 @@ pub trait Retriever: Send + Sync {
 #[async_trait]
 pub trait Parser: Send + Sync {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError>;
+
+    /// Parses `resource` and returns the text segmentation the parser had to build anyway, so a
+    /// caller that needs the segmentation never builds the same one twice. The default parses
+    /// without a segmentation, and every parser whose parse path has no segmentation returns
+    /// `None`; the caller then segments the returned document itself.
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        Ok((self.parse(resource).await?, None))
+    }
 }
 
 pub trait SourceViewRenderer: Send + Sync {

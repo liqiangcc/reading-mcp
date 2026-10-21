@@ -186,10 +186,14 @@ READING_MCP_LOCAL_ROOTS=/home/me/books:/home/me/docs reading-mcp
 
 ```text
 File Raw Cache
-File Parsed Cache
+File Parsed Cache（仅 PDF）
 SQLite DocumentRepository
 SQLite FTS5 SearchIndex
 ```
+
+Parsed Cache 只保存 PDF 的解析结果：PDF layout/OCR 解析代价高，重复解析不可接受。
+EPUB、HTML、Markdown 与纯文本重新解析很便宜，所以不再缓存，也不再在内存和磁盘上多留副本。
+PDF 的解析缓存位于 `<state>/cache/parsed-v2`；旧的 `<state>/cache/parsed` 在启动时被删除。
 
 MCP 进程重启后，已经打开过的 `document_id` 仍可直接用于 `read_document` / `search_document`。
 
@@ -214,7 +218,7 @@ If-Modified-Since
       ↓
 304 Not Modified
       ↓
-复用 Raw + Parsed Cache
+复用 Raw Cache（PDF 另复用 Parsed Cache）
 ```
 
 需要强制重新获取时：
@@ -286,7 +290,7 @@ Paragraph / Sentence / Search Candidate
 
 默认向 **stderr** 输出结构化 JSON，stdout 专用于 MCP JSON-RPC：
 
-- Raw / Parsed cache hit/miss；
+- Raw cache hit/miss（PDF 另有 Parsed cache hit/miss）；
 - retrieve duration / bytes / media type；
 - parse duration / section count / PDF page count；
 - index/search duration / hit count。

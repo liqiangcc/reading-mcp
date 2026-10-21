@@ -102,7 +102,7 @@ impl FileParsedDocumentCache {
     }
 
     fn directory(&self) -> PathBuf {
-        self.root.join("parsed")
+        self.root.join("parsed-v2")
     }
 }
 

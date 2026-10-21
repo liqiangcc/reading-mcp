@@ -14,7 +14,7 @@ Repository      = SQLite
 Paragraph index = SQLite derived TextUnitIndex
 Search          = SQLite FTS5
 Raw cache       = persistent file cache
-Parsed cache    = persistent file cache
+Parsed cache    = persistent file cache (PDF only)
 Telemetry       = stderr JSON enabled
 ```
 
@@ -107,8 +107,16 @@ READING_MCP_STATE_DIR
 ├── reading-mcp.sqlite
 └── cache/
     ├── raw/
-    └── parsed/
+    └── parsed-v2/
 ```
+
+Parsed cache 只保存 PDF 的解析结果：PDF layout/OCR 解析以分钟计，值得为它多留一份缓存副本；
+EPUB、HTML、Markdown 与纯文本重新解析很便宜（每个版本只发生一次），所以不再写入 parsed cache。
+本地文件没有 raw 副本（`LimitedFileRetriever` 不写任何缓存）；`cache/raw` 只用于 HTTP 条件重验证。
+
+旧的 `<state>/cache/parsed` 目录在启动时删除一次：只删该精确路径，NotFound 视为成功，
+其他错误只向 stderr 记录一次且不会让启动失败。丢失的旧条目只意味着版本变更后 PDF 需要重新解析；
+已存储的 open result 仍然直接应答重新打开。
 
 SQLite 中：
 
@@ -251,7 +259,7 @@ If-None-Match
 If-Modified-Since
 ```
 
-`304 Not Modified` 时复用现有 raw/parsed cache。
+`304 Not Modified` 时复用现有 raw cache；PDF 还会复用 parsed cache。
 
 ```json
 {
@@ -396,7 +404,7 @@ READING_MCP_TELEMETRY=false
 
 ```text
 raw_cache_get / raw_cache_put
-parsed_cache_get / parsed_cache_put
+parsed_cache_get / parsed_cache_put（仅 PDF）
 retrieve
 parse
 index

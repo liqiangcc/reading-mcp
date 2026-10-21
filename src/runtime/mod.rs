@@ -176,7 +176,8 @@ pub fn build_server(
     );
     let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache)
         .with_ocr_fingerprint(fingerprint)
-        .with_ocr_admission(config.ocr_enabled);
+        .with_ocr_admission(config.ocr_enabled)
+        .with_pdf_only(true);
     if config.pdf_layout_python.is_some() {
         cached = cached.with_pdf_namespace(crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE);
     }
@@ -311,6 +312,9 @@ fn build_state_components(
         ))
     })?;
     let cache_root = state_dir.join("cache");
+    // Non-PDF documents are no longer cached as parsed output, and the parsed
+    // cache moved to a new directory. Drop the legacy directory once.
+    remove_legacy_parsed_cache(&cache_root.join("parsed"));
     let database = state_dir.join("reading-mcp.sqlite");
     let repository = Arc::new(SqliteDocumentRepository::open(&database)?);
     let text_unit_index = Arc::new(SqliteTextUnitIndex::open(&database)?);
@@ -328,6 +332,60 @@ fn build_state_components(
         },
         ephemeral_state,
     ))
+}
+
+fn remove_legacy_parsed_cache(directory: &std::path::Path) {
+    match std::fs::remove_dir_all(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!(
+            "warning: failed to remove legacy parsed cache {}: {error}",
+            directory.display()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod startup_cache_tests {
+    use super::*;
+
+    fn state_config(state: &std::path::Path) -> RuntimeConfig {
+        RuntimeConfig {
+            state_dir: Some(state.to_path_buf()),
+            ..RuntimeConfig::default()
+        }
+    }
+
+    #[test]
+    fn startup_removes_the_legacy_parsed_cache_and_keeps_the_other_caches() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        let cache = state.join("cache");
+        std::fs::create_dir_all(cache.join("parsed")).unwrap();
+        std::fs::write(cache.join("parsed").join("stale.json"), b"{}").unwrap();
+        std::fs::create_dir_all(cache.join("raw")).unwrap();
+        std::fs::write(cache.join("raw").join("kept.bin"), b"raw").unwrap();
+        std::fs::create_dir_all(cache.join("parsed-v2")).unwrap();
+        std::fs::write(cache.join("parsed-v2").join("kept.json"), b"{}").unwrap();
+
+        build_state_components(&state_config(&state)).unwrap();
+
+        assert!(!cache.join("parsed").exists());
+        assert!(cache.join("raw").join("kept.bin").is_file());
+        assert!(cache.join("parsed-v2").join("kept.json").is_file());
+        assert!(state.join("reading-mcp.sqlite").is_file());
+    }
+
+    #[test]
+    fn startup_tolerates_a_missing_legacy_parsed_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+
+        build_state_components(&state_config(&state)).unwrap();
+
+        assert!(!state.join("cache").join("parsed").exists());
+        assert!(state.join("reading-mcp.sqlite").is_file());
+    }
 }
 
 #[cfg(test)]

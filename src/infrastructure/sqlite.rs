@@ -639,13 +639,29 @@ impl DocumentRepository for SqliteDocumentRepository {
             .validate_ocr_publication()
             .map_err(ApplicationError::RepositoryFailed)?;
         let normalized_document_hash = document.normalized_document_hash();
-        let json = serde_json::to_string(&StoredDocument::from_document(&document))
-            .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
         let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
+                // The section text stays out of `document_json` only when the very text of this
+                // document version is already stored: a repository used on its own, which never
+                // stored it, keeps the text inline exactly as before. The decision and the insert
+                // share this connection, so no other write of this process can land between them.
+                let content_store = if section_text_is_stored(
+                    connection,
+                    &document,
+                    &normalized_document_hash,
+                )? {
+                    Some(SECTION_TEXT_CONTENT_STORE)
+                } else {
+                    None
+                };
+                let json = serde_json::to_string(&StoredDocument::with_content_store(
+                    &document,
+                    content_store,
+                ))
+                .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
                 connection
                     .execute(
                         "INSERT INTO documents(id, source, content_hash, document_json, normalized_document_hash)
@@ -716,7 +732,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                 };
                 let stored = serde_json::from_str::<StoredDocument>(&json)
                     .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
-                let document = stored.into_document()?;
+                let document = stored.into_document(connection, stored_hash.as_deref())?;
                 document
                     .validate_ocr_publication()
                     .map_err(ApplicationError::RepositoryFailed)?;
@@ -744,6 +760,88 @@ impl DocumentRepository for SqliteDocumentRepository {
         )
         .await
     }
+}
+
+/// The `content_store` value of a `document_json` row that keeps no section text inline: every
+/// section's text is in `section_text_v1` for the same document version.
+const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v1";
+
+/// Whether `document`'s section text is stored in `section_text_v1` for exactly this document
+/// version, so that `document_json` may leave it out: the unit row names this document and hash for
+/// the current `TEXT_SEGMENTATION_VERSION`, and `section_layout_v1` holds exactly one row per
+/// section, in depth-first document order, whose `char_len` is that section's char count.
+fn section_text_is_stored(
+    connection: &Connection,
+    document: &Document,
+    normalized_document_hash: &NormalizedDocumentHash,
+) -> Result<bool, ApplicationError> {
+    if !has_table(connection, "text_unit_documents_v2")?
+        || !has_table(connection, "section_layout_v1")?
+    {
+        return Ok(false);
+    }
+    let stored = connection
+        .query_row(
+            "SELECT doc_key, normalized_document_hash, segmentation_version
+               FROM text_unit_documents_v2
+              WHERE document_id = ?1",
+            params![&document.id.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some((doc_key, stored_hash, segmentation_version)) = stored else {
+        return Ok(false);
+    };
+    if stored_hash != normalized_document_hash.as_ref()
+        || segmentation_version != TEXT_SEGMENTATION_VERSION
+    {
+        return Ok(false);
+    }
+    let mut ordered_sections = Vec::new();
+    collect_sections(&document.root_sections, &mut ordered_sections);
+    let char_lens = section_char_lens(connection, doc_key)?;
+    if char_lens.len() != ordered_sections.len() {
+        return Ok(false);
+    }
+    for (section, char_len) in ordered_sections.iter().zip(char_lens) {
+        if usize::try_from(char_len).ok() != Some(section.normalized_text_len()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether this database has `table`. A repository opened on its own never creates the text-unit
+/// tables, so their absence means the section text is not stored.
+fn has_table(connection: &Connection, table: &str) -> Result<bool, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|found| found.is_some())
+        .map_err(repository_error)
+}
+
+/// The `char_len` of one document's `section_layout_v1` rows, in `section_key` order.
+fn section_char_lens(connection: &Connection, doc_key: i64) -> Result<Vec<i64>, ApplicationError> {
+    let mut statement = connection
+        .prepare("SELECT char_len FROM section_layout_v1 WHERE doc_key = ?1 ORDER BY section_key")
+        .map_err(repository_error)?;
+    let rows = statement
+        .query_map(params![doc_key], |row| row.get::<_, i64>(0))
+        .map_err(repository_error)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(repository_error)
 }
 
 fn ensure_normalized_document_hash_column(connection: &Connection) -> Result<(), ApplicationError> {
@@ -3864,6 +3962,10 @@ fn i64_to_usize(value: i64, field: &str) -> Result<usize, ApplicationError> {
 struct StoredDocument {
     #[serde(default)]
     normalization_version: Option<String>,
+    /// Where the section text lives. Absent when every section carries its text inline, which is
+    /// what an old row and a repository used on its own write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_store: Option<String>,
     id: String,
     source: String,
     title: String,
@@ -3874,9 +3976,14 @@ struct StoredDocument {
 }
 
 impl StoredDocument {
-    fn from_document(document: &Document) -> Self {
+    /// `content_store` names where the section text is kept. With `Some`, every section's `content`
+    /// is written empty and the text is read back from that store on load; with `None` the text is
+    /// inline, byte for byte as before.
+    fn with_content_store(document: &Document, content_store: Option<&str>) -> Self {
+        let omit_content = content_store.is_some();
         Self {
             normalization_version: Some(NORMALIZATION_VERSION.into()),
+            content_store: content_store.map(str::to_owned),
             id: document.id.0.clone(),
             source: document.source.0.clone(),
             title: document.title.clone(),
@@ -3886,12 +3993,19 @@ impl StoredDocument {
             root_sections: document
                 .root_sections
                 .iter()
-                .map(StoredSection::from_section)
+                .map(|section| StoredSection::from_section(section, omit_content))
                 .collect(),
         }
     }
 
-    fn into_document(self) -> Result<Document, ApplicationError> {
+    /// Decodes the document. `connection` and `stored_hash` are read only when the row keeps its
+    /// section text in `section_text_v1`; `stored_hash` is the hash of the `documents` row, if it
+    /// has one.
+    fn into_document(
+        self,
+        connection: &Connection,
+        stored_hash: Option<&str>,
+    ) -> Result<Document, ApplicationError> {
         let persisted_version = self.normalization_version.ok_or_else(|| {
             ApplicationError::StaleDocument(format!(
                 "persisted document has no normalization version; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
@@ -3902,8 +4016,8 @@ impl StoredDocument {
                 "persisted document normalization version {persisted_version} is stale; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
             )));
         }
-
-        Ok(Document {
+        let content_store = self.content_store;
+        let mut document = Document {
             id: DocumentId(self.id),
             source: DocumentSource(self.source),
             title: self.title,
@@ -3915,7 +4029,114 @@ impl StoredDocument {
                 .into_iter()
                 .map(StoredSection::into_section)
                 .collect(),
-        })
+        };
+        match content_store.as_deref() {
+            None => {}
+            Some(store) if store == SECTION_TEXT_CONTENT_STORE => {
+                load_document_section_text(connection, &mut document, stored_hash)?;
+            }
+            Some(store) => {
+                return Err(ApplicationError::StaleDocument(format!(
+                    "persisted document keeps its section text in unknown store {store}; explicit source reopen required"
+                )));
+            }
+        }
+        Ok(document)
+    }
+}
+
+fn stale_section_text(document_id: &DocumentId, reason: &str) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "stored section text of document {} is stale: {reason}; explicit source reopen required",
+        document_id.0
+    ))
+}
+
+/// Fills every section's `content` from `section_text_v1`, in depth-first section order, which is
+/// the order `write_document_sections` assigns `section_key` in.
+fn load_document_section_text(
+    connection: &Connection,
+    document: &mut Document,
+    stored_hash: Option<&str>,
+) -> Result<(), ApplicationError> {
+    let document_id = document.id.clone();
+    if !has_table(connection, "text_unit_documents_v2")
+        .map_err(|error| stale_section_text(&document_id, &error.to_string()))?
+    {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text is not stored",
+        ));
+    }
+    let stored = connection
+        .query_row(
+            "SELECT doc_key, normalized_document_hash
+               FROM text_unit_documents_v2
+              WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some((doc_key, text_hash)) = stored else {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text is not stored",
+        ));
+    };
+    if stored_hash.is_some_and(|stored_hash| stored_hash != text_hash) {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text belongs to another version of the document",
+        ));
+    }
+    let char_lens = section_char_lens(connection, doc_key)
+        .map_err(|error| stale_section_text(&document_id, &error.to_string()))?;
+    let section_count = document.section_count();
+    if char_lens.len() != section_count {
+        return Err(stale_section_text(
+            &document_id,
+            &format!(
+                "its section layout has {} rows for {section_count} sections",
+                char_lens.len()
+            ),
+        ));
+    }
+
+    let mut texts = Vec::with_capacity(char_lens.len());
+    for (index, char_len) in char_lens.into_iter().enumerate() {
+        let section_key = i64::try_from(index).map_err(|_| {
+            stale_section_text(&document_id, "its section count exceeds the stored range")
+        })?;
+        let char_len = i64_to_usize(char_len, "char_len")
+            .map_err(|error| stale_section_text(&document_id, &error.to_string()))?;
+        let text = load_section_text_unchecked(connection, doc_key, section_key)
+            .map_err(|error| stale_section_text(&document_id, &error.to_string()))?;
+        let text_chars = text.chars().count();
+        if text_chars != char_len {
+            return Err(stale_section_text(
+                &document_id,
+                &format!("section {section_key} text has {text_chars} chars, expected {char_len}"),
+            ));
+        }
+        texts.push(text);
+    }
+    let mut texts = texts.into_iter();
+    fill_section_text(&mut document.root_sections, &mut texts);
+    if texts.next().is_some() {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text has more sections than the document",
+        ));
+    }
+    Ok(())
+}
+
+/// Assigns the stored texts to the sections in depth-first order, one text per section.
+fn fill_section_text(sections: &mut [Section], texts: &mut std::vec::IntoIter<String>) {
+    for section in sections.iter_mut() {
+        section.content = texts.next().unwrap_or_default();
+        fill_section_text(&mut section.children, texts);
     }
 }
 
@@ -3931,18 +4152,24 @@ struct StoredSection {
 }
 
 impl StoredSection {
-    fn from_section(section: &Section) -> Self {
+    /// `omit_content` writes an empty `content` instead of a copy of the section's text, for rows
+    /// whose text is stored in `section_text_v1`.
+    fn from_section(section: &Section, omit_content: bool) -> Self {
         Self {
             id: section.id.0.clone(),
             parent_id: section.parent_id.as_ref().map(|value| value.0.clone()),
             title: section.title.clone(),
             level: section.level,
-            content: section.content.clone(),
+            content: if omit_content {
+                String::new()
+            } else {
+                section.content.clone()
+            },
             location: StoredLocation::from_location(&section.location),
             children: section
                 .children
                 .iter()
-                .map(StoredSection::from_section)
+                .map(|child| StoredSection::from_section(child, omit_content))
                 .collect(),
         }
     }

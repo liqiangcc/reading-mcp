@@ -253,12 +253,15 @@ impl OpenDocumentUseCase {
         if let Some((store, _)) = &self.open_results {
             store.remove(&document.id).await?;
         }
-        self.repository.save_shared(Arc::clone(&document)).await?;
+        // The segmentation goes first: `save_shared` leaves the section text out of
+        // `document_json` only when `section_text_v1` already holds the text of this very document
+        // version, and reads it back from there on load.
         if let Some(index) = &self.text_unit_index {
             index
                 .replace_document_segmentation(&document, Arc::clone(&segmentation))
                 .await?;
         }
+        self.repository.save_shared(Arc::clone(&document)).await?;
         self.search_index
             .index_with_segmentation(
                 Arc::clone(&document),

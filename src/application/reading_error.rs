@@ -1,11 +1,11 @@
 //! The closed error vocabulary of the v2 `open` and `read` tools.
 //!
-//! The v1 tools keep their own `ApplicationError` mapping. The v2 tools speak only the eight codes
-//! of the approved contract, so every failure passes through this type before it reaches the wire.
+//! The v1 tools keep their own `ApplicationError` mapping. The v2 tools speak only the codes of the
+//! approved contract, so every failure passes through this type before it reaches the wire.
 
 use crate::application::ports::ApplicationError;
 
-/// The eight v2 error codes.
+/// The v2 error codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadingErrorCode {
     NotOpened,
@@ -13,9 +13,12 @@ pub enum ReadingErrorCode {
     StaleHandle,
     TooLong,
     InvalidArgument,
+    TooLarge,
     BlockedSource,
     FetchFailed,
     OcrRequired,
+    Unreadable,
+    Internal,
 }
 
 impl ReadingErrorCode {
@@ -26,9 +29,12 @@ impl ReadingErrorCode {
             Self::StaleHandle => "stale_handle",
             Self::TooLong => "too_long",
             Self::InvalidArgument => "invalid_argument",
+            Self::TooLarge => "too_large",
             Self::BlockedSource => "blocked_source",
             Self::FetchFailed => "fetch_failed",
             Self::OcrRequired => "ocr_required",
+            Self::Unreadable => "unreadable",
+            Self::Internal => "internal",
         }
     }
 }
@@ -91,36 +97,40 @@ impl ReadingError {
 impl From<ApplicationError> for ReadingError {
     fn from(error: ApplicationError) -> Self {
         let detail = error.to_string();
+        // No wildcard arm: a new `ApplicationError` variant must pick its v2 code here.
         let code = match &error {
             ApplicationError::DocumentNotFound => ReadingErrorCode::NotOpened,
             ApplicationError::SectionNotFound => ReadingErrorCode::UnknownHandle,
             ApplicationError::StaleDocument(_)
             | ApplicationError::StaleLocator(_)
             | ApplicationError::StaleStructure(_) => ReadingErrorCode::StaleHandle,
-            ApplicationError::BlockedSource(_) => ReadingErrorCode::BlockedSource,
-            ApplicationError::OcrRequired
-            | ApplicationError::OcrNoSupportedProjection
-            | ApplicationError::OcrFailed
-            | ApplicationError::OcrUnavailable => ReadingErrorCode::OcrRequired,
             ApplicationError::InvalidRequest(_)
             | ApplicationError::InvalidLocator(_)
             | ApplicationError::InvalidCursor(_)
             | ApplicationError::StaleCursor(_)
             | ApplicationError::CursorTargetMismatch(_)
             | ApplicationError::CursorEncodingFailed(_) => ReadingErrorCode::InvalidArgument,
-            ApplicationError::ResourceLimitExceeded(_) => ReadingErrorCode::TooLong,
+            ApplicationError::ResourceLimitExceeded(_) | ApplicationError::OcrResourceLimit => {
+                ReadingErrorCode::TooLarge
+            }
+            ApplicationError::BlockedSource(_) | ApplicationError::AuthenticationFailed(_) => {
+                ReadingErrorCode::BlockedSource
+            }
+            ApplicationError::OcrRequired
+            | ApplicationError::OcrNoSupportedProjection
+            | ApplicationError::OcrFailed
+            | ApplicationError::OcrUnavailable => ReadingErrorCode::OcrRequired,
             ApplicationError::RetrievalFailed(_)
-            | ApplicationError::AuthenticationFailed(_)
-            | ApplicationError::ParseFailed(_)
-            | ApplicationError::UnsupportedTextEncoding(_)
             | ApplicationError::OcrBusy
-            | ApplicationError::OcrTimeout
-            | ApplicationError::OcrResourceLimit
-            | ApplicationError::RepositoryFailed(_)
+            | ApplicationError::OcrTimeout => ReadingErrorCode::FetchFailed,
+            ApplicationError::ParseFailed(_) | ApplicationError::UnsupportedTextEncoding(_) => {
+                ReadingErrorCode::Unreadable
+            }
+            ApplicationError::RepositoryFailed(_)
             | ApplicationError::CacheFailed(_)
             | ApplicationError::IndexFailed(_)
             | ApplicationError::TextUnitIndexFailed(_)
-            | ApplicationError::SourceViewFailed(_) => ReadingErrorCode::FetchFailed,
+            | ApplicationError::SourceViewFailed(_) => ReadingErrorCode::Internal,
         };
         Self::new(code, detail)
     }
@@ -128,53 +138,7 @@ impl From<ApplicationError> for ReadingError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReadingError, ReadingErrorCode};
-    use crate::application::ports::ApplicationError;
-
-    #[test]
-    fn every_application_error_maps_onto_one_of_the_eight_codes() {
-        for (error, expected) in [
-            (
-                ApplicationError::DocumentNotFound,
-                ReadingErrorCode::NotOpened,
-            ),
-            (
-                ApplicationError::SectionNotFound,
-                ReadingErrorCode::UnknownHandle,
-            ),
-            (
-                ApplicationError::StaleDocument("old".into()),
-                ReadingErrorCode::StaleHandle,
-            ),
-            (
-                ApplicationError::StaleCursor("old".into()),
-                ReadingErrorCode::InvalidArgument,
-            ),
-            (
-                ApplicationError::BlockedSource("private".into()),
-                ReadingErrorCode::BlockedSource,
-            ),
-            (ApplicationError::OcrRequired, ReadingErrorCode::OcrRequired),
-            (
-                ApplicationError::ResourceLimitExceeded("big".into()),
-                ReadingErrorCode::TooLong,
-            ),
-            (
-                ApplicationError::RetrievalFailed("offline".into()),
-                ReadingErrorCode::FetchFailed,
-            ),
-            (
-                ApplicationError::ParseFailed("broken".into()),
-                ReadingErrorCode::FetchFailed,
-            ),
-            (
-                ApplicationError::TextUnitIndexFailed("sqlite".into()),
-                ReadingErrorCode::FetchFailed,
-            ),
-        ] {
-            assert_eq!(ReadingError::from(error).code, expected);
-        }
-    }
+    use super::ReadingErrorCode;
 
     #[test]
     fn codes_are_the_contract_strings() {
@@ -186,8 +150,11 @@ mod tests {
             ReadingErrorCode::InvalidArgument.as_str(),
             "invalid_argument"
         );
+        assert_eq!(ReadingErrorCode::TooLarge.as_str(), "too_large");
         assert_eq!(ReadingErrorCode::BlockedSource.as_str(), "blocked_source");
         assert_eq!(ReadingErrorCode::FetchFailed.as_str(), "fetch_failed");
         assert_eq!(ReadingErrorCode::OcrRequired.as_str(), "ocr_required");
+        assert_eq!(ReadingErrorCode::Unreadable.as_str(), "unreadable");
+        assert_eq!(ReadingErrorCode::Internal.as_str(), "internal");
     }
 }

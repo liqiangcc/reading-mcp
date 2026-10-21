@@ -17,6 +17,10 @@ Per task and tool set it records calls, request and response tokens, the body sh
 response, ``tools/list`` tokens times calls, and server milliseconds.  Tokens are the same
 rough heuristic the sequential probe uses: ``ascii_chars / 4 + other_chars / 1.5``.
 
+The per-sentence overhead counts the reading calls only (``read`` for v2, ``get_text_units``
+for v1): request tokens plus response tokens minus body tokens, divided by the sentences those
+calls returned.  The ``open`` step has its own column.
+
 The v2 task 2 starting point is addressed directly by its documented section handle
 ``d<key>~<chk>.s<section_key>``: ``open`` reports the section count, so the middle section is
 ``s<count / 2>`` and ``read`` skips forward to the next section that has items.
@@ -51,6 +55,8 @@ probe = load_probe()
 SENTENCES_T2 = 500
 V1 = "v1"
 V2 = "v2"
+# The tools that return reading items: v1 pages them with `get_text_units`, v2 with `read`.
+READ_TOOLS = frozenset({"read", "get_text_units"})
 
 
 class TaskResult:
@@ -65,23 +71,35 @@ class TaskResult:
         self.body_tokens = 0.0
         self.server_ms = 0.0
         self.sentences = 0
+        self.read_calls = 0
+        self.read_request_tokens = 0.0
+        self.read_response_tokens = 0.0
+        self.read_body_tokens = 0.0
+        self.read_sentences = 0
         self.error: str | None = None
 
     def add(self, name: str, arguments: dict, result: dict, wall_ms: float) -> None:
         self.calls += 1
-        self.request_tokens += probe.est_tokens(
+        request_tokens = probe.est_tokens(
             probe.compact_json({"name": name, "arguments": arguments})
         )
         measurement = probe.measure_result(result)
-        self.response_tokens += measurement["est_tokens"]
+        response_tokens = measurement["est_tokens"]
+        self.request_tokens += request_tokens
+        self.response_tokens += response_tokens
         self.server_ms += wall_ms
-        payload = probe.tool_payload(result)
-        items = (payload or {}).get("items") if isinstance(payload, dict) else None
-        for item in items or []:
-            text = item_text(item)
-            if text is not None:
-                self.body_tokens += probe.est_tokens(text)
-                self.sentences += 1
+        reading = name in READ_TOOLS
+        if reading:
+            self.read_calls += 1
+            self.read_request_tokens += request_tokens
+            self.read_response_tokens += response_tokens
+        for text in item_texts(probe.tool_payload(result)):
+            body_tokens = probe.est_tokens(text)
+            self.body_tokens += body_tokens
+            self.sentences += 1
+            if reading:
+                self.read_body_tokens += body_tokens
+                self.read_sentences += 1
 
     def total_tokens(self, tools_list_tokens: float) -> float:
         return (
@@ -90,10 +108,19 @@ class TaskResult:
             + tools_list_tokens * self.calls
         )
 
+    def open_tokens(self) -> float:
+        """The tokens of the `open` step on its own, reported in its own column."""
+        return self.request_tokens + self.response_tokens
+
     def extra_tokens_per_sentence(self) -> float | None:
-        if not self.sentences:
+        """Per-sentence overhead of the reading calls alone: no `open`, no tool definitions."""
+        if not self.read_sentences:
             return None
-        return (self.response_tokens - self.body_tokens + self.request_tokens) / self.sentences
+        return (
+            self.read_request_tokens
+            + self.read_response_tokens
+            - self.read_body_tokens
+        ) / self.read_sentences
 
     def body_share_pct(self) -> float | None:
         if not self.response_tokens:
@@ -109,6 +136,29 @@ def item_text(item):
     if isinstance(item, (list, tuple)) and len(item) >= 2:
         return item[1] if isinstance(item[1], str) else None
     return None
+
+
+def item_texts(payload):
+    """The item texts of one answer, in the batch shape or the flat single-item shape."""
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items")
+    if isinstance(items, list):
+        texts = []
+        for item in items:
+            text = item_text(item)
+            if text is not None:
+                texts.append(text)
+        return texts
+    text = payload.get("text")
+    return [text] if isinstance(text, str) else []
+
+
+def starts_section(payload) -> bool:
+    """Whether one answer returns an item at position 0 of its section stream."""
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("section")) or bool(payload.get("sections"))
 
 
 def tool_arguments(**kwargs) -> dict:
@@ -257,15 +307,14 @@ def v2_task1(server, doc_handle: str, deadline: float) -> TaskResult:
     first = True
     while True:
         payload = call(server, "read", {"from": from_handle}, deadline, record)
-        sections = payload.get("sections") or []
-        if not first and sections:
+        if not first and starts_section(payload):
             # A new section started, so the first section with body text ended.
             return record
         first = False
-        next_cursor = payload.get("next")
-        if not next_cursor:
+        next_handle = payload.get("next")
+        if not next_handle:
             return record
-        from_handle = next_cursor
+        from_handle = next_handle
 
 
 def v2_task2(server, opened: dict, deadline: float) -> TaskResult:
@@ -281,10 +330,10 @@ def v2_task2(server, opened: dict, deadline: float) -> TaskResult:
         if record.sentences >= SENTENCES_T2:
             break
         payload = call(server, "read", {"from": from_handle}, deadline, record)
-        next_cursor = payload.get("next")
-        if not next_cursor:
+        next_handle = payload.get("next")
+        if not next_handle:
             break
-        from_handle = next_cursor
+        from_handle = next_handle
     return record
 
 
@@ -361,6 +410,7 @@ def run_toolset(
                 task.request_tokens += record.request_tokens
                 task.response_tokens += record.response_tokens
                 task.server_ms += record.server_ms
+        result["open"] = record
         result["tasks"] = [t1, t2]
     except probe.ProbeError as exc:
         result["error"] = str(exc)
@@ -383,15 +433,17 @@ def fmt(value, digits: int = 1) -> str:
 def table(rows: list[dict], tools_tokens: dict[str, float]) -> str:
     lines = [
         "| Book | Task | Tools | Calls | Sentences | Request tokens | Response tokens | "
-        "Body share % | tools/list tokens x calls | Server ms | Total tokens | Extra tokens/sentence |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "Body share % | tools/list tokens x calls | Server ms | Total tokens | "
+        "Open tokens | Extra tokens/sentence (read calls) |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
+        open_tokens = row["open"].open_tokens() if row.get("open") else None
         for task in row["tasks"]:
             tools_tokens_value = tools_tokens.get(task.toolset, 0.0)
             lines.append(
                 "| {book} | {task} | {tools} | {calls} | {sentences} | {request} | {response} | "
-                "{body} | {defs} | {ms} | {total} | {extra} |".format(
+                "{body} | {defs} | {ms} | {total} | {open} | {extra} |".format(
                     book=row["book"],
                     task=task.task,
                     tools=task.toolset,
@@ -403,6 +455,7 @@ def table(rows: list[dict], tools_tokens: dict[str, float]) -> str:
                     defs=fmt(tools_tokens_value * task.calls),
                     ms=fmt(task.server_ms, 0),
                     total=fmt(task.total_tokens(tools_tokens_value)),
+                    open=fmt(open_tokens),
                     extra=fmt(task.extra_tokens_per_sentence()),
                 )
             )
@@ -461,7 +514,7 @@ def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[s
             extra = right.extra_tokens_per_sentence()
             ok = extra is not None and extra <= 30.0
             lines.append(
-                "{} {book} {task} v2 extra tokens per sentence: {extra} (limit 30)".format(
+                "{} {book} {task} v2 extra tokens per sentence on read calls: {extra} (limit 30)".format(
                     "PASS" if ok else "FAIL",
                     book=book,
                     task=name,
@@ -588,9 +641,23 @@ def main() -> int:
                             "response_tokens": task.response_tokens,
                             "body_tokens": task.body_tokens,
                             "server_ms": task.server_ms,
+                            "read_calls": task.read_calls,
+                            "read_request_tokens": task.read_request_tokens,
+                            "read_response_tokens": task.read_response_tokens,
+                            "read_body_tokens": task.read_body_tokens,
+                            "read_sentences": task.read_sentences,
                         }
                         for task in row["tasks"]
                     ],
+                    "open": (
+                        {
+                            "calls": row["open"].calls,
+                            "request_tokens": row["open"].request_tokens,
+                            "response_tokens": row["open"].response_tokens,
+                        }
+                        if row.get("open")
+                        else None
+                    ),
                 }
                 for row in rows
             ],

@@ -68,8 +68,8 @@ use super::source_view_contracts::{
     GetSourceViewRequest, GetSourceViewResponse, SourceViewRepresentationDto,
 };
 use super::v2_contracts::{
-    OpenRequest, OpenView, ReadRequest, ReadView, error_result, fetch_retry, text_result,
-    too_long_retry,
+    FlatReadView, OpenRequest, OpenView, ReadRequest, ReadView, error_result, retry_for,
+    text_result, too_long_retry,
 };
 
 #[derive(Clone)]
@@ -739,7 +739,7 @@ impl ReadingMcpServer {
 #[tool_router(router = tool_router_v2)]
 impl ReadingMcpServer {
     #[tool(
-        description = "Open one local file or public HTTPS URL and return a short document handle with the title, format, section count, character count and first root sections. Call it once per book before read, and set refresh to re-ingest changed bytes. Every later read call needs the doc handle it returns."
+        description = "Open one local file or public HTTPS URL and return a short document handle with title, format, section count, char count and first sections. Call it once per book before read; set refresh to re-ingest changed bytes."
     )]
     async fn open(
         &self,
@@ -756,7 +756,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Read an opened book in reading order: one item per call, or a char-budgeted batch when max_chars is set. from takes a doc handle, an item handle or a next cursor; unit picks sentence or paragraph, direction picks forward or backward, and back re-reads preceding items. Follow next until it is absent."
+        description = "Read an opened book in reading order: one item per call, or a char-budgeted batch when max_chars is set. from takes a document, section, paragraph or sentence handle, or a b: cursor; unit picks sentence or paragraph, direction picks forward or backward, back re-reads preceding items. Follow next until it is absent."
     )]
     async fn read(
         &self,
@@ -790,8 +790,16 @@ impl ReadingMcpServer {
             direction,
             back: request.back.unwrap_or(0),
         };
+        // One item, no `back`: the answer is that item's own flat object. Otherwise it is a batch.
+        let single = request.max_chars.is_none() && command.back == 0;
         Ok(match self.read_reading.execute(command).await {
-            Ok(result) => text_result(&ReadView::from(result)),
+            Ok(result) => {
+                if single {
+                    text_result(&FlatReadView::new(result, &request.from))
+                } else {
+                    text_result(&ReadView::from(result))
+                }
+            }
             Err(error) => {
                 let retry = if error.code == ReadingErrorCode::TooLong {
                     too_long_retry(&request, &error)
@@ -801,14 +809,6 @@ impl ReadingMcpServer {
                 error_result(&error, retry)
             }
         })
-    }
-}
-
-/// The `retry` object of a v2 error, or `None` when repeating the call would not be exactly right.
-fn retry_for(error: &ReadingError) -> Option<serde_json::Value> {
-    match error.code {
-        ReadingErrorCode::FetchFailed => fetch_retry(),
-        _ => None,
     }
 }
 

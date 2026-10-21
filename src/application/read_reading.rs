@@ -15,10 +15,10 @@ use crate::application::ports::{
 };
 use crate::application::reading_error::ReadingError;
 use crate::application::short_handle::{
-    CursorDirection, DocumentHandle, ReadingFrom, ReadingHandle, SectionHandle, handle_checksum,
-    paragraph_handle, parse_from, sentence_handle,
+    CursorUnit, DocumentHandle, ReadingCursor, ReadingFrom, ReadingHandle, SectionHandle,
+    handle_checksum, paragraph_handle, parse_from, sentence_handle,
 };
-use crate::application::text_unit_stream::content_class;
+use crate::application::text_unit_stream::item_kind;
 use crate::domain::{Document, DocumentId, SectionId};
 
 /// The largest `max_chars` a batch read accepts.
@@ -30,7 +30,7 @@ const FETCH_CHUNK: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadReadingCommand {
-    /// A document, section, paragraph or sentence handle, or an `r:`/`b:` cursor.
+    /// A document, section, paragraph or sentence handle, or a backward `b:` cursor.
     pub from: String,
     /// `sentence` (default) or `paragraph`.
     pub unit: RequestedTextUnitKind,
@@ -61,6 +61,7 @@ pub struct ReadReadingSection {
 pub struct ReadReadingResult {
     pub items: Vec<ReadReadingItem>,
     pub sections: Vec<ReadReadingSection>,
+    /// The next item's handle when reading forward, or a `b:` cursor when reading backward.
     pub next: Option<String>,
     /// The index of the `from` item within `items`, when `back` > 0 and it was returned.
     pub anchor: Option<usize>,
@@ -105,7 +106,7 @@ impl ReadReadingUseCase {
             ReadingError::invalid(
                 "from",
                 format!(
-                    "from 必须是句柄（d<key>~<chk>[.s<key>[.p<n>[.<n>]]]）或游标（r:/b:<section>.<S|P>.<pos>）：{}",
+                    "from 必须是句柄（d<key>~<chk>[.s<key>[.p<n>[.<n>]]]）或后向游标（b:<section>.<S|P>.<pos>）：{}",
                     error.message
                 ),
             )
@@ -118,21 +119,16 @@ impl ReadReadingUseCase {
                 None,
             ),
             ReadingFrom::Cursor(cursor) => {
-                let cursor_direction = match cursor.direction {
-                    CursorDirection::Forward => TextUnitDirection::Forward,
-                    CursorDirection::Backward => TextUnitDirection::Backward,
-                };
-                if let Some(direction) = command.direction
-                    && direction != cursor_direction
-                {
+                // The `b:` prefix carries the direction, so it must agree with `direction`.
+                if command.direction == Some(TextUnitDirection::Forward) {
                     return Err(ReadingError::invalid(
                         "direction",
-                        "direction 必须与游标前缀一致：r: 是 forward，b: 是 backward".to_owned(),
+                        "direction 必须与游标前缀一致：b: 是 backward".to_owned(),
                     ));
                 }
                 (
                     cursor.section.document.clone(),
-                    cursor_direction,
+                    TextUnitDirection::Backward,
                     Some(cursor.position),
                 )
             }
@@ -824,25 +820,30 @@ impl<'a> Fill<'a> {
 
     async fn finish(mut self, walk: &mut Walk<'_>) -> Result<ReadReadingResult, ReadingError> {
         let next = match self.next {
-            Some(((section, position), direction)) => {
+            Some(((section, position), TextUnitDirection::Forward)) => {
+                // Forward `next` is the next item's own handle, so a caller passes it back as `from`.
+                let section_handle = SectionHandle {
+                    document: self.handle.clone(),
+                    section_key: walk.section_key(section).await?,
+                };
+                let row = walk
+                    .items(section, TextUnitDirection::Forward, position, 1)
+                    .await?
+                    .into_iter()
+                    .next();
+                row.map(|row| item_handle(&section_handle, &row))
+            }
+            Some(((section, position), TextUnitDirection::Backward)) => {
                 let section_key = walk.section_key(section).await?;
                 Some(
-                    crate::application::short_handle::ReadingCursor {
-                        direction: match direction {
-                            TextUnitDirection::Forward => CursorDirection::Forward,
-                            TextUnitDirection::Backward => CursorDirection::Backward,
-                        },
+                    ReadingCursor {
                         section: SectionHandle {
                             document: self.handle.clone(),
                             section_key,
                         },
                         unit: match self.unit {
-                            RequestedTextUnitKind::Sentence => {
-                                crate::application::short_handle::CursorUnit::Sentence
-                            }
-                            RequestedTextUnitKind::Paragraph => {
-                                crate::application::short_handle::CursorUnit::Paragraph
-                            }
+                            RequestedTextUnitKind::Sentence => CursorUnit::Sentence,
+                            RequestedTextUnitKind::Paragraph => CursorUnit::Paragraph,
                         },
                         position,
                     }
@@ -872,28 +873,31 @@ async fn render(
         document: document.clone(),
         section_key,
     };
-    let (handle, content_class) = match &row.unit {
-        OwnedStreamUnit::Sentence(sentence) => (
-            sentence_handle(&handle, sentence.paragraph_index, sentence.sentence_index),
-            None,
-        ),
-        OwnedStreamUnit::Paragraph(paragraph) => (
-            paragraph_handle(&handle, paragraph.paragraph_index),
-            // Only the sentence stream returns a whole paragraph; then the item carries the v1
-            // content class so the caller can tell a table from prose.
-            match unit {
-                RequestedTextUnitKind::Sentence => {
-                    Some(content_class(row.content_class).1.to_owned())
-                }
-                RequestedTextUnitKind::Paragraph => None,
-            },
-        ),
-    };
     Ok(ReadReadingItem {
-        handle,
+        handle: item_handle(&handle, row),
+        // Only the sentence stream returns a whole paragraph; then the item carries the v1 content
+        // class when it is coarse or non-prose, so the caller can tell a table from prose.
+        content_class: match (unit, &row.unit) {
+            (RequestedTextUnitKind::Sentence, OwnedStreamUnit::Paragraph(_)) => {
+                item_kind(row.content_class).map(str::to_owned)
+            }
+            _ => None,
+        },
         text: row_text(row),
-        content_class,
     })
+}
+
+/// The handle of one stored stream item: a sentence handle, or a paragraph handle when the item is a
+/// coarse paragraph or the stream itself is the paragraph stream.
+fn item_handle(section: &SectionHandle, row: &StoredStreamItem) -> String {
+    match &row.unit {
+        OwnedStreamUnit::Sentence(sentence) => {
+            sentence_handle(section, sentence.paragraph_index, sentence.sentence_index)
+        }
+        OwnedStreamUnit::Paragraph(paragraph) => {
+            paragraph_handle(section, paragraph.paragraph_index)
+        }
+    }
 }
 
 fn row_text(row: &StoredStreamItem) -> String {

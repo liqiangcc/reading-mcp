@@ -408,6 +408,11 @@ pub(crate) fn content_class(class: ParagraphContentClass) -> (TextUnitContentCla
     }
 }
 
+/// The v2 `kind` of a coarse or non-prose item: its content class, or `None` for prose.
+pub(crate) fn item_kind(class: ParagraphContentClass) -> Option<&'static str> {
+    (is_non_prose_class(class) || is_coarse_structural_class(class)).then_some(class.as_str())
+}
+
 fn is_non_prose_class(class: ParagraphContentClass) -> bool {
     matches!(
         class,

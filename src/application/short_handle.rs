@@ -1,4 +1,4 @@
-//! The v2 short reading handles: `d3~9f2c.s12.p4.2` and the `r:`/`b:` cursors.
+//! The v2 short reading handles: `d3~9f2c.s12.p4.2` and the backward `b:` cursor.
 //!
 //! A handle names one document, section, paragraph or sentence in a handful of bytes. The
 //! document part carries the `text_unit_documents_v2.doc_key` integer and a four hex digit
@@ -71,28 +71,15 @@ impl CursorUnit {
     }
 }
 
-/// The reading direction a cursor walks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorDirection {
-    Forward,
-    Backward,
-}
-
-impl CursorDirection {
-    pub const fn prefix(self) -> &'static str {
-        match self {
-            Self::Forward => "r:",
-            Self::Backward => "b:",
-        }
-    }
-}
-
-/// A continuation cursor: `<prefix><section handle>.<unit>.<position>`.
+/// A backward continuation cursor: `b:<section handle>.<unit>.<position>`.
+///
+/// The direction travels with the cursor, so a backward walk needs nothing else. Forward reading
+/// needs no cursor at all: `next` is the next item's handle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadingCursor {
-    pub direction: CursorDirection,
     pub section: SectionHandle,
     pub unit: CursorUnit,
+    /// The exclusive end of the stream range the next backward step reads.
     pub position: usize,
 }
 
@@ -181,8 +168,7 @@ impl std::fmt::Display for ReadingCursor {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "{}{}.{}.{}",
-            self.direction.prefix(),
+            "b:{}.{}.{}",
             self.section,
             self.unit.letter(),
             self.position
@@ -190,21 +176,15 @@ impl std::fmt::Display for ReadingCursor {
     }
 }
 
-/// Parses `from`: a `r:`/`b:` cursor, or a handle.
+/// Parses `from`: a `b:` cursor, or a handle.
 pub fn parse_from(value: &str) -> Result<ReadingFrom, HandleParseError> {
-    if let Some(rest) = value.strip_prefix("r:") {
-        return parse_cursor(CursorDirection::Forward, rest).map(ReadingFrom::Cursor);
-    }
     if let Some(rest) = value.strip_prefix("b:") {
-        return parse_cursor(CursorDirection::Backward, rest).map(ReadingFrom::Cursor);
+        return parse_cursor(rest).map(ReadingFrom::Cursor);
     }
     parse_handle(value).map(ReadingFrom::Handle)
 }
 
-fn parse_cursor(
-    direction: CursorDirection,
-    value: &str,
-) -> Result<ReadingCursor, HandleParseError> {
+fn parse_cursor(value: &str) -> Result<ReadingCursor, HandleParseError> {
     // `<section handle>.<S|P>.<position>`; the position is the only unbounded numeric tail, so split
     // it off first and parse the rest as a section handle.
     let (head, position) = value
@@ -233,7 +213,6 @@ fn parse_cursor(
         }
     };
     Ok(ReadingCursor {
-        direction,
         section,
         unit,
         position,
@@ -336,9 +315,8 @@ fn parse_number(value: &str, what: &str) -> Result<usize, HandleParseError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CursorDirection, CursorUnit, DocumentHandle, ReadingCursor, ReadingFrom, ReadingHandle,
-        SectionHandle, handle_checksum, paragraph_handle, parse_from, parse_handle,
-        sentence_handle,
+        CursorUnit, DocumentHandle, ReadingCursor, ReadingFrom, ReadingHandle, SectionHandle,
+        handle_checksum, paragraph_handle, parse_from, parse_handle, sentence_handle,
     };
     use crate::domain::{DocumentId, NormalizedDocumentHash};
 
@@ -386,35 +364,41 @@ mod tests {
     }
 
     #[test]
-    fn cursors_round_trip_in_both_directions_and_units() {
-        for direction in [CursorDirection::Forward, CursorDirection::Backward] {
-            for unit in [CursorUnit::Sentence, CursorUnit::Paragraph] {
-                for position in [0usize, 1, 17, 12345] {
-                    let cursor = ReadingCursor {
-                        direction,
-                        section: section(),
-                        unit,
-                        position,
-                    };
-                    let text = cursor.to_string();
-                    assert_eq!(
-                        parse_from(&text).expect("the generated cursor must parse"),
-                        ReadingFrom::Cursor(cursor.clone()),
-                        "round trip failed for {text}"
-                    );
-                }
+    fn backward_cursors_round_trip_in_both_units() {
+        for unit in [CursorUnit::Sentence, CursorUnit::Paragraph] {
+            for position in [0usize, 1, 17, 12345] {
+                let cursor = ReadingCursor {
+                    section: section(),
+                    unit,
+                    position,
+                };
+                let text = cursor.to_string();
+                assert_eq!(
+                    parse_from(&text).expect("the generated cursor must parse"),
+                    ReadingFrom::Cursor(cursor.clone()),
+                    "round trip failed for {text}"
+                );
             }
         }
         assert_eq!(
             ReadingCursor {
-                direction: CursorDirection::Forward,
                 section: section(),
                 unit: CursorUnit::Sentence,
                 position: 1,
             }
             .to_string(),
-            "r:d3~9f2c.s12.S.1"
+            "b:d3~9f2c.s12.S.1"
         );
+    }
+
+    #[test]
+    fn the_forward_cursor_is_gone() {
+        for value in ["r:d3~9f2c.s12.S.1", "r:d3~9f2c.s12.P.0"] {
+            assert!(
+                parse_from(value).is_err(),
+                "{value:?} must no longer parse: forward reading follows handles"
+            );
+        }
     }
 
     #[test]
@@ -440,12 +424,12 @@ mod tests {
             "d3~9f2c.s12.p4.2.1",
             "d3~9f2c.s12.p4.x",
             "d3~9f2c.s12.4",
-            "r:d3~9f2c.s12.S",
-            "r:d3~9f2c.s12.X.1",
-            "r:d3~9f2c.S.1",
-            "r:d3~9f2c.s12.p4.2.S.1",
-            "r:d3~9f2c.s12.S.x",
-            "r:d3~9f2c.s12.S.-1",
+            "b:d3~9f2c.s12.S",
+            "b:d3~9f2c.s12.X.1",
+            "b:d3~9f2c.S.1",
+            "b:d3~9f2c.s12.p4.2.S.1",
+            "b:d3~9f2c.s12.S.x",
+            "b:d3~9f2c.s12.S.-1",
             "c:d3~9f2c.s12.S.1",
         ] {
             assert!(

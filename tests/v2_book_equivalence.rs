@@ -88,7 +88,7 @@ async fn compare_book(client: &Client, path: &Path) -> usize {
     let mut next = Some(doc.clone());
     while let Some(from) = next {
         let result = read(client, &from, json!({ "max_chars": 16_000 })).await;
-        batch.extend(items(&result).into_iter().map(|(_, text, _)| text));
+        batch.extend(texts(&result));
         next = payload(&result)
             .get("next")
             .and_then(Value::as_str)
@@ -96,7 +96,7 @@ async fn compare_book(client: &Client, path: &Path) -> usize {
     }
     let mut mismatches = count_mismatches("batch 16000", &reference, &batch);
 
-    // Sentence-step mode over the first 2000 items.
+    // Sentence-step mode over the first 2000 items, following `next` handles.
     let mut stepped = Vec::new();
     let mut next = Some(doc);
     while let Some(from) = next {
@@ -104,7 +104,7 @@ async fn compare_book(client: &Client, path: &Path) -> usize {
             break;
         }
         let result = read(client, &from, json!({})).await;
-        stepped.extend(items(&result).into_iter().map(|(_, text, _)| text));
+        stepped.extend(texts(&result));
         next = payload(&result)
             .get("next")
             .and_then(Value::as_str)
@@ -246,23 +246,25 @@ fn payload(result: &CallToolResult) -> Value {
     serde_json::from_str(&text).expect("the tool answers with compact JSON")
 }
 
-fn items(result: &CallToolResult) -> Vec<(String, String, Option<String>)> {
+/// The item texts of one `read` answer, in the flat single-item shape or the batch shape.
+fn texts(result: &CallToolResult) -> Vec<String> {
     let payload = payload(result);
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .expect("read answers with items");
-    items
-        .iter()
-        .map(|item| {
-            let parts = item.as_array().expect("an item is an array");
-            (
-                parts[0].as_str().expect("handle").to_owned(),
-                parts[1].as_str().expect("text").to_owned(),
-                parts.get(2).and_then(Value::as_str).map(str::to_owned),
-            )
-        })
-        .collect()
+    if let Some(items) = payload.get("items").and_then(Value::as_array) {
+        return items
+            .iter()
+            .map(|item| {
+                item.as_array().expect("an item is an array")[1]
+                    .as_str()
+                    .expect("text")
+                    .to_owned()
+            })
+            .collect();
+    }
+    payload
+        .get("text")
+        .and_then(Value::as_str)
+        .map(|text| vec![text.to_owned()])
+        .unwrap_or_default()
 }
 
 fn arguments(value: Value) -> Map<String, Value> {

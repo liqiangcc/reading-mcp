@@ -23,7 +23,7 @@ pub struct OpenRequest {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadRequest {
-    /// Handle, or an `r:`/`b:` cursor.
+    /// Handle, or a `b:` cursor.
     pub from: String,
     /// sentence (default) or paragraph.
     #[serde(default)]
@@ -69,7 +69,63 @@ impl From<OpenReadingResult> for OpenView {
     }
 }
 
-/// The compact `read` answer.
+/// The compact `read` answer for one item: the item's text, its next handle, and what a caller
+/// cannot see in the item alone.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct FlatReadView {
+    /// The returned item's handle, only when it is not byte-identical to `from`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// The section, only when the item is position 0 of its section stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section: Option<SectionRef>,
+    /// The lowercase snake-case content class of a coarse or non-prose item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// A section named without a position, for the single-item answer.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SectionRef {
+    pub s: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub title: String,
+}
+
+impl FlatReadView {
+    pub fn new(result: ReadReadingResult, from: &str) -> Self {
+        let section = result
+            .sections
+            .into_iter()
+            .next()
+            .map(|section| SectionRef {
+                s: section.handle,
+                title: section.title,
+            });
+        let item = result.items.into_iter().next();
+        let (at, kind, text) = match item {
+            Some(item) => (
+                (item.handle != from).then_some(item.handle),
+                item.content_class,
+                Some(item.text),
+            ),
+            None => (None, None, None),
+        };
+        Self {
+            at,
+            section,
+            kind,
+            text,
+            next: result.next,
+        }
+    }
+}
+
+/// The compact `read` answer for a batch.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct ReadView {
     pub items: Vec<Value>,
@@ -149,15 +205,24 @@ fn hint(error: &ReadingError) -> String {
         }
         ReadingErrorCode::TooLong => too_long_hint(error),
         ReadingErrorCode::InvalidArgument => invalid_argument_hint(error),
+        ReadingErrorCode::TooLarge => {
+            "来源超出资源上限（文件或 OCR 输入过大），请换一个更小的来源。".to_owned()
+        }
         ReadingErrorCode::BlockedSource => {
             "该来源被安全策略拒绝：只允许已授权的本地目录和公开 HTTPS 地址。".to_owned()
         }
         ReadingErrorCode::FetchFailed => format!(
-            "获取或解析来源失败，请等待 {} 秒后用相同参数重试：{}",
-            FETCH_RETRY_WAIT_SECONDS, error.detail
+            "获取来源失败，请等待 {} 秒后用相同参数重试。",
+            FETCH_RETRY_WAIT_SECONDS
         ),
         ReadingErrorCode::OcrRequired => {
             "该来源需要本地 OCR 才能读取，请启用 OCR 后重新 open。".to_owned()
+        }
+        ReadingErrorCode::Unreadable => {
+            "来源无法解析或文本编码不受支持，请确认文件格式与编码后重新 open。".to_owned()
+        }
+        ReadingErrorCode::Internal => {
+            "服务内部错误（存储或索引失败），请稍后重试；若持续失败请检查服务状态。".to_owned()
         }
     }
 }
@@ -182,12 +247,12 @@ fn too_long_hint(error: &ReadingError) -> String {
 fn invalid_argument_hint(error: &ReadingError) -> String {
     match error.field {
         Some("from") => format!(
-            "from 必须是文档/节/段落/句子句柄（d<key>~<chk>[.s<key>[.p<n>[.<n>]]]）或游标（r:/b:<section>.<S|P>.<pos>）。{}",
+            "from 必须是文档/节/段落/句子句柄（d<key>~<chk>[.s<key>[.p<n>[.<n>]]]）或后向游标（b:<section>.<S|P>.<pos>）。{}",
             error.detail
         ),
         Some("unit") => "unit 只能是 sentence 或 paragraph。".to_owned(),
         Some("direction") => {
-            "direction 只能是 forward 或 backward，且必须与游标前缀一致（r: 为 forward，b: 为 backward）。"
+            "direction 只能是 forward 或 backward，且必须与游标前缀一致（b: 为 backward）。"
                 .to_owned()
         }
         Some("max_chars") => "max_chars 必须是 1 到 16000 之间的整数。".to_owned(),
@@ -217,9 +282,22 @@ pub fn too_long_retry(request: &ReadRequest, error: &ReadingError) -> Option<Val
     Some(Value::Object(retry))
 }
 
-/// The `retry` object for a `fetch_failed` answer: the same call after a short wait.
-pub fn fetch_retry() -> Option<Value> {
-    Some(json!({ "wait_seconds": FETCH_RETRY_WAIT_SECONDS }))
+/// The `retry` object of a v2 error, or `None` when repeating the call would not be exactly right.
+pub fn retry_for(error: &ReadingError) -> Option<Value> {
+    match error.code {
+        ReadingErrorCode::FetchFailed => Some(json!({ "wait_seconds": FETCH_RETRY_WAIT_SECONDS })),
+        // `too_long` carries its own retry, built from the request by `too_long_retry`.
+        ReadingErrorCode::NotOpened
+        | ReadingErrorCode::UnknownHandle
+        | ReadingErrorCode::StaleHandle
+        | ReadingErrorCode::TooLong
+        | ReadingErrorCode::InvalidArgument
+        | ReadingErrorCode::TooLarge
+        | ReadingErrorCode::BlockedSource
+        | ReadingErrorCode::OcrRequired
+        | ReadingErrorCode::Unreadable
+        | ReadingErrorCode::Internal => None,
+    }
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -241,8 +319,12 @@ pub fn error_result(error: &ReadingError, retry: Option<Value>) -> CallToolResul
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorView, OpenView, ReadView, SectionView, item_value, too_long_retry};
+    use super::{
+        ErrorView, FlatReadView, OpenView, ReadView, SectionView, item_value, retry_for,
+        too_long_retry,
+    };
     use crate::application::open_reading::OpenReadingResult;
+    use crate::application::ports::ApplicationError;
     use crate::application::read_reading::{
         ReadReadingItem, ReadReadingResult, ReadReadingSection,
     };
@@ -306,12 +388,12 @@ mod tests {
                 handle: "d3~9f2c.s13".into(),
                 title: "本纪第十三".into(),
             }],
-            next: Some("r:d3~9f2c.s13.S.1".into()),
+            next: Some("d3~9f2c.s13.p1.1".into()),
             anchor: None,
         });
         assert_eq!(
             compact(&view),
-            r#"{"items":[["d3~9f2c.s12.p4.2","…text…"],["d3~9f2c.s12.p5","…table text…","table"]],"sections":[{"at":1,"s":"d3~9f2c.s13","title":"本纪第十三"}],"next":"r:d3~9f2c.s13.S.1"}"#
+            r#"{"items":[["d3~9f2c.s12.p4.2","…text…"],["d3~9f2c.s12.p5","…table text…","table"]],"sections":[{"at":1,"s":"d3~9f2c.s13","title":"本纪第十三"}],"next":"d3~9f2c.s13.p1.1"}"#
         );
     }
 
@@ -363,5 +445,201 @@ mod tests {
             serde_json::json!({"from":"d3~9f2c.s1.p2","max_chars":900,"unit":"sentence"})
         );
         assert!(too_long_retry(&request, &ReadingError::too_long(20_000)).is_none());
+    }
+
+    fn item(handle: &str, text: &str, content_class: Option<&str>) -> ReadReadingItem {
+        ReadReadingItem {
+            handle: handle.into(),
+            text: text.into(),
+            content_class: content_class.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn flat_view_is_one_object_in_contract_key_order() {
+        let view = FlatReadView::new(
+            ReadReadingResult {
+                items: vec![item("d3~9f2c.s12.p4.3", "…text…", None)],
+                sections: vec![ReadReadingSection {
+                    at: 0,
+                    handle: "d3~9f2c.s12".into(),
+                    title: "本纪第十二".into(),
+                }],
+                next: Some("d3~9f2c.s12.p4.4".into()),
+                anchor: None,
+            },
+            "d3~9f2c.s12",
+        );
+        assert_eq!(
+            compact(&view),
+            r#"{"at":"d3~9f2c.s12.p4.3","section":{"s":"d3~9f2c.s12","title":"本纪第十二"},"text":"…text…","next":"d3~9f2c.s12.p4.4"}"#
+        );
+    }
+
+    #[test]
+    fn flat_view_omits_at_when_from_is_the_items_own_handle() {
+        let view = FlatReadView::new(
+            ReadReadingResult {
+                items: vec![item("d3~9f2c.s12.p4.3", "a", None)],
+                sections: Vec::new(),
+                next: None,
+                anchor: None,
+            },
+            "d3~9f2c.s12.p4.3",
+        );
+        assert_eq!(compact(&view), r#"{"text":"a"}"#);
+    }
+
+    #[test]
+    fn flat_view_carries_the_kind_of_a_non_prose_item() {
+        let view = FlatReadView::new(
+            ReadReadingResult {
+                items: vec![item("d3~9f2c.s12.p5", "cell", Some("table"))],
+                sections: Vec::new(),
+                next: None,
+                anchor: None,
+            },
+            "d3~9f2c.s12.p5",
+        );
+        assert_eq!(compact(&view), r#"{"kind":"table","text":"cell"}"#);
+    }
+
+    #[test]
+    fn only_fetch_failed_carries_a_retry_of_its_own() {
+        // The approved table, one row per `ApplicationError` variant: its code and whether the
+        // answer carries `retry`.
+        let cases: Vec<(ApplicationError, &str, bool)> = vec![
+            (ApplicationError::DocumentNotFound, "not_opened", false),
+            (ApplicationError::SectionNotFound, "unknown_handle", false),
+            (
+                ApplicationError::StaleDocument("old".into()),
+                "stale_handle",
+                false,
+            ),
+            (
+                ApplicationError::StaleLocator("old".into()),
+                "stale_handle",
+                false,
+            ),
+            (
+                ApplicationError::StaleStructure("old".into()),
+                "stale_handle",
+                false,
+            ),
+            (
+                ApplicationError::InvalidRequest("bad".into()),
+                "invalid_argument",
+                false,
+            ),
+            (
+                ApplicationError::InvalidLocator("bad".into()),
+                "invalid_argument",
+                false,
+            ),
+            (
+                ApplicationError::InvalidCursor("bad".into()),
+                "invalid_argument",
+                false,
+            ),
+            (
+                ApplicationError::StaleCursor("old".into()),
+                "invalid_argument",
+                false,
+            ),
+            (
+                ApplicationError::CursorTargetMismatch("other".into()),
+                "invalid_argument",
+                false,
+            ),
+            (
+                ApplicationError::CursorEncodingFailed("bad".into()),
+                "invalid_argument",
+                false,
+            ),
+            (
+                ApplicationError::ResourceLimitExceeded("big".into()),
+                "too_large",
+                false,
+            ),
+            (ApplicationError::OcrResourceLimit, "too_large", false),
+            (
+                ApplicationError::BlockedSource("private".into()),
+                "blocked_source",
+                false,
+            ),
+            (
+                ApplicationError::AuthenticationFailed("profile".into()),
+                "blocked_source",
+                false,
+            ),
+            (ApplicationError::OcrRequired, "ocr_required", false),
+            (
+                ApplicationError::OcrNoSupportedProjection,
+                "ocr_required",
+                false,
+            ),
+            (ApplicationError::OcrFailed, "ocr_required", false),
+            (ApplicationError::OcrUnavailable, "ocr_required", false),
+            (
+                ApplicationError::RetrievalFailed("offline".into()),
+                "fetch_failed",
+                true,
+            ),
+            (ApplicationError::OcrBusy, "fetch_failed", true),
+            (ApplicationError::OcrTimeout, "fetch_failed", true),
+            (
+                ApplicationError::ParseFailed("broken".into()),
+                "unreadable",
+                false,
+            ),
+            (
+                ApplicationError::UnsupportedTextEncoding("utf-16".into()),
+                "unreadable",
+                false,
+            ),
+            (
+                ApplicationError::RepositoryFailed("disk".into()),
+                "internal",
+                false,
+            ),
+            (
+                ApplicationError::CacheFailed("disk".into()),
+                "internal",
+                false,
+            ),
+            (
+                ApplicationError::IndexFailed("index".into()),
+                "internal",
+                false,
+            ),
+            (
+                ApplicationError::TextUnitIndexFailed("sqlite".into()),
+                "internal",
+                false,
+            ),
+            (
+                ApplicationError::SourceViewFailed("view".into()),
+                "internal",
+                false,
+            ),
+        ];
+        for (error, code, has_retry) in cases {
+            let mapped = ReadingError::from(error);
+            assert_eq!(mapped.code.as_str(), code, "wrong code: {}", mapped.detail);
+            assert_eq!(
+                retry_for(&mapped).is_some(),
+                has_retry,
+                "wrong retry presence for {code}: {}",
+                mapped.detail
+            );
+            if has_retry {
+                assert_eq!(
+                    retry_for(&mapped),
+                    Some(serde_json::json!({ "wait_seconds": 30 }))
+                );
+            }
+        }
+        // `too_long` is built by `read` itself, and its retry needs the request.
+        assert!(retry_for(&ReadingError::too_long(900)).is_none());
     }
 }

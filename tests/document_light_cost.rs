@@ -15,7 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reading_mcp::application::ports::{DocumentRepository, RetrievedResource, TextUnitIndex};
+use reading_mcp::application::ports::{
+    DocumentRepository, Parser, RetrievedResource, TextUnitIndex,
+};
 use reading_mcp::domain::{Document, DocumentSource, MediaType, Section, SectionId};
 use reading_mcp::infrastructure::{SqliteDocumentRepository, SqliteTextUnitIndex};
 use reading_mcp::parsing::{ArchiveLimits, ParserRouter};

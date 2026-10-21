@@ -169,8 +169,8 @@ def main() -> int:
             pragma_lines.append(f"sqlite_file_bytes={sqlite_file_bytes(database)}")
         print(
             "input={label} size_mib={size_mb:g} ok=yes peak_rss_kib={peak} "
-            "documents={documents} document_json_bytes={json_bytes} "
-            "section_text_rows={rows} section_text_bytes={text_bytes} "
+            "documents={documents} document_json_bytes={document_json_bytes} "
+            "section_text_rows={section_text_rows} section_text_bytes={section_text_bytes} "
             "sqlite_file_bytes={file_bytes}".format(
                 label=label,
                 size_mb=size_mb,

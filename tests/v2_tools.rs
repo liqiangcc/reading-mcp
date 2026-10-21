@@ -28,7 +28,7 @@ fn epub_book() -> Vec<u8> {
     let cursor = Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(cursor);
     let options = SimpleFileOptions::default();
-    let entries: [(&str, &str); 6] = [
+    let entries: [(&str, &str); 5] = [
         ("mimetype", "application/epub+zip"),
         (
             "META-INF/container.xml",
@@ -168,7 +168,7 @@ fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().expect("an object").clone()
 }
 
-async fn call(client: &Client, name: &str, value: Value) -> CallToolResult {
+async fn call(client: &Client, name: &'static str, value: Value) -> CallToolResult {
     client
         .call_tool(CallToolRequestParams::new(name).with_arguments(arguments(value)))
         .await

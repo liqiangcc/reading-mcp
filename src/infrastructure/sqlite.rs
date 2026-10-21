@@ -371,6 +371,198 @@ impl SectionLayoutCache {
     }
 }
 
+/// How many MiB of section text the scan text cache keeps by default.
+const DEFAULT_SCAN_TEXT_CACHE_MIB: usize = 48;
+
+/// The cap of the scan text cache in bytes, from `READING_MCP_SEARCH_CACHE_MIB`. 0 disables the
+/// cache, and a value that is not a number falls back to the default.
+fn scan_text_cache_bytes() -> usize {
+    let mib = match std::env::var("READING_MCP_SEARCH_CACHE_MIB") {
+        Ok(value) => value.trim().parse().unwrap_or(DEFAULT_SCAN_TEXT_CACHE_MIB),
+        Err(_) => DEFAULT_SCAN_TEXT_CACHE_MIB,
+    };
+    mib.saturating_mul(1024 * 1024)
+}
+
+/// One section's text as a scan reads it, with the lowercase form every pass over it needs.
+struct ScanSectionText {
+    text: Arc<str>,
+    lowered: LoweredSectionText,
+}
+
+enum LoweredSectionText {
+    /// `lowercase_fast` borrowed the text: it lowercases to itself, so every slice of it does too.
+    Borrowed,
+    /// The lowercase copy, kept because lowercasing changes the text.
+    Owned(Arc<str>),
+}
+
+impl ScanSectionText {
+    fn new(text: String) -> Self {
+        let lowered = match lowercase_fast(&text) {
+            Cow::Borrowed(_) => LoweredSectionText::Borrowed,
+            Cow::Owned(lowered) => LoweredSectionText::Owned(Arc::from(lowered)),
+        };
+        Self {
+            text: Arc::from(text),
+            lowered,
+        }
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Whether the whole section lowercases to itself, so every slice of it does too.
+    fn lowered_is_borrowed(&self) -> bool {
+        matches!(self.lowered, LoweredSectionText::Borrowed)
+    }
+
+    fn lowered(&self) -> &str {
+        match &self.lowered {
+            LoweredSectionText::Borrowed => self.text.as_ref(),
+            LoweredSectionText::Owned(lowered) => lowered.as_ref(),
+        }
+    }
+
+    /// The bytes this entry holds: the text plus the owned lowercase copy.
+    fn bytes(&self) -> usize {
+        self.text.len()
+            + match &self.lowered {
+                LoweredSectionText::Borrowed => 0,
+                LoweredSectionText::Owned(lowered) => lowered.len(),
+            }
+    }
+}
+
+/// The section texts cached for one document, and whether the document outgrew the cap.
+#[derive(Default)]
+struct ScanTextSections {
+    texts: HashMap<i64, Arc<ScanSectionText>>,
+    bytes: usize,
+    /// The document's text outgrew the cap, so nothing is cached for it any more.
+    over_cap: bool,
+}
+
+/// The section texts of the most recently scanned document. The store is keyed by the stored document
+/// meta and checked against it on every scan, so a replaced segmentation, a re-store or a removal
+/// leaves it unused; `write_document_sections` drops it as well.
+struct ScanTextStore {
+    doc_key: i64,
+    normalized_document_hash: NormalizedDocumentHash,
+    cap: usize,
+    sections: Mutex<ScanTextSections>,
+}
+
+impl ScanTextStore {
+    fn new(meta: &StoredUnitDocument, cap: usize) -> Self {
+        Self {
+            doc_key: meta.doc_key,
+            normalized_document_hash: meta.normalized_document_hash.clone(),
+            cap,
+            sections: Mutex::new(ScanTextSections::default()),
+        }
+    }
+
+    /// Whether this store holds `meta`'s document: the same stored row and the same normalized text.
+    fn matches(&self, meta: &StoredUnitDocument) -> bool {
+        self.doc_key == meta.doc_key
+            && self.normalized_document_hash == meta.normalized_document_hash
+    }
+
+    fn get(&self, section_key: i64) -> Option<Arc<ScanSectionText>> {
+        let sections = self.sections.lock().ok()?;
+        sections.texts.get(&section_key).map(Arc::clone)
+    }
+
+    /// Caches one section's text. The section that takes the document over the cap drops everything
+    /// cached for it: a document over the cap is not cached at all.
+    fn insert(&self, section_key: i64, text: Arc<ScanSectionText>) {
+        let Ok(mut sections) = self.sections.lock() else {
+            return;
+        };
+        if sections.over_cap {
+            return;
+        }
+        sections.bytes += text.bytes();
+        if sections.bytes > self.cap {
+            *sections = ScanTextSections {
+                over_cap: true,
+                ..Default::default()
+            };
+            return;
+        }
+        sections.texts.insert(section_key, text);
+    }
+}
+
+/// The scan text store of `meta`'s document: the cached one when it holds that very document, else a
+/// new one that replaces it. `None` when the cache is off or its cap is zero.
+fn scan_text_store(
+    cache: &Mutex<Option<Arc<ScanTextStore>>>,
+    meta: &StoredUnitDocument,
+    options: ScanOptions,
+) -> Option<Arc<ScanTextStore>> {
+    if !options.cache {
+        return None;
+    }
+    let cap = scan_text_cache_bytes();
+    if cap == 0 {
+        return None;
+    }
+    let mut cached = cache.lock().ok()?;
+    if let Some(store) = cached.as_ref()
+        && store.matches(meta)
+    {
+        return Some(Arc::clone(store));
+    }
+    let store = Arc::new(ScanTextStore::new(meta, cap));
+    *cached = Some(Arc::clone(&store));
+    Some(store)
+}
+
+/// How a lexical scan may use the per-document scan text cache, threads and score pruning.
+///
+/// The plain options — no cache, one thread, no pruning — are exactly the scan of R2c step 3, and
+/// exist so that tests can prove the fast scan equal to it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Whether the per-document scan text cache may be used.
+    pub cache: bool,
+    /// The most threads a scan may use; 1 is serial.
+    pub threads: usize,
+    /// Whether units whose score bound cannot reach the current threshold are skipped.
+    pub prune: bool,
+}
+
+impl ScanOptions {
+    /// The scan production uses: the cache and the pruning always, and the thread count the
+    /// environment asks for.
+    pub fn production() -> Self {
+        Self {
+            cache: true,
+            threads: 1,
+            prune: true,
+        }
+    }
+
+    /// The scan of R2c step 3: no cache, one thread, no pruning.
+    pub fn plain() -> Self {
+        Self {
+            cache: false,
+            threads: 1,
+            prune: false,
+        }
+    }
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
 pub struct SqliteDocumentRepository {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
@@ -654,6 +846,8 @@ pub struct SqliteTextUnitIndex {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
     cache: Arc<Mutex<SectionLayoutCache>>,
+    /// The section texts the last scanned document was scanned from. One document at a time.
+    scan_text: Arc<Mutex<Option<Arc<ScanTextStore>>>>,
 }
 
 impl SqliteTextUnitIndex {
@@ -745,6 +939,7 @@ impl SqliteTextUnitIndex {
             path,
             connection: Arc::new(Mutex::new(connection)),
             cache: Arc::new(Mutex::new(SectionLayoutCache::default())),
+            scan_text: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -773,6 +968,14 @@ impl SqliteTextUnitIndex {
             },
         )
         .await
+    }
+
+    /// Forgets the cached scan text: the document it belongs to was re-stored, so its stored text may
+    /// have changed. Only one document is cached, so dropping it always suffices.
+    fn drop_scan_text(&self) {
+        if let Ok(mut cached) = self.scan_text.lock() {
+            *cached = None;
+        }
     }
 
     /// The stored `section_layout_v1` rows of `document_id`, in `section_key` order, as
@@ -822,8 +1025,30 @@ impl SqliteTextUnitIndex {
         mode: MatchMode,
         limit: usize,
     ) -> Result<Option<(Vec<SectionId>, Vec<ScannedUnitHit>)>, ApplicationError> {
+        self.scan_lexical_with_options(
+            document_id,
+            expected_hash,
+            query,
+            mode,
+            limit,
+            ScanOptions::production(),
+        )
+        .await
+    }
+
+    /// [`Self::scan_lexical`] with the scan's cache, thread count and pruning spelled out.
+    pub(crate) async fn scan_lexical_with_options(
+        &self,
+        document_id: &DocumentId,
+        expected_hash: &NormalizedDocumentHash,
+        query: Arc<LexicalQuery>,
+        mode: MatchMode,
+        limit: usize,
+        options: ScanOptions,
+    ) -> Result<Option<(Vec<SectionId>, Vec<ScannedUnitHit>)>, ApplicationError> {
         let document_id = document_id.clone();
         let expected_hash = expected_hash.clone();
+        let cache = Arc::clone(&self.scan_text);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -837,8 +1062,16 @@ impl SqliteTextUnitIndex {
                     return Ok(None);
                 }
 
-                let (section_ids, hits, _timings) =
-                    scan_stored_sections(connection, &meta, &query, mode, limit, false)?;
+                let store = scan_text_store(&cache, &meta, options);
+                let (section_ids, hits, _timings) = scan_stored_sections(
+                    connection,
+                    &meta,
+                    &query,
+                    mode,
+                    limit,
+                    store.as_ref(),
+                    false,
+                )?;
                 Ok(Some((section_ids, hits)))
             },
         )
@@ -862,6 +1095,7 @@ impl SqliteTextUnitIndex {
         };
         let lexical = Arc::new(lexical);
         let document_id = document_id.clone();
+        let cache = Arc::clone(&self.scan_text);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -872,12 +1106,14 @@ impl SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Ok(None);
                 }
+                let store = scan_text_store(&cache, &meta, ScanOptions::production());
                 let (_section_ids, _hits, timings) = scan_stored_sections(
                     connection,
                     &meta,
                     &lexical,
                     MatchMode::Strict,
                     limit,
+                    store.as_ref(),
                     true,
                 )?;
                 Ok(Some(timings))
@@ -998,6 +1234,30 @@ impl ScanTimer {
     }
 }
 
+/// The text of one section: from the scan text store when it holds it, else from SQLite, in which
+/// case it is stored for the next pass. The store is never locked while the caller uses the text.
+fn scan_section_text(
+    connection: &Connection,
+    store: Option<&Arc<ScanTextStore>>,
+    doc_key: i64,
+    section_key: i64,
+) -> Result<Arc<ScanSectionText>, ApplicationError> {
+    if let Some(store) = store
+        && let Some(text) = store.get(section_key)
+    {
+        return Ok(text);
+    }
+    let text = Arc::new(ScanSectionText::new(load_section_text_unchecked(
+        connection,
+        doc_key,
+        section_key,
+    )?));
+    if let Some(store) = store {
+        store.insert(section_key, Arc::clone(&text));
+    }
+    Ok(text)
+}
+
 /// One pass over the stored section text: the paragraphs and sentences of `meta`'s document that
 /// `mode` accepts, best `limit` first, and the section ids they index.
 fn scan_stored_sections(
@@ -1006,6 +1266,7 @@ fn scan_stored_sections(
     query: &LexicalQuery,
     mode: MatchMode,
     limit: usize,
+    store: Option<&Arc<ScanTextStore>>,
     collect_timings: bool,
 ) -> Result<(Vec<SectionId>, Vec<ScannedUnitHit>, ScanTimings), ApplicationError> {
     let mut timer = ScanTimer::new(collect_timings);
@@ -1026,9 +1287,9 @@ fn scan_stored_sections(
         }
         timer.tally(|timings| timings.sections_scanned += 1);
         timer.begin();
-        let text = load_section_text_unchecked(connection, meta.doc_key, section_key)?;
+        let text = scan_section_text(connection, store, meta.doc_key, section_key)?;
         timer.end(ScanPhase::ReadText);
-        let index = NormalizedTextIndex::new(&text);
+        let index = NormalizedTextIndex::new(text.text());
         if index.char_len() != char_len {
             return Err(ApplicationError::TextUnitIndexFailed(format!(
                 "section {section_key} text has {} chars, expected {char_len}",
@@ -1036,13 +1297,13 @@ fn scan_stored_sections(
             )));
         }
         timer.begin();
-        let section_lowered = lowercase_fast(&text);
+        let section_lowered = text.lowered();
         // A borrowed whole-section lowercase means every char of the section lowercases to itself, so
         // every slice of it does too and the per-slice lowercasing can be skipped.
-        let borrowed = matches!(section_lowered, Cow::Borrowed(_));
+        let borrowed = text.lowered_is_borrowed();
         let worth_scanning = match mode {
-            MatchMode::Strict => query.may_contain_all(&section_lowered),
-            MatchMode::Relaxed => query.may_contain_any(&section_lowered),
+            MatchMode::Strict => query.may_contain_all(section_lowered),
+            MatchMode::Relaxed => query.may_contain_any(section_lowered),
         };
         timer.end(ScanPhase::SectionPrefilter);
         if !worth_scanning {
@@ -1694,7 +1955,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 )
             },
         )
-        .await
+        .await?;
+        self.drop_scan_text();
+        Ok(())
     }
 
     async fn replace_document_segmentation(
@@ -1723,7 +1986,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 )
             },
         )
-        .await
+        .await?;
+        self.drop_scan_text();
+        Ok(())
     }
 
     async fn section_units(

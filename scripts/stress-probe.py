@@ -13,6 +13,9 @@ Speaks newline-delimited JSON-RPC MCP over stdio to the release binary. Three mo
 Memory caps use `sudo systemd-run --scope -p MemoryMax=<cap> -p MemorySwapMax=0`. Peak RSS is
 the `ru_maxrss` of the wait4 on that wrapper, which includes the waited-for server process.
 
+`--env KEY=VALUE` (repeatable) adds variables to every server process the probe starts, in every
+mode, and is recorded in every JSON as `server_env`.
+
 Standard library only. This script never builds anything: pass an existing release binary.
 """
 
@@ -47,9 +50,18 @@ DEEP_BUDGET_S = 20 * 60
 CAPS = ["1024M", "768M", "512M"]
 KILLED_CODES = (-9, 137)
 
+# Extra variables for every server process, filled from --env KEY=VALUE.
+SERVER_ENV: dict[str, str] = {}
+
 
 class ProbeError(RuntimeError):
     pass
+
+
+def env_label(pairs: dict[str, str]) -> str:
+    if not pairs:
+        return "default"
+    return ", ".join(f"{key}={pairs[key]}" for key in sorted(pairs))
 
 
 def send(process: subprocess.Popen, message: dict) -> None:
@@ -213,6 +225,7 @@ def server_env(state_dir: str, roots: str, telemetry: bool = False) -> dict:
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
+    env.update(SERVER_ENV)
     return env
 
 
@@ -221,7 +234,7 @@ def cap_command(binary: str, cap: str | None, env: dict) -> list[str]:
         return [binary]
     setenv = []
     for key, value in env.items():
-        if key.startswith("READING_MCP_"):
+        if key.startswith("READING_MCP_") or key in SERVER_ENV:
             setenv += ["--setenv", f"{key}={value}"]
     return [
         "sudo", "systemd-run", "--scope", "--quiet",
@@ -504,7 +517,8 @@ def probe_mode(args) -> int:
     inputs = [entry.split("=", 1) for entry in args.input]
     global_deadline = time.monotonic() + args.deadline_minutes * 60
     os.makedirs(args.state_root, exist_ok=True)
-    report: dict = {"mechanism": None, "books": [], "caps": [], "concurrency": None, "deep": []}
+    report: dict = {"server_env": dict(SERVER_ENV), "mechanism": None, "books": [],
+                    "caps": [], "concurrency": None, "deep": []}
     capable = args.caps and cap_available()
     report["mechanism"] = "sudo systemd-run --scope MemoryMax/MemorySwapMax=0" if capable else "unavailable"
 
@@ -558,7 +572,8 @@ def fmt(value, digits=2) -> str:
 
 
 def tables_1_to_3(report: dict) -> str:
-    lines = ["| Input | Size MiB | Sections | Sentences | Open s | Peak RSS MiB | Disk MiB | × source | Error |",
+    lines = [f"Server env: {env_label(report.get('server_env') or {})}", "",
+             "| Input | Size MiB | Sections | Sentences | Open s | Peak RSS MiB | Disk MiB | × source | Error |",
              "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for book in report["books"]:
         if "skipped" in book:
@@ -609,8 +624,8 @@ def read_mode(args) -> int:
     os.makedirs(state_dir)
     env = server_env(state_dir, os.path.dirname(os.path.abspath(args.source)))
     server = Server([args.binary], env, os.path.join(state_dir, "server.log"), 1800)
-    out: dict = {"label": args.label, "shard": args.shard, "shards": args.shards,
-                 "partial": False, "error": None}
+    out: dict = {"server_env": dict(SERVER_ENV), "label": args.label, "shard": args.shard,
+                 "shards": args.shards, "partial": False, "error": None}
     try:
         server.initialize()
         data, open_s, error = open_document(server, args.source)
@@ -710,15 +725,29 @@ def hms(seconds: float) -> str:
     return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
 
 
+def shard_env_line(shards: list[dict]) -> str:
+    """One `Server env:` line for the whole run, or one entry per shard when they disagree."""
+    envs = [(shard, shard.get("server_env") or {}) for shard in shards]
+    first = envs[0][1] if envs else {}
+    if all(pairs == first for _, pairs in envs):
+        return f"Server env: {env_label(first)}"
+    parts = [f"{shard['label']} {shard['shard']}/{shard['shards']}: {env_label(pairs)}"
+             for shard, pairs in envs]
+    return "Server env: " + "; ".join(parts)
+
+
 def aggregate_mode(args) -> int:
     by_label: dict[str, list[dict]] = {}
+    every_shard: list[dict] = []
     for name in sorted(os.listdir(args.shards_dir)):
         if name.endswith(".json"):
             with open(os.path.join(args.shards_dir, name), encoding="utf-8") as handle:
                 shard = json.load(handle)
             by_label.setdefault(shard["label"], []).append(shard)
+            every_shard.append(shard)
 
-    lines = ["| Input | Sentences | Calls | Total read time | ms/call p50 | p95 | p99 | max | "
+    lines = [shard_env_line(every_shard), "",
+             "| Input | Sentences | Calls | Total read time | ms/call p50 | p95 | p99 | max | "
              "First 5% p50 | Last 5% p50 | Max RSS MiB | RSS growth MiB/100k calls | Estimated? |",
              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     dump = {}
@@ -759,6 +788,7 @@ def aggregate_mode(args) -> int:
         dump[label] = {"sentences": total_sentences, "calls": calls, "read_s": read_s,
                        "estimated": estimated, "max_rss_mib": max_rss}
     print("\n".join(lines))
+    dump["server_env"] = dict(SERVER_ENV)
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(dump, handle, indent=1)
     return 0
@@ -778,7 +808,14 @@ def main() -> int:
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--shards-dir", default="")
+    parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                        help="extra server env var, repeatable")
     args = parser.parse_args()
+    for entry in args.env:
+        key, sep, value = entry.partition("=")
+        if not sep or not key:
+            parser.error(f"--env expects KEY=VALUE, got {entry!r}")
+        SERVER_ENV[key] = value
     if args.mode == "probe":
         return probe_mode(args)
     if args.mode == "read":

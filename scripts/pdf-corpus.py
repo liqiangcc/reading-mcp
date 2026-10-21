@@ -28,6 +28,7 @@ import argparse
 import collections
 import hashlib
 import importlib.util
+import itertools
 import json
 import math
 import os
@@ -588,87 +589,100 @@ def coverage_mode(args) -> int:
         for page, page_layout in zip(document, layout["pages"]):
             info: dict = {
                 "page": page.number + 1,
-                "image_count": len(page.get_image_info()),
-                "has_native_body": worker.has_native_body(page_layout),
-                "text_regions": len(worker.native_text_regions(page_layout)),
+                "image_count": 0,
+                "has_native_body": None,
+                "text_regions": None,
                 "rotation": page.rotation,
                 "page_points": [round(page.rect.width, 1), round(page.rect.height, 1)],
                 "images": [],
-                "visual_boxes": [name for name, _ in box_classes(page_layout)],
+                "visual_boxes": [],
                 "reason": None,
+                "analysis_error": None,
             }
-            page_area = page.rect.width * page.rect.height or 1.0
-            boxes = box_classes(page_layout)
-            for image in page.get_image_info():
-                bbox = [float(value) for value in (image.get("bbox") or [0, 0, 0, 0])]
-                area = max(0.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
-                inside = None
-                for name, box in boxes:
-                    if contains(box, bbox):
-                        inside = name
-                        break
-                info["images"].append({
-                    "bbox": [round(value, 1) for value in bbox],
-                    "area_share": round(area / page_area, 3),
-                    "pixels": [image.get("width"), image.get("height")],
-                    "inside_box": inside,
-                    "has_transform": bool(image.get("transform")),
-                })
-            info["images"].sort(key=lambda item: item["area_share"], reverse=True)
-            if info["image_count"]:
-                pixels = worker.raster_pixel_count(page, 300)
-                cumulative += pixels
-                info["raster_pixels_at_300dpi"] = pixels
-                info["cumulative_raster_pixels"] = cumulative
-                try:
-                    pixmap = worker.prepare_page_raster(page, dpi=300)
-                    coverage = worker.native_raster_coverage(
-                        page, pixmap, worker.native_text_regions(page_layout), dpi=300)
-                    if coverage is None:
-                        info["coverage"] = None
-                    else:
-                        total_samples = len(pixmap.samples)
-                        before = coverage["uncovered_samples"]
-                        masked = bytearray(pixmap.samples)
-                        rectangles = [mask["pixel_bbox"] for mask in coverage["masks"]]
-                        scale = 300 / 72
-                        for _, bbox in boxes:
-                            rectangles.append([math.ceil(bbox[0] * scale),
-                                               math.ceil(bbox[1] * scale),
-                                               math.floor(bbox[2] * scale),
-                                               math.floor(bbox[3] * scale)])
-                        for x0, y0, x1, y1 in rectangles:
-                            for row in range(int(y0), int(y1)):
-                                start = (row * pixmap.width + int(x0)) * 3
-                                masked[start:start + max(0, int(x1) - int(x0)) * 3] = \
-                                    b"\xff" * (max(0, int(x1) - int(x0)) * 3)
-                        after = len(masked) - masked.count(255)
-                        info["coverage"] = {
-                            "total_samples": total_samples,
-                            "uncovered_samples": before,
-                            "uncovered_share": round(before / total_samples, 5),
-                            "masks": len(coverage["masks"]),
-                            "uncovered_after_visual_boxes": after,
-                            "box_explained_share": (
-                                round((before - after) / before, 4) if before else None),
-                        }
-                except worker.OcrStageFailure as exc:
-                    info["coverage"] = {"error": f"{exc.code}: {exc}"}
-                except Exception as exc:  # noqa: BLE001 - recorded, not fatal
-                    info["coverage"] = {"error": f"{type(exc).__name__}: {exc}"}
-                worker.RASTER_BUDGET = worker.OcrRasterBudget()
-                worker.PAGE_DEADLINE = None
-                try:
-                    worker.require_disabled_page_coverage(page, page_layout)
-                except worker.OcrRequired as exc:
-                    info["reason"] = str(exc)
-                except worker.OcrStageFailure as exc:
-                    info["reason"] = f"{exc.code}: {exc}"
-                except Exception as exc:  # noqa: BLE001
-                    info["reason"] = f"{type(exc).__name__}: {exc}"
-                if info["reason"] and result["first_failing_page"] is None:
-                    result["first_failing_page"] = info["page"]
-                    result["first_reason"] = info["reason"]
+            try:
+                info["image_count"] = len(page.get_image_info())
+                # The worker's own predicate; it raises TypeError when a layout box carries
+                # `textlines: null`, which the worker would hit on the same page.
+                info["has_native_body"] = worker.has_native_body(page_layout)
+                info["text_regions"] = len(worker.native_text_regions(page_layout))
+                boxes = box_classes(page_layout)
+                info["visual_boxes"] = [name for name, _ in boxes]
+                page_area = page.rect.width * page.rect.height or 1.0
+                for image in page.get_image_info():
+                    bbox = [float(value) for value in (image.get("bbox") or [0, 0, 0, 0])]
+                    area = max(0.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+                    inside = None
+                    for name, box in boxes:
+                        if contains(box, bbox):
+                            inside = name
+                            break
+                    info["images"].append({
+                        "bbox": [round(value, 1) for value in bbox],
+                        "area_share": round(area / page_area, 3),
+                        "pixels": [image.get("width"), image.get("height")],
+                        "inside_box": inside,
+                        "has_transform": bool(image.get("transform")),
+                    })
+                info["images"].sort(key=lambda item: item["area_share"], reverse=True)
+                if info["image_count"]:
+                    pixels = worker.raster_pixel_count(page, 300)
+                    cumulative += pixels
+                    info["raster_pixels_at_300dpi"] = pixels
+                    info["cumulative_raster_pixels"] = cumulative
+                    try:
+                        pixmap = worker.prepare_page_raster(page, dpi=300)
+                        coverage = worker.native_raster_coverage(
+                            page, pixmap, worker.native_text_regions(page_layout), dpi=300)
+                        if coverage is None:
+                            info["coverage"] = None
+                        else:
+                            total_samples = len(pixmap.samples)
+                            before = coverage["uncovered_samples"]
+                            masked = bytearray(pixmap.samples)
+                            rectangles = [mask["pixel_bbox"] for mask in coverage["masks"]]
+                            scale = 300 / 72
+                            for _, bbox in boxes:
+                                rectangles.append([math.ceil(bbox[0] * scale),
+                                                   math.ceil(bbox[1] * scale),
+                                                   math.floor(bbox[2] * scale),
+                                                   math.floor(bbox[3] * scale)])
+                            for x0, y0, x1, y1 in rectangles:
+                                for row in range(int(y0), int(y1)):
+                                    start = (row * pixmap.width + int(x0)) * 3
+                                    masked[start:start + max(0, int(x1) - int(x0)) * 3] = \
+                                        b"\xff" * (max(0, int(x1) - int(x0)) * 3)
+                            after = len(masked) - masked.count(255)
+                            info["coverage"] = {
+                                "total_samples": total_samples,
+                                "uncovered_samples": before,
+                                "uncovered_share": round(before / total_samples, 5),
+                                "masks": len(coverage["masks"]),
+                                "uncovered_after_visual_boxes": after,
+                                "box_explained_share": (
+                                    round((before - after) / before, 4) if before else None),
+                            }
+                    except worker.OcrStageFailure as exc:
+                        info["coverage"] = {"error": f"{exc.code}: {exc}"}
+                    except Exception as exc:  # noqa: BLE001 - recorded, not fatal
+                        info["coverage"] = {"error": f"{type(exc).__name__}: {exc}"}
+                    # Fresh per-page raster budget: each page gets an independent verdict.
+                    worker.RASTER_BUDGET = worker.OcrRasterBudget()
+                    worker.PAGE_DEADLINE = None
+                    try:
+                        worker.require_disabled_page_coverage(page, page_layout)
+                    except worker.OcrRequired as exc:
+                        info["reason"] = str(exc)
+                    except worker.OcrStageFailure as exc:
+                        info["reason"] = f"{exc.code}: {exc}"
+                    except Exception as exc:  # noqa: BLE001
+                        info["reason"] = f"{type(exc).__name__}: {exc}"
+            except Exception as exc:  # noqa: BLE001 - a page that cannot be analysed is data
+                info["analysis_error"] = f"{type(exc).__name__}: {exc}"
+                if info["reason"] is None:
+                    info["reason"] = info["analysis_error"]
+            if info["reason"] and result["first_failing_page"] is None:
+                result["first_failing_page"] = info["page"]
+                result["first_reason"] = info["reason"]
             result["pages"].append(info)
     result["cumulative_raster_pixels"] = cumulative
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
@@ -885,6 +899,29 @@ def evaluate(rule: dict[str, bool], label: bool) -> str:
     return "tn"
 
 
+def detector_evaluation(papers: list[dict], threshold: float) -> tuple[list[str], dict]:
+    """TP/FP/FN for every single rule and every OR-pair, against one containment label."""
+    labelled = [paper for paper in papers if (paper.get("reference") or {}).get("chars")]
+    names = ["a_char_ratio", "b_sentences_per_page", "c_nonprintable", "d_cjk_share"]
+    combos = [(name,) for name in names] + list(itertools.combinations(names, 2))
+    rows = ["| Rule | TP | FP | FN | TN | Errors |", "| --- | --- | --- | --- | --- | --- |"]
+    result: dict = {"threshold": threshold, "papers": len(labelled), "rules": {}}
+    for combo in combos:
+        counts: collections.Counter = collections.Counter()
+        for paper in labelled:
+            rules = detector_rules(paper)
+            label = ((paper.get("default") or {}).get("containment") or 0.0) < threshold
+            counts[evaluate({"x": any(rules[name] for name in combo)}, label)] += 1
+        key = "+".join(combo)
+        entry = {"tp": counts.get("tp", 0), "fp": counts.get("fp", 0),
+                 "fn": counts.get("fn", 0), "tn": counts.get("tn", 0)}
+        entry["errors"] = entry["fp"] + entry["fn"]
+        result["rules"][key] = entry
+        rows.append(f"| {key} | {entry['tp']} | {entry['fp']} | {entry['fn']} | "
+                    f"{entry['tn']} | {entry['errors']} |")
+    return rows, result
+
+
 def aggregate_mode(args) -> int:
     if not os.path.isdir(args.jsonl_dir):
         print(f"::error::no shard results in {args.jsonl_dir}")
@@ -894,22 +931,22 @@ def aggregate_mode(args) -> int:
     if not papers:
         print(f"::error::no paper records in {args.jsonl_dir}")
         return 1
-    coverages = {record["id"]: record for record in records
+    coverages = {record["id"]: record.get("coverage") or {} for record in records
                  if record.get("kind_record") == "coverage"}
     papers.sort(key=lambda item: (item.get("group") or "", item.get("id") or ""))
 
     # 1. per-paper table
     table = ["| Paper | Group | Pages | Backend | Outcome | Open s | Peak RSS MiB | Sections | "
-             "Sentences | Sent/page | Chars | Char ratio vs ref | Containment (5-gram) | "
-             "Non-printable | CJK share |",
+             "Sentences | Sent/page | Chars | Ref window (pages/chars) | Char ratio vs ref | "
+             "5-gram containment | Non-printable | CJK share |",
              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
-             "--- | --- |"]
+             "--- | --- | --- |"]
     for paper in papers:
         for backend in ("default", "layout"):
             result = paper.get(backend) or {}
             if not result:
                 table.append(f"| {paper['id']} | {paper.get('group')} | {paper.get('pages')} | "
-                             f"{backend} | not run | - | - | - | - | - | - | - | - | - | - |")
+                             f"{backend} | not run | - | - | - | - | - | - | - | - | - | - | - |")
                 continue
             table.append(
                 f"| {paper['id']} | {paper.get('group')} | {paper.get('pages')} | {backend} | "
@@ -918,6 +955,7 @@ def aggregate_mode(args) -> int:
                 f"{fmt((result.get('peak_rss_kib') or 0) / 1024, 1)} | "
                 f"{fmt(result.get('sections'))} | {fmt(result.get('sentences'))} | "
                 f"{fmt(result.get('sentences_per_page'))} | {fmt(result.get('chars'))} | "
+                f"{fmt(result.get('reference_pages_used'))}/{fmt(result.get('reference_chars_used'))} | "
                 f"{fmt(result.get('char_ratio'), 3)} | {fmt(result.get('containment'), 3)} | "
                 f"{fmt(result.get('nonprintable_share'), 3)} | "
                 f"{fmt(result.get('cjk_share'), 3)} |")
@@ -925,57 +963,60 @@ def aggregate_mode(args) -> int:
     # 2. refusals
     refused = [paper for paper in papers
                if (paper.get("layout") or {}).get("error_code") == "OCR_REQUIRED"]
-    opened_ok = [paper for paper in papers if (paper.get("layout") or {}).get("outcome") == "ok"]
     other_fail = [paper for paper in papers if paper.get("layout")
                   and (paper["layout"].get("outcome") != "ok")
                   and paper["layout"].get("error_code") != "OCR_REQUIRED"]
     by_group: dict[str, list[int]] = {}
     by_reason: collections.Counter = collections.Counter()
-    refusal_rows = ["| Paper | Group | Pages | Failing page(s) | Reason | Rasters on the failing "
-                    "page | Box explained | Verdict |",
-                    "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    refusal_rows = ["| Paper | Group | Pages | Failing page(s) | First reason | Raster on the first "
+                    "failing page | Uncovered share | Box explained | Verdict |",
+                    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     inside_box = 0
     outside_box = 0
+    refusal_details = []
     for paper in refused:
-        coverage = coverages.get(paper["id"], {}).get("coverage") or {}
-        reason = (paper.get("layout_refusal") or {}).get("first_reason")
-        if not reason:
-            reason = coverage.get("first_reason")
-        by_reason[reason or "unknown"] += 1
+        coverage = coverages.get(paper["id"]) or {}
+        pages_info = coverage.get("pages") or []
+        failing = [info for info in pages_info if info.get("reason")]
+        first = failing[0] if failing else None
+        reason = (first or {}).get("reason") or coverage.get("first_reason") \
+            or (paper.get("layout_refusal") or {}).get("first_reason") or "unknown"
+        by_reason[reason] += 1
         group = paper.get("group") or "?"
         counts = by_group.setdefault(group, [0, 0])
         counts[0] += 1
-        pages = [info["page"] for info in coverage.get("pages", []) if info.get("reason")]
-        failing = [info for info in coverage.get("pages", []) if info.get("reason")]
-        description = []
-        explained = []
+        top = (first or {}).get("images") or []
+        top = top[0] if top else None
+        description = "-"
+        if top:
+            description = (f"{first['image_count']} raster(s), largest "
+                           f"{top['area_share'] * 100:.0f}% of page"
+                           + (f" inside {top['inside_box']} box" if top.get("inside_box") else "")
+                           + (" (transformed)" if top.get("has_transform") else ""))
+        coverage_info = (first or {}).get("coverage") or {}
+        explained = coverage_info.get("box_explained_share")
         verdict = "not explained by any box"
-        for info in failing[:3]:
-            images = info.get("images") or []
-            top = images[0] if images else None
-            if top:
-                description.append(
-                    f"p{info['page']}: {info['image_count']} raster(s), largest "
-                    f"{top['area_share'] * 100:.0f}% of page"
-                    + (f" inside {top['inside_box']} box" if top.get("inside_box") else "")
-                    + (" (transformed)" if top.get("has_transform") else ""))
-            coverage_info = info.get("coverage") or {}
-            if coverage_info.get("box_explained_share") is not None:
-                explained.append(f"p{info['page']}: "
-                                 f"{coverage_info['box_explained_share'] * 100:.1f}%")
-            if top and top.get("inside_box") and (
-                    coverage_info.get("box_explained_share") or 0) >= 0.9:
-                verdict = "raster inside a retained picture/figure box"
-        if verdict.startswith("raster inside"):
+        if top and top.get("inside_box") and (explained or 0) >= 0.9:
+            verdict = "raster inside a retained picture/figure box"
             inside_box += 1
         else:
             outside_box += 1
+        refusal_details.append({
+            "id": paper["id"], "group": group, "pages": paper.get("pages"),
+            "failing_pages": [info["page"] for info in failing],
+            "reason": reason, "top_raster": top,
+            "uncovered_share": coverage_info.get("uncovered_share"),
+            "box_explained_share": explained, "verdict": verdict,
+            "has_native_body": (first or {}).get("has_native_body"),
+            "visual_boxes": (first or {}).get("visual_boxes"),
+        })
         refusal_rows.append(
             f"| {paper['id']} | {group} | {paper.get('pages')} | "
-            f"{','.join(str(page) for page in pages) or '-'} | {reason} | "
-            f"{'; '.join(description) or '-'} | {'; '.join(explained) or '-'} | {verdict} |")
-    for group, counts in by_group.items():
-        counts[1] = len([paper for paper in papers if paper.get("group") == group])
+            f"{','.join(str(info['page']) for info in failing) or '-'} | {reason} | "
+            f"{description} | {fmt(coverage_info.get('uncovered_share'), 3)} | "
+            f"{fmt(explained, 3)} | {verdict} |")
+    for group in by_group:
+        by_group[group][1] = len([paper for paper in papers if paper.get("group") == group])
     group_rows = ["| Group | Papers | Layout refused | Rate |",
                   "| --- | --- | --- | --- |"]
     for group in sorted(by_group):
@@ -987,34 +1028,21 @@ def aggregate_mode(args) -> int:
         reason_rows.append(f"| {reason} | {count} |")
 
     # 3. detectors
-    labelled = [paper for paper in papers
-                if (paper.get("reference") or {}).get("chars")]
-    detector_rows = ["| Rule | TP | FP | FN | TN | Errors |",
-                     "| --- | --- | --- | --- | --- | --- |"]
-    evaluation: dict[str, dict] = {}
-    for name in ("a_char_ratio", "b_sentences_per_page", "c_nonprintable", "d_cjk_share"):
-        counts = collections.Counter()
-        for paper in labelled:
-            label = ((paper.get("default") or {}).get("containment") or 0.0) < 0.5
-            counts[evaluate({name: detector_rules(paper)[name]}, label)] += 1
-        evaluation[name] = dict(counts)
-    names = list(evaluation)
-    for left in names:
-        for right in names:
-            if names.index(right) <= names.index(left):
-                continue
-            key = f"{left}|{right}"
-            counts = collections.Counter()
-            for paper in labelled:
-                rules = detector_rules(paper)
-                label = ((paper.get("default") or {}).get("containment") or 0.0) < 0.5
-                counts[evaluate({key: rules[left] or rules[right]}, label)] += 1
-            evaluation[key] = dict(counts)
-    for key, counts in evaluation.items():
-        detector_rows.append(
-            f"| {key} | {counts.get('tp', 0)} | {counts.get('fp', 0)} | "
-            f"{counts.get('fn', 0)} | {counts.get('tn', 0)} | "
-            f"{counts.get('fp', 0) + counts.get('fn', 0)} |")
+    detector_rows, primary = detector_evaluation(papers, 0.5)
+    sensitivity_rows, sensitivity = detector_evaluation(papers, 0.8)
+    per_paper_rules = ["| Paper | Ref CJK | Ref chars/page | Default containment | a | b | c | d |",
+                       "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for paper in papers:
+        reference = paper.get("reference") or {}
+        if not reference.get("chars"):
+            continue
+        rules = detector_rules(paper)
+        per_paper_rules.append(
+            f"| {paper['id']} | {fmt(reference.get('cjk_chars'))} | "
+            f"{fmt(reference.get('chars_per_page'), 0)} | "
+            f"{fmt((paper.get('default') or {}).get('containment'), 3)} | "
+            f"{fmt(rules['a_char_ratio'])} | {fmt(rules['b_sentences_per_page'])} | "
+            f"{fmt(rules['c_nonprintable'])} | {fmt(rules['d_cjk_share'])} |")
 
     # 4. open time and RSS
     def times(backend: str) -> list[float]:
@@ -1051,24 +1079,34 @@ def aggregate_mode(args) -> int:
         "papers_ok": len([paper for paper in papers if paper.get("outcome") == "ok"]),
         "download_failed": [paper["id"] for paper in papers
                             if paper.get("outcome") == "download_failed"],
+        "not_run": [paper["id"] for paper in papers if paper.get("outcome") == "not_run"],
         "layout_refused": len(refused),
-        "layout_ok": len(opened_ok),
+        "layout_ok": len([paper for paper in papers
+                          if (paper.get("layout") or {}).get("outcome") == "ok"]),
         "layout_other_failures": [(paper["id"], paper["layout"].get("error_code"))
                                   for paper in other_fail],
         "refusal_reasons": dict(by_reason),
         "refused_inside_picture_box": inside_box,
         "refused_outside_any_box": outside_box,
-        "detectors": evaluation,
+        "refusal_details": refusal_details,
+        "detectors": {"primary": primary, "sensitivity": sensitivity},
         "timing": timing,
         "corpus": [{"id": paper["id"], "group": paper.get("group"),
                     "pages": paper.get("pages")} for paper in papers],
     }
     text = "\n".join([
         "# PDF-1a corpus results", "",
-        "## Per-paper outcome and text quality", "", *table, "",
+        "## Per-paper outcome and text quality", "",
+        "The reference window is the leading reference pages whose characters reach the "
+        "backend's own output volume (at most 20 pages); comparing a 200-sentence read against "
+        "a whole document would only measure the sentence cap.", "",
+        *table, "",
         "## Layout refusals", "", *group_rows, "", *reason_rows, "", *refusal_rows, "",
-        "## Detector candidates against the label `default 5-gram containment < 0.5`", "",
+        "## Detector candidates (label: default 5-gram containment < 0.5)", "",
         *detector_rows, "",
+        "## Detector candidates (sensitivity: containment < 0.8)", "",
+        *sensitivity_rows, "",
+        "## Rule flags per paper", "", *per_paper_rules, "",
         "## Open time and peak RSS", "", *timing_rows, "",
     ])
     print(text)

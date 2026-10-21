@@ -78,10 +78,8 @@ class TaskResult:
         payload = probe.tool_payload(result)
         items = (payload or {}).get("items") if isinstance(payload, dict) else None
         for item in items or []:
-            if not isinstance(item, dict):
-                continue
-            text = item.get("text")
-            if isinstance(text, str):
+            text = item_text(item)
+            if text is not None:
                 self.body_tokens += probe.est_tokens(text)
                 self.sentences += 1
 
@@ -101,6 +99,16 @@ class TaskResult:
         if not self.response_tokens:
             return None
         return 100.0 * self.body_tokens / self.response_tokens
+
+
+def item_text(item):
+    """The text of one item, in the v1 object shape or the v2 `[handle, text, class?]` shape."""
+    if isinstance(item, dict):
+        text = item.get("text")
+        return text if isinstance(text, str) else None
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        return item[1] if isinstance(item[1], str) else None
+    return None
 
 
 def tool_arguments(**kwargs) -> dict:
@@ -269,7 +277,9 @@ def v2_task2(server, opened: dict, deadline: float) -> TaskResult:
         return record
     middle = max(0, min(sections - 1, sections // 2))
     from_handle = f"{doc}.s{middle}"
-    while record.sentences < SENTENCES_T2:
+    for _ in range(SENTENCES_T2 * 4):
+        if record.sentences >= SENTENCES_T2:
+            break
         payload = call(server, "read", {"from": from_handle}, deadline, record)
         next_cursor = payload.get("next")
         if not next_cursor:

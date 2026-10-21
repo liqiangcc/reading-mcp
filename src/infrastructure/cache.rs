@@ -88,6 +88,7 @@ pub struct CachingParser {
     pdf_namespace: Option<String>,
     ocr_fingerprint: String,
     ocr_admission: Option<Arc<super::ocr_singleflight::OcrSingleFlight>>,
+    pdf_only: bool,
 }
 
 impl CachingParser {
@@ -98,7 +99,14 @@ impl CachingParser {
             pdf_namespace: None,
             ocr_fingerprint: "ocr-disabled/v1".into(),
             ocr_admission: None,
+            pdf_only: false,
         }
+    }
+    /// Restrict the parsed cache to PDFs. Layout and OCR parses are expensive
+    /// enough to pay for the extra copy; every other media type re-parses.
+    pub fn with_pdf_only(mut self, pdf_only: bool) -> Self {
+        self.pdf_only = pdf_only;
+        self
     }
     pub fn with_ocr_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
         self.ocr_fingerprint = fingerprint.into();
@@ -118,6 +126,15 @@ impl CachingParser {
 #[async_trait]
 impl Parser for CachingParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        if self.pdf_only && !resource.media_type.is_pdf() {
+            // No key, no SHA-256, no cache copy: non-PDF parses are cheap.
+            let document = self.inner.parse(resource).await?;
+            document
+                .validate_ocr_publication()
+                .map_err(ApplicationError::CacheFailed)?;
+            return Ok(document);
+        }
+
         let key = ParsedCacheKey {
             final_source: resource.final_source.clone(),
             raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
@@ -213,6 +230,91 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(calls.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn pdf_only_parses_non_pdf_resources_without_touching_the_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counting = Arc::new(CountingParsedDocumentCache::default());
+        let cache: Arc<dyn ParsedDocumentCache> = counting.clone();
+        let parser = CachingParser::new(
+            Arc::new(FakeParser {
+                calls: calls.clone(),
+            }),
+            cache,
+        )
+        .with_pdf_only(true);
+        let source = DocumentSource("file:///notes.md".into());
+        let resource = RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: MediaType("text/markdown".into()),
+            bytes: b"# Notes\n\nSame bytes.\n".to_vec(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        };
+        for expected in [1, 2, 3] {
+            parser.parse(resource.clone()).await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+        }
+        assert_eq!(counting.gets.load(Ordering::SeqCst), 0);
+        assert_eq!(counting.puts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn pdf_only_still_hits_the_cache_for_pdfs() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counting = Arc::new(CountingParsedDocumentCache::default());
+        let cache: Arc<dyn ParsedDocumentCache> = counting.clone();
+        let parser = CachingParser::new(
+            Arc::new(FakeParser {
+                calls: calls.clone(),
+            }),
+            cache,
+        )
+        .with_pdf_only(true);
+        let source = DocumentSource("file:///paper.pdf".into());
+        let resource = RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: MediaType("application/pdf".into()),
+            bytes: b"%PDF-1.7 same bytes".to_vec(),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        };
+        let first = parser.parse(resource.clone()).await.unwrap();
+        let second = parser.parse(resource).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(counting.gets.load(Ordering::SeqCst), 2);
+        assert_eq!(counting.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(first.id, second.id);
+    }
+
+    #[derive(Default)]
+    struct CountingParsedDocumentCache {
+        entries: RwLock<HashMap<ParsedCacheKey, Document>>,
+        gets: AtomicUsize,
+        puts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ParsedDocumentCache for CountingParsedDocumentCache {
+        async fn get(&self, key: &ParsedCacheKey) -> Result<Option<Document>, ApplicationError> {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            Ok(self.entries.read().await.get(key).cloned())
+        }
+
+        async fn put(
+            &self,
+            key: ParsedCacheKey,
+            document: Document,
+        ) -> Result<(), ApplicationError> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.entries.write().await.insert(key, document);
+            Ok(())
         }
     }
 

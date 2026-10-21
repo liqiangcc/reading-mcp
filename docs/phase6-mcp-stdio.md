@@ -48,7 +48,7 @@ v5 → epub-structure-validator/v1 persisted report + coverage evidence
 v6 → block-aware segmentation v2 changes persisted validator TextUnit coverage
 ```
 
-`CachingParser` returns Parsed Cache hits without rerunning parser/validator work. Because the persisted EPUB validation report contains current Paragraph/Sentence coverage, v5 cache entries must miss once TextUnit semantics advance to v2. Raw Resource Cache remains independently reusable.
+`CachingParser` returns Parsed Cache hits without rerunning parser/validator work. Because the persisted EPUB validation report contains current Paragraph/Sentence coverage, v5 cache entries must miss once TextUnit semantics advance to v2. Raw Resource Cache remains independently reusable. The runtime now restricts the Parsed Cache to PDFs (`with_pdf_only`); EPUB, HTML, Markdown and text re-parse instead, and PDF entries live under `<state>/cache/parsed-v2`.
 
 Current precise identity：
 

@@ -6,6 +6,30 @@ use crate::domain::OcrConfig;
 use crate::infrastructure::ResourceBudget;
 use crate::retrieval::HttpRetrieverConfig;
 
+/// Which tool set `READING_MCP_TOOLS` selects.
+///
+/// `v1` (the default) is the nine stable tools; `v2` is only the two short-handle tools of this
+/// release; `both` serves them together. A tool that is not registered is absent from `tools/list`
+/// and rejected when called.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolSet {
+    #[default]
+    V1,
+    V2,
+    Both,
+}
+
+impl ToolSet {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "v1" => Some(Self::V1),
+            "v2" => Some(Self::V2),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub pdf_layout_python: Option<PathBuf>,
@@ -21,6 +45,7 @@ pub struct RuntimeConfig {
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
     pub telemetry: bool,
+    pub tools: ToolSet,
     pub resource_budget: ResourceBudget,
     pub source_view: SourceViewLimits,
     pub http: HttpRetrieverConfig,
@@ -46,6 +71,7 @@ impl Default for RuntimeConfig {
             state_dir: default_state_dir(),
             allow_http: false,
             telemetry: true,
+            tools: ToolSet::default(),
             resource_budget,
             source_view: SourceViewLimits::default(),
             http,
@@ -123,6 +149,11 @@ impl RuntimeConfig {
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;
         config.telemetry = env_bool("READING_MCP_TELEMETRY", config.telemetry)?;
+        if let Ok(value) = std::env::var("READING_MCP_TOOLS") {
+            config.tools = ToolSet::parse(&value).ok_or_else(|| {
+                format!("READING_MCP_TOOLS must be one of v1, v2 or both, got {value:?}")
+            })?;
+        }
 
         config.resource_budget.max_document_bytes = env_usize(
             "READING_MCP_MAX_DOCUMENT_BYTES",
@@ -309,4 +340,19 @@ fn env_u64(name: &str, default: u64) -> Result<u64, String> {
     value
         .parse::<u64>()
         .map_err(|_| format!("{name} must be a non-negative integer"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolSet;
+
+    #[test]
+    fn tool_set_parsing_accepts_only_the_documented_values() {
+        assert_eq!(ToolSet::parse("v1"), Some(ToolSet::V1));
+        assert_eq!(ToolSet::parse(" V2 "), Some(ToolSet::V2));
+        assert_eq!(ToolSet::parse("both"), Some(ToolSet::Both));
+        assert_eq!(ToolSet::parse("v3"), None);
+        assert_eq!(ToolSet::parse(""), None);
+        assert_eq!(ToolSet::default(), ToolSet::V1);
+    }
 }

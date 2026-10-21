@@ -17,7 +17,7 @@ use reading_mcp::application::get_text_units::{
     GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
     TextUnitDirection,
 };
-use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
+use reading_mcp::application::open_document::OpenDocumentUseCase;
 use reading_mcp::application::open_reading::{OpenReadingCommand, OpenReadingUseCase};
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievalOptions, RetrievedResource, Retriever,
@@ -363,7 +363,8 @@ async fn stored() -> Stored {
 
 impl Stored {
     fn units(&self) -> Arc<dyn TextUnitIndex> {
-        Arc::clone(&self.index)
+        let units: Arc<dyn TextUnitIndex> = Arc::clone(&self.index);
+        units
     }
 }
 
@@ -817,7 +818,8 @@ async fn v2_open_never_loads_the_full_document() {
     let full: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
     let light: Arc<dyn DocumentRepository> = Arc::new(LightOnlyRepository::new(Arc::clone(&full)));
     let index = Arc::new(KeyedTextUnitIndex::default());
-    let units: Arc<dyn TextUnitIndex> = Arc::clone(&index);
+    let keyed: Arc<KeyedTextUnitIndex> = Arc::clone(&index);
+    let units: Arc<dyn TextUnitIndex> = keyed;
 
     let open_full = Arc::new(OpenDocumentUseCase::with_text_unit_index(
         Arc::new(AllowAllPolicy),

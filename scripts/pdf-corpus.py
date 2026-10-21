@@ -378,6 +378,7 @@ def reference_metrics(path: str) -> dict:
             pages.append({
                 "page": page.number + 1,
                 "chars": chars,
+                "cjk": cjk,
                 "images": len(images),
                 "largest_raster_share": round(largest, 3),
                 "has_text": chars > 0,
@@ -858,6 +859,11 @@ def decorate(backend: dict, texts: list[str], reference: dict,
     result["char_ratio"] = (round(stats["chars"] / prefix_chars, 3) if prefix_chars else None)
     result["containment"] = gram_containment(prefix, joined)
     result["containment_first20"] = gram_containment("\n".join(first_page_texts), joined)
+    # CJK recall against the same leading-page window: the sentence cap must not be
+    # mistaken for lost CJK text.
+    window_cjk = sum((page.get("cjk") or 0) for page in reference["page_text"][:pages_used])
+    result["reference_cjk_window"] = window_cjk
+    result["cjk_recall"] = (round(stats["cjk_chars"] / window_cjk, 3) if window_cjk else None)
     return result
 
 
@@ -1011,6 +1017,7 @@ def aggregate_mode(args) -> int:
                     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     inside_box = 0
     outside_box = 0
+    edges_only = 0
     refusal_details = []
     for paper in refused:
         coverage = coverages.get(paper["id"]) or {}
@@ -1038,6 +1045,9 @@ def aggregate_mode(args) -> int:
         if top and top.get("inside_box") and residual is not None and residual <= 0.005:
             verdict = "raster inside a retained picture/figure box"
             inside_box += 1
+        elif (explained or 0) >= 0.99 and residual is not None and residual <= 0.005:
+            verdict = "residue only at box edges (no box contains the raster)"
+            edges_only += 1
         else:
             outside_box += 1
         refusal_details.append({
@@ -1093,6 +1103,23 @@ def aggregate_mode(args) -> int:
             f"{fmt(rules['a_char_ratio'])} | {fmt(rules['b_sentences_per_page'])} | "
             f"{fmt(rules['c_nonprintable'])} | {fmt(rules['d_cjk_share'])} |")
 
+    # 3b. CJK papers: how much of the reference CJK text each backend returns
+    cjk_rows = ["| Paper | Reference CJK chars | Default CJK chars | Default recall | "
+                "Layout CJK chars | Layout recall |",
+                "| --- | --- | --- | --- | --- | --- |"]
+    for paper in papers:
+        reference = paper.get("reference") or {}
+        if (reference.get("cjk_chars") or 0) < 200:
+            continue
+        default = paper.get("default") or {}
+        layout = paper.get("layout") or {}
+        default_cjk = default.get("cjk_chars")
+        layout_cjk = layout.get("cjk_chars")
+        cjk_rows.append(
+            f"| {paper['id']} | {reference['cjk_chars']} | {fmt(default_cjk)} | "
+            f"{fmt(default.get('cjk_recall'), 3)} | {fmt(layout_cjk)} | "
+            f"{fmt(layout.get('cjk_recall'), 3)} |")
+
     # 4. open time and RSS
     def times(backend: str) -> list[float]:
         return [paper[backend]["open_s"] for paper in papers
@@ -1136,6 +1163,7 @@ def aggregate_mode(args) -> int:
                                   for paper in other_fail],
         "refusal_reasons": dict(by_reason),
         "refused_inside_picture_box": inside_box,
+        "refused_box_edges_only": edges_only,
         "refused_outside_any_box": outside_box,
         "refusal_details": refusal_details,
         "detectors": {"primary": primary, "sensitivity": sensitivity},
@@ -1156,6 +1184,7 @@ def aggregate_mode(args) -> int:
         "## Detector candidates (sensitivity: containment < 0.8)", "",
         *sensitivity_rows, "",
         "## Rule flags per paper", "", *per_paper_rules, "",
+        "## CJK papers", "", *cjk_rows, "",
         "## Open time and peak RSS", "", *timing_rows, "",
     ])
     print(text)

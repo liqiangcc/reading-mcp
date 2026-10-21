@@ -14,7 +14,9 @@ Measurement only. No product code changed; the corpus list is committed
   (`pdf-corpus.yml`, build once, 3 shards of 10 papers, aggregate). Release binary from
   `main` (3867ee8), `READING_MCP_TOOLS=v1`, OCR off, layout backend from
   `scripts/pdf-layout/setup-pdf-layout.sh` (pymupdf/pymupdf4llm/pymupdf-layout 1.28.2).
-  No download failed and no paper was skipped by the shard deadline.
+  No download failed and no paper was skipped by the shard deadline. A rerun of the same commit
+  (run 39636039835) reproduced every outcome and every text number exactly; only the open times
+  moved (layout open median 8.72 s there vs 6.23 s here), so the timings below are single-run.
 - **Reference text**: PyMuPDF `page.get_text()` for every page, independent of both backends.
 - **Backend text**: `open_document`, `get_document_structure`, then `get_text_units`
   (`requested_kind=sentence`, one item per call) for the first 200 sentences, exactly as

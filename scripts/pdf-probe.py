@@ -232,6 +232,8 @@ def server_env(state_dir: str, roots: str, backend: str, layout_python: str) -> 
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
+    # The probe calls v1 tools only; pin v1 so a v2 default tool set does not drop them.
+    env["READING_MCP_TOOLS"] = "v1"
     # OCR is opt-in and stays off: an image-only PDF must report ocr_required.
     env["READING_MCP_OCR_ENABLED"] = "false"
     if backend == "layout":

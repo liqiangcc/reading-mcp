@@ -37,6 +37,7 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
             "zip_",
             "crc32",
             "deflate",
+            "zlib_rs",
             "reading_mcp::parsing::archive",
             "reading_mcp::retrieval::file",
         ),
@@ -54,13 +55,16 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
         ),
     ),
     (
+        # The EPUB container/spine reconciliation only: not the whole `parsing::epub` module,
+        # which is the parent frame of the ZIP read and the XHTML parse as well.
         "EPUB structure validation and reconciliation",
         (
-            "reading_mcp::parsing::epub",
             "epub_validator",
             "epub_structure",
             "epub_navigation",
             "reconcil",
+            "remap_epub_section",
+            "append_remapped_blocks",
             "roxmltree",
         ),
     ),
@@ -223,33 +227,37 @@ def render(args: argparse.Namespace) -> str:
         for name in present:
             inclusive[name] += weight
 
-    unknown = leaves.get("[unknown]", 0)
+    unknown = sum(weight for symbol, weight in leaves.items() if symbol.startswith("[unknown]"))
     lines = [
         f"### {args.label}: {args.heading or 'first open'}, {wall:.2f} s wall, "
         f"{total} samples ({total / wall:.0f}/s)",
         "",
-        "| Bucket | Inclusive % | ms | Exclusive % |",
+        "| Bucket | ms | % of open | Inside this phase (inclusive) |",
         "| --- | ---: | ---: | ---: |",
     ]
     names = [name for name, _ in BUCKETS] + [OTHER]
     for name in names:
-        share = 100.0 * inclusive.get(name, 0) / total
-        self_share = 100.0 * exclusive.get(name, 0) / total
-        lines.append(f"| {name} | {share:.1f} | {share / 100.0 * wall * 1000.0:.0f} | {self_share:.1f} |")
+        share = 100.0 * exclusive.get(name, 0) / total
+        inside = 100.0 * inclusive.get(name, 0) / total
+        lines.append(
+            f"| {name} | {share / 100.0 * wall * 1000.0:.0f} | {share:.1f} | {inside:.1f} |"
+        )
+    lines.append("")
     lines.append(
-        ""
-    )
-    lines.append(
-        f"Inclusive sums over 100% because one sample can sit inside several buckets; the exclusive "
-        f"column is a partition. Unresolved leaf frames: {100.0 * unknown / total:.1f}% of samples."
+        f"`ms` and `% of open` are a partition: every sample is charged to the deepest frame that "
+        f"belongs to a bucket, so they sum to the measured wall time. `Inside this phase` counts a "
+        f"sample once per bucket in its stack, so it double counts and sums over 100%; it answers "
+        f"how much of the open runs inside a phase, and it is inflated for wrapper calls such as "
+        f"`epub_validator::validate_epub_document_inner`, which parses the book inside the "
+        f"validation call. Unresolved leaf frames (`[unknown]@<module>`): "
+        f"{100.0 * unknown / total:.1f}% of samples."
     )
     lines.append("")
     lines.append(f"Top {args.top} self-time symbols:")
     lines.append("")
     lines.append("| # | Symbol | Self % | ms |")
     lines.append("| ---: | --- | ---: | ---: |")
-    named = [item for item in leaves.most_common() if item[0] != "[unknown]"]
-    for rank, (symbol, weight) in enumerate(named[: args.top], start=1):
+    for rank, (symbol, weight) in enumerate(leaves.most_common()[: args.top], start=1):
         share = 100.0 * weight / total
         lines.append(f"| {rank} | `{symbol}` | {share:.2f} | {share / 100.0 * wall * 1000.0:.0f} |")
     lines.append("")

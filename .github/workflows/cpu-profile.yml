@@ -111,9 +111,17 @@ jobs:
               --percent-limit 0.5 2>/dev/null | head -120 > "$base.self.txt" || true
             "$PERF" report -i "$data" --children --sort symbol --stdio \
               --percent-limit 2 2>/dev/null | head -120 > "$base.inclusive.txt" || true
+            # The tree above spends its 120 lines on a handful of symbols; the flat lists keep
+            # the whole ranking, including the addresses perf could not symbolize.
+            "$PERF" report -i "$data" --no-children --sort dso,symbol --stdio --no-call-graph \
+              --percent-limit 0.1 2>/dev/null | sed -n '/^# Overhead/,$p' \
+              > "$base.self-flat.txt" || true
+            "$PERF" report -i "$data" --children --sort dso,symbol --stdio --no-call-graph \
+              --percent-limit 0.5 2>/dev/null | sed -n '/^# Overhead/,$p' \
+              > "$base.inclusive-flat.txt" || true
             "$PERF" script -i "$data" 2>/dev/null \
               | python3 scripts/perf-collapse.py > "$base.folded" || true
-            wc -l "$base.self.txt" "$base.inclusive.txt" "$base.folded" || true
+            wc -l "$base".*.txt "$base.folded" || true
           done
           ls -l perf
 
@@ -126,10 +134,10 @@ jobs:
           report() {
             label="$1"
             heading="$2"
-            if [ -f "perf/$label.perf.data.folded" ]; then
+            if [ -f "perf/$label.folded" ]; then
               python3 scripts/cpu-profile-report.py \
                 --label "$label" --heading "$heading" \
-                --folded "perf/$label.perf.data.folded" \
+                --folded "perf/$label.folded" \
                 --wall-from-json "perf/open-$label.json" --row-label "$label" \
                 >> "$OUT" || echo "::warning::no wall time for $label"
             fi
@@ -137,10 +145,10 @@ jobs:
           report zh-large "first open"
           report en-novel "first open"
           report cjk-64mib "first open"
-          if [ -f perf/cjk-64mib-next.perf.data.folded ]; then
+          if [ -f perf/cjk-64mib-next.folded ]; then
             python3 scripts/cpu-profile-report.py \
               --label cjk-64mib-next --heading "2,000 deep Next reads" \
-              --folded perf/cjk-64mib-next.perf.data.folded \
+              --folded perf/cjk-64mib-next.folded \
               --wall-from-json perf/cjk-64mib-next.json \
               >> "$OUT"
           fi

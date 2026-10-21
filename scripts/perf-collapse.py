@@ -21,13 +21,19 @@ ADDRESS = re.compile(r"^[0-9a-f]{4,}$")
 
 
 def normalize_frame(line: str) -> str | None:
-    """Turn one `perf script` callchain line into a bare function name."""
+    """Turn one `perf script` callchain line into a bare function name.
+
+    A frame perf cannot symbolize keeps the basename of its DSO, `[unknown]@libc.so.6`, so that
+    the report can say which module the unresolved time is in instead of only "[unknown]".
+    """
     text = line.strip()
     if not text:
         return None
     # Drop a trailing module/DSO note: "sym+0x12 (/path/to/binary)" or "([kernel.kallsyms])".
+    dso = ""
     marker = text.rfind(" (")
     if marker > 0 and text.endswith(")"):
+        dso = text[marker + 2 : -1]
         text = text[:marker]
     # perf script prefixes each frame with its address: "4a1b2c sym+0x1f". Drop that token.
     head, _, rest = text.partition(" ")
@@ -38,7 +44,8 @@ def normalize_frame(line: str) -> str | None:
         text = text.rsplit("+0x", 1)[0]
     text = text.strip()
     if not text or text == "[unknown]" or ADDRESS.match(text):
-        return "[unknown]"
+        name = dso.strip("[]").rsplit("/", 1)[-1]
+        return f"[unknown]@{name}" if name else "[unknown]"
     return text
 
 

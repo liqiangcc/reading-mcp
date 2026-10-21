@@ -55,7 +55,7 @@ TEXT_UNIT_BASE = {
 }
 
 REQUEST_TIMEOUT = 900.0
-SEEK_PAGE = 2_000
+SEEK_PAGE = 256  # the server caps get_text_units max_items at 256
 PERF_ARGS = ["-F", "999", "-g", "--call-graph", "fp"]
 
 
@@ -290,13 +290,14 @@ def seek(
     document_id: str,
     section_id: str,
     target: int,
+    page: int = SEEK_PAGE,
 ) -> tuple[str | None, int, int]:
     """Page forward to `target` stream position; return (cursor, position, calls)."""
     position = 0
     cursor = None
     calls = 0
     while position < target:
-        want = min(SEEK_PAGE, target - position)
+        want = min(page, target - position)
         arguments = {
             "document_id": document_id,
             "section_id": section_id,
@@ -403,6 +404,8 @@ def probe(args: argparse.Namespace) -> int:
         raise ProbeError("--calls must be positive")
     if not 0.0 <= args.start_fraction < 1.0:
         raise ProbeError("--start-fraction must be in [0, 1)")
+    if not 1 <= args.seek_page <= SEEK_PAGE:
+        raise ProbeError(f"--seek-page must be in [1, {SEEK_PAGE}]")
 
     scratch_root = os.path.join(os.getcwd(), ".tmp")
     os.makedirs(scratch_root, exist_ok=True)
@@ -456,7 +459,9 @@ def probe(args: argparse.Namespace) -> int:
         if not isinstance(total_items, int) or total_items <= 0:
             raise ProbeError(f"section reported {total_items!r} stream items")
         target = int(total_items * args.start_fraction)
-        cursor, start_position, seek_calls = seek(server, document_id, section_id, target)
+        cursor, start_position, seek_calls = seek(
+            server, document_id, section_id, target, args.seek_page
+        )
         print(
             f"opened in {open_seconds:.2f} s; section {index}/{len(sections)} has "
             f"{total_items} sentences; seeked to {start_position} in {seek_calls} pages",
@@ -493,7 +498,11 @@ def probe(args: argparse.Namespace) -> int:
                 )
                 total_items = head["stream"].get("total_items")
                 cursor, start_position, seek_calls = seek(
-                    server, document_id, section_id, int(total_items * args.start_fraction)
+                    server,
+                    document_id,
+                    section_id,
+                    int(total_items * args.start_fraction),
+                    args.seek_page,
                 )
                 print(f"wrapper open done; seeked to {start_position}", flush=True)
 
@@ -521,6 +530,7 @@ def probe(args: argparse.Namespace) -> int:
         "start_position": start_position,
         "end_position": end_position,
         "seek_pages": seek_calls,
+        "seek_page": args.seek_page,
         "open_seconds": None if open_seconds is None else round(open_seconds, 2),
         "perf_mode": perf_mode,
         "perf_out": perf_out,
@@ -555,6 +565,12 @@ def main() -> int:
         help="fraction of the chosen section's sentence stream to start at",
     )
     parser.add_argument("--perf", default="perf", help="perf binary")
+    parser.add_argument(
+        "--seek-page",
+        type=int,
+        default=SEEK_PAGE,
+        help=f"sentence items per untimed seek page (server limit {SEEK_PAGE})",
+    )
     parser.add_argument("--perf-out", default=None, help="perf data output path")
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", required=True, help="JSON result path")

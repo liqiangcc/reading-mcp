@@ -449,12 +449,21 @@ async fn an_unknown_metadata_store_is_stale() {
     });
 
     let reopened = SqliteDocumentRepository::open(&database).expect("repository should reopen");
-    for result in [
-        reopened.get_with_hash(&document.id).await,
-        reopened.get_light_with_hash(&document.id).await,
-        reopened.load_metadata(&document.id, "light").await,
-    ] {
-        let error = result.expect_err("an unknown metadata store must not load");
+    let errors = [
+        reopened
+            .get_with_hash(&document.id)
+            .await
+            .expect_err("an unknown metadata store must not load"),
+        reopened
+            .get_light_with_hash(&document.id)
+            .await
+            .expect_err("an unknown metadata store must not load light"),
+        reopened
+            .load_metadata(&document.id, "light")
+            .await
+            .expect_err("an unknown metadata store must not name an entry"),
+    ];
+    for error in errors {
         assert!(
             matches!(error, ApplicationError::StaleDocument(_)),
             "expected StaleDocument, got {error:?}"

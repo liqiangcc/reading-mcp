@@ -91,6 +91,7 @@ async fn ocr_deadline_cap_and_busy_have_actionable_private_mcp_errors_without_pu
         .with_ocr_budget(true);
         let mut server = crate::runtime::build_server(RuntimeConfig {
             state_dir: None,
+            tools: crate::runtime::ToolSet::V1,
             ..RuntimeConfig::default()
         })
         .unwrap();

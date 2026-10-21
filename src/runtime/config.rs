@@ -355,6 +355,6 @@ mod tests {
         assert_eq!(ToolSet::parse("both"), Some(ToolSet::Both));
         assert_eq!(ToolSet::parse("v3"), None);
         assert_eq!(ToolSet::parse(""), None);
-        assert_eq!(ToolSet::default(), ToolSet::V1);
+        assert_eq!(ToolSet::default(), ToolSet::V2);
     }
 }

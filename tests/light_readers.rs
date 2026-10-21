@@ -219,7 +219,8 @@ impl TextUnitIndex for KeyedTextUnitIndex {
         &self,
         document_id: &DocumentId,
     ) -> Result<Option<i64>, ApplicationError> {
-        Ok(self.section_ids(document_id).map(|_| 0))
+        // A handle's document key starts at 1, so this fixture document is key 1.
+        Ok(self.section_ids(document_id).map(|_| 1))
     }
 
     async fn document_id_for_key(

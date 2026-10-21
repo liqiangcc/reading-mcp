@@ -677,7 +677,7 @@ pub fn emit_document_decode_miss(document: &Document, phases: DocumentDecodePhas
         .iter()
         .map(|(key, value)| (key.clone(), key.len() + value.len()))
         .collect::<Vec<_>>();
-    metadata_key_bytes.sort_by(|left, right| right.1.cmp(&left.1));
+    metadata_key_bytes.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     emit(json!({
         "event": "repository_get",
         "stage": "decode",

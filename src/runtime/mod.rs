@@ -11,11 +11,13 @@ use crate::application::get_text_units::GetTextUnitsUseCase;
 use crate::application::list_directories::ListDirectoryUseCase;
 use crate::application::list_documents::ListDocumentsUseCase;
 use crate::application::open_document::OpenDocumentUseCase;
+use crate::application::open_reading::OpenReadingUseCase;
 use crate::application::ports::{
     DocumentRepository, OpenResultStore, ParsedDocumentCache, Parser, RawResourceCache, Retriever,
     SearchIndex, SourcePolicy, TextUnitIndex,
 };
 use crate::application::read_document::ReadDocumentUseCase;
+use crate::application::read_reading::ReadReadingUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
 use crate::application::source_view::SourceViewUseCase;
 use crate::infrastructure::{
@@ -35,7 +37,7 @@ use crate::retrieval::{
 };
 use crate::security::{HttpAccessPolicy, PublicHttpAccessPolicy};
 
-pub use config::RuntimeConfig;
+pub use config::{RuntimeConfig, ToolSet};
 
 struct RuntimeComponents {
     raw_cache: Arc<dyn RawResourceCache>,
@@ -240,6 +242,15 @@ pub fn build_server(
     );
     let get_context =
         Arc::new(GetContextUseCase::new(repository).with_text_unit_index(text_unit_index.clone()));
+    let open_reading = Arc::new(OpenReadingUseCase::new(
+        open_document.clone(),
+        repository.clone(),
+        text_unit_index.clone(),
+    ));
+    let read_reading = Arc::new(ReadReadingUseCase::new(
+        repository.clone(),
+        text_unit_index.clone(),
+    ));
 
     Ok(ReadingMcpServer::from_use_cases(
         open_document,
@@ -251,6 +262,9 @@ pub fn build_server(
         read_document,
         get_context,
         source_view,
+        open_reading,
+        read_reading,
+        config.tools,
         ephemeral_state,
     ))
 }

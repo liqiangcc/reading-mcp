@@ -13,7 +13,7 @@ use reading_mcp::application::get_text_units::{
     EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
 };
 use reading_mcp::application::ports::{
-    RetrievedResource, SectionTextUnits, TextUnitIndex, TextUnitStreamKey,
+    Parser, RetrievedResource, SectionTextUnits, TextUnitIndex, TextUnitStreamKey,
 };
 use reading_mcp::domain::{DocumentSource, MediaType, Section, SectionId};
 use reading_mcp::infrastructure::{InMemoryTextUnitIndex, SqliteTextUnitIndex};

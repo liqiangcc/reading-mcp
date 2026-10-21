@@ -172,7 +172,7 @@ fn preorder(roots: &[Section], depth: usize) -> Vec<&Section> {
     output
 }
 
-fn collect(section: &Section, level: usize, depth: usize, output: &mut Vec<&Section>) {
+fn collect<'a>(section: &'a Section, level: usize, depth: usize, output: &mut Vec<&'a Section>) {
     if level > depth {
         return;
     }

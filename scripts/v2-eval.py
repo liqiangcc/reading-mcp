@@ -288,8 +288,8 @@ def v2_task2(server, opened: dict, deadline: float) -> TaskResult:
     return record
 
 
-def measure_tools_list(binary: str, state_root: str, toolset: str, seconds: float) -> float:
-    """The `tools/list` token footprint of one tool set."""
+def measure_tools_list(binary: str, state_root: str, toolset: str, seconds: float) -> tuple:
+    """The `tools/list` footprint of one tool set: (estimated tokens, bytes)."""
     state = probe.fresh_directory(os.path.join(state_root, f"tools-list-{toolset}"))
     server = None
     try:
@@ -304,9 +304,10 @@ def measure_tools_list(binary: str, state_root: str, toolset: str, seconds: floa
         )
         server.initialize(timeout=max(30.0, seconds))
         result = server.tools_list(timeout=max(30.0, seconds))
-        return probe.est_tokens(probe.compact_json(result))
+        response_json = probe.compact_json(result)
+        return probe.est_tokens(response_json), len(response_json.encode("utf-8"))
     except Exception:  # noqa: BLE001 - a missing footprint must not hide the tasks
-        return 0.0
+        return 0.0, 0
     finally:
         if server is not None:
             server.close()
@@ -513,12 +514,13 @@ def main() -> int:
     state_root = os.path.join(base, f"run-{os.getpid()}-{stamp}")
     os.makedirs(state_root, exist_ok=True)
 
-    tools_tokens = {
+    tools_footprint = {
         toolset: measure_tools_list(
             binary, state_root, toolset, args.max_seconds_per_task
         )
         for toolset in (V1, V2)
     }
+    tools_tokens = {toolset: tokens for toolset, (tokens, _bytes) in tools_footprint.items()}
 
     rows: list[dict] = []
     for label, path in documents:
@@ -547,7 +549,11 @@ def main() -> int:
         "`tools/list` tokens multiplied by the number of calls."
     )
     print()
-    print(f"tools/list tokens: v1={tools_tokens.get(V1, 0.0):.0f} v2={tools_tokens.get(V2, 0.0):.0f}")
+    for toolset in (V1, V2):
+        tokens, size = tools_footprint.get(toolset, (0.0, 0))
+        print(
+            f"tools/list {toolset}: {size} bytes, ~{tokens:.0f} est. tokens"
+        )
     print()
     print(table(rows, tools_tokens))
     print()
@@ -561,7 +567,10 @@ def main() -> int:
     probe.dump_output(
         args.out,
         {
-            "tools_list_tokens": tools_tokens,
+            "tools_list": {
+                toolset: {"tokens": tokens, "bytes": size}
+                for toolset, (tokens, size) in tools_footprint.items()
+            },
             "rows": [
                 {
                     "book": row["book"],

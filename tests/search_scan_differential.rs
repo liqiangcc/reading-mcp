@@ -2,9 +2,7 @@
 //! score-bound pruning must return exactly the hits of the plain scan — no cache, one thread, no
 //! pruning — as whole result vectors.
 
-use reading_mcp::application::ports::{
-    DocumentRepository, LexicalSearchHit, Parser, RetrievedResource, SearchIndex,
-};
+use reading_mcp::application::ports::{DocumentRepository, Parser, RetrievedResource, SearchIndex};
 use reading_mcp::domain::{Document, DocumentSource, MediaType};
 use reading_mcp::infrastructure::{ScanOptions, SqliteDocumentRepository, SqliteSearchIndex};
 use reading_mcp::parsing::{MarkdownParser, TextParser};
@@ -95,16 +93,23 @@ async fn tied_scores_document() -> Document {
                     地址空間隔離進程內存，頁表把虛擬頁映射到物理幀，進程只能看到自己的地址空間，\
                     頁表項記錄物理幀號，缺頁時由操作系統換入";
     let paragraph = format!("{sentence}{sentence}{sentence}{sentence}。");
+    let paragraph_chars = paragraph.chars().count() + 2;
     let mut text = String::new();
+    let mut chars = 0usize;
     let mut section = 0usize;
-    while text.chars().count() < 1_100_000 {
-        text.push_str(&format!("# 第{section}節\n\n"));
+    while chars < 1_100_000 {
+        let heading = format!("# 第{section}節\n\n");
+        chars += heading.chars().count();
+        text.push_str(&heading);
         for _ in 0..8 {
             text.push_str(&paragraph);
             text.push_str("\n\n");
+            chars += paragraph_chars;
         }
         section += 1;
     }
+    // Over the 1 MiB of text below which a scan stays serial.
+    assert!(chars >= 1_048_576, "the document holds only {chars} chars");
     MarkdownParser
         .parse(resource("memory:tied.md", "text/markdown", text))
         .await

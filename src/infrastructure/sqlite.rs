@@ -1082,6 +1082,7 @@ impl SqliteTextUnitIndex {
                     mode,
                     limit,
                     store: store.as_ref(),
+                    prune: options.prune,
                     collect_timings: false,
                 };
                 let (section_ids, hits, _timings) =
@@ -1127,6 +1128,7 @@ impl SqliteTextUnitIndex {
                     mode: MatchMode::Strict,
                     limit,
                     store: store.as_ref(),
+                    prune: options.prune,
                     collect_timings: true,
                 };
                 let (_section_ids, _hits, timings) =
@@ -1299,6 +1301,8 @@ struct ScanPass<'a> {
     mode: MatchMode,
     limit: usize,
     store: Option<&'a Arc<ScanTextStore>>,
+    /// Whether units whose score bound cannot reach the thread's threshold may be skipped.
+    prune: bool,
     collect_timings: bool,
 }
 
@@ -1318,6 +1322,30 @@ struct PlannedSection {
     section: usize,
     section_key: i64,
     char_len: usize,
+    /// The most any unit in the section can score; infinite when the section was not planned, so it is
+    /// never pruned.
+    bound: f32,
+}
+
+/// The bound of the best score any unit in a section can reach, or `None` when the whole-section
+/// prefilter rejects the section.
+fn section_bound(pass: &ScanPass<'_>, lowered: &str) -> Option<f32> {
+    let query = pass.query;
+    match pass.mode {
+        MatchMode::Strict => {
+            if !query.may_contain_all(lowered) {
+                return None;
+            }
+            Some(query.container_bound(lowered, query.token_count()))
+        }
+        MatchMode::Relaxed => {
+            let tokens = query.contained_token_count(lowered);
+            if tokens == 0 {
+                return None;
+            }
+            Some(query.container_bound(lowered, tokens))
+        }
+    }
 }
 
 /// How many threads a pass over `sections` uses: only a document of at least 1 MiB of text, only when
@@ -1426,6 +1454,9 @@ struct SectionScanner<'a> {
     /// How many hits this thread keeps before it sorts and truncates them to `limit`.
     flush_at: usize,
     hits: Vec<ScannedUnitHit>,
+    /// The `limit`-th best score this thread holds, once it holds `limit` hits: units that cannot
+    /// reach it are skipped, and only those scoring strictly below it.
+    threshold: Option<f32>,
     timer: ScanTimer,
 }
 
@@ -1435,8 +1466,35 @@ impl<'a> SectionScanner<'a> {
             pass,
             flush_at: pass.limit.saturating_mul(4).saturating_add(64),
             hits: Vec::new(),
+            threshold: None,
             timer: ScanTimer::new(pass.collect_timings),
         }
+    }
+
+    /// The score a unit must reach to be worth scoring, when this thread already holds enough hits.
+    fn prune_below(&self) -> Option<f32> {
+        if self.pass.prune {
+            self.threshold
+        } else {
+            None
+        }
+    }
+
+    /// Whether a unit whose bound is `bound` cannot reach this thread's threshold and may be skipped.
+    fn skips(&self, bound: f32) -> bool {
+        self.prune_below()
+            .is_some_and(|threshold| bound < threshold)
+    }
+
+    /// The most a unit inside this paragraph can score, given the prefilter passed on it.
+    fn paragraph_bound(&self, lowered: &str) -> f32 {
+        let query = self.pass.query;
+        let tokens = match self.pass.mode {
+            // The prefilter on this very paragraph proved that every query token is in it.
+            MatchMode::Strict => query.token_count(),
+            MatchMode::Relaxed => query.contained_token_count(lowered),
+        };
+        query.container_bound(lowered, tokens)
     }
 
     /// Decodes one section's stored layout and scans it.
@@ -1472,6 +1530,11 @@ impl<'a> SectionScanner<'a> {
                 section.char_len
             )));
         }
+        // No unit inside a section can score above its bound, and a unit scoring below this thread's
+        // threshold cannot reach the final `limit` either. Only a bound strictly below it may skip.
+        if self.skips(section.bound) {
+            return Ok(());
+        }
         // A borrowed whole-section lowercase means every char of the section lowercases to itself, so
         // every slice of it does too and the per-slice lowercasing can be skipped.
         let borrowed = text.lowered_is_borrowed();
@@ -1493,8 +1556,14 @@ impl<'a> SectionScanner<'a> {
                 MatchMode::Strict => query.may_contain_all(&lowered),
                 MatchMode::Relaxed => query.may_contain_any(&lowered),
             };
-            prefilters.insert(paragraph.start, paragraph.end, prefilter);
-            if !prefilter {
+            // The paragraph's own bound covers its sentences too, so a pruned paragraph records a
+            // failing prefilter and its sentences are skipped with it.
+            let pruned = prefilter
+                && self
+                    .prune_below()
+                    .is_some_and(|threshold| self.paragraph_bound(&lowered) < threshold);
+            prefilters.insert(paragraph.start, paragraph.end, prefilter && !pruned);
+            if !prefilter || pruned {
                 continue;
             }
             let score = match mode {
@@ -1577,7 +1646,18 @@ impl<'a> SectionScanner<'a> {
         sort_scanned_hits(&mut self.hits, section_ids);
         self.timer.add_since(ScanPhase::Sort, sort_start);
         self.hits.truncate(self.pass.limit);
+        self.update_threshold();
         self.timer.begin();
+    }
+
+    /// Raises the score a unit must reach once this thread holds `limit` hits: the `limit`-th best of
+    /// them, which is at most the final `limit`-th best of the whole scan.
+    fn update_threshold(&mut self) {
+        self.threshold = if self.hits.len() >= self.pass.limit {
+            self.hits.last().map(|hit| hit.score)
+        } else {
+            None
+        };
     }
 
     /// The hits of this thread, best first and at most `limit` of them.
@@ -1605,7 +1685,7 @@ fn scan_stored_sections(
     let threads = scan_threads(&sections, pass.store, options);
     // The plain scan of R2c step 3: no cache, one thread and no pruning, section by section in one
     // pass. Every other configuration plans the sections first, which the store makes cheap.
-    if threads <= 1 && pass.store.is_none() {
+    if threads <= 1 && pass.store.is_none() && !options.prune {
         return scan_sections_interleaved(connection, meta, &sections, pass);
     }
     let mut timer = ScanTimer::new(pass.collect_timings);
@@ -1640,21 +1720,21 @@ fn plan_sections(
     threads: usize,
     timer: &mut ScanTimer,
 ) -> Result<Option<PlannedSections>, ApplicationError> {
-    let passed: Vec<bool> = if threads <= 1 {
-        let mut passed = Vec::with_capacity(sections.len());
+    let bounds: Vec<Option<f32>> = if threads <= 1 {
+        let mut bounds = Vec::with_capacity(sections.len());
         for (section_key, _, _) in sections {
             timer.tally(|timings| timings.sections_scanned += 1);
             timer.begin();
             let text = scan_section_text(connection, pass.store, meta.doc_key, *section_key)?;
             timer.end(ScanPhase::ReadText);
             timer.begin();
-            passed.push(pass.section_passes_prefilter(text.lowered()));
+            bounds.push(section_bound(pass, text.lowered()));
             timer.end(ScanPhase::SectionPrefilter);
         }
-        passed
+        bounds
     } else {
         let collect_timings = timer.enabled;
-        let mut passed: Vec<bool> = vec![false; sections.len()];
+        let mut bounds: Vec<Option<f32>> = vec![None; sections.len()];
         let workers = parallel_map(
             threads,
             sections.len(),
@@ -1672,37 +1752,46 @@ fn plan_sections(
             },
             |worker: &mut ScanTimer, _index, text: Arc<ScanSectionText>| {
                 worker.begin();
-                let section_passed = pass.section_passes_prefilter(text.lowered());
+                let bound = section_bound(pass, text.lowered());
                 worker.end(ScanPhase::SectionPrefilter);
-                section_passed
+                bound
             },
         )?;
         for (worker, results) in workers {
-            for (index, section_passed) in results {
-                passed[index] = section_passed;
+            for (index, bound) in results {
+                bounds[index] = bound;
             }
             timer.merge(worker.finish());
         }
         if pass.store.is_some_and(|store| store.over_cap()) {
             return Ok(None);
         }
-        passed
+        bounds
     };
 
     let mut section_ids = Vec::new();
     let mut planned = Vec::new();
-    for ((section_key, section_id, char_len), section_passed) in sections.iter().zip(&passed) {
-        if !*section_passed {
+    for ((section_key, section_id, char_len), bound) in sections.iter().zip(bounds) {
+        let Some(bound) = bound else {
             continue;
-        }
+        };
         timer.tally(|timings| timings.sections_passed_prefilter += 1);
         planned.push(PlannedSection {
             section: section_ids.len(),
             section_key: *section_key,
             char_len: *char_len,
+            bound,
         });
         section_ids.push(section_id.clone());
     }
+    // Visit the highest bound first, so a thread's threshold rises early. The final sort makes the
+    // visiting order irrelevant to the result.
+    planned.sort_by(|left, right| {
+        right
+            .bound
+            .total_cmp(&left.bound)
+            .then_with(|| left.section.cmp(&right.section))
+    });
     Ok(Some((section_ids, planned)))
 }
 
@@ -1723,6 +1812,9 @@ fn scan_planned_serial(
         .map_err(text_unit_index_error)?;
     let mut scanner = SectionScanner::new(pass);
     for section in planned {
+        if scanner.skips(section.bound) {
+            continue;
+        }
         timer.begin();
         let text = scan_section_text(connection, pass.store, meta.doc_key, section.section_key)?;
         timer.end(ScanPhase::ReadText);
@@ -1847,6 +1939,9 @@ fn scan_sections_interleaved(
             section: section_ids.len(),
             section_key: *section_key,
             char_len: *char_len,
+            // The interleaved scan never prunes: it is the plain scan and the fallback for a document
+            // over the cap, and both scan every accepted section.
+            bound: f32::INFINITY,
         };
         section_ids.push(section_id.clone());
         scanner.scan_section(&section, &text, &layout, &section_ids)?;

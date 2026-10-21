@@ -22,12 +22,15 @@ async fn a_document_over_the_cap_is_not_cached_and_still_returns_the_same_hits()
     let repository = SqliteDocumentRepository::open(&database).expect("repository");
     let index = SqliteSearchIndex::open(&database).expect("index");
 
-    // Well over one MiB of stored text.
+    // Well over one MiB of stored text, in few enough sentences to stay quick to segment.
     let mut text = String::new();
-    for paragraph in 0..24_000 {
-        text.push_str(&format!(
-            "第{paragraph}段：皇帝在朝堂上討論虛擬內存機制與頁表映射，節度使入朝議事。\n\n"
-        ));
+    for paragraph in 0..4_000 {
+        for _ in 0..6 {
+            text.push_str(&format!(
+                "第{paragraph}段：皇帝在朝堂上討論虛擬內存機制與頁表映射，節度使入朝議事，"
+            ));
+        }
+        text.push_str("。\n\n");
     }
     assert!(text.len() > 2 * 1024 * 1024, "the document is over the cap");
     let document = document(&text).await;

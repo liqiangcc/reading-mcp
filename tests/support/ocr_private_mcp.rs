@@ -23,6 +23,7 @@ async fn startup_cache_identity_and_corruption_rejection() {
             .env("READING_MCP_LOCAL_ROOTS", directory.path())
             .env("READING_MCP_STATE_DIR", &state)
             .env("READING_MCP_TELEMETRY", "true")
+            .env("READING_MCP_TOOLS", "v1")
             // Host stdlib verifier only; OCR uses the packaged interpreter.
             .env("READING_MCP_PDF_LAYOUT_PYTHON", "/usr/bin/python3")
             .env("READING_MCP_OCR_RUNTIME_ROOT", &root)

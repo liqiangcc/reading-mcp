@@ -285,7 +285,8 @@ async fn start_client(
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", state_dir.as_ref())
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport = TokioChildProcess::new(command).expect("MCP process should start");
     ().serve(transport)
         .await

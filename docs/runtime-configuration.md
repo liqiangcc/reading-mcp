@@ -16,7 +16,7 @@ Search          = SQLite FTS5
 Raw cache       = persistent file cache
 Parsed cache    = persistent file cache (PDF only)
 Telemetry       = stderr JSON enabled
-Tools           = v1 (nine stable tools)
+Tools           = v2 (seven short-handle tools)
 ```
 
 Sentence enumeration 不需要 Sentence SQLite rows；它从 persisted canonical Document 确定性 materialize。
@@ -26,19 +26,22 @@ Sentence enumeration 不需要 Sentence SQLite rows；它从 persisted canonical
 `READING_MCP_TOOLS` 选择进程暴露的 tool 集合：
 
 ```text
-v1    默认。九个稳定 tool：open_document / get_document_structure / get_text_units /
+v2    默认。七个短句柄 tool：open / read / browse / outline / search / cite /
+      source_view。未设置该变量或取值为空时即为该集合。
+v1    九个稳定 tool：open_document / get_document_structure / get_text_units /
       read_document / search_document / get_context / get_source_view /
-      list_documents / list_directory。
-      未设置该变量时 tools/list 与之前逐字节一致。
-v2    只有本版本的短句柄 tool：open 与 read。
-both  同时暴露 v1 与 v2（共 11 个 tool）。
+      list_documents / list_directory。其 tools/list 与此前逐字节一致。
+both  同时暴露 v1 与 v2（共 16 个 tool）。
 ```
 
 未知取值在启动时直接报错。未注册的 tool 不出现在 `tools/list` 中，调用时返回
 tool not found。
 
+默认已从 v1 切换为 v2。**既有 host 的 service 配置若仍需旧的九个 tool，必须显式设置
+`READING_MCP_TOOLS=v1`**；不改配置的进程会按 v2 启动。
+
 ```bash
-READING_MCP_TOOLS=v2 reading-mcp
+READING_MCP_TOOLS=v1 reading-mcp
 READING_MCP_TOOLS=both reading-mcp
 ```
 

@@ -44,7 +44,8 @@ async fn stdio_acceptance_matrix_covers_all_mvp_formats() {
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", "memory")
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport = TokioChildProcess::new(command).expect("MCP process should start");
     let client = ().serve(transport).await.expect("MCP process should initialize");
 

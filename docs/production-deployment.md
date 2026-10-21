@@ -172,6 +172,8 @@ It does not print log bodies or secrets.
 
 After host verification, separately run the production acceptance scenarios in [`chatgpt-acceptance.md`](chatgpt-acceptance.md) through the real Secure MCP Tunnel. For `v0.1.0`, acceptance must include real `tools/list = 9`, `list_directory`, and `get_source_view` evidence before the Deployment Issue can close.
 
+The runtime default tool set is now `v2` (seven short-handle tools: `open`, `read`, `browse`, `outline`, `search`, `cite`, `source_view`); see [runtime configuration](runtime-configuration.md). A host whose service config and acceptance still expect the nine v1 tools must set `READING_MCP_TOOLS=v1` in that service's environment; the deployed unit is not changed by this repository. Without it the service starts in v2 mode and `tools/list` returns seven tools.
+
 ## Rollback
 
 Known-good binaries and service-unit/state checkpoints live in the rollback directory created by deployment. On failure:

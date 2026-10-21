@@ -23,7 +23,8 @@ async fn stdio_get_text_units_continues_exclusively_after_locator_anchor() {
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", "memory")
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport = TokioChildProcess::new(command).expect("server process");
     let client = ().serve(transport).await.expect("MCP initialization");
 

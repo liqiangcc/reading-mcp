@@ -38,6 +38,7 @@ async fn real_ocr_http_saved_locator_survives_server_restart() {
                 .env("READING_MCP_LOCAL_ROOTS", directory.path())
                 .env("READING_MCP_STATE_DIR", &state)
                 .env("READING_MCP_TELEMETRY", "false")
+                .env("READING_MCP_TOOLS", "v1")
                 .env(
                     "READING_MCP_PDF_LAYOUT_PYTHON",
                     std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),

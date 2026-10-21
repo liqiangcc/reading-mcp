@@ -752,7 +752,7 @@ impl ReadingMcpServer {
 #[tool_router(router = tool_router_v2)]
 impl ReadingMcpServer {
     #[tool(
-        description = "Open one local file or public HTTPS URL and return a short document handle with title, format, section count, char count and first sections. Call it once per book before read; set refresh to re-ingest changed bytes."
+        description = "Call first: open a file or HTTPS URL and return a document handle. refresh re-reads changed bytes; errors carry a retry call."
     )]
     async fn open(
         &self,
@@ -769,7 +769,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Read an opened book in reading order: one item per call, or a char-budgeted batch when max_chars is set. from takes a document, section, paragraph or sentence handle, or a b: cursor; unit picks sentence or paragraph, direction picks forward or backward, back re-reads preceding items. Follow next until it is absent."
+        description = "Read in order; from is a document, section, paragraph or sentence handle, or next. One sentence per call unless max_chars or back is given; back returns an anchor. Follow next."
     )]
     async fn read(
         &self,
@@ -825,7 +825,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "List the books under the configured roots, or one authorized directory's subdirectories and books, as [name, kind, size] entries. kind is doc or dir; pass a doc name to open. Omit path to list the roots' documents."
+        description = "List books under the roots, or one directory's entries, as [name, kind, size]; kind is doc or dir. Pass a doc name to open."
     )]
     async fn browse(
         &self,
@@ -884,7 +884,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "List a book's section tree in reading order as [section handle, title, level, chars] nodes, starting at a document or section handle. depth bounds the levels below at and limit the nodes per answer; follow next to continue. Use a node's handle with read to jump to that section."
+        description = "List a book's sections as [handle, title, level, chars] from a document or section handle; depth and limit bound it, next continues. Pass a handle to read."
     )]
     async fn outline(
         &self,
@@ -903,7 +903,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Search one opened book for a query and return ranked sentence hits as [sentence handle, snippet] plus the sections they live in. The handles read directly: pass one to read as from. total is the number of hits returned."
+        description = "Search one opened book: ranked [sentence handle, snippet] hits with their sections. Pass a hit's handle to read."
     )]
     async fn search(
         &self,
@@ -921,7 +921,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Return the full v1 citation of one or more handles: the exact TextLocator, the original source position and the document identity it is bound to. This is the only tool with long fields; use it when a quote needs provenance. Every other tool stays compact."
+        description = "Return the full locator of one or more handles: exact source position and document identity. Only cite returns them; use it for provenance."
     )]
     async fn cite(
         &self,
@@ -934,7 +934,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Render the original source page bound to a handle and return the page image with its page number and page count. A document handle renders its first section. Use it to check fidelity against the scanned or EPUB source."
+        description = "Render the original source page of a handle as an image with page number and count; a document gives its first section."
     )]
     async fn source_view(
         &self,

@@ -128,6 +128,7 @@ fn spawn_server(port: u16, local_roots: &std::ffi::OsStr, state_dir: &std::path:
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", state_dir)
         .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)

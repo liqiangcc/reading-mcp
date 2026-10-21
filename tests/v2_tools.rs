@@ -754,19 +754,19 @@ async fn source_view_errors_use_the_v2_vocabulary() {
 // ------------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn v2_registers_exactly_the_seven_tools_and_v1_stays_default() {
+async fn v2_registers_exactly_the_seven_tools_and_v1_stays_selectable() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
 
-    let default = start_client(directory.path(), &directory.path().join("default"), None).await;
-    let names = default
+    let v1 = start_client(directory.path(), &directory.path().join("v1"), Some("v1")).await;
+    let names = v1
         .list_all_tools()
         .await
         .expect("tools/list should succeed")
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 9, "the default tool set is v1");
-    default.cancel().await.expect("client should close cleanly");
+    assert_eq!(names.len(), 9, "the v1 tool set is the nine stable tools");
+    v1.cancel().await.expect("client should close cleanly");
 
     let v2 = start_client(directory.path(), &directory.path().join("v2"), Some("v2")).await;
     let names = v2

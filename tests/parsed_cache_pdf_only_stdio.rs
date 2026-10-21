@@ -24,7 +24,8 @@ async fn opening_markdown_through_stdio_writes_no_parsed_cache_entry() {
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", &state)
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport =
         TokioChildProcess::new(command).expect("reading-mcp child process should start");
     let client = ().serve(transport).await.expect("MCP initialization should succeed");

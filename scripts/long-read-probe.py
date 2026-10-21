@@ -243,6 +243,7 @@ def server_environment(state_dir: str, roots: str, overrides: list[str]) -> dict
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
+    env["READING_MCP_TOOLS"] = "v1"
     for item in overrides:
         key, separator, value = item.partition("=")
         if not separator or not key:

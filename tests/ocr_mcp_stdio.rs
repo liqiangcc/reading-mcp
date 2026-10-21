@@ -54,6 +54,7 @@ async fn mixed_native_order_survives_real_mcp_publication_and_restart() {
             command
                 .env("READING_MCP_LOCAL_ROOTS", directory.path())
                 .env("READING_MCP_STATE_DIR", &state)
+                .env("READING_MCP_TOOLS", "v1")
                 .env(
                     "READING_MCP_PDF_LAYOUT_PYTHON",
                     std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
@@ -144,6 +145,7 @@ async fn disabled_ocr_preserves_native_documents_and_rejects_incomplete_scans() 
     command
         .env("READING_MCP_LOCAL_ROOTS", directory.path())
         .env("READING_MCP_STATE_DIR", &state)
+        .env("READING_MCP_TOOLS", "v1")
         .env(
             "READING_MCP_PDF_LAYOUT_PYTHON",
             std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
@@ -217,6 +219,7 @@ async fn frozen_four_page_cold_and_restarted_warm_open_budgets() {
                 )
                 .env("READING_MCP_STATE_DIR", &state)
                 .env("READING_MCP_TELEMETRY", "true")
+                .env("READING_MCP_TOOLS", "v1")
                 .env(
                     "READING_MCP_PDF_LAYOUT_PYTHON",
                     std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
@@ -326,6 +329,7 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                 )
                 .env("READING_MCP_STATE_DIR", &state)
                 .env("READING_MCP_TELEMETRY", "false")
+                .env("READING_MCP_TOOLS", "v1")
                 // Existing #92 deployment profile; retain the production and
                 // default guards rather than bypassing embedded-image checks.
                 .env("READING_MCP_SOURCE_VIEW_MAX_PIXELS", "16000000")

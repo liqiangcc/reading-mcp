@@ -28,7 +28,8 @@ async fn stdio_agent_can_browse_a_source_workspace_then_open_a_document() {
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", "memory")
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport = TokioChildProcess::new(command).expect("reading-mcp should start");
     let client = ().serve(transport).await.expect("MCP initialization should succeed");
 

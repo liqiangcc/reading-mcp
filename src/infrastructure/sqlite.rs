@@ -3934,9 +3934,23 @@ fn collect_chunk_stream_items(
         return Ok(Vec::new());
     };
 
-    let mut items = Vec::with_capacity(end - start);
+    struct PageUnit {
+        position: usize,
+        chunk_index: usize,
+        unit: UnitRef,
+        unit_start: usize,
+        unit_end: usize,
+        content_class: ParagraphContentClass,
+        degradation: Option<&'static str>,
+        char_count: usize,
+    }
+
+    // A page loads its text once, from the first selected unit's start to the last one's end, as
+    // the planner-backed index does; each unit keeps its own range into that slice.
+    let mut chunks: Vec<SectionChunk> = Vec::new();
+    let mut pending: Vec<PageUnit> = Vec::with_capacity(end - start);
     let mut chunk_no = chunk.chunk_no;
-    loop {
+    'chunks: loop {
         if kind == RequestedTextUnitKind::Paragraph && chunk.is_mid_paragraph() {
             match load_section_chunk_at_no(
                 connection,
@@ -3949,9 +3963,11 @@ fn collect_chunk_stream_items(
                     chunk_no += 1;
                     continue;
                 }
-                None => return Ok(items),
+                None => break,
             }
         }
+        let chunk_index = chunks.len();
+        chunks.push(chunk.clone());
         let (paragraphs, sentences, coverage, section_coverage) =
             build_section_descriptors(&chunk.layout, header.paragraph_coverage.as_ref())?;
         let mut entries = Vec::new();
@@ -3991,33 +4007,20 @@ fn collect_chunk_stream_items(
                 }
             };
             if stream_position >= end {
-                return Ok(items);
+                break 'chunks;
             }
             if stream_position < start {
                 continue;
             }
             let (unit_start, unit_end) = unit_char_range(&chunk.layout, entry.unit)?;
-            let text = load_text_slice(
-                connection,
-                meta.doc_key,
-                header.section_key,
+            pending.push(PageUnit {
+                position: stream_position,
+                chunk_index,
+                unit: entry.unit,
                 unit_start,
                 unit_end,
-            )?;
-            let index = NormalizedTextIndex::new(&text);
-            items.push(StoredStreamItem {
-                position: stream_position,
-                unit: build_owned_unit(
-                    meta,
-                    section_id,
-                    &chunk.layout,
-                    chunk.first_paragraph_index,
-                    entry.unit,
-                    &index,
-                    unit_start,
-                )?,
                 content_class: entry.content_class,
-                degradation: entry.degradation.map(str::to_owned),
+                degradation: entry.degradation,
                 char_count: entry.char_count,
             });
         }
@@ -4032,6 +4035,44 @@ fn collect_chunk_stream_items(
             break;
         };
         chunk = next;
+    }
+
+    let Some((range_start, range_end)) =
+        pending.iter().fold(None::<(usize, usize)>, |range, unit| {
+            Some(match range {
+                None => (unit.unit_start, unit.unit_end),
+                Some((start, end)) => (start.min(unit.unit_start), end.max(unit.unit_end)),
+            })
+        })
+    else {
+        return Ok(Vec::new());
+    };
+    let text = load_text_slice(
+        connection,
+        meta.doc_key,
+        header.section_key,
+        range_start,
+        range_end,
+    )?;
+    let index = NormalizedTextIndex::new(&text);
+    let mut items = Vec::with_capacity(pending.len());
+    for unit in pending {
+        let chunk = &chunks[unit.chunk_index];
+        items.push(StoredStreamItem {
+            position: unit.position,
+            unit: build_owned_unit(
+                meta,
+                section_id,
+                &chunk.layout,
+                chunk.first_paragraph_index,
+                unit.unit,
+                &index,
+                range_start,
+            )?,
+            content_class: unit.content_class,
+            degradation: unit.degradation.map(str::to_owned),
+            char_count: unit.char_count,
+        });
     }
     Ok(items)
 }

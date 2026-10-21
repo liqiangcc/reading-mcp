@@ -16,9 +16,46 @@ Search          = SQLite FTS5
 Raw cache       = persistent file cache
 Parsed cache    = persistent file cache (PDF only)
 Telemetry       = stderr JSON enabled
+Tools           = v1 (nine stable tools)
 ```
 
 Sentence enumeration 不需要 Sentence SQLite rows；它从 persisted canonical Document 确定性 materialize。
+
+## Tool set（`READING_MCP_TOOLS`）
+
+`READING_MCP_TOOLS` 选择进程暴露的 tool 集合：
+
+```text
+v1    默认。九个稳定 tool：open_document / get_document_structure / get_text_units /
+      read_document / search_document / get_context / get_source_view /
+      list_documents / list_directory。
+      未设置该变量时 tools/list 与之前逐字节一致。
+v2    只有本版本的短句柄 tool：open 与 read。
+both  同时暴露 v1 与 v2（共 11 个 tool）。
+```
+
+未知取值在启动时直接报错。未注册的 tool 不出现在 `tools/list` 中，调用时返回
+tool not found。
+
+```bash
+READING_MCP_TOOLS=v2 reading-mcp
+READING_MCP_TOOLS=both reading-mcp
+```
+
+v2 句柄格式：
+
+```text
+d<doc_key>~<chk>                       文档，例如 d3~9f2c
+d<doc_key>~<chk>.s<section_key>        节，例如 d3~9f2c.s12
+d<doc_key>~<chk>.s12.p<paragraph>      段落（1 起）
+d<doc_key>~<chk>.s12.p4.<sentence>     句子（1 起），例如 d3~9f2c.s12.p4.2
+r:<section>.<S|P>.<position>           前向游标
+b:<section>.<S|P>.<position>           后向游标
+```
+
+`doc_key` 是 `text_unit_documents_v2.doc_key`，`chk` 是
+`document_id | normalized_document_hash | TEXT_SEGMENTATION_VERSION` 的 SHA-256 前 4 位小写十六进制。
+`section_key` 是 store 为节分配的文档顺序下标（`section_layout_v1.section_key`）。
 
 ## 可选 PDF layout（#95 主线能力）
 

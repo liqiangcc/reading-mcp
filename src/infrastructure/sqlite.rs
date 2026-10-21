@@ -3016,6 +3016,60 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         )
         .await
     }
+
+    async fn document_key(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        let document_id = document_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| stored_document_key(connection, &document_id),
+        )
+        .await
+    }
+
+    async fn document_id_for_key(
+        &self,
+        doc_key: i64,
+    ) -> Result<Option<DocumentId>, ApplicationError> {
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| stored_document_id_at_key(connection, doc_key),
+        )
+        .await
+    }
+
+    async fn section_key(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        let document_id = document_id.clone();
+        let section_id = section_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| stored_section_key(connection, &document_id, &section_id),
+        )
+        .await
+    }
+
+    async fn section_id_for_key(
+        &self,
+        document_id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<SectionId>, ApplicationError> {
+        let document_id = document_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| stored_section_id_at_key(connection, &document_id, section_key),
+        )
+        .await
+    }
 }
 
 fn stale_text_units(document_id: &DocumentId) -> ApplicationError {
@@ -4283,6 +4337,85 @@ impl StoredParagraphCoverage {
             fallback_chars: self.fallback_chars,
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Short-handle key lookups (v2).
+//
+// The v2 tools address a document by `text_unit_documents_v2.doc_key` and a section by
+// `section_layout_v1.section_key` instead of by the long canonical ids. These four lookups are the
+// only bridge between the two namings. They are appended here, after the rest of the store, so they
+// never conflict with in-flight work on the scan and layout code above.
+// ---------------------------------------------------------------------------------------------
+
+/// `text_unit_documents_v2.doc_key` of `document_id`.
+fn stored_document_key(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<i64>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(text_unit_index_error)
+}
+
+/// The document stored under `doc_key`.
+fn stored_document_id_at_key(
+    connection: &Connection,
+    doc_key: i64,
+) -> Result<Option<DocumentId>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT document_id FROM text_unit_documents_v2 WHERE doc_key = ?1",
+            params![doc_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map(|row| row.map(DocumentId))
+        .map_err(text_unit_index_error)
+}
+
+/// `section_layout_v1.section_key` of one section of `document_id`.
+fn stored_section_key(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+) -> Result<Option<i64>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT l.section_key
+               FROM section_layout_v1 l
+               JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
+              WHERE d.document_id = ?1 AND l.section_id = ?2",
+            params![&document_id.0, &section_id.0],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(text_unit_index_error)
+}
+
+/// The section stored at `section_key` of `document_id`.
+fn stored_section_id_at_key(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_key: i64,
+) -> Result<Option<SectionId>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT l.section_id
+               FROM section_layout_v1 l
+               JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
+              WHERE d.document_id = ?1 AND l.section_key = ?2",
+            params![&document_id.0, section_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map(|row| row.map(SectionId))
+        .map_err(text_unit_index_error)
 }
 
 #[cfg(test)]

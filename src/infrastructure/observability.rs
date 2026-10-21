@@ -184,16 +184,14 @@ impl ObservedParser {
     pub fn new(inner: Arc<dyn Parser>) -> Self {
         Self { inner }
     }
-}
 
-#[async_trait]
-impl Parser for ObservedParser {
-    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let started = Instant::now();
-        let bytes = resource.bytes.len();
-        let media_type = resource.media_type.0.clone();
-        let result = self.inner.parse(resource).await;
-        match &result {
+    fn emit_parse_event(
+        started: Instant,
+        bytes: usize,
+        media_type: &str,
+        result: Result<&Document, &ApplicationError>,
+    ) {
+        match result {
             Ok(document) => emit(json!({
                 "event": "parse",
                 "duration_ms": started.elapsed().as_millis(),
@@ -212,6 +210,34 @@ impl Parser for ObservedParser {
                 "success": false
             })),
         }
+    }
+}
+
+#[async_trait]
+impl Parser for ObservedParser {
+    async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let started = Instant::now();
+        let bytes = resource.bytes.len();
+        let media_type = resource.media_type.0.clone();
+        let result = self.inner.parse(resource).await;
+        Self::emit_parse_event(started, bytes, &media_type, result.as_ref());
+        result
+    }
+
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        let started = Instant::now();
+        let bytes = resource.bytes.len();
+        let media_type = resource.media_type.0.clone();
+        let result = self.inner.parse_with_segmentation(resource).await;
+        Self::emit_parse_event(
+            started,
+            bytes,
+            &media_type,
+            result.as_ref().map(|(document, _)| document),
+        );
         result
     }
 }
@@ -527,6 +553,51 @@ impl TextUnitIndex for ObservedTextUnitIndex {
             .section_stream_position(key, unit_kind, paragraph_index, sentence_index)
             .await;
         emit_text_unit_read(started, "section_stream_position", result.is_ok());
+        result
+    }
+
+    async fn document_key(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.document_key(document_id).await;
+        emit_text_unit_read(started, "document_key", result.is_ok());
+        result
+    }
+
+    async fn document_id_for_key(
+        &self,
+        doc_key: i64,
+    ) -> Result<Option<DocumentId>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.document_id_for_key(doc_key).await;
+        emit_text_unit_read(started, "document_id_for_key", result.is_ok());
+        result
+    }
+
+    async fn section_key(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.section_key(document_id, section_id).await;
+        emit_text_unit_read(started, "section_key", result.is_ok());
+        result
+    }
+
+    async fn section_id_for_key(
+        &self,
+        document_id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<SectionId>, ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .section_id_for_key(document_id, section_key)
+            .await;
+        emit_text_unit_read(started, "section_id_for_key", result.is_ok());
         result
     }
 }

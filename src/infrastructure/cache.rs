@@ -9,7 +9,7 @@ use crate::application::ports::{
     ApplicationError, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
     RetrievalOptions, RetrievedResource, Retriever,
 };
-use crate::domain::{Document, DocumentSource, NORMALIZATION_VERSION};
+use crate::domain::{Document, DocumentSegmentation, DocumentSource, NORMALIZATION_VERSION};
 
 #[derive(Default)]
 pub struct InMemoryRawResourceCache {
@@ -121,6 +121,23 @@ impl CachingParser {
         self.pdf_namespace = Some(namespace.into());
         self
     }
+
+    /// The cache key of one resource. Both parse paths build it here, so they cannot drift.
+    fn cache_key(&self, resource: &RetrievedResource) -> ParsedCacheKey {
+        ParsedCacheKey {
+            final_source: resource.final_source.clone(),
+            raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
+            normalization_version: if resource.media_type.is_pdf() {
+                self.pdf_namespace
+                    .as_ref()
+                    .map(|ns| format!("{NORMALIZATION_VERSION}:{ns}"))
+                    .unwrap_or_else(|| NORMALIZATION_VERSION.into())
+            } else {
+                NORMALIZATION_VERSION.into()
+            },
+            ocr_fingerprint: self.ocr_fingerprint.clone(),
+        }
+    }
 }
 
 #[async_trait]
@@ -135,19 +152,7 @@ impl Parser for CachingParser {
             return Ok(document);
         }
 
-        let key = ParsedCacheKey {
-            final_source: resource.final_source.clone(),
-            raw_sha256: format!("sha256:{:x}", Sha256::digest(&resource.bytes)),
-            normalization_version: if resource.media_type.is_pdf() {
-                self.pdf_namespace
-                    .as_ref()
-                    .map(|ns| format!("{NORMALIZATION_VERSION}:{ns}"))
-                    .unwrap_or_else(|| NORMALIZATION_VERSION.into())
-            } else {
-                NORMALIZATION_VERSION.into()
-            },
-            ocr_fingerprint: self.ocr_fingerprint.clone(),
-        };
+        let key = self.cache_key(&resource);
 
         if let Some(document) = self.cache.get(&key).await? {
             document
@@ -169,6 +174,44 @@ impl Parser for CachingParser {
             .map_err(ApplicationError::CacheFailed)?;
         self.cache.put(key, document.clone()).await?;
         Ok(document)
+    }
+
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        if self.pdf_only && !resource.media_type.is_pdf() {
+            let (document, segmentation) = self.inner.parse_with_segmentation(resource).await?;
+            document
+                .validate_ocr_publication()
+                .map_err(ApplicationError::CacheFailed)?;
+            return Ok((document, segmentation));
+        }
+
+        let key = self.cache_key(&resource);
+
+        if let Some(document) = self.cache.get(&key).await? {
+            document
+                .validate_ocr_publication()
+                .map_err(ApplicationError::CacheFailed)?;
+            // A cache hit hands back a stored document, not a segmentation.
+            return Ok((document, None));
+        }
+
+        if let Some(admission) = &self.ocr_admission
+            && resource.media_type.is_pdf()
+        {
+            return admission
+                .parse(key, resource, self.inner.clone(), self.cache.clone())
+                .await
+                .map(|document| (document, None));
+        }
+        let (document, segmentation) = self.inner.parse_with_segmentation(resource).await?;
+        document
+            .validate_ocr_publication()
+            .map_err(ApplicationError::CacheFailed)?;
+        self.cache.put(key, document.clone()).await?;
+        Ok((document, segmentation))
     }
 }
 

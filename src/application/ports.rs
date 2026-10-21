@@ -195,6 +195,17 @@ pub trait Retriever: Send + Sync {
 #[async_trait]
 pub trait Parser: Send + Sync {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError>;
+
+    /// Parses `resource` and returns the text segmentation the parser had to build anyway, so a
+    /// caller that needs the segmentation never builds the same one twice. The default parses
+    /// without a segmentation, and every parser whose parse path has no segmentation returns
+    /// `None`; the caller then segments the returned document itself.
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        Ok((self.parse(resource).await?, None))
+    }
 }
 
 pub trait SourceViewRenderer: Send + Sync {
@@ -521,6 +532,42 @@ pub trait TextUnitIndex: Send + Sync {
                 char_count: entry.char_count,
             })
             .collect())
+    }
+
+    /// The store's `doc_key` for `document_id`, the integer a v2 document handle carries.
+    /// `None` when this document was never ingested into this store.
+    async fn document_key(
+        &self,
+        _document_id: &DocumentId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        Ok(None)
+    }
+
+    /// The document stored under `doc_key`, or `None` when no document has that key.
+    async fn document_id_for_key(
+        &self,
+        _doc_key: i64,
+    ) -> Result<Option<DocumentId>, ApplicationError> {
+        Ok(None)
+    }
+
+    /// The store's `section_key` for one section of `document_id`.
+    /// `None` when this document or section was never ingested into this store.
+    async fn section_key(
+        &self,
+        _document_id: &DocumentId,
+        _section_id: &SectionId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        Ok(None)
+    }
+
+    /// The section stored at `section_key` of `document_id`, or `None` when there is no such row.
+    async fn section_id_for_key(
+        &self,
+        _document_id: &DocumentId,
+        _section_key: i64,
+    ) -> Result<Option<SectionId>, ApplicationError> {
+        Ok(None)
     }
 
     /// The stream position of the unit with this kind and indices, if it is in the stream.

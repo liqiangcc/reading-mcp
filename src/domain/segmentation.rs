@@ -4,14 +4,16 @@
 //! reading profile and the PDF inspector need coverage, the EPUB validator needs ranges, indices and
 //! orders. Unit structs are materialized from these boundaries where a caller really needs them.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use thiserror::Error;
 
 use super::{
-    Document, NormalizedBlockKind, NormalizedBlockMap, NormalizedBlockMapError,
-    NormalizedDocumentHash, NormalizedTextRange, ParagraphContentClass, ParagraphSectionCoverage,
-    ParagraphTextUnitSet, Section, SectionId, SentenceEligibility, SentenceParagraphCoverage,
-    SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextUnit, TextUnitKind,
-    paragraph_text_unit_id, sentence_text_unit_id,
+    Document, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap, NormalizedBlockMapError,
+    NormalizedDocumentHash, NormalizedTextIndex, NormalizedTextRange, ParagraphContentClass,
+    ParagraphSectionCoverage, ParagraphTextUnitSet, Section, SectionId, SentenceEligibility,
+    SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
+    TextUnit, TextUnitKind, paragraph_text_unit_id, sentence_text_unit_id,
 };
 
 /// Why a document cannot be segmented into boundaries.
@@ -380,6 +382,7 @@ impl Document {
         &self,
         block_map: Option<&NormalizedBlockMap>,
     ) -> Result<DocumentSegmentation, SegmentationError> {
+        SEGMENTATION_BUILDS.fetch_add(1, Ordering::Relaxed);
         let mut sections = Vec::new();
         let mut paragraph_source_order = 0usize;
         let mut sentence_source_order = 0usize;
@@ -398,8 +401,9 @@ impl Document {
     }
 }
 
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParagraphBoundarySource {
+pub enum ParagraphBoundarySource {
     NativeParagraph,
     NativeBlockQuote,
     NativeListItem,
@@ -408,10 +412,11 @@ enum ParagraphBoundarySource {
     Fallback,
 }
 
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ParagraphCandidate {
-    range: NormalizedTextRange,
-    source: ParagraphBoundarySource,
+pub struct ParagraphCandidate {
+    pub range: NormalizedTextRange,
+    pub source: ParagraphBoundarySource,
 }
 
 fn collect_section_segmentation(
@@ -421,8 +426,11 @@ fn collect_section_segmentation(
     paragraph_source_order: &mut usize,
     sentence_source_order: &mut usize,
 ) -> Result<(), SegmentationError> {
-    let candidates = section_paragraph_candidates(section, block_map);
     let index = section.normalized_text_index();
+    // The section's own blocks, in map order, are also the lookup table for every paragraph's
+    // content class: a paragraph can only be a block of its own section.
+    let blocks = section_blocks(block_map, section);
+    let candidates = section_paragraph_candidates(&index, &blocks);
     let paragraph_chars = candidates
         .iter()
         .map(|candidate| candidate.range.len())
@@ -484,7 +492,7 @@ fn collect_section_segmentation(
         let text = index
             .slice(candidate.range)
             .expect("generated paragraph range must be a valid owner slice");
-        let content_class = paragraph_content_class(block_map, &section.id, candidate.range, text);
+        let content_class = paragraph_content_class(&blocks, candidate.range, text);
         let mut eligibility = match content_class {
             ParagraphContentClass::ProseOrUnknown | ParagraphContentClass::NativeParagraph => {
                 SentenceEligibility::Eligible
@@ -504,6 +512,7 @@ fn collect_section_segmentation(
         // strict callers can fail closed instead of trusting the over-claim.
         if eligibility == SentenceEligibility::Eligible
             && content_class == ParagraphContentClass::ProseOrUnknown
+            && fallback_guard_can_fire(text)
             && looks_like_unreliable_fallback_text(text)
         {
             eligibility = SentenceEligibility::CoarseParagraphOnly;
@@ -584,27 +593,28 @@ fn collect_section_segmentation(
     Ok(())
 }
 
-fn section_paragraph_candidates(
+fn section_blocks<'a>(
+    block_map: Option<&'a NormalizedBlockMap>,
     section: &Section,
-    block_map: Option<&NormalizedBlockMap>,
-) -> Vec<ParagraphCandidate> {
-    let Some(block_map) = block_map else {
-        return fallback_paragraph_candidates(
-            &section.content,
-            NormalizedTextRange::new(0, section.normalized_text_len())
-                .expect("whole Section range must be ordered"),
-        );
-    };
+) -> Vec<&'a NormalizedBlock> {
+    match block_map {
+        Some(block_map) => block_map
+            .blocks
+            .iter()
+            .filter(|block| block.owner_section_id == section.id)
+            .collect(),
+        None => Vec::new(),
+    }
+}
 
-    let blocks = block_map
-        .blocks
-        .iter()
-        .filter(|block| block.owner_section_id == section.id)
-        .collect::<Vec<_>>();
+fn section_paragraph_candidates(
+    index: &NormalizedTextIndex<'_>,
+    blocks: &[&NormalizedBlock],
+) -> Vec<ParagraphCandidate> {
     if blocks.is_empty() {
         return fallback_paragraph_candidates(
-            &section.content,
-            NormalizedTextRange::new(0, section.normalized_text_len())
+            index,
+            NormalizedTextRange::new(0, index.char_len())
                 .expect("whole Section range must be ordered"),
         );
     }
@@ -615,36 +625,42 @@ fn section_paragraph_candidates(
         if cursor < block.normalized_range.start() {
             let gap = NormalizedTextRange::new(cursor, block.normalized_range.start())
                 .expect("validated block gap must be ordered");
-            candidates.extend(fallback_paragraph_candidates(&section.content, gap));
+            candidates.extend(fallback_paragraph_candidates(index, gap));
         }
         candidates.push(ParagraphCandidate {
             range: block.normalized_range,
-            source: match block.kind {
-                NormalizedBlockKind::Paragraph => ParagraphBoundarySource::NativeParagraph,
-                NormalizedBlockKind::BlockQuote => ParagraphBoundarySource::NativeBlockQuote,
-                NormalizedBlockKind::ListItem => ParagraphBoundarySource::NativeListItem,
-                NormalizedBlockKind::Preformatted => ParagraphBoundarySource::NativePreformatted,
-                NormalizedBlockKind::Table => ParagraphBoundarySource::NativeTable,
-            },
+            source: block_paragraph_source(block.kind),
         });
         cursor = block.normalized_range.end();
     }
 
-    if cursor < section.normalized_text_len() {
-        let tail = NormalizedTextRange::new(cursor, section.normalized_text_len())
+    if cursor < index.char_len() {
+        let tail = NormalizedTextRange::new(cursor, index.char_len())
             .expect("validated trailing gap must be ordered");
-        candidates.extend(fallback_paragraph_candidates(&section.content, tail));
+        candidates.extend(fallback_paragraph_candidates(index, tail));
     }
 
     candidates
 }
 
+fn block_paragraph_source(kind: NormalizedBlockKind) -> ParagraphBoundarySource {
+    match kind {
+        NormalizedBlockKind::Paragraph => ParagraphBoundarySource::NativeParagraph,
+        NormalizedBlockKind::BlockQuote => ParagraphBoundarySource::NativeBlockQuote,
+        NormalizedBlockKind::ListItem => ParagraphBoundarySource::NativeListItem,
+        NormalizedBlockKind::Preformatted => ParagraphBoundarySource::NativePreformatted,
+        NormalizedBlockKind::Table => ParagraphBoundarySource::NativeTable,
+    }
+}
+
+/// Splits one block gap into fallback paragraphs, slicing through the section's scalar index so the
+/// gap costs O(gap) instead of the O(section) that `NormalizedTextRange::slice` pays per call.
 fn fallback_paragraph_candidates(
-    content: &str,
+    index: &NormalizedTextIndex<'_>,
     owner_range: NormalizedTextRange,
 ) -> Vec<ParagraphCandidate> {
-    let slice = owner_range
-        .slice(content)
+    let slice = index
+        .slice(owner_range)
         .expect("fallback range must be a valid Section slice");
     paragraph_ranges(slice)
         .into_iter()
@@ -663,16 +679,11 @@ fn fallback_paragraph_candidates(
 }
 
 fn paragraph_content_class(
-    block_map: Option<&NormalizedBlockMap>,
-    owner_section_id: &SectionId,
+    blocks: &[&NormalizedBlock],
     range: NormalizedTextRange,
     text: &str,
 ) -> ParagraphContentClass {
-    if let Some(block) = block_map.and_then(|map| {
-        map.blocks.iter().find(|block| {
-            block.owner_section_id == *owner_section_id && block.normalized_range == range
-        })
-    }) {
+    if let Some(block) = find_section_block(blocks, range) {
         return match block.kind {
             NormalizedBlockKind::Paragraph => ParagraphContentClass::NativeParagraph,
             NormalizedBlockKind::BlockQuote => ParagraphContentClass::BlockQuote,
@@ -683,6 +694,23 @@ fn paragraph_content_class(
     }
 
     classify_fallback_paragraph_content(text)
+}
+
+/// The block a whole-map scan finds first: map order is the block order of the section, and the
+/// validated map keeps those ranges non-overlapping and in order, so a binary search lands on the
+/// same block and ties on a range still resolve to the first block in map order.
+fn find_section_block<'a>(
+    blocks: &[&'a NormalizedBlock],
+    range: NormalizedTextRange,
+) -> Option<&'a NormalizedBlock> {
+    let position = blocks.partition_point(|block| {
+        (block.normalized_range.start(), block.normalized_range.end())
+            < (range.start(), range.end())
+    });
+    blocks
+        .get(position)
+        .filter(|block| block.normalized_range == range)
+        .copied()
 }
 
 fn paragraph_ranges(content: &str) -> Vec<NormalizedTextRange> {
@@ -926,6 +954,49 @@ const MIN_MISSING_SPACE_GLUE_EVENTS: usize = 3;
 const MIN_DOUBLED_RUN_CHARS: usize = 6;
 const MIN_BIBLIOGRAPHIC_MARKERS: usize = 4;
 const BIBLIOGRAPHIC_WINDOW_WORDS: usize = 10;
+
+/// Proves the fallback guard cannot fire, without running its Unicode-heavy work.
+///
+/// Every signal needs at least one of:
+/// - an ASCII letter or digit (the bibliographic markers, the year and link markers, the
+///   digit/uppercase and digit/month glue events);
+/// - `)` (the `)provided` glue event);
+/// - a cased letter, upper- or lowercase (the punctuation/uppercase, uppercase-run and
+///   lowercase/uppercase glue events);
+/// - two adjacent equal alphabetic characters (the doubled-character token needs a run of
+///   exactly two to count as a doubled run).
+///
+/// When none is present, all three signals are impossible and skipping the guard cannot
+/// change a verdict. CJK text without repeated adjacent characters therefore skips the
+/// per-character case lookups and the per-word lowercasing that the guard would do.
+#[doc(hidden)]
+pub fn fallback_guard_can_fire(text: &str) -> bool {
+    if text
+        .as_bytes()
+        .iter()
+        .any(|byte| byte.is_ascii_alphanumeric() || *byte == b')')
+    {
+        return true;
+    }
+
+    let mut previous = None;
+    for ch in text.chars() {
+        if ch.is_uppercase() || ch.is_lowercase() {
+            return true;
+        }
+        if ch.is_alphabetic() && previous == Some(ch) {
+            return true;
+        }
+        previous = Some(ch);
+    }
+    false
+}
+
+/// The pre-R5b guard verdict, kept for the differential and real-book comparisons.
+#[doc(hidden)]
+pub fn looks_like_unreliable_fallback_text_unguarded(text: &str) -> bool {
+    looks_like_unreliable_fallback_text(text)
+}
 
 /// A fallback paragraph that merges heterogeneous fragments (masthead, title, byline,
 /// bibliographic metadata) or carries extraction corruption (missing spaces, doubled
@@ -1192,6 +1263,151 @@ fn is_table_delimiter_cell(cell: &str) -> bool {
 fn strip_line_ending(line: &str) -> &str {
     let line = line.strip_suffix('\n').unwrap_or(line);
     line.strip_suffix('\r').unwrap_or(line)
+}
+
+/// Test hook: how many times any document has been segmented in this process. The open path must
+/// segment each document once, and `tests/epub_open_segmentation_once.rs` reads this counter to
+/// prove it; the cost is one relaxed increment per build.
+#[doc(hidden)]
+pub static SEGMENTATION_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+// ---------------------------------------------------------------------------------------------
+// Test-only: the pre-R5b implementations.
+//
+// `tests/segmentation_speedups.rs` and the real-book check compare each of these against the
+// implementation that replaced it, paragraph by paragraph and section by section, on every fixture
+// and on real books. They are `#[doc(hidden)]`; no production path calls them.
+// ---------------------------------------------------------------------------------------------
+
+/// The candidate list the pre-R5b code built: every block gap sliced with
+/// `NormalizedTextRange::slice`, which revalidates the whole section per call.
+#[doc(hidden)]
+pub fn section_paragraph_candidates_linear_scan(
+    section: &Section,
+    block_map: Option<&NormalizedBlockMap>,
+) -> Vec<ParagraphCandidate> {
+    let content = &section.content;
+    let Some(block_map) = block_map else {
+        return fallback_paragraph_candidates_linear_scan(
+            content,
+            NormalizedTextRange::new(0, section.normalized_text_len())
+                .expect("whole Section range must be ordered"),
+        );
+    };
+
+    let blocks = block_map
+        .blocks
+        .iter()
+        .filter(|block| block.owner_section_id == section.id)
+        .collect::<Vec<_>>();
+    if blocks.is_empty() {
+        return fallback_paragraph_candidates_linear_scan(
+            content,
+            NormalizedTextRange::new(0, section.normalized_text_len())
+                .expect("whole Section range must be ordered"),
+        );
+    }
+
+    let mut candidates = Vec::new();
+    let mut cursor = 0usize;
+    for block in blocks {
+        if cursor < block.normalized_range.start() {
+            let gap = NormalizedTextRange::new(cursor, block.normalized_range.start())
+                .expect("validated block gap must be ordered");
+            candidates.extend(fallback_paragraph_candidates_linear_scan(content, gap));
+        }
+        candidates.push(ParagraphCandidate {
+            range: block.normalized_range,
+            source: block_paragraph_source(block.kind),
+        });
+        cursor = block.normalized_range.end();
+    }
+
+    if cursor < section.normalized_text_len() {
+        let tail = NormalizedTextRange::new(cursor, section.normalized_text_len())
+            .expect("validated trailing gap must be ordered");
+        candidates.extend(fallback_paragraph_candidates_linear_scan(content, tail));
+    }
+
+    candidates
+}
+
+fn fallback_paragraph_candidates_linear_scan(
+    content: &str,
+    owner_range: NormalizedTextRange,
+) -> Vec<ParagraphCandidate> {
+    let slice = owner_range
+        .slice(content)
+        .expect("fallback range must be a valid Section slice");
+    paragraph_ranges(slice)
+        .into_iter()
+        .map(|range| {
+            let range = NormalizedTextRange::new(
+                owner_range.start() + range.start(),
+                owner_range.start() + range.end(),
+            )
+            .expect("offset fallback paragraph range must be ordered");
+            ParagraphCandidate {
+                range,
+                source: ParagraphBoundarySource::Fallback,
+            }
+        })
+        .collect()
+}
+
+/// The candidate list the current code builds, for the same section and block map.
+#[doc(hidden)]
+pub fn section_paragraph_candidates_indexed(
+    section: &Section,
+    block_map: Option<&NormalizedBlockMap>,
+) -> Vec<ParagraphCandidate> {
+    let index = section.normalized_text_index();
+    let blocks = section_blocks(block_map, section);
+    section_paragraph_candidates(&index, &blocks)
+}
+
+/// The content class the pre-R5b code found: a linear scan over the whole block map.
+#[doc(hidden)]
+pub fn paragraph_content_class_whole_map_scan(
+    block_map: Option<&NormalizedBlockMap>,
+    owner_section_id: &SectionId,
+    range: NormalizedTextRange,
+    text: &str,
+) -> ParagraphContentClass {
+    if let Some(block) = block_map.and_then(|map| {
+        map.blocks.iter().find(|block| {
+            block.owner_section_id == *owner_section_id && block.normalized_range == range
+        })
+    }) {
+        return match block.kind {
+            NormalizedBlockKind::Paragraph => ParagraphContentClass::NativeParagraph,
+            NormalizedBlockKind::BlockQuote => ParagraphContentClass::BlockQuote,
+            NormalizedBlockKind::ListItem => ParagraphContentClass::ListItem,
+            NormalizedBlockKind::Preformatted => ParagraphContentClass::Preformatted,
+            NormalizedBlockKind::Table => ParagraphContentClass::Table,
+        };
+    }
+
+    classify_fallback_paragraph_content(text)
+}
+
+/// The content class the current code finds: a binary search over the section's own blocks.
+#[doc(hidden)]
+pub fn paragraph_content_class_in_section(
+    block_map: Option<&NormalizedBlockMap>,
+    owner_section_id: &SectionId,
+    range: NormalizedTextRange,
+    text: &str,
+) -> ParagraphContentClass {
+    let blocks = block_map
+        .map(|map| {
+            map.blocks
+                .iter()
+                .filter(|block| block.owner_section_id == *owner_section_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    paragraph_content_class(&blocks, range, text)
 }
 
 #[cfg(test)]

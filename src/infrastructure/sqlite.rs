@@ -2123,18 +2123,17 @@ impl StoredKindSummary {
     }
 }
 
+type SectionDescriptors = (
+    Vec<ParagraphDesc>,
+    Vec<SentenceDesc>,
+    Vec<ParagraphCoverageDesc>,
+    Option<SectionCoverageDesc>,
+);
+
 fn build_section_descriptors(
     layout: &SectionLayout,
     section_coverage: Option<&ParagraphSectionCoverage>,
-) -> Result<
-    (
-        Vec<ParagraphDesc>,
-        Vec<SentenceDesc>,
-        Vec<ParagraphCoverageDesc>,
-        Option<SectionCoverageDesc>,
-    ),
-    ApplicationError,
-> {
+) -> Result<SectionDescriptors, ApplicationError> {
     let paragraphs = layout
         .paragraphs
         .iter()
@@ -2442,11 +2441,8 @@ fn build_chunk_ranges(layout: &SectionLayout, sorted: bool) -> Vec<ChunkRange> {
 
             let flush_mid = {
                 let (range, estimated) = pending.as_mut().expect("a chunk must be open");
-                let shrunk = if range.mid_paragraph {
-                    sentence_cost(sentence, range.first_paragraph_index, previous_sentence)
-                } else {
-                    sentence_cost(sentence, range.first_paragraph_index, previous_sentence)
-                };
+                let shrunk =
+                    sentence_cost(sentence, range.first_paragraph_index, previous_sentence);
                 *estimated += shrunk;
                 range.sentence_end = sentence_slot + 1;
                 range.mid_paragraph && *estimated + 64 > LAYOUT_CHUNK_BYTES
@@ -3603,8 +3599,6 @@ struct SectionHeader {
     char_len: usize,
     paragraph_coverage: Option<ParagraphSectionCoverage>,
     plan_error: Option<String>,
-    paragraph_count: usize,
-    sentence_count: usize,
     chunk_count: usize,
     paragraph_total_preserve: usize,
     paragraph_total_eligible: usize,
@@ -3622,15 +3616,11 @@ struct SectionHeader {
 struct SectionChunk {
     chunk_no: usize,
     first_paragraph_index: usize,
-    first_sentence_index: usize,
-    paragraph_slot: usize,
-    sentence_slot: usize,
     paragraph_entry: usize,
     sentence_entry: usize,
     eligible_paragraph_entry: usize,
     eligible_sentence_entry: usize,
     paragraph_count: usize,
-    sentence_count: usize,
     layout: SectionLayout,
 }
 
@@ -3692,6 +3682,7 @@ fn load_section_header(
         .optional()
         .map_err(text_unit_index_error)?
         .map(|row| -> Result<SectionHeader, ApplicationError> {
+            let _ = (row.4, row.5);
             Ok(SectionHeader {
                 section_key: row.0,
                 char_len: i64_to_usize(row.1, "char_len")?,
@@ -3708,8 +3699,6 @@ fn load_section_header(
                     )
                     .transpose()?,
                 plan_error: row.3,
-                paragraph_count: i64_to_usize(row.4, "paragraph_count")?,
-                sentence_count: i64_to_usize(row.5, "sentence_count")?,
                 chunk_count: i64_to_usize(row.6, "chunk_count")?,
                 paragraph_total_preserve: i64_to_usize(row.7, "paragraph total")?,
                 paragraph_total_eligible: i64_to_usize(row.8, "paragraph eligible total")?,
@@ -3727,18 +3716,18 @@ fn load_section_header(
 const SECTION_CHUNK_COLUMNS: &str = "chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot, sentence_slot, paragraph_entry, sentence_entry, eligible_paragraph_entry, eligible_sentence_entry, paragraph_count, sentence_count, blob";
 
 fn decode_section_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SectionChunk> {
+    let _: i64 = row.get(2)?;
+    let _: i64 = row.get(3)?;
+    let _: i64 = row.get(4)?;
+    let _: i64 = row.get(10)?;
     Ok(SectionChunk {
         chunk_no: row.get::<_, i64>(0)?.try_into().unwrap_or(usize::MAX),
         first_paragraph_index: row.get::<_, i64>(1)?.try_into().unwrap_or(usize::MAX),
-        first_sentence_index: row.get::<_, i64>(2)?.try_into().unwrap_or(usize::MAX),
-        paragraph_slot: row.get::<_, i64>(3)?.try_into().unwrap_or(usize::MAX),
-        sentence_slot: row.get::<_, i64>(4)?.try_into().unwrap_or(usize::MAX),
         paragraph_entry: row.get::<_, i64>(5)?.try_into().unwrap_or(usize::MAX),
         sentence_entry: row.get::<_, i64>(6)?.try_into().unwrap_or(usize::MAX),
         eligible_paragraph_entry: row.get::<_, i64>(7)?.try_into().unwrap_or(usize::MAX),
         eligible_sentence_entry: row.get::<_, i64>(8)?.try_into().unwrap_or(usize::MAX),
         paragraph_count: row.get::<_, i64>(9)?.try_into().unwrap_or(usize::MAX),
-        sentence_count: row.get::<_, i64>(10)?.try_into().unwrap_or(usize::MAX),
         layout: SectionLayout {
             paragraphs: Vec::new(),
             sentences: Vec::new(),
@@ -3919,6 +3908,7 @@ fn reassemble_section_layout(chunks: &[SectionChunk]) -> SectionLayout {
 /// Reads exactly the entries of `[start, end)` from the chunks those entries live in. Each chunk is
 /// decoded once and walked with the same planner rules as ingest, so page order and positions match
 /// the whole-section plan.
+#[allow(clippy::too_many_arguments)]
 fn collect_chunk_stream_items(
     connection: &Connection,
     meta: &StoredUnitDocument,
@@ -5413,32 +5403,6 @@ fn stored_section_id_at_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn layout_paragraph(paragraph_index: usize, start: usize, end: usize) -> LayoutParagraph {
-        LayoutParagraph {
-            paragraph_index,
-            source_order: paragraph_index,
-            start,
-            end,
-        }
-    }
-
-    fn layout_sentence(
-        paragraph_index: usize,
-        sentence_index: usize,
-        start: usize,
-        end: usize,
-    ) -> LayoutSentence {
-        LayoutSentence {
-            paragraph_index,
-            sentence_index,
-            source_order: paragraph_index * 10 + sentence_index,
-            start,
-            end,
-            parent_start: start,
-            parent_end: end,
-        }
-    }
 
     /// The fast unit scan — cache, threads and pruning — must return exactly the units of the plain
     /// one, as whole vectors.

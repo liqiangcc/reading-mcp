@@ -1,8 +1,8 @@
 use sha2::{Digest, Sha256};
 
 use super::{
-    ContentHash, Document, DocumentId, NormalizedBlockMapError, NormalizedDocumentHash,
-    NormalizedTextRange, SectionId,
+    ContentHash, Document, DocumentId, NormalizedDocumentHash, NormalizedTextRange, SectionId,
+    SegmentationError,
 };
 
 pub const TEXT_SEGMENTATION_VERSION: &str = "text-segmentation/v3";
@@ -157,9 +157,7 @@ pub struct SentenceTextUnitSet {
 }
 
 impl Document {
-    pub fn try_paragraph_text_units(
-        &self,
-    ) -> Result<ParagraphTextUnitSet, NormalizedBlockMapError> {
+    pub fn try_paragraph_text_units(&self) -> Result<ParagraphTextUnitSet, SegmentationError> {
         Ok(self.try_text_unit_sets()?.0)
     }
 
@@ -168,7 +166,7 @@ impl Document {
             .expect("canonical normalized block map must be valid for TextUnit materialization")
     }
 
-    pub fn try_sentence_text_units(&self) -> Result<SentenceTextUnitSet, NormalizedBlockMapError> {
+    pub fn try_sentence_text_units(&self) -> Result<SentenceTextUnitSet, SegmentationError> {
         Ok(self.try_text_unit_sets()?.1)
     }
 
@@ -180,7 +178,7 @@ impl Document {
     /// Builds both unit sets from one segmentation of the persisted block evidence.
     pub fn try_text_unit_sets(
         &self,
-    ) -> Result<(ParagraphTextUnitSet, SentenceTextUnitSet), NormalizedBlockMapError> {
+    ) -> Result<(ParagraphTextUnitSet, SentenceTextUnitSet), SegmentationError> {
         let segmentation = self.try_segmentation()?;
         let normalized_document_hash = self.normalized_document_hash();
         Ok(segmentation.materialize(self, &normalized_document_hash))

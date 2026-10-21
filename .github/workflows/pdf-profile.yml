@@ -1,0 +1,196 @@
+name: PDF profile
+run-name: PDF profile (BENCH-D2)
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/d2-**']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary with line tables
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-bin
+          path: target/release/reading-mcp
+
+  inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2
+      - name: Download public-domain sources
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p "$IN"
+          download() {
+            if curl -fsSL --retry 3 -o "$2" "$1"; then
+              echo "$2: $(stat -c%s "$2") bytes"
+            else
+              echo "::warning::failed to download $1"
+              rm -f "$2"
+            fi
+            return 0
+          }
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600.txt" "$IN/war-and-peace.txt"
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$IN/song-shi.epub"
+      - name: Download pinned CC-BY arXiv papers
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          python3 scripts/pdf-gen-inputs.py --download-arxiv "$IN" | tail -40
+      - name: Generate synthetic inputs and ground truth
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          args=(--out "$IN")
+          [ -f "$IN/war-and-peace.txt" ] && args+=(--war-and-peace "$IN/war-and-peace.txt")
+          [ -f "$IN/song-shi.epub" ] && args+=(--song-shi "$IN/song-shi.epub")
+          python3 scripts/pdf-gen-inputs.py "${args[@]}" | tail -60
+          ls -l "$IN" | tail -30
+      - name: Upload inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-inputs
+          path: ${{ runner.temp }}/inputs
+          retention-days: 7
+
+  probe:
+    needs: [build, inputs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        input:
+          - paper-2col-en
+          - paper-2col-cjk
+          - text-long-en
+          - text-long-cjk
+          - scan-small
+          - arxiv-ml-2col
+          - arxiv-math-heavy
+          - arxiv-many-figures
+        backend: [default, layout]
+    name: probe ${{ matrix.input }} ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install probe tooling
+        run: pip install pymupdf==1.28.2
+      - name: Restore pip cache for the layout environment
+        if: matrix.backend == 'layout'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pdf-layout-${{ hashFiles('scripts/pdf-layout/requirements.txt') }}
+      - name: Create the pinned layout environment
+        if: matrix.backend == 'layout'
+        env:
+          PDF_LAYOUT_VENV: ${{ github.workspace }}/.pdf-layout-venv
+          PYTHON: python3
+        run: bash scripts/pdf-layout/setup-pdf-layout.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf-inputs
+          path: ${{ runner.temp }}/inputs
+      - name: Open, read and score ${{ matrix.input }} (${{ matrix.backend }})
+        run: |
+          set -o pipefail
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p "$RUNNER_TEMP/results" "$RUNNER_TEMP/artifacts"
+          args=(--mode run
+                --binary "$RUNNER_TEMP/bin/reading-mcp"
+                --input "${{ matrix.input }}=$IN/${{ matrix.input }}.pdf"
+                --backend "${{ matrix.backend }}"
+                --state-root "$RUNNER_TEMP/state"
+                --artifact-dir "$RUNNER_TEMP/artifacts"
+                --out "$RUNNER_TEMP/results/${{ matrix.input }}-${{ matrix.backend }}.jsonl"
+                --deadline-minutes 320)
+          if [ -f "$IN/${{ matrix.input }}.meta.json" ]; then
+            args+=(--meta "$IN/${{ matrix.input }}.meta.json")
+          fi
+          if [ "${{ matrix.backend }}" = "layout" ]; then
+            args+=(--layout-python "$GITHUB_WORKSPACE/.pdf-layout-venv/bin/python")
+          fi
+          if [ "${{ matrix.input }}" = "text-long-cjk" ]; then
+            args+=(--caps)
+          fi
+          python3 scripts/pdf-probe.py "${args[@]}" | tail -150
+          {
+            echo "### ${{ matrix.input }} / ${{ matrix.backend }}"
+            echo
+            python3 scripts/pdf-probe.py --mode aggregate \
+              --jsonl-dir "$RUNNER_TEMP/results" --out "$RUNNER_TEMP/merged.json" \
+              | tail -150
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload probe results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.input }}-${{ matrix.backend }}
+          path: |
+            ${{ runner.temp }}/results/
+            ${{ runner.temp }}/artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  aggregate:
+    needs: [probe]
+    if: always() && needs.probe.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: probe-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/all
+      - name: Merge every shard into the final tables
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/final"
+          python3 scripts/pdf-probe.py --mode aggregate \
+            --jsonl-dir "$RUNNER_TEMP/all/results" \
+            --out "$RUNNER_TEMP/final/pdf-baseline.json" \
+            --markdown "$RUNNER_TEMP/final/pdf-baseline.md" | tail -150
+          cat "$RUNNER_TEMP/final/pdf-baseline.md" >> "$GITHUB_STEP_SUMMARY"
+          ls -l "$RUNNER_TEMP/final" | tail -10
+      - name: Upload final tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-baseline
+          path: |
+            ${{ runner.temp }}/final/
+            ${{ runner.temp }}/all/artifacts/diff-*.txt
+          if-no-files-found: warn
+          retention-days: 14

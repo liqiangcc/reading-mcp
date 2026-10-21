@@ -80,11 +80,22 @@ def database_sizes(database: str) -> dict[str, int]:
         chunks = connection.execute(
             f"SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))), 0) FROM {table}"
         ).fetchone()
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_meta_v1'"
+        ).fetchone():
+            meta = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0)"
+                " FROM document_meta_v1"
+            ).fetchone()
+        else:
+            meta = (0, 0)
         return {
             "documents": int(documents[0]),
             "document_json_bytes": int(documents[1]),
             "section_text_rows": int(chunks[0]),
             "section_text_bytes": int(chunks[1]),
+            "document_meta_v1_rows": int(meta[0]),
+            "document_meta_v1_bytes": int(meta[1]),
         }
     finally:
         connection.close()
@@ -181,6 +192,8 @@ def main() -> int:
             "input={label} size_mib={size_mb:g} ok=yes peak_rss_kib={peak} "
             "documents={documents} document_json_bytes={document_json_bytes} "
             "section_text_rows={section_text_rows} section_text_bytes={section_text_bytes} "
+            "document_meta_v1_rows={document_meta_v1_rows} "
+            "document_meta_v1_bytes={document_meta_v1_bytes} "
             "sqlite_file_bytes={file_bytes}".format(
                 label=label,
                 size_mb=size_mb,

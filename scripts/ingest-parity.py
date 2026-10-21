@@ -796,6 +796,11 @@ def compare(label: str, left: dict, right: dict, out_dir: str) -> dict:
         if left["dump"][block] != right["dump"][block]:
             columns[column] = "DIFF"
             diffs.append(difflib_text(label, column, left["dump"][block], right["dump"][block]))
+            if block == "layouts":
+                detail = layout_block_diff(left["dump"][block], right["dump"][block])
+                if detail:
+                    print(f"{label}: {detail}", flush=True)
+                    diffs.append(detail + "\n")
 
     if diffs:
         with open(
@@ -816,6 +821,56 @@ def difflib_text(label: str, block: str, left: str, right: str, limit: int = 200
         )
     )
     return "".join(diff[:limit])
+
+
+def layout_block_diff(
+    left_text: str, right_text: str, limit: int = 4
+) -> str | None:
+    """Returns a compact first-mismatch summary for the layouts block, if it can be decoded."""
+    left_rows = left_text.splitlines()
+    right_rows = right_text.splitlines()
+    if len(left_rows) != len(right_rows):
+        return f"layouts row count A={len(left_rows)} B={len(right_rows)}"
+    for row_index, (left_row, right_row) in enumerate(zip(left_rows, right_rows)):
+        if left_row == right_row:
+            continue
+        left_fields = left_row.split("\t")
+        right_fields = right_row.split("\t")
+        if len(left_fields) != len(right_fields):
+            return f"layouts row {row_index} field count A={len(left_fields)} B={len(right_fields)}"
+        for field_index, (left_field, right_field) in enumerate(
+            zip(left_fields[:-1], right_fields[:-1])
+        ):
+            if left_field != right_field:
+                return (
+                    f"layouts row {row_index} field {field_index}: "
+                    f"A={left_field!r} B={right_field!r}"
+                )
+        try:
+            left_layout = decode_layout(bytes.fromhex(left_fields[-1]))
+            right_layout = decode_layout(bytes.fromhex(right_fields[-1]))
+        except (ValueError, KeyError) as error:
+            return f"layouts row {row_index} blob decode failed: {error}"
+        for part in ("paragraphs", "sentences", "coverage"):
+            left_records = left_layout[part]
+            right_records = right_layout[part]
+            if left_records == right_records:
+                continue
+            if len(left_records) != len(right_records):
+                return (
+                    f"section {left_fields[2]} {part} count "
+                    f"A={len(left_records)} B={len(right_records)}"
+                )
+            for record_index, (left_record, right_record) in enumerate(
+                zip(left_records, right_records)
+            ):
+                if left_record != right_record:
+                    return (
+                        f"section {left_fields[2]} {part}[{record_index}]: "
+                        f"A={left_record} B={right_record}"
+                    )
+        return f"section {left_fields[2]} blob length A={len(left_fields[-1])} B={len(right_fields[-1])}"
+    return None
 
 
 def parse_inputs(spec: str) -> list[tuple[str, str]]:

@@ -84,7 +84,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: r2c4-parity-${{ github.ref_name }}
+          name: r2c4-parity-${{ github.run_id }}
           path: parity-${{ github.ref_name }}/
 
   profile:
@@ -129,5 +129,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: r2c4-profile-${{ github.ref_name }}
+          name: r2c4-profile-${{ github.run_id }}
           path: profile-${{ github.ref_name }}/

@@ -634,7 +634,7 @@ def probe(args: argparse.Namespace) -> int:
         "calls={calls} mean_ms={mean_ms} median_ms={median_ms} p95_ms={p95_ms} "
         "max_ms={max_ms} io_read_bytes_mean={io_read_bytes_mean} "
         "perf_mode={perf_mode} perf_out={perf_out}".format(
-            perf_mode=perf_mode, perf_out=perf_out, **summary
+            perf_mode=perf_mode, perf_out=perf_out, **{**summary, **io_summary}
         ),
         flush=True,
     )

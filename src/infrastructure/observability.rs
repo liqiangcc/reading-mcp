@@ -16,7 +16,44 @@ use crate::domain::{
     ParagraphTextUnitSet, SectionId, SentenceTextUnitSet, TextUnit,
 };
 
+/// The process's current and peak resident set size, in KiB, from `/proc/self/status`.
+///
+/// Linux only, and only reached from the observed wrappers, which are installed only when
+/// telemetry is on, so it costs nothing when telemetry is off. Any read or parse failure
+/// yields `None`, and the fields are then simply left out of the event.
+#[cfg(target_os = "linux")]
+fn memory_counters() -> Option<(u64, u64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let mut rss_kib = None;
+    let mut hwm_kib = None;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmRSS:") {
+            rss_kib = parse_status_kib(value);
+        } else if let Some(value) = line.strip_prefix("VmHWM:") {
+            hwm_kib = parse_status_kib(value);
+        }
+    }
+    Some((rss_kib?, hwm_kib?))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_status_kib(value: &str) -> Option<u64> {
+    value.split_whitespace().next()?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn memory_counters() -> Option<(u64, u64)> {
+    None
+}
+
 fn emit(value: serde_json::Value) {
+    let mut value = value;
+    if let Some((rss_kib, hwm_kib)) = memory_counters()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("rss_kib".into(), json!(rss_kib));
+        object.insert("hwm_kib".into(), json!(hwm_kib));
+    }
     eprintln!("{value}");
 }
 

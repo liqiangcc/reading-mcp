@@ -8,6 +8,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde_json::json;
 
+use crate::application::cite_reading::CiteReadingUseCase;
 use crate::application::get_context::{
     ContextContainerKind, ContextItemKind, ContextItemRole, ContextRelation, ContextTarget,
     ContextUnit, GetContextCommand, GetContextUseCase, GetStructuredContextCommand,
@@ -30,6 +31,7 @@ use crate::application::list_documents::{
 };
 use crate::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use crate::application::open_reading::{OpenReadingCommand, OpenReadingUseCase};
+use crate::application::outline_reading::{OutlineReadingCommand, OutlineReadingUseCase};
 use crate::application::ports::{ApplicationError, RetrievalOptions};
 use crate::application::read_document::{
     ContinueExactReadCommand, ContinueReadCommand, ReadDocumentUseCase, ReadExactTargetCommand,
@@ -40,6 +42,7 @@ use crate::application::reading_error::{ReadingError, ReadingErrorCode};
 use crate::application::search_document::{
     SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
 };
+use crate::application::search_reading::{SearchReadingCommand, SearchReadingUseCase};
 use crate::application::source_view::{
     GetSourceViewCommand, SourceViewRepresentation, SourceViewUseCase,
 };
@@ -68,8 +71,9 @@ use super::source_view_contracts::{
     GetSourceViewRequest, GetSourceViewResponse, SourceViewRepresentationDto,
 };
 use super::v2_contracts::{
-    FlatReadView, OpenRequest, OpenView, ReadRequest, ReadView, error_result, retry_for,
-    text_result, too_long_retry,
+    BrowseRequest, CiteRequest, CiteView, FlatReadView, OpenRequest, OpenView, OutlineRequest,
+    OutlineView, ReadRequest, ReadView, SearchRequest, SearchView, SourceViewRequest, error_result,
+    retry_for, text_result, too_long_retry,
 };
 
 #[derive(Clone)]
@@ -85,6 +89,9 @@ pub struct ReadingMcpServer {
     source_view: Arc<SourceViewUseCase>,
     open_reading: Arc<OpenReadingUseCase>,
     read_reading: Arc<ReadReadingUseCase>,
+    outline_reading: Arc<OutlineReadingUseCase>,
+    search_reading: Arc<SearchReadingUseCase>,
+    cite_reading: Arc<CiteReadingUseCase>,
     tools: ToolSet,
     _ephemeral_state: Option<Arc<crate::runtime::EphemeralStateDir>>,
 }
@@ -127,6 +134,9 @@ impl ReadingMcpServer {
         source_view: Arc<SourceViewUseCase>,
         open_reading: Arc<OpenReadingUseCase>,
         read_reading: Arc<ReadReadingUseCase>,
+        outline_reading: Arc<OutlineReadingUseCase>,
+        search_reading: Arc<SearchReadingUseCase>,
+        cite_reading: Arc<CiteReadingUseCase>,
         tools: ToolSet,
         ephemeral_state: Option<Arc<crate::runtime::EphemeralStateDir>>,
     ) -> Self {
@@ -142,6 +152,9 @@ impl ReadingMcpServer {
             source_view,
             open_reading,
             read_reading,
+            outline_reading,
+            search_reading,
+            cite_reading,
             tools,
             _ephemeral_state: ephemeral_state,
         }
@@ -810,6 +823,159 @@ impl ReadingMcpServer {
             }
         })
     }
+
+    #[tool(
+        description = "List the books under the configured roots, or one authorized directory's subdirectories and books, as [name, kind, size] entries. kind is doc or dir; pass a doc name to open. Omit path to list the roots' documents."
+    )]
+    async fn browse(
+        &self,
+        Parameters(request): Parameters<BrowseRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let entries: Vec<(String, &'static str, u64)> = match request.path {
+            Some(path) => {
+                let result = match self
+                    .list_directory
+                    .execute(ListDirectoryCommand {
+                        path: Some(path),
+                        max_results:
+                            crate::application::list_directories::DEFAULT_DIRECTORY_MAX_RESULTS,
+                        cursor: None,
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => return Ok(v2_error(error)),
+                };
+                result
+                    .entries
+                    .into_iter()
+                    .map(|entry| {
+                        let kind = match entry.kind {
+                            DirectoryEntryKind::Directory => "dir",
+                            DirectoryEntryKind::Document => "doc",
+                        };
+                        (entry.name, kind, entry.size_bytes.unwrap_or(0))
+                    })
+                    .collect()
+            }
+            None => {
+                let result = match self
+                    .list_documents
+                    .execute(ListDocumentsCommand {
+                        path: None,
+                        recursive: false,
+                        max_results:
+                            crate::application::list_documents::DEFAULT_DISCOVERY_MAX_RESULTS,
+                        cursor: None,
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => return Ok(v2_error(error)),
+                };
+                result
+                    .documents
+                    .into_iter()
+                    .map(|document| (document.name, "doc", document.size_bytes))
+                    .collect()
+            }
+        };
+        Ok(text_result(&entries))
+    }
+
+    #[tool(
+        description = "List a book's section tree in reading order as [section handle, title, level, chars] nodes, starting at a document or section handle. depth bounds the levels below at and limit the nodes per answer; follow next to continue. Use a node's handle with read to jump to that section."
+    )]
+    async fn outline(
+        &self,
+        Parameters(request): Parameters<OutlineRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let command = OutlineReadingCommand {
+            at: request.at,
+            depth: request.depth,
+            limit: request.limit,
+            cursor: request.cursor,
+        };
+        Ok(match self.outline_reading.execute(command).await {
+            Ok(result) => text_result(&OutlineView::from(result)),
+            Err(error) => error_result(&error, retry_for(&error)),
+        })
+    }
+
+    #[tool(
+        description = "Search one opened book for a query and return ranked sentence hits as [sentence handle, snippet] plus the sections they live in. The handles read directly: pass one to read as from. total is the number of hits returned."
+    )]
+    async fn search(
+        &self,
+        Parameters(request): Parameters<SearchRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let command = SearchReadingCommand {
+            doc: request.doc,
+            query: request.query,
+            limit: request.limit,
+        };
+        Ok(match self.search_reading.execute(command).await {
+            Ok(result) => text_result(&SearchView::from(result)),
+            Err(error) => error_result(&error, retry_for(&error)),
+        })
+    }
+
+    #[tool(
+        description = "Return the full v1 citation of one or more handles: the exact TextLocator, the original source position and the document identity it is bound to. This is the only tool with long fields; use it when a quote needs provenance. Every other tool stays compact."
+    )]
+    async fn cite(
+        &self,
+        Parameters(request): Parameters<CiteRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(match self.cite_reading.execute(&request.at).await {
+            Ok(result) => text_result(&CiteView::from(result)),
+            Err(error) => error_result(&error, retry_for(&error)),
+        })
+    }
+
+    #[tool(
+        description = "Render the original source page bound to a handle and return the page image with its page number and page count. A document handle renders its first section. Use it to check fidelity against the scanned or EPUB source."
+    )]
+    async fn source_view(
+        &self,
+        Parameters(request): Parameters<SourceViewRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let locator = match self.cite_reading.source_locator(&request.at).await {
+            Ok(locator) => locator,
+            Err(error) => return Ok(error_result(&error, retry_for(&error))),
+        };
+        let result = match self
+            .source_view
+            .execute(GetSourceViewCommand {
+                document_id: locator.document_id.clone(),
+                target_locator: locator,
+                representation: SourceViewRepresentation::Original,
+                dpi: None,
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => return Ok(v2_error(error)),
+        };
+        let metadata = json!({
+            "at": request.at,
+            "page": result.page_number,
+            "pages": result.page_count,
+        });
+        let image = base64::engine::general_purpose::STANDARD.encode(&result.view.bytes);
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(
+                serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_owned()),
+            ),
+            ContentBlock::image(image, result.view.media_type.0),
+        ]))
+    }
+}
+
+/// One v2 error answer from an application failure.
+fn v2_error(error: ApplicationError) -> CallToolResult {
+    let error = ReadingError::from(error);
+    error_result(&error, retry_for(&error))
 }
 
 struct GetReadDocumentResponse;

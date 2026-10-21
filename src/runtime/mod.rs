@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 pub(crate) use ephemeral_state::EphemeralStateDir;
 
+use crate::application::cite_reading::CiteReadingUseCase;
 use crate::application::get_context::GetContextUseCase;
 use crate::application::get_document_structure::GetDocumentStructureUseCase;
 use crate::application::get_text_units::GetTextUnitsUseCase;
@@ -12,6 +13,7 @@ use crate::application::list_directories::ListDirectoryUseCase;
 use crate::application::list_documents::ListDocumentsUseCase;
 use crate::application::open_document::OpenDocumentUseCase;
 use crate::application::open_reading::OpenReadingUseCase;
+use crate::application::outline_reading::OutlineReadingUseCase;
 use crate::application::ports::{
     DocumentRepository, OpenResultStore, ParsedDocumentCache, Parser, RawResourceCache, Retriever,
     SearchIndex, SourcePolicy, TextUnitIndex,
@@ -19,6 +21,7 @@ use crate::application::ports::{
 use crate::application::read_document::ReadDocumentUseCase;
 use crate::application::read_reading::ReadReadingUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
+use crate::application::search_reading::SearchReadingUseCase;
 use crate::application::source_view::SourceViewUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
@@ -249,6 +252,19 @@ pub fn build_server(
         repository.clone(),
         text_unit_index.clone(),
     ));
+    let outline_reading = Arc::new(OutlineReadingUseCase::new(
+        repository.clone(),
+        text_unit_index.clone(),
+    ));
+    let search_reading = Arc::new(SearchReadingUseCase::new(
+        repository.clone(),
+        text_unit_index.clone(),
+        search_document.clone(),
+    ));
+    let cite_reading = Arc::new(CiteReadingUseCase::new(
+        repository.clone(),
+        text_unit_index.clone(),
+    ));
     let get_context =
         Arc::new(GetContextUseCase::new(repository).with_text_unit_index(text_unit_index.clone()));
 
@@ -264,6 +280,9 @@ pub fn build_server(
         source_view,
         open_reading,
         read_reading,
+        outline_reading,
+        search_reading,
+        cite_reading,
         config.tools,
         ephemeral_state,
     ))

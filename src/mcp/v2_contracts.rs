@@ -1,16 +1,25 @@
-//! The v2 `open` and `read` wire contracts.
+//! The v2 tool wire contracts: `open`, `read`, `browse`, `outline`, `search`, `cite` and
+//! `source_view`.
 //!
-//! Both tools answer with one compact JSON text in `content` and never with `structuredContent` or
-//! an `outputSchema`, so the whole payload is exactly the bytes the model reads.
+//! Every v2 tool answers with one compact JSON text in `content` and never with
+//! `structuredContent` or an `outputSchema`, so the whole payload is exactly the bytes the model
+//! reads. `cite` is the only tool that returns long fields on purpose.
 
 use rmcp::model::{CallToolResult, ContentBlock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::contracts::TextLocatorDto;
+use crate::application::cite_reading::{CITE_VERSIONS, CiteReadingItem, CiteReadingResult};
 use crate::application::open_reading::OpenReadingResult;
+use crate::application::outline_reading::{
+    DEFAULT_OUTLINE_DEPTH, DEFAULT_OUTLINE_LIMIT, OutlineReadingResult,
+};
 use crate::application::read_reading::{ReadReadingItem, ReadReadingResult};
 use crate::application::reading_error::{ReadingError, ReadingErrorCode};
+use crate::application::search_reading::{DEFAULT_SEARCH_LIMIT, SearchReadingResult};
+use crate::domain::TextLocator;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct OpenRequest {
@@ -37,6 +46,62 @@ pub struct ReadRequest {
     /// Preceding items to re-read first, 0-50.
     #[serde(default)]
     pub back: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct BrowseRequest {
+    /// An authorized directory to list; omit to list the configured roots' documents.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct OutlineRequest {
+    /// A document or section handle.
+    pub at: String,
+    /// Levels below `at` to list, 1-32.
+    #[serde(default = "default_outline_depth")]
+    pub depth: usize,
+    /// Nodes per answer, 1-1000.
+    #[serde(default = "default_outline_limit")]
+    pub limit: usize,
+    /// The `next` of a previous outline answer.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+fn default_outline_depth() -> usize {
+    DEFAULT_OUTLINE_DEPTH
+}
+
+fn default_outline_limit() -> usize {
+    DEFAULT_OUTLINE_LIMIT
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SearchRequest {
+    /// A document handle.
+    pub doc: String,
+    pub query: String,
+    /// Hits to return, 1-50.
+    #[serde(default = "default_search_reading_limit")]
+    pub limit: usize,
+}
+
+fn default_search_reading_limit() -> usize {
+    DEFAULT_SEARCH_LIMIT
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct CiteRequest {
+    /// One or more document, section, paragraph or sentence handles.
+    pub at: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SourceViewRequest {
+    /// A document, section, paragraph or sentence handle.
+    pub at: String,
 }
 
 /// The compact `open` answer.
@@ -170,6 +235,120 @@ fn item_value(item: ReadReadingItem) -> Value {
         parts.push(Value::String(content_class));
     }
     Value::Array(parts)
+}
+
+/// The compact `outline` answer: `[[handle, title, level, chars], ...]` and the next cursor.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OutlineView {
+    pub items: Vec<(String, String, u8, usize)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+impl From<OutlineReadingResult> for OutlineView {
+    fn from(result: OutlineReadingResult) -> Self {
+        Self {
+            items: result
+                .items
+                .into_iter()
+                .map(|item| (item.handle, item.title, item.level, item.chars))
+                .collect(),
+            next: result.next,
+        }
+    }
+}
+
+/// The compact `search` answer: the hit count, the sections the hits live in, and the hits.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SearchView {
+    pub total: usize,
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    pub sections: Map<String, Value>,
+    pub hits: Vec<(String, String)>,
+}
+
+impl From<SearchReadingResult> for SearchView {
+    fn from(result: SearchReadingResult) -> Self {
+        let mut sections = Map::new();
+        for (handle, title) in result.sections {
+            sections.insert(handle, Value::String(title));
+        }
+        Self {
+            total: result.total,
+            sections,
+            hits: result
+                .hits
+                .into_iter()
+                .map(|hit| (hit.handle, hit.snippet))
+                .collect(),
+        }
+    }
+}
+
+/// The compact `cite` answer: one citation per requested handle.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CiteView {
+    pub items: Vec<Value>,
+}
+
+impl From<CiteReadingResult> for CiteView {
+    fn from(result: CiteReadingResult) -> Self {
+        Self {
+            items: result.items.into_iter().map(cite_value).collect(),
+        }
+    }
+}
+
+fn cite_value(item: CiteReadingItem) -> Value {
+    let (normalization_version, normalized_document_hash_version, segmentation_version) =
+        CITE_VERSIONS;
+    let mut citation = Map::new();
+    citation.insert("at".into(), Value::String(item.at));
+    if let Some(locator) = item.locator {
+        citation.insert("locator".into(), locator_value(&locator));
+    }
+    if let Some(source_position) = item.source_position {
+        citation.insert("src".into(), Value::String(source_position));
+    }
+    if let Some(page) = item.page {
+        citation.insert("page".into(), json!(page));
+    }
+    let mut identity = Map::new();
+    identity.insert("id".into(), Value::String(item.document_id));
+    identity.insert("content_hash".into(), Value::String(item.content_hash));
+    identity.insert(
+        "normalized_document_hash".into(),
+        Value::String(item.normalized_document_hash),
+    );
+    identity.insert("norm".into(), Value::String(normalization_version.into()));
+    identity.insert(
+        "ndh".into(),
+        Value::String(normalized_document_hash_version.into()),
+    );
+    identity.insert("seg".into(), Value::String(segmentation_version.into()));
+    citation.insert("doc".into(), Value::Object(identity));
+    Value::Object(citation)
+}
+
+fn locator_value(locator: &TextLocator) -> Value {
+    let dto = TextLocatorDto {
+        document_id: locator.document_id.0.clone(),
+        content_hash: locator.content_hash.0.clone(),
+        normalized_document_hash: locator.normalized_document_hash.0.clone(),
+        owner_section_id: locator.owner_section_id.0.clone(),
+        section_path: locator.section_path.clone(),
+        paragraph_index: locator.paragraph_index,
+        sentence_index: locator.sentence_index,
+        normalized_range: locator.normalized_range.map(|range| {
+            super::contracts::NormalizedRangeDto {
+                start: range.start(),
+                end: range.end(),
+            }
+        }),
+        segmentation_version: locator.segmentation_version.clone(),
+        native_location: locator.native_location.clone(),
+    };
+    serde_json::to_value(dto).unwrap_or(Value::Null)
 }
 
 /// The v2 error body: one code, one short Chinese hint, and a retry only when it is exactly right.
@@ -320,15 +499,18 @@ pub fn error_result(error: &ReadingError, retry: Option<Value>) -> CallToolResul
 #[cfg(test)]
 mod tests {
     use super::{
-        ErrorView, FlatReadView, OpenView, ReadView, SectionView, item_value, retry_for,
-        too_long_retry,
+        CiteView, ErrorView, FlatReadView, OpenView, OutlineView, ReadView, SearchView,
+        SectionView, item_value, retry_for, too_long_retry,
     };
+    use crate::application::cite_reading::{CiteReadingItem, CiteReadingResult};
     use crate::application::open_reading::OpenReadingResult;
+    use crate::application::outline_reading::{OutlineReadingItem, OutlineReadingResult};
     use crate::application::ports::ApplicationError;
     use crate::application::read_reading::{
         ReadReadingItem, ReadReadingResult, ReadReadingSection,
     };
     use crate::application::reading_error::ReadingError;
+    use crate::application::search_reading::{SearchReadingHit, SearchReadingResult};
 
     fn compact<T: serde::Serialize>(value: &T) -> String {
         serde_json::to_string(value).expect("the view serializes")
@@ -641,5 +823,61 @@ mod tests {
         }
         // `too_long` is built by `read` itself, and its retry needs the request.
         assert!(retry_for(&ReadingError::too_long(900)).is_none());
+    }
+
+    #[test]
+    fn outline_view_is_compact_tuples_and_omits_an_absent_next() {
+        let view = OutlineView::from(OutlineReadingResult {
+            items: vec![OutlineReadingItem {
+                handle: "d3~9f2c.s0".into(),
+                title: "本纪第一".into(),
+                level: 1,
+                chars: 1_204,
+            }],
+            next: None,
+        });
+        assert_eq!(
+            compact(&view),
+            r#"{"items":[["d3~9f2c.s0","本纪第一",1,1204]]}"#
+        );
+    }
+
+    #[test]
+    fn search_view_omits_empty_sections_and_keeps_the_hit_pairs() {
+        let view = SearchView::from(SearchReadingResult {
+            total: 1,
+            sections: Vec::new(),
+            hits: vec![SearchReadingHit {
+                handle: "d3~9f2c.s1.p2.3".into(),
+                snippet: "寶玉".into(),
+            }],
+        });
+        assert_eq!(
+            compact(&view),
+            r#"{"total":1,"hits":[["d3~9f2c.s1.p2.3","寶玉"]]}"#
+        );
+    }
+
+    #[test]
+    fn cite_view_omits_the_locator_of_a_document_handle_but_keeps_identity() {
+        let view = CiteView::from(CiteReadingResult {
+            items: vec![CiteReadingItem {
+                at: "d3~9f2c".into(),
+                locator: None,
+                source_position: None,
+                page: None,
+                document_id: "doc:alpha".into(),
+                content_hash: "sha256:raw".into(),
+                normalized_document_hash: "sha256:norm".into(),
+            }],
+        });
+        let text = compact(&view);
+        assert!(
+            !text.contains("locator"),
+            "a document handle has no locator"
+        );
+        assert!(text.contains(r#""id":"doc:alpha""#));
+        assert!(text.contains(r#""content_hash":"sha256:raw""#));
+        assert!(text.contains(r#""normalized_document_hash":"sha256:norm""#));
     }
 }

@@ -6,7 +6,7 @@ on:
 jobs:
   heap:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust 1.99.1
@@ -25,15 +25,67 @@ jobs:
           mkdir -p heap
           python3 scripts/memory-profile.py --binary target/release/reading-mcp --sizes-mb 4 \
             --states memory,dir --wrapper "heaptrack -o heap/{label}" --out heap/runs.json
-      - name: Summarize peak consumers
+      - name: Download zh-large (宋史)
         run: |
-          heaptrack_print --help
-          for f in heap/*-4mib*; do
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p "$BOOKS"
+          if curl -fsSL --retry 3 -o "$BOOKS/zh-large.epub" \
+            "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"; then
+            echo "zh-large: $(stat -c%s "$BOOKS/zh-large.epub") bytes"
+          else
+            echo "::warning::failed to download zh-large"
+            rm -f "$BOOKS/zh-large.epub"
+          fi
+      - name: Record heap profiles of the big inputs
+        run: |
+          mkdir -p heap
+          docs=""
+          if [ -f "$RUNNER_TEMP/books/zh-large.epub" ]; then
+            docs="zh-large=$RUNNER_TEMP/books/zh-large.epub"
+          fi
+          args=(--binary target/release/reading-mcp --states dir --cjk-sizes-mb 16,64
+            --parse-timeout-seconds 900 --run-timeout-seconds 900
+            --wrapper "heaptrack -o heap/{label}" --out heap/runs-big.json)
+          if [ -n "$docs" ]; then
+            args+=(--documents "$docs")
+          fi
+          python3 scripts/memory-profile.py "${args[@]}"
+      - name: Summarize peak consumers
+        if: always()
+        run: |
+          heaptrack_print --help | head -40
+          for f in heap/memory-4mib.zst heap/dir-4mib.zst heap/cjk-16mib.zst heap/cjk-64mib.zst \
+                   heap/zh-large.zst; do
+            if [ ! -e "$f" ]; then
+              echo "missing $f"
+              continue
+            fi
             echo "=== $f"
-            heaptrack_print --file "$f" --print-peaks=1 --peak-limit=25 --sub-peak-limit=4 \
+            heaptrack_print --file "$f" --print-peaks=1 --peak-limit=30 --sub-peak-limit=8 \
               --print-allocators=0 --print-temporary=0 --print-leaks=0 --print-histogram=0 \
-              | tee "$f.peaks.txt" | head -400
+              > "$f.peaks.txt"
+            head -250 "$f.peaks.txt"
+            echo "--- tail of $f.peaks.txt"
+            tail -30 "$f.peaks.txt"
           done
+      - name: RSS per open phase (telemetry, no heaptrack)
+        if: always()
+        run: |
+          mkdir -p heap
+          python3 scripts/memory-profile.py --binary target/release/reading-mcp --states dir \
+            --cjk-sizes-mb 64 --parse-timeout-seconds 900 --run-timeout-seconds 900 \
+            --rss-phases --out heap/runs-rss-phases.json
+      - name: SQLite facts behind the open
+        if: always()
+        run: |
+          mkdir -p heap/sqlite-facts
+          docs=()
+          if [ -f "$RUNNER_TEMP/books/zh-large.epub" ]; then
+            docs+=(--documents "zh-large=$RUNNER_TEMP/books/zh-large.epub")
+          fi
+          python3 scripts/sqlite-facts.py --binary target/release/reading-mcp \
+            --out-dir heap/sqlite-facts --cjk-mib 64 "${docs[@]}" \
+            --parse-timeout-seconds 900 --run-timeout-seconds 900
       - name: Upload heap data
         if: always()
         uses: actions/upload-artifact@v4

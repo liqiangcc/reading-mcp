@@ -22,6 +22,10 @@ With `--reopen`, every successful input is opened a second time by a new server 
 same state directory, which measures the restart-and-reopen case. The row then gains `Reopen s`
 and `Reopen extra KiB` columns; without the flag the table is unchanged.
 
+With `--rss-phases` (which implies `--telemetry`), a second per-input table is printed with the
+`rss_kib` and `hwm_kib` the server's telemetry events carried after each open phase. Without the
+flag the output is byte-identical to before.
+
 With `--probe-query label=query` (repeatable), an input whose label has a query runs
 `search_document` on its opened `document_id` and then `get_context` around the first hit, in the
 same server process, and the row gains `Search s`, `Hits` and `Context s` columns. The probe runs
@@ -641,6 +645,9 @@ PHASE_EVENTS = (
     ("FTS index s", "index"),
 )
 
+# The open's phases, in the order the open runs them, as named by their telemetry events.
+RSS_PHASES = tuple(event for _, event in PHASE_EVENTS)
+
 
 def telemetry_path(directory: str, label: str, phase: str) -> str:
     safe = label.replace(os.sep, "_")
@@ -682,6 +689,18 @@ def telemetry_sums(events: list[dict], success_only: bool) -> dict[str, tuple[in
 def telemetry_phase_seconds(events: list[dict]) -> dict[str, float]:
     sums = telemetry_sums(events, success_only=True)
     return {event: sums.get(event, (0, 0.0))[1] / 1000.0 for _, event in PHASE_EVENTS}
+
+
+def telemetry_rss_phases(events: list[dict]) -> dict[str, tuple[int, int]]:
+    """Return each phase event's last `(rss_kib, hwm_kib)`, i.e. its state once it finished."""
+    phases: dict[str, tuple[int, int]] = {}
+    for item in events:
+        event = item.get("event")
+        rss_kib = item.get("rss_kib")
+        hwm_kib = item.get("hwm_kib")
+        if isinstance(event, str) and isinstance(rss_kib, int) and isinstance(hwm_kib, int):
+            phases[event] = (rss_kib, hwm_kib)
+    return phases
 
 
 def telemetry_read_totals(events: list[dict]) -> dict[str, tuple[int, float]]:
@@ -796,6 +815,25 @@ def telemetry_table(rows: list[dict]) -> str:
         ]
         cells += [format_number(phases.get(event, 0.0)) for _, event in PHASE_EVENTS]
         cells.append(format_number(open_seconds - listed))
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def rss_phase_table(rows: list[dict]) -> str:
+    columns = ["Label", "Peak RSS KiB"] + [f"{phase} RSS/HWM MiB" for phase in RSS_PHASES]
+    alignments = ["---", "---:"] + ["---:" for _ in RSS_PHASES]
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join(alignments) + " |",
+    ]
+    for row in rows:
+        phases = row.get("telemetry_rss")
+        if not phases:
+            continue
+        cells = [table_cell(row.get("label")), str(row["peak_rss_kib"])]
+        for phase in RSS_PHASES:
+            rss_kib, hwm_kib = phases.get(phase, (None, None))
+            cells.append("-" if rss_kib is None else f"{rss_kib / 1024:.1f}/{hwm_kib / 1024:.1f}")
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
@@ -987,8 +1025,9 @@ def run_input_group(
             )
         if telemetry and open_stderr:
             probe_events = read_telemetry_events(open_stderr)
+            row["telemetry_rss"] = telemetry_rss_phases(probe_events)
             if reopen and row["ok"]:
-                probe_events += read_telemetry_events(reopen_stderr)
+                probe_events = probe_events + read_telemetry_events(reopen_stderr)
             row["telemetry_reads"] = telemetry_read_totals(probe_events)
         if entry_state_dir is not None:
             row["disk"] = measure_disk(entry_state_dir)
@@ -1029,11 +1068,19 @@ def main() -> int:
         help="record each input run's stderr and print the first-open phase breakdown",
     )
     parser.add_argument(
+        "--rss-phases",
+        action="store_true",
+        help="also print the RSS and high-water mark after each open phase (implies --telemetry)",
+    )
+    parser.add_argument(
         "--disk",
         action="store_true",
         help="give each input a fresh state dir and print its disk footprint",
     )
     args = parser.parse_args()
+
+    if args.rss_phases:
+        args.telemetry = True
 
     sizes = parse_floats(args.sizes_mb)
     cjk_sizes = parse_floats(args.cjk_sizes_mb)
@@ -1180,6 +1227,10 @@ def main() -> int:
         phases = telemetry_table(rows)
         print(phases, flush=True)
         outputs.append(phases)
+        if args.rss_phases:
+            rss_phases = rss_phase_table(rows)
+            print(rss_phases, flush=True)
+            outputs.append(rss_phases)
         for line in telemetry_read_lines(rows):
             print(line, flush=True)
             outputs.append(line)

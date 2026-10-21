@@ -15,6 +15,7 @@ use reading_mcp::application::get_text_units::{
 use reading_mcp::application::ports::{
     Parser, RetrievedResource, SectionTextUnits, TextUnitIndex, TextUnitStreamKey,
 };
+use reading_mcp::application::text_unit_stream::{StreamUnit, plan_section_stream};
 use reading_mcp::domain::{DocumentSource, MediaType, Section, SectionId};
 use reading_mcp::infrastructure::{InMemoryTextUnitIndex, SqliteTextUnitIndex};
 use reading_mcp::parsing::{ArchiveLimits, ParserRouter};
@@ -209,7 +210,7 @@ async fn compare_stream(
         report,
     )
     .await;
-    compare_positions(sqlite, memory, key, units, label, report).await;
+    compare_positions(sqlite, key, units, label, report).await;
 }
 
 async fn compare_pages(
@@ -277,12 +278,54 @@ async fn compare_pages(
 
 async fn compare_positions(
     sqlite: &dyn TextUnitIndex,
-    memory: &dyn TextUnitIndex,
     key: TextUnitStreamKey<'_>,
     units: &SectionTextUnits,
     label: &str,
     report: &mut Report,
 ) {
+    // The default position lookup plans the whole section per call, so on the largest real
+    // sections probing every unit against it is quadratic. Plan once and scan that plan instead;
+    // the first entry of a unit wins, exactly as the planner's own lookup does.
+    let paragraphs = units.paragraphs.iter().collect::<Vec<_>>();
+    let sentences = units.sentences.iter().collect::<Vec<_>>();
+    let sentence_coverage = units.sentence_coverage.iter().collect::<Vec<_>>();
+    let plan = plan_section_stream(
+        key.section_id,
+        &paragraphs,
+        units.paragraph_coverage.as_ref(),
+        &sentences,
+        &sentence_coverage,
+        key.kind,
+    )
+    .expect("the planner should plan every stored section");
+    let mut expected: BTreeMap<(EffectiveTextUnitKind, usize, Option<usize>), usize> =
+        BTreeMap::new();
+    let mut eligible_position = 0usize;
+    for (position, entry) in plan.entries.iter().enumerate() {
+        let position = match key.policy {
+            TextUnitCoveragePolicy::PreserveSource => position,
+            TextUnitCoveragePolicy::EligibleOnly => {
+                if !entry.eligible {
+                    continue;
+                }
+                let position = eligible_position;
+                eligible_position += 1;
+                position
+            }
+        };
+        let unit = match entry.unit {
+            StreamUnit::Paragraph(unit) => {
+                (EffectiveTextUnitKind::Paragraph, unit.paragraph_index, None)
+            }
+            StreamUnit::Sentence(unit) => (
+                EffectiveTextUnitKind::Sentence,
+                unit.paragraph_index,
+                Some(unit.sentence_index),
+            ),
+        };
+        expected.entry(unit).or_insert(position);
+    }
+
     let mut probes: Vec<(EffectiveTextUnitKind, usize, Option<usize>)> = units
         .paragraphs
         .iter()
@@ -300,16 +343,26 @@ async fn compare_positions(
 
     for (unit_kind, paragraph_index, sentence_index) in probes {
         report.positions += 1;
-        let left = sqlite
+        let actual = match sqlite
             .section_stream_position(key, unit_kind, paragraph_index, sentence_index)
-            .await;
-        let right = memory
-            .section_stream_position(key, unit_kind, paragraph_index, sentence_index)
-            .await;
-        if left != right {
+            .await
+        {
+            Ok(position) => position,
+            Err(error) => {
+                report.mismatches.push(format!(
+                    "{label}: position of {unit_kind:?} {paragraph_index}/{sentence_index:?} \
+                     failed: {error:?}"
+                ));
+                continue;
+            }
+        };
+        let expected = expected
+            .get(&(unit_kind, paragraph_index, sentence_index))
+            .copied();
+        if actual != expected {
             report.mismatches.push(format!(
                 "{label}: position of {unit_kind:?} {paragraph_index}/{sentence_index:?} \
-                 differs: sqlite={left:?} memory={right:?}"
+                 differs: sqlite={actual:?} plan={expected:?}"
             ));
         }
     }

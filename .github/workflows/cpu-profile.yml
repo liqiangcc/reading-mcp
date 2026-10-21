@@ -1,0 +1,172 @@
+name: CPU profile
+run-name: CPU profile of the first open and of deep Next reads
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/r5a-*']
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # A separate target dir keeps the normal release cache untouched.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target-cpu
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      RUSTFLAGS: -C force-frame-pointers=yes
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cpu-profile
+      - name: Build release binary with line tables and frame pointers
+        run: cargo build --release --locked --bin reading-mcp
+
+      - name: Install perf
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common || true
+          sudo apt-get install -y "linux-tools-$(uname -r)" \
+            || sudo apt-get install -y linux-tools-generic \
+            || true
+          sudo sysctl kernel.perf_event_paranoid=-1 || true
+          sudo sysctl kernel.kptr_restrict=0 || true
+          PERF=$(command -v perf || true)
+          if [ -z "$PERF" ] || ! "$PERF" --version >/dev/null 2>&1; then
+            PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
+          fi
+          if [ -z "$PERF" ] || ! "$PERF" --version; then
+            echo "::error::no working perf binary found"
+            ls -l /usr/lib/linux-tools/ /usr/bin/perf 2>&1 || true
+            exit 1
+          fi
+          echo "PERF=$PERF" >> "$GITHUB_ENV"
+          sysctl kernel.perf_event_paranoid kernel.kptr_restrict || true
+
+      - name: Download and generate inputs
+        run: |
+          set -eux
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p "$IN"
+          curl -fsSL --retry 3 -o "$IN/zh-large.epub" \
+            https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub
+          curl -fsSL --retry 3 -o "$IN/en-novel.epub" \
+            https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub
+          python3 -c 'import importlib.util,os; spec=importlib.util.spec_from_file_location("gen","scripts/gen-stress-inputs.py"); gen=importlib.util.module_from_spec(spec); spec.loader.exec_module(gen); gen.write_cjk(os.path.join(os.environ["RUNNER_TEMP"],"inputs","cjk-64mib.txt"), 64*1024*1024)'
+          ls -l "$IN"
+          sha256sum "$IN"/* || true
+
+      - name: First open of each input under perf
+        run: |
+          set -euxo pipefail
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p perf
+          BIN="$CARGO_TARGET_DIR/release/reading-mcp"
+          profile_open() {
+            label="$1"
+            source="$2"
+            python3 scripts/memory-profile.py \
+              --binary "$BIN" \
+              --states dir \
+              --documents "$label=$source" \
+              --telemetry \
+              --run-timeout-seconds 900 \
+              --wrapper "$PERF record -F 999 -g --call-graph fp -o perf/{label}.perf.data --" \
+              --out "perf/open-$label.json" | tee "perf/open-$label.md"
+          }
+          profile_open zh-large "$IN/zh-large.epub" || echo "::warning::zh-large open profile failed"
+          profile_open en-novel "$IN/en-novel.epub" || echo "::warning::en-novel open profile failed"
+          profile_open cjk-64mib "$IN/cjk-64mib.txt" || echo "::warning::cjk-64mib open profile failed"
+          # The per-state baseline row only measures server startup under the wrapper.
+          rm -f perf/dir-baseline.*
+          ls -l perf
+
+      - name: Deep Next reads of cjk-64mib under perf
+        run: |
+          set -euxo pipefail
+          mkdir -p perf
+          python3 scripts/deep-next-probe.py \
+            --binary "$CARGO_TARGET_DIR/release/reading-mcp" \
+            --document "$RUNNER_TEMP/inputs/cjk-64mib.txt" \
+            --calls 2000 \
+            --start-fraction 0.5 \
+            --perf "$PERF" \
+            --perf-out perf/cjk-64mib-next.perf.data \
+            --out perf/cjk-64mib-next.json | tee perf/cjk-64mib-next.md
+          ls -l perf
+
+      - name: Perf reports and folded stacks
+        if: always()
+        run: |
+          set -eux
+          shopt -s nullglob
+          for data in perf/*.perf.data; do
+            base="${data%.perf.data}"
+            echo "=== $data"
+            "$PERF" report -i "$data" --no-children --sort symbol --stdio \
+              --percent-limit 0.5 2>/dev/null | head -120 > "$base.self.txt" || true
+            "$PERF" report -i "$data" --children --sort symbol --stdio \
+              --percent-limit 2 2>/dev/null | head -120 > "$base.inclusive.txt" || true
+            # The tree above spends its 120 lines on a handful of symbols; the flat lists keep
+            # the whole ranking, including the addresses perf could not symbolize.
+            "$PERF" report -i "$data" --no-children --sort dso,symbol --stdio --no-call-graph \
+              --percent-limit 0.1 > "$base.self-flat.txt" 2>/dev/null || true
+            "$PERF" report -i "$data" --children --sort dso,symbol --stdio --no-call-graph \
+              --percent-limit 0.5 > "$base.inclusive-flat.txt" 2>/dev/null || true
+            "$PERF" script -i "$data" 2>/dev/null \
+              | python3 scripts/perf-collapse.py > "$base.folded" || true
+            wc -l "$base".*.txt "$base.folded" || true
+          done
+          ls -l perf
+
+      - name: Bucket analysis
+        if: always()
+        run: |
+          set -eux
+          OUT=perf/analysis.md
+          : > "$OUT"
+          report() {
+            label="$1"
+            heading="$2"
+            if [ -f "perf/$label.folded" ]; then
+              python3 scripts/cpu-profile-report.py \
+                --label "$label" --heading "$heading" \
+                --folded "perf/$label.folded" \
+                --self-flat "perf/$label.self-flat.txt" \
+                --wall-from-json "perf/open-$label.json" --row-label "$label" \
+                >> "$OUT" || echo "::warning::no wall time for $label"
+            fi
+          }
+          report zh-large "first open"
+          report en-novel "first open"
+          report cjk-64mib "first open"
+          if [ -f perf/cjk-64mib-next.folded ]; then
+            python3 scripts/cpu-profile-report.py \
+              --label cjk-64mib-next --heading "2,000 deep Next reads" \
+              --folded perf/cjk-64mib-next.folded \
+              --self-flat perf/cjk-64mib-next.self-flat.txt \
+              --wall-from-json perf/cjk-64mib-next.json \
+              >> "$OUT"
+          fi
+          cat "$OUT"
+          cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compress perf data
+        if: always()
+        run: |
+          set -eux
+          shopt -s nullglob
+          for data in perf/*.perf.data; do gzip -9 "$data"; done
+          ls -l perf
+
+      - name: Upload perf data and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-profile
+          path: perf/
+          if-no-files-found: warn

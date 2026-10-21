@@ -8,11 +8,12 @@ use rmcp::{
 use tokio::io::{Stdin, Stdout};
 
 /// `tunnel-client` may probe an MCP server with `server/discover` before the
-/// regular MCP `initialize` request. rmcp 2.2.0 rejects every pre-initialize
-/// request except `ping`, so answer the probe with JSON-RPC method-not-found
-/// and let the client fall back to the standard initialize handshake. Reject
-/// other pre-initialize requests without forwarding them so a stale tunnel
-/// binding cannot terminate the stdio process.
+/// regular MCP `initialize` request. rmcp 3.5.1 answers `server/discover` from
+/// its default `ServerHandler::discover`, which switches the peer to the
+/// stateless 2026-07-28 lifecycle this server does not implement, so answer the
+/// probe with JSON-RPC method-not-found and let the client fall back to the
+/// standard initialize handshake. Reject other pre-initialize requests without
+/// forwarding them so a stale tunnel binding cannot terminate the stdio process.
 struct DiscoveryCompatibleStdio {
     inner: AsyncRwTransport<RoleServer, Stdin, Stdout>,
     initialized: bool,

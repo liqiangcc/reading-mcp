@@ -444,19 +444,18 @@ def growth_mib_per_100k(samples: list[tuple[int, int]]) -> float | None:
     return slope * 100000 / 1024
 
 
-def similarity(gt: str, got: str) -> dict:
-    """Character-level similarity: mean difflib ratio over aligned 2,000-character windows."""
+def windowed_ratio(left: str, right: str) -> float:
+    """difflib ratio over 2,000-character windows, weighted by window length."""
     ratios: list[float] = []
     weights: list[int] = []
-    for offset in range(0, max(len(gt), len(got)), SIMILARITY_WINDOW):
-        left = gt[offset:offset + SIMILARITY_WINDOW]
-        right = got[offset:offset + SIMILARITY_WINDOW]
-        if not left and not right:
+    for offset in range(0, max(len(left), len(right)), SIMILARITY_WINDOW):
+        a = left[offset:offset + SIMILARITY_WINDOW]
+        b = right[offset:offset + SIMILARITY_WINDOW]
+        if not a and not b:
             break
-        ratios.append(difflib.SequenceMatcher(None, left, right).ratio())
-        weights.append(max(len(left), len(right)))
-    score = sum(r * w for r, w in zip(ratios, weights)) / sum(weights) if weights else 0.0
-    return {"similarity": round(score, 4), "windows": len(ratios)}
+        ratios.append(difflib.SequenceMatcher(None, a, b).ratio())
+        weights.append(max(len(a), len(b)))
+    return sum(r * w for r, w in zip(ratios, weights)) / sum(weights) if weights else 0.0
 
 
 def match_paragraphs(doc: str, paragraphs: list[str]) -> dict:
@@ -465,11 +464,17 @@ def match_paragraphs(doc: str, paragraphs: list[str]) -> dict:
     exact = 0
     fuzzy = 0
     first_miss: str | None = None
+    weighted = 0.0
+    weight = 0
+    matched_chars = 0
     for paragraph in paragraphs:
         index = doc.find(paragraph, position)
         if index >= 0:
             exact += 1
             position = index + len(paragraph)
+            weighted += len(paragraph)
+            weight += len(paragraph)
+            matched_chars += len(paragraph)
             continue
         anchor = paragraph[:24]
         index = doc.find(anchor, position) if anchor else -1
@@ -481,12 +486,17 @@ def match_paragraphs(doc: str, paragraphs: list[str]) -> dict:
                 fuzzy += 1
                 position = index + len(paragraph)
                 matched = True
+                weighted += windowed_ratio(paragraph, window) * len(paragraph)
+                matched_chars += len(paragraph)
                 break
             index = doc.find(anchor, index + 1)
+        weight += len(paragraph)
         if not matched and first_miss is None:
             first_miss = paragraph[:80]
     total = len(paragraphs)
     return {
+        "similarity": round(weighted / weight, 4) if weight else None,
+        "matched_chars": matched_chars,
         "paragraphs": total,
         "paragraphs_exact": exact,
         "paragraphs_fuzzy": fuzzy,
@@ -740,7 +750,8 @@ def run_one(args) -> int:
                                                 f"diff-{label}-{backend}.txt")
                     excerpt = diff_excerpt(gt, joined, excerpt_path, f"{label} ({backend})")
                     quality_record.update({
-                        **similarity(gt, joined),
+                        "similarity": matched["similarity"],
+                        "matched_chars": matched["matched_chars"],
                         "order_score": matched["order_score"],
                         "order_score_exact": matched["order_score_exact"],
                         "paragraphs": matched["paragraphs"],
@@ -946,8 +957,8 @@ def aggregate_mode(args) -> int:
                 f"{fmt(read.get('errors'))} |"
             )
 
-    quality_rows = ["| Input | Backend | GT chars | Extracted chars | Similarity | Paragraphs | "
-                    "Order score | Leaks: header | footer | footnote | Diff excerpt |",
+    quality_rows = ["| Input | Backend | GT chars | Extracted chars | Char similarity | Paragraphs | "
+                    "Order score | Order (exact) | Leaks: header | footer | footnote | Diff excerpt |",
                     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for label in inputs:
         for backend in backends:
@@ -959,8 +970,9 @@ def aggregate_mode(args) -> int:
                 f"| {label} | {backend} | {fmt(quality.get('gt_chars'))} | "
                 f"{fmt(quality.get('extracted_chars'))} | {fmt(quality.get('similarity'), 3)} | "
                 f"{fmt(quality.get('paragraphs'))} | {fmt(quality.get('order_score'), 3)} | "
-                f"{fmt(leaks.get('header'))} | {fmt(leaks.get('footer'))} | "
-                f"{fmt(leaks.get('footnote'))} | {fmt(quality.get('diff_excerpt'))} |"
+                f"{fmt(quality.get('order_score_exact'), 3)} | {fmt(leaks.get('header'))} | "
+                f"{fmt(leaks.get('footer'))} | {fmt(leaks.get('footnote'))} | "
+                f"{fmt(quality.get('diff_excerpt'))} |"
             )
 
     real_rows = ["| Input | Backend | Sentences read | Short <5 chars | Long >800 chars | Read errors | "
@@ -994,7 +1006,12 @@ def aggregate_mode(args) -> int:
         "## Open, structure and text quality", "", *main_rows, "",
         "## Reopen (parsed cache)", "", *reopen_rows, "",
         "## Sentence-by-sentence reads", "", *read_rows, "",
-        "## Text quality against ground truth", "", *quality_rows, "",
+        "## Text quality against ground truth", "",
+        "Char similarity is the length-weighted difflib ratio of every ground-truth paragraph "
+        "against its aligned extraction window (2,000-character windows), counting a missing "
+        "paragraph as 0. Order score is the fraction of ground-truth paragraphs found "
+        "contiguously and in order (exact substring, else a 0.90-ratio fuzzy match).", "",
+        *quality_rows, "",
         "## Real papers (first 200 sentences)", "", *real_rows, "",
         "## Memory caps", "", *cap_rows, "",
     ]

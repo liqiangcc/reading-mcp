@@ -649,21 +649,37 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
         "a paragraph handle must report the sentence it read: {from_paragraph}"
     );
 
-    // Every backward single step returns another item, so `at` is always present.
+    // A backward step from a handle reads at that handle's own item, so `at` stays absent; every
+    // step after it follows a `b:` cursor, and then `at` names the item it read.
     let mut from = walked.last().expect("the walk is non-empty").handle.clone();
     let mut expected = walked.len() - 1;
+    let mut step = payload(&v2_read(&client, &from, json!({ "direction": "backward" })).await);
+    assert_eq!(
+        flat_item(&step, &from).map(|item| item.text),
+        Some(walked[expected].text.clone()),
+        "a backward step from a handle must read at that handle: {step}"
+    );
+    assert!(
+        step.get("at").is_none(),
+        "the handle's own item must not repeat in `at`: {step}"
+    );
     loop {
-        let step = payload(&v2_read(&client, &from, json!({ "direction": "backward" })).await);
-        expected -= 1;
-        assert_eq!(
-            step["at"].as_str(),
-            Some(walked[expected].handle.as_str()),
-            "a backward step must report the item it read: {step}"
-        );
         match step.get("next").and_then(Value::as_str) {
             Some(next) => from = next.to_owned(),
             None => break,
         }
+        assert!(
+            from.starts_with("b:"),
+            "a backward `next` must be a b: cursor: {from}"
+        );
+        // No `direction` here: the cursor prefix carries it.
+        step = payload(&v2_read(&client, &from, json!({})).await);
+        expected -= 1;
+        assert_eq!(
+            step["at"].as_str(),
+            Some(walked[expected].handle.as_str()),
+            "a backward step from a cursor must report the item it read: {step}"
+        );
         assert!(
             expected > 0,
             "the backward walk must not pass the book start"

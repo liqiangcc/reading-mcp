@@ -356,6 +356,12 @@ impl SqliteDocumentRepository {
                     key TEXT NOT NULL,
                     value TEXT NOT NULL,
                     UNIQUE(document_id, key)
+                 );
+                 CREATE TABLE IF NOT EXISTS document_body_order_v1 (
+                    document_id TEXT NOT NULL,
+                    order_json TEXT,
+                    error TEXT,
+                    UNIQUE(document_id)
                  );",
             )
             .map_err(repository_error)?;
@@ -405,6 +411,10 @@ impl DocumentRepository for SqliteDocumentRepository {
                 };
                 let (light_metadata, heavy_metadata) = split_metadata(&document.metadata);
                 let metadata_store = (!heavy_metadata.is_empty()).then_some(DOCUMENT_META_STORE);
+                // The body order costs an `epub_structure_map` parse, which is the largest metadata
+                // value of a book, so it is computed once here — from the document in hand — and
+                // stored, instead of on every `read`.
+                let body_order = crate::application::body_order_ids(&document);
                 let json = serde_json::to_string(&StoredDocument::with_stores(
                     &document,
                     content_store,
@@ -451,6 +461,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                             .map_err(repository_error)?;
                     }
                 }
+                store_body_order(&transaction, &document.id, body_order)?;
                 transaction.commit().map_err(repository_error)?;
                 let mut cache = cache.lock().map_err(|_| {
                     ApplicationError::RepositoryFailed("document cache lock poisoned".into())
@@ -592,6 +603,44 @@ impl DocumentRepository for SqliteDocumentRepository {
         )
         .await
     }
+
+    async fn load_section_char_len(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<usize>, ApplicationError> {
+        let id = id.clone();
+        let section_id = section_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| load_one_section_char_len(connection, &id, &section_id),
+        )
+        .await
+    }
+
+    async fn body_order(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                if let Some(stored) = load_body_order(connection, &id)? {
+                    return Ok(Some(stored));
+                }
+                // A document saved before `document_body_order_v1` existed: compute the order from
+                // the full document. The read path never writes, so the next save stores it.
+                let Some((document, _)) = load_document_row(connection, &id, false)? else {
+                    return Ok(None);
+                };
+                Ok(Some(crate::application::body_order_ids(&document)))
+            },
+        )
+        .await
+    }
 }
 
 /// One `documents` row decoded in full: the row read, the parse, the section text, the OCR
@@ -722,13 +771,28 @@ fn load_stored_metadata(
     }
 }
 
-/// The text of exactly one section, not its subtree, read from `section_text_v2` with the same
-/// staleness checks as the whole-document load.
-fn load_one_section_text(
+/// Where one section's text of one document lives.
+enum SectionTextPlace {
+    /// No `documents` row.
+    Missing,
+    /// The row keeps its section text inline: there is no `text_unit_documents_v2` row for it, so the
+    /// text of a section comes from the full document, exactly as the default trait implementation
+    /// reads it.
+    Inline,
+    /// The text is in `section_text_v2` under these keys, and its length is `char_len`.
+    Stored {
+        doc_key: i64,
+        section_key: i64,
+        char_len: usize,
+    },
+}
+
+/// Resolves [`SectionTextPlace`] with the same staleness checks as the whole-document load.
+fn section_text_place(
     connection: &Connection,
     document_id: &DocumentId,
     section_id: &SectionId,
-) -> Result<Option<String>, ApplicationError> {
+) -> Result<SectionTextPlace, ApplicationError> {
     let stored_hash = connection
         .query_row(
             "SELECT normalized_document_hash FROM documents WHERE id = ?1",
@@ -738,7 +802,7 @@ fn load_one_section_text(
         .optional()
         .map_err(repository_error)?;
     let Some(stored_hash) = stored_hash else {
-        return Ok(None);
+        return Ok(SectionTextPlace::Missing);
     };
     let meta = connection
         .query_row(
@@ -757,10 +821,9 @@ fn load_one_section_text(
         .optional()
         .map_err(repository_error)?;
     let Some((doc_key, text_hash, segmentation_version)) = meta else {
-        return Err(stale_section_text(
-            document_id,
-            "its section text is not stored",
-        ));
+        // The text-unit store does not know this document, so `save_shared` kept its section text
+        // inline in `document_json`.
+        return Ok(SectionTextPlace::Inline);
     };
     if stored_hash.is_some_and(|stored_hash| stored_hash != text_hash) {
         return Err(stale_section_text(
@@ -774,11 +837,10 @@ fn load_one_section_text(
             "its section text is not stored for the current segmentation version",
         ));
     }
-    let section_key = match stored_section_key(connection, document_id, section_id)
+    let Some(section_key) = stored_section_key(connection, document_id, section_id)
         .map_err(|error| stale_section_text(document_id, &error.to_string()))?
-    {
-        Some(section_key) => section_key,
-        None => return Ok(None),
+    else {
+        return Ok(SectionTextPlace::Missing);
     };
     let char_len: i64 = connection
         .query_row(
@@ -789,6 +851,44 @@ fn load_one_section_text(
         .map_err(|error| stale_section_text(document_id, &error.to_string()))?;
     let char_len = i64_to_usize(char_len, "char_len")
         .map_err(|error| stale_section_text(document_id, &error.to_string()))?;
+    Ok(SectionTextPlace::Stored {
+        doc_key,
+        section_key,
+        char_len,
+    })
+}
+
+/// The text of one section of a document whose text is not in `section_text_v2`: the inline
+/// `document_json` row, decoded in full. Only a row written before the text-unit store held the
+/// document takes this path.
+fn load_inline_section_text(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+) -> Result<Option<String>, ApplicationError> {
+    Ok(load_document_row(connection, document_id, false)?
+        .and_then(|(document, _)| document.find_section(section_id).map(|s| s.content.clone())))
+}
+
+/// The text of exactly one section, not its subtree, read from `section_text_v2` with the same
+/// staleness checks as the whole-document load.
+fn load_one_section_text(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+) -> Result<Option<String>, ApplicationError> {
+    let (doc_key, section_key, char_len) =
+        match section_text_place(connection, document_id, section_id)? {
+            SectionTextPlace::Missing => return Ok(None),
+            SectionTextPlace::Inline => {
+                return load_inline_section_text(connection, document_id, section_id);
+            }
+            SectionTextPlace::Stored {
+                doc_key,
+                section_key,
+                char_len,
+            } => (doc_key, section_key, char_len),
+        };
     if char_len == 0 {
         return Ok(Some(String::new()));
     }
@@ -802,6 +902,100 @@ fn load_one_section_text(
         ));
     }
     Ok(Some(text))
+}
+
+/// The length of exactly one section's normalized text, which is the `char_len` the text store
+/// keeps next to that text: `write_document_sections` stores `section.normalized_text_len()`, and
+/// both the whole-document load and the light load verify it against the text they read.
+fn load_one_section_char_len(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+) -> Result<Option<usize>, ApplicationError> {
+    match section_text_place(connection, document_id, section_id)? {
+        SectionTextPlace::Missing => Ok(None),
+        SectionTextPlace::Inline => Ok(load_document_row(connection, document_id, false)?
+            .and_then(|(document, _)| {
+                document
+                    .find_section(section_id)
+                    .map(|section| section.normalized_text_len())
+            })),
+        SectionTextPlace::Stored { char_len, .. } => Ok(Some(char_len)),
+    }
+}
+
+/// Replaces the stored body order of `document_id` with `order`: the section ids in body order, or
+/// the exact error text `body_order_ids` returned for the document. Every error `body_order_ids`
+/// reports is a `RepositoryFailed`, so its message is the whole result.
+fn store_body_order(
+    transaction: &rusqlite::Transaction<'_>,
+    document_id: &DocumentId,
+    order: Result<Vec<SectionId>, ApplicationError>,
+) -> Result<(), ApplicationError> {
+    let (order_json, error) = match order {
+        Ok(section_ids) => (
+            Some(serde_json::to_string(&section_ids).map_err(|error| {
+                ApplicationError::RepositoryFailed(format!(
+                    "body order of document {} cannot be encoded: {error}",
+                    document_id.0
+                ))
+            })?),
+            None,
+        ),
+        Err(ApplicationError::RepositoryFailed(message)) => (None, Some(message)),
+        Err(other) => (None, Some(other.to_string())),
+    };
+    transaction
+        .execute(
+            "INSERT INTO document_body_order_v1(document_id, order_json, error)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(document_id) DO UPDATE SET
+                order_json = excluded.order_json,
+                error = excluded.error",
+            params![document_id.0, order_json, error],
+        )
+        .map_err(repository_error)?;
+    Ok(())
+}
+
+/// One `document_body_order_v1` row: the section ids in body order, or the exact error text
+/// `body_order_ids` reported for the document. `Ok(None)` when the row does not exist.
+fn load_body_order(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
+    let row = connection
+        .query_row(
+            "SELECT order_json, error FROM document_body_order_v1 WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some((order_json, error)) = row else {
+        return Ok(None);
+    };
+    if let Some(error) = error {
+        return Ok(Some(Err(ApplicationError::RepositoryFailed(error))));
+    }
+    let Some(order_json) = order_json else {
+        return Ok(Some(Err(ApplicationError::RepositoryFailed(format!(
+            "stored body order of document {} holds neither an order nor an error",
+            document_id.0
+        )))));
+    };
+    let section_ids = serde_json::from_str::<Vec<SectionId>>(&order_json).map_err(|error| {
+        ApplicationError::RepositoryFailed(format!(
+            "stored body order of document {} cannot be decoded: {error}",
+            document_id.0
+        ))
+    })?;
+    Ok(Some(Ok(section_ids)))
 }
 
 /// The `content_store` value of a `document_json` row that keeps no section text inline: every

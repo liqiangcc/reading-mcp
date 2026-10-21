@@ -108,19 +108,21 @@ impl OpenReadingUseCase {
         })
     }
 
+    /// The light document: `open` reads only the root section ids and titles, so it shares the
+    /// repository's `Arc` instead of cloning the decoded document.
     async fn document(
         &self,
         document_id: &crate::domain::DocumentId,
-    ) -> Result<Document, ReadingError> {
-        match self.repository.get(document_id).await? {
-            Some(document) => Ok(Arc::unwrap_or_clone(document)),
+    ) -> Result<Arc<Document>, ReadingError> {
+        match self.repository.get_light_with_hash(document_id).await? {
+            Some((document, _)) => Ok(document),
             None => Err(ReadingError::not_opened()),
         }
     }
 
     async fn top_sections(
         &self,
-        document: &Document,
+        document: &Arc<Document>,
         handle: &DocumentHandle,
     ) -> Result<Vec<(String, String)>, ReadingError> {
         let mut top = Vec::new();

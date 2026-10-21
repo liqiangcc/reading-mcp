@@ -1,4 +1,7 @@
 mod body_order;
+// The stored body order a repository keeps is the same computation, so a repository implementation
+// outside this module reads it through this re-export.
+pub(crate) use body_order::body_order_ids;
 pub mod cite_reading;
 pub mod derived_text_units;
 mod directory_cursor;
@@ -7,6 +10,7 @@ pub mod get_context;
 pub mod get_document_structure;
 pub mod get_text_units;
 mod handle_reading;
+mod light_sections;
 pub mod list_directories;
 pub mod list_documents;
 mod local_path;

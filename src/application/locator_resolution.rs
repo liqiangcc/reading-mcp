@@ -1,4 +1,5 @@
 use crate::application::get_text_units::EffectiveTextUnitKind;
+use crate::application::light_sections::SectionTexts;
 use crate::application::ports::{ApplicationError, OwnedStreamUnit, TextUnitIndex};
 use crate::domain::{
     Document, NormalizedDocumentHash, NormalizedTextRange, TEXT_SEGMENTATION_VERSION, TextLocator,
@@ -35,6 +36,7 @@ pub(crate) async fn resolve_text_locator(
     locator: &TextLocator,
     normalized_document_hash: &NormalizedDocumentHash,
     units: &dyn TextUnitIndex,
+    texts: &mut SectionTexts<'_>,
 ) -> Result<ResolvedTextLocator, ApplicationError> {
     if locator.document_id != document.id {
         return Err(ApplicationError::InvalidLocator(format!(
@@ -72,7 +74,8 @@ pub(crate) async fn resolve_text_locator(
         locator.segmentation_version.as_deref(),
     ) {
         (None, None, None, None) => {
-            let range = NormalizedTextRange::new(0, section.normalized_text_len())
+            let owner_len = texts.char_len(&section.id).await?;
+            let range = NormalizedTextRange::new(0, owner_len)
                 .expect("zero-to-length normalized range is valid");
             Ok(ResolvedTextLocator {
                 locator: TextLocator::for_section_with_hash(
@@ -85,7 +88,8 @@ pub(crate) async fn resolve_text_locator(
             })
         }
         (None, None, Some(range), None) => {
-            section.validate_normalized_range(range).map_err(|error| {
+            let owner_len = texts.char_len(&section.id).await?;
+            range.validate_for_text_len(owner_len).map_err(|error| {
                 ApplicationError::InvalidLocator(format!("invalid character range: {error}"))
             })?;
             Ok(ResolvedTextLocator {

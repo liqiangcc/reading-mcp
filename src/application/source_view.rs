@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use tokio::task::spawn_blocking;
 
 use crate::application::derived_text_units::DerivedTextUnits;
+use crate::application::light_sections::SectionTexts;
 use crate::application::locator_resolution::resolve_text_locator;
 use crate::application::ports::{
     ApplicationError, DocumentRepository, RenderedSourceView, RetrievalOptions, Retriever,
@@ -139,11 +140,15 @@ impl SourceViewUseCase {
             Some(index) => Arc::clone(index),
             None => Arc::new(DerivedTextUnits::new(Arc::clone(&document))),
         };
+        // `source_view` still loads the full document (R1c-3d migrates it), so its section lengths
+        // come from that document and no section text is fetched again.
+        let mut texts = SectionTexts::from_document(&document);
         let resolved = resolve_text_locator(
             &document,
             &command.target_locator,
             &normalized_document_hash,
             units.as_ref(),
+            &mut texts,
         )
         .await?;
         let section = document

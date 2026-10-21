@@ -146,7 +146,7 @@ impl ReadReadingUseCase {
             })?;
         let (document, normalized_hash) = self
             .repository
-            .get_with_hash(&document_id)
+            .get_light_with_hash(&document_id)
             .await?
             .ok_or_else(ReadingError::not_opened)?;
         if handle_checksum(&document.id, &normalized_hash) != document_handle.checksum {
@@ -156,7 +156,7 @@ impl ReadReadingUseCase {
             )));
         }
 
-        let ordered = reading_order(&document)?;
+        let ordered = reading_order(self.repository.as_ref(), &document.id).await?;
         if ordered.is_empty() {
             return Ok(ReadReadingResult {
                 items: Vec::new(),
@@ -381,12 +381,24 @@ impl ReadReadingUseCase {
     }
 }
 
-/// The section order of a document: v1 `body_order`.
-fn reading_order(document: &Document) -> Result<Vec<SectionId>, ReadingError> {
-    let order = crate::application::body_order::section_body_order(document)?;
-    let mut sections = order.into_iter().collect::<Vec<_>>();
-    sections.sort_by_key(|(_, order)| *order);
-    Ok(sections.into_iter().map(|(id, _)| id).collect())
+/// The section order of a document: v1 `body_order`, from the repository's stored result.
+async fn reading_order(
+    repository: &dyn DocumentRepository,
+    document_id: &DocumentId,
+) -> Result<Vec<SectionId>, ReadingError> {
+    let stored = repository.body_order(document_id).await?;
+    let sections = match stored {
+        Some(sections) => sections?,
+        // A repository that cannot say: compute it from the document it keeps.
+        None => {
+            let document = repository
+                .get_with_hash(document_id)
+                .await?
+                .ok_or_else(ReadingError::not_opened)?;
+            crate::application::body_order::body_order_ids(&document)?
+        }
+    };
+    Ok(sections)
 }
 
 /// The per-call view of a document's section streams, with the neighbour search every walk needs.

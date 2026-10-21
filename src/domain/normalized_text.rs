@@ -58,7 +58,12 @@ impl NormalizedTextRange {
     }
 
     pub fn validate_for_text(self, owner_text: &str) -> Result<(), NormalizedTextRangeError> {
-        let owner_len = owner_text.chars().count();
+        self.validate_for_text_len(owner_text.chars().count())
+    }
+
+    /// The same check as [`Self::validate_for_text`], given the owner text's Unicode scalar count
+    /// instead of the text, so a caller that only needs the length never reads the text.
+    pub fn validate_for_text_len(self, owner_len: usize) -> Result<(), NormalizedTextRangeError> {
         if self.end > owner_len {
             return Err(NormalizedTextRangeError::OutOfBounds {
                 start: self.start,

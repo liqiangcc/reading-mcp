@@ -330,6 +330,39 @@ pub trait DocumentRepository: Send + Sync {
             .await?
             .and_then(|(document, _)| document.find_section(section_id).map(|s| s.content.clone())))
     }
+
+    /// The number of Unicode scalars of exactly one section's normalized text, i.e.
+    /// `Section::normalized_text_len()`, without reading the text. The default reads the section's
+    /// text and counts it; a store that keeps the length next to the text overrides this with one
+    /// row read.
+    async fn load_section_char_len(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<usize>, ApplicationError> {
+        Ok(self
+            .load_section_text(id, section_id)
+            .await?
+            .map(|text| text.chars().count()))
+    }
+
+    /// The document's canonical body order as `section_body_order` computes it: the section ids in
+    /// body order, or the exact error that function returns for this document. `Ok(None)` when this
+    /// repository holds no body order for `id`.
+    ///
+    /// The default loads the whole document and computes the order, which is correct but costs the
+    /// EPUB structure map parse; a store that keeps the computed result overrides this.
+    async fn body_order(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
+        let Some((document, _)) = self.get_with_hash(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(crate::application::body_order::body_order_ids(
+            &document,
+        )))
+    }
 }
 
 /// The persisted paragraph and sentence units of one section, in source order, with their coverage records.
@@ -738,5 +771,19 @@ pub trait SearchIndex: Send + Sync {
         Err(ApplicationError::IndexFailed(
             "search adapter does not implement canonical lexical candidates".into(),
         ))
+    }
+
+    /// Lexical candidates for `query` over `document`, which the caller already loaded and whose
+    /// normalized hash it already has. The default drops the document and asks
+    /// [`Self::search_lexical`], which loads the document itself; an index that scans the stored
+    /// section text overrides this so one `search_document` call loads the document once.
+    async fn search_lexical_in(
+        &self,
+        document: &Document,
+        _normalized_document_hash: &NormalizedDocumentHash,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        self.search_lexical(&document.id, query, limit).await
     }
 }

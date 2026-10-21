@@ -198,8 +198,8 @@ carries no section `content`. Line numbers are `origin/main` at the start of
 | 10 | `cite_reading.rs:120` `section_body_order(&resolved.document)` (v2 `cite` → v2 `source_view`'s document-handle locator) | the EPUB structure map | left as is: it is on the `source_view` path, which R1c-3d migrates. It is reached only for a PDF, whose order is the canonical tree walk and needs no metadata |
 | 11 | `get_document_structure.rs:177`, `:207` and `source_view.rs:225` (`original_source_binding_map`), `:133-137` | body order / binding map / one section's text | **not in this task**: R1c-3d |
 
-Two more consequences of the light document are worth recording, because neither reads text but both
-depend on the document being the **same** one the full load returned:
+Four more consequences are worth recording, because none of them reads text but all of them depend on
+the document being the **same** one the full load returned:
 
 - `SqliteSearchIndex::search_lexical_with_options` (`sqlite_search_index.rs:349-351`) used to load the
   document a second time inside a `search_document` call. It now takes the light document and its
@@ -207,3 +207,14 @@ depend on the document being the **same** one the full load returned:
   it is called on its own, so a `search_document` call loads the document once.
 - `open_reading.rs:116` `Arc::unwrap_or_clone(document)` deep-cloned the decoded document on every
   `open`. The use case now reads the light `Arc` and never clones it.
+- `ObservedDocumentRepository` (`observability.rs:348-402`) forwarded only `save`, `get` and
+  `get_with_hash`, so the default `get_light_with_hash` of the wrapper would have called
+  `get_with_hash` and handed every reader a **full** document — the wrapper is installed on every
+  runtime (`runtime/mod.rs:59`). It now forwards `get_light_with_hash`, `load_metadata`,
+  `load_section_text`, `load_section_char_len` and `body_order`, and emits `repository_get` for the
+  light read exactly as it does for the full one.
+- `SqliteDocumentRepository::load_section_text` (`sqlite.rs:771-905`) used to fail for a row that keeps
+  its section text **inline** in `document_json` — the shape `save_shared` writes when the text-unit
+  store does not hold the document yet. A light reader on such a row would have failed where the old
+  full load succeeded, so `section_text_place` now names that case (`SectionTextPlace::Inline`) and the
+  reader falls back to the inline row, which is what the default trait implementation does.

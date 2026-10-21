@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::derived_text_units::DerivedTextUnits;
+use crate::application::light_sections::SectionTexts;
 use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, SearchHitKind, SearchIndex, TextUnitIndex,
@@ -83,11 +84,16 @@ impl SearchDocumentUseCase {
             )));
         }
 
-        let (document, normalized_document_hash) = self
-            .repository
-            .get_with_hash(&command.document_id)
-            .await?
-            .ok_or(ApplicationError::DocumentNotFound)?;
+        let loaded = match self.text_unit_index {
+            Some(_) => {
+                self.repository
+                    .get_light_with_hash(&command.document_id)
+                    .await?
+            }
+            None => self.repository.get_with_hash(&command.document_id).await?,
+        };
+        let (document, normalized_document_hash) =
+            loaded.ok_or(ApplicationError::DocumentNotFound)?;
         let tokenizer_version = self.search_index.tokenizer_version();
         let units: Arc<dyn TextUnitIndex> = match &self.text_unit_index {
             Some(index) => Arc::clone(index),
@@ -124,21 +130,26 @@ impl SearchDocumentUseCase {
         units: &dyn TextUnitIndex,
     ) -> Result<Vec<LocatedSearchHit>, ApplicationError> {
         let expected_tokenizer_version = self.search_index.tokenizer_version();
+        // The scan runs on the document this call already holds: one load per `search_document`.
         let index_hits = match self
             .search_index
-            .search_lexical(&document.id, query, limit)
+            .search_lexical_in(document, normalized_document_hash, query, limit)
             .await
         {
             Ok(hits) => hits,
             Err(ApplicationError::DocumentNotFound) => {
                 self.search_index.index(document).await?;
                 self.search_index
-                    .search_lexical(&document.id, query, limit)
+                    .search_lexical_in(document, normalized_document_hash, query, limit)
                     .await?
             }
             Err(error) => return Err(error),
         };
 
+        let mut texts = match self.text_unit_index {
+            Some(_) => SectionTexts::from_repository(document, self.repository.as_ref()),
+            None => SectionTexts::from_document(document),
+        };
         let mut hits = Vec::with_capacity(index_hits.len());
         for hit in index_hits {
             if hit.source != document.source {
@@ -154,14 +165,19 @@ impl SearchDocumentUseCase {
                 )));
             }
 
-            let resolved =
-                resolve_text_locator(document, &hit.text_locator, normalized_document_hash, units)
-                    .await
-                    .map_err(|error| {
-                        ApplicationError::IndexFailed(format!(
-                            "search hit carries an invalid canonical locator: {error}"
-                        ))
-                    })?;
+            let resolved = resolve_text_locator(
+                document,
+                &hit.text_locator,
+                normalized_document_hash,
+                units,
+                &mut texts,
+            )
+            .await
+            .map_err(|error| {
+                ApplicationError::IndexFailed(format!(
+                    "search hit carries an invalid canonical locator: {error}"
+                ))
+            })?;
             if hit.section_id != resolved.locator.owner_section_id {
                 return Err(ApplicationError::IndexFailed(format!(
                     "search hit section {} does not match locator owner {}",

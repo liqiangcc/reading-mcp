@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::application::light_sections::SectionTexts;
 use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex,
@@ -213,7 +214,7 @@ impl GetTextUnitsUseCase {
 
         let (document, normalized_hash) = self
             .repository
-            .get_with_hash(&command.document_id)
+            .get_light_with_hash(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let section = document
@@ -259,6 +260,7 @@ impl GetTextUnitsUseCase {
             };
             (claims.origin_anchor_index, locator)
         } else if let Some(anchor_locator) = anchor_locator.as_ref() {
+            let mut texts = SectionTexts::from_repository(&document, self.repository.as_ref());
             let (index, locator) = self
                 .resolve_anchor_index(
                     &document,
@@ -267,6 +269,7 @@ impl GetTextUnitsUseCase {
                     command.requested_kind,
                     command.coverage_policy,
                     &normalized_hash,
+                    &mut texts,
                 )
                 .await?;
             (Some(index), Some(locator))
@@ -378,6 +381,7 @@ impl GetTextUnitsUseCase {
             .map(|row| reading_item(document, section, row).locator))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_anchor_index(
         &self,
         document: &Document,
@@ -386,12 +390,14 @@ impl GetTextUnitsUseCase {
         requested_kind: RequestedTextUnitKind,
         coverage_policy: TextUnitCoveragePolicy,
         normalized_document_hash: &NormalizedDocumentHash,
+        texts: &mut SectionTexts<'_>,
     ) -> Result<(usize, TextLocator), ApplicationError> {
         let resolved = resolve_text_locator(
             document,
             anchor_locator,
             normalized_document_hash,
             self.text_unit_index.as_ref(),
+            texts,
         )
         .await?;
         if resolved.locator.owner_section_id != section.id {

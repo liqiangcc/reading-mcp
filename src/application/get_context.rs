@@ -4,6 +4,7 @@ use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::get_text_units::{
     EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
 };
+use crate::application::light_sections::SectionTexts;
 use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex,
@@ -144,6 +145,7 @@ impl GetContextUseCase {
     ) -> Result<GetContextResult, ApplicationError> {
         validate_window(command.before, command.after)?;
         let (document, normalized_document_hash) = self.load_document(&command.document_id).await?;
+        let mut texts = self.section_texts(&document);
         section_neighbor_result(
             &document,
             &command.section_id,
@@ -151,7 +153,9 @@ impl GetContextUseCase {
             command.after,
             command.max_chars,
             &normalized_document_hash,
+            &mut texts,
         )
+        .await
     }
 
     pub async fn execute_structured(
@@ -164,11 +168,13 @@ impl GetContextUseCase {
 
         let (document, normalized_document_hash) = self.load_document(&command.document_id).await?;
         let units = self.text_units(&document);
+        let mut texts = self.section_texts(&document);
         let resolved = resolve_target(
             &document,
             command.target,
             &normalized_document_hash,
             units.as_ref(),
+            &mut texts,
         )
         .await?;
 
@@ -186,7 +192,9 @@ impl GetContextUseCase {
                     after,
                     command.max_chars,
                     &normalized_document_hash,
+                    &mut texts,
                 )
+                .await
             }
             ContextRelation::Neighbor {
                 unit: ContextUnit::Paragraph,
@@ -230,12 +238,16 @@ impl GetContextUseCase {
             }
             ContextRelation::Container {
                 kind: ContextContainerKind::Section,
-            } => section_container_result(
-                &document,
-                resolved,
-                command.max_chars,
-                &normalized_document_hash,
-            ),
+            } => {
+                section_container_result(
+                    &document,
+                    resolved,
+                    command.max_chars,
+                    &normalized_document_hash,
+                    &mut texts,
+                )
+                .await
+            }
             ContextRelation::Structural { kind } => structural_result(
                 &document,
                 resolved,
@@ -246,14 +258,25 @@ impl GetContextUseCase {
         }
     }
 
+    /// The light document when a stored text-unit index serves the units — every reader then asks
+    /// the repository for the text of exactly the sections it renders — and the full document when
+    /// the units come from `DerivedTextUnits`, which segments the document's own text.
     async fn load_document(
         &self,
         id: &DocumentId,
     ) -> Result<(Arc<Document>, NormalizedDocumentHash), ApplicationError> {
-        self.repository
-            .get_with_hash(id)
-            .await?
-            .ok_or(ApplicationError::DocumentNotFound)
+        let loaded = match self.text_unit_index {
+            Some(_) => self.repository.get_light_with_hash(id).await?,
+            None => self.repository.get_with_hash(id).await?,
+        };
+        loaded.ok_or(ApplicationError::DocumentNotFound)
+    }
+
+    fn section_texts<'a>(&self, document: &'a Arc<Document>) -> SectionTexts<'a> {
+        match self.text_unit_index {
+            Some(_) => SectionTexts::from_repository(document, self.repository.as_ref()),
+            None => SectionTexts::from_document(document),
+        }
     }
 
     fn text_units(&self, document: &Arc<Document>) -> Arc<dyn TextUnitIndex> {
@@ -275,6 +298,7 @@ async fn resolve_target(
     target: ContextTarget,
     normalized_document_hash: &NormalizedDocumentHash,
     units: &dyn TextUnitIndex,
+    texts: &mut SectionTexts<'_>,
 ) -> Result<ResolvedTarget, ApplicationError> {
     match target {
         ContextTarget::Section(section_id) => {
@@ -292,7 +316,8 @@ async fn resolve_target(
         }
         ContextTarget::Locator(locator) => {
             let resolved =
-                resolve_text_locator(document, &locator, normalized_document_hash, units).await?;
+                resolve_text_locator(document, &locator, normalized_document_hash, units, texts)
+                    .await?;
             let kind = match resolved.kind {
                 ResolvedLocatorKind::Section => ContextItemKind::Section,
                 ResolvedLocatorKind::Paragraph => ContextItemKind::Paragraph,
@@ -333,13 +358,14 @@ fn require_anchor_kind(
     Ok(())
 }
 
-fn section_neighbor_result(
+async fn section_neighbor_result(
     document: &Document,
     section_id: &SectionId,
     before: usize,
     after: usize,
     max_chars: Option<usize>,
     normalized_document_hash: &NormalizedDocumentHash,
+    texts: &mut SectionTexts<'_>,
 ) -> Result<GetContextResult, ApplicationError> {
     let mut sections = Vec::new();
     flatten_sections(&document.root_sections, &mut sections);
@@ -351,11 +377,13 @@ fn section_neighbor_result(
 
     let start = owner_index.saturating_sub(before);
     let end = (owner_index + after + 1).min(sections.len());
-    let rendered = sections[start..end]
-        .iter()
-        .map(|section| render_section_shallow(section))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    // Each rendered neighbour's own text, and nothing else: `before + after + 1` sections.
+    let mut rendered = Vec::with_capacity(end - start);
+    for section in &sections[start..end] {
+        let content = texts.text(&section.id).await?;
+        rendered.push(render_section_shallow(section, &content));
+    }
+    let rendered = rendered.join("\n\n");
     let (content, truncated) = truncate_chars(rendered, max_chars);
     let anchor_locator =
         TextLocator::for_section_with_hash(document, owner, normalized_document_hash);
@@ -625,16 +653,19 @@ fn stale_text_units(document: &Document) -> ApplicationError {
     ))
 }
 
-fn section_container_result(
+async fn section_container_result(
     document: &Document,
     target: ResolvedTarget,
     max_chars: Option<usize>,
     normalized_document_hash: &NormalizedDocumentHash,
+    texts: &mut SectionTexts<'_>,
 ) -> Result<GetContextResult, ApplicationError> {
     let section = document
         .find_section(&target.locator.owner_section_id)
         .ok_or(ApplicationError::SectionNotFound)?;
-    let (content, truncated) = truncate_chars(render_section_shallow(section), max_chars);
+    let section_text = texts.text(&section.id).await?;
+    let (content, truncated) =
+        truncate_chars(render_section_shallow(section, &section_text), max_chars);
 
     Ok(GetContextResult {
         document_id: document.id.clone(),

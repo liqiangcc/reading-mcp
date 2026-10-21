@@ -39,8 +39,10 @@ pub async fn resolve_document(
                 handle.doc_key
             ))
         })?;
+    // Every caller (`outline`, `search`, `cite`, the `source_view` locator) reads the section tree,
+    // the titles and the locators, never a section's text, so the light document is enough.
     let (document, normalized_document_hash) = repository
-        .get_with_hash(&document_id)
+        .get_light_with_hash(&document_id)
         .await?
         .ok_or_else(ReadingError::not_opened)?;
     if handle_checksum(&document.id, &normalized_document_hash) != handle.checksum {

@@ -39,6 +39,8 @@ pub use original_source::{
     OriginalSourceBinding, OriginalSourceBindingError, OriginalSourceBindingMap,
     OriginalSourceTarget,
 };
+#[doc(hidden)]
+pub use segmentation::SEGMENTATION_BUILDS;
 pub use segmentation::{
     DocumentSegmentation, ParagraphBoundary, SectionSegmentation, SegmentationError,
     SentenceBoundary, SentenceCoverageBoundary,

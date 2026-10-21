@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use roxmltree::Document as XmlDocument;
@@ -7,7 +8,8 @@ use zip::ZipArchive;
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::{
-    Document, DocumentSource, MediaType, NormalizedBlock, NormalizedBlockMap, Section, SectionId,
+    Document, DocumentSegmentation, DocumentSource, MediaType, NormalizedBlock, NormalizedBlockMap,
+    Section, SectionId,
 };
 
 use super::HtmlParser;
@@ -23,7 +25,9 @@ use super::epub_structure::{
     EPUB_STRUCTURE_MAP_VERSION, EpubSpineParseStatus, EpubSpineRecord, ParsedSpineDocument,
     reconcile_epub_structure,
 };
-use super::epub_validator::attach_epub_validation_report;
+use super::epub_validator::{
+    attach_epub_validation_report, attach_epub_validation_report_with_segmentation,
+};
 
 #[derive(Clone)]
 pub struct EpubParser {
@@ -40,6 +44,24 @@ impl EpubParser {
     }
 
     fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        self.parse_sync_inner(resource, false)
+            .map(|(document, _)| document)
+    }
+
+    /// The same parse, returning the segmentation validation needed, so the caller never builds a
+    /// second one.
+    fn parse_sync_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        self.parse_sync_inner(resource, true)
+    }
+
+    fn parse_sync_inner(
+        &self,
+        resource: RetrievedResource,
+        keep_segmentation: bool,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
         let hash = content_hash(&resource.bytes);
         let id = document_id(&resource.final_source, &hash);
         let mut archive =
@@ -298,15 +320,27 @@ impl EpubParser {
         document
             .set_normalized_block_map(NormalizedBlockMap::new(normalized_blocks))
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
-        let report = attach_epub_validation_report(&mut document)
-            .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+        let (report, segmentation) = if keep_segmentation {
+            // The report attaches only metadata: the block map and the section contents the
+            // segmentation reads are the ones set just above, so this is the segmentation
+            // `Document::try_segmentation` builds from the returned document.
+            let segmentation = Arc::new(document.segmentation());
+            let report =
+                attach_epub_validation_report_with_segmentation(&mut document, &segmentation)
+                    .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+            (report, Some(segmentation))
+        } else {
+            let report = attach_epub_validation_report(&mut document)
+                .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+            (report, None)
+        };
         if report.has_errors() {
             return Err(ApplicationError::ParseFailed(format!(
                 "EPUB structural validation failed: {}",
                 report.error_codes().join(", ")
             )));
         }
-        Ok(document)
+        Ok((document, segmentation))
     }
 }
 
@@ -315,6 +349,14 @@ impl Parser for EpubParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let parser = self.clone();
         run_blocking(move || parser.parse_sync(resource)).await
+    }
+
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        let parser = self.clone();
+        run_blocking(move || parser.parse_sync_with_segmentation(resource)).await
     }
 }
 

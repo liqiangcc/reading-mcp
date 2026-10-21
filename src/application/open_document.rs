@@ -208,15 +208,20 @@ impl OpenDocumentUseCase {
             return Err(ApplicationError::OcrTimeout);
         }
 
-        let document = self.parser.parse(resource).await?;
+        let (document, parsed_segmentation) = self.parser.parse_with_segmentation(resource).await?;
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::ParseFailed)?;
-        let segmentation = Arc::new(document.try_segmentation().map_err(|error| {
-            ApplicationError::TextUnitIndexFailed(format!(
-                "cannot build current Paragraph coverage from persisted block evidence: {error}"
-            ))
-        })?);
+        // A parser that had to segment the document already (EPUB validation does) hands that
+        // segmentation back, so the open never builds the same one twice.
+        let segmentation = match parsed_segmentation {
+            Some(segmentation) => segmentation,
+            None => Arc::new(document.try_segmentation().map_err(|error| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "cannot build current Paragraph coverage from persisted block evidence: {error}"
+                ))
+            })?),
+        };
         let normalized_document_hash = document.normalized_document_hash();
         let reliability = match &self.reliability_inspector {
             Some(inspector) => inspector.inspect_with_segmentation(&document, &segmentation)?,

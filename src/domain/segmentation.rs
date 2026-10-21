@@ -4,6 +4,8 @@
 //! reading profile and the PDF inspector need coverage, the EPUB validator needs ranges, indices and
 //! orders. Unit structs are materialized from these boundaries where a caller really needs them.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use thiserror::Error;
 
 use super::{
@@ -380,6 +382,7 @@ impl Document {
         &self,
         block_map: Option<&NormalizedBlockMap>,
     ) -> Result<DocumentSegmentation, SegmentationError> {
+        SEGMENTATION_BUILDS.fetch_add(1, Ordering::Relaxed);
         let mut sections = Vec::new();
         let mut paragraph_source_order = 0usize;
         let mut sentence_source_order = 0usize;
@@ -1193,6 +1196,12 @@ fn strip_line_ending(line: &str) -> &str {
     let line = line.strip_suffix('\n').unwrap_or(line);
     line.strip_suffix('\r').unwrap_or(line)
 }
+
+/// Test hook: how many times any document has been segmented in this process. The open path must
+/// segment each document once, and `tests/epub_open_segmentation_once.rs` reads this counter to
+/// prove it; the cost is one relaxed increment per build.
+#[doc(hidden)]
+pub static SEGMENTATION_BUILDS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 mod tests {

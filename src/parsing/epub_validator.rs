@@ -286,7 +286,27 @@ fn validate_epub_document_inner(
 pub(crate) fn attach_epub_validation_report(
     document: &mut Document,
 ) -> Result<EpubValidationReport, serde_json::Error> {
-    let report = validate_epub_document(document);
+    attach_epub_validation_report_inner(document, None)
+}
+
+/// Attaches the same report [`attach_epub_validation_report`] attaches, reusing a segmentation the
+/// caller already built. The report is a pure function of the document's canonical facts, so the
+/// reused segmentation can only change how long validation takes, never what it concludes.
+pub(crate) fn attach_epub_validation_report_with_segmentation(
+    document: &mut Document,
+    segmentation: &DocumentSegmentation,
+) -> Result<EpubValidationReport, serde_json::Error> {
+    attach_epub_validation_report_inner(document, Some(segmentation))
+}
+
+fn attach_epub_validation_report_inner(
+    document: &mut Document,
+    segmentation: Option<&DocumentSegmentation>,
+) -> Result<EpubValidationReport, serde_json::Error> {
+    let report = match segmentation {
+        Some(segmentation) => validate_epub_document_with_segmentation(document, segmentation),
+        None => validate_epub_document(document),
+    };
     let json = serde_json::to_string(&report)?;
     document.metadata.insert(
         EPUB_VALIDATION_REPORT_VERSION_METADATA_KEY.into(),

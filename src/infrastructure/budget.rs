@@ -7,7 +7,7 @@ use tokio::time::timeout;
 use crate::application::ports::{
     ApplicationError, Parser, RetrievalOptions, RetrievedResource, Retriever,
 };
-use crate::domain::{Document, DocumentSource, Section};
+use crate::domain::{Document, DocumentSegmentation, DocumentSource, Section};
 
 #[derive(Clone, Debug)]
 pub struct ResourceBudget {
@@ -95,38 +95,62 @@ impl BudgetedParser {
         self.ocr_enabled = enabled;
         self
     }
+
+    fn parse_timeout(&self, is_pdf: bool) -> Duration {
+        if self.ocr_enabled && is_pdf {
+            OCR_PARSE_TIMEOUT
+        } else {
+            self.budget.parse_timeout
+        }
+    }
+
+    fn timeout_error(&self, is_pdf: bool, parse_timeout: Duration) -> ApplicationError {
+        if self.ocr_enabled && is_pdf {
+            ApplicationError::OcrTimeout
+        } else {
+            ApplicationError::ResourceLimitExceeded(format!(
+                "parser exceeded {parse_timeout:?} timeout"
+            ))
+        }
+    }
+
+    fn budget_error(&self, is_pdf: bool, error: ApplicationError) -> ApplicationError {
+        if self.ocr_enabled && is_pdf {
+            ApplicationError::OcrResourceLimit
+        } else {
+            error
+        }
+    }
 }
 
 #[async_trait]
 impl Parser for BudgetedParser {
     async fn parse(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
         let is_pdf = resource.media_type.is_pdf();
-        let parse_timeout = if self.ocr_enabled && is_pdf {
-            OCR_PARSE_TIMEOUT
-        } else {
-            self.budget.parse_timeout
-        };
+        let parse_timeout = self.parse_timeout(is_pdf);
         let document = timeout(parse_timeout, self.inner.parse(resource))
             .await
-            .map_err(|_| {
-                if self.ocr_enabled && is_pdf {
-                    ApplicationError::OcrTimeout
-                } else {
-                    ApplicationError::ResourceLimitExceeded(format!(
-                        "parser exceeded {:?} timeout",
-                        parse_timeout
-                    ))
-                }
-            })??;
+            .map_err(|_| self.timeout_error(is_pdf, parse_timeout))??;
 
-        validate_document_budget(&document, &self.budget).map_err(|error| {
-            if self.ocr_enabled && is_pdf {
-                ApplicationError::OcrResourceLimit
-            } else {
-                error
-            }
-        })?;
+        validate_document_budget(&document, &self.budget)
+            .map_err(|error| self.budget_error(is_pdf, error))?;
         Ok(document)
+    }
+
+    async fn parse_with_segmentation(
+        &self,
+        resource: RetrievedResource,
+    ) -> Result<(Document, Option<Arc<DocumentSegmentation>>), ApplicationError> {
+        let is_pdf = resource.media_type.is_pdf();
+        let parse_timeout = self.parse_timeout(is_pdf);
+        let (document, segmentation) =
+            timeout(parse_timeout, self.inner.parse_with_segmentation(resource))
+                .await
+                .map_err(|_| self.timeout_error(is_pdf, parse_timeout))??;
+
+        validate_document_budget(&document, &self.budget)
+            .map_err(|error| self.budget_error(is_pdf, error))?;
+        Ok((document, segmentation))
     }
 }
 

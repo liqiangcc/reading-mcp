@@ -600,7 +600,13 @@ def coverage_mode(args) -> int:
                 "analysis_error": None,
             }
             try:
-                info["image_count"] = len(page.get_image_info())
+                images = page.get_image_info()
+                info["image_count"] = len(images)
+                if not images:
+                    # `require_disabled_page_coverage` returns before any predicate on a page
+                    # without raster images, so such a page cannot raise a refusal.
+                    result["pages"].append(info)
+                    continue
                 # The worker's own predicate; it raises TypeError when a layout box carries
                 # `textlines: null`, which the worker would hit on the same page.
                 info["has_native_body"] = worker.has_native_body(page_layout)
@@ -608,7 +614,7 @@ def coverage_mode(args) -> int:
                 boxes = box_classes(page_layout)
                 info["visual_boxes"] = [name for name, _ in boxes]
                 page_area = page.rect.width * page.rect.height or 1.0
-                for image in page.get_image_info():
+                for image in images:
                     bbox = [float(value) for value in (image.get("bbox") or [0, 0, 0, 0])]
                     area = max(0.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
                     inside = None
@@ -660,7 +666,35 @@ def coverage_mode(args) -> int:
                                 "uncovered_after_visual_boxes": after,
                                 "box_explained_share": (
                                     round((before - after) / before, 4) if before else None),
+                                "residual_page_share": round(after / total_samples, 6),
                             }
+                            # Where does the residue live? Mask every vector drawing too: a
+                            # residue that disappears is page furniture (rules, tinted boxes,
+                            # rendered math), not a raster the rule could ever cover.
+                            drawings = page.get_drawings()
+                            info["drawings"] = len(drawings)
+                            masked = bytearray(pixmap.samples)
+                            for x0, y0, x1, y1 in rectangles:
+                                for row in range(int(y0), int(y1)):
+                                    start = (row * pixmap.width + int(x0)) * 3
+                                    masked[start:start + max(0, int(x1) - int(x0)) * 3] = \
+                                        b"\xff" * (max(0, int(x1) - int(x0)) * 3)
+                            for drawing in drawings:
+                                rect = drawing.get("rect")
+                                if rect is None:
+                                    continue
+                                x0 = max(0, math.floor(rect.x0 * scale))
+                                y0 = max(0, math.floor(rect.y0 * scale))
+                                x1 = min(pixmap.width, math.ceil(rect.x1 * scale))
+                                y1 = min(pixmap.height, math.ceil(rect.y1 * scale))
+                                for row in range(int(y0), int(y1)):
+                                    start = (row * pixmap.width + int(x0)) * 3
+                                    masked[start:start + max(0, int(x1) - int(x0)) * 3] = \
+                                        b"\xff" * (max(0, int(x1) - int(x0)) * 3)
+                            info["coverage"]["residual_after_drawings"] = (
+                                len(masked) - masked.count(255))
+                            info["coverage"]["residual_after_drawings_page_share"] = round(
+                                (len(masked) - masked.count(255)) / total_samples, 6)
                     except worker.OcrStageFailure as exc:
                         info["coverage"] = {"error": f"{exc.code}: {exc}"}
                     except Exception as exc:  # noqa: BLE001 - recorded, not fatal
@@ -879,8 +913,11 @@ def detector_rules(paper: dict) -> dict:
     nonprintable = default.get("nonprintable_share")
     cjk_share = default.get("cjk_share")
     sentences_per_page = default.get("sentences_per_page")
+    # Rule (a) uses the aligned window ratio (`char_ratio`): a fixed 200-sentence read
+    # compared against a whole document would only measure the sentence cap.
+    ratio = default.get("char_ratio")
     return {
-        "a_char_ratio": bool(ref_chars) and (chars / ref_chars) < 0.5,
+        "a_char_ratio": (ratio is not None and ratio < 0.5),
         "b_sentences_per_page": (sentences_per_page is not None and sentences_per_page < 3
                                  and ref_per_page > 500),
         "c_nonprintable": (nonprintable is not None and nonprintable > 0.01),
@@ -969,8 +1006,9 @@ def aggregate_mode(args) -> int:
     by_group: dict[str, list[int]] = {}
     by_reason: collections.Counter = collections.Counter()
     refusal_rows = ["| Paper | Group | Pages | Failing page(s) | First reason | Raster on the first "
-                    "failing page | Uncovered share | Box explained | Verdict |",
-                    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                    "failing page | Uncovered share | Box explained | Residual share | After "
+                    "drawings | Drawings | Verdict |",
+                    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     inside_box = 0
     outside_box = 0
     refusal_details = []
@@ -995,8 +1033,9 @@ def aggregate_mode(args) -> int:
                            + (" (transformed)" if top.get("has_transform") else ""))
         coverage_info = (first or {}).get("coverage") or {}
         explained = coverage_info.get("box_explained_share")
+        residual = coverage_info.get("residual_page_share")
         verdict = "not explained by any box"
-        if top and top.get("inside_box") and (explained or 0) >= 0.9:
+        if top and top.get("inside_box") and residual is not None and residual <= 0.005:
             verdict = "raster inside a retained picture/figure box"
             inside_box += 1
         else:
@@ -1007,6 +1046,10 @@ def aggregate_mode(args) -> int:
             "reason": reason, "top_raster": top,
             "uncovered_share": coverage_info.get("uncovered_share"),
             "box_explained_share": explained, "verdict": verdict,
+            "residual_page_share": residual,
+            "residual_after_drawings_page_share":
+                coverage_info.get("residual_after_drawings_page_share"),
+            "drawings": (first or {}).get("drawings"),
             "has_native_body": (first or {}).get("has_native_body"),
             "visual_boxes": (first or {}).get("visual_boxes"),
         })
@@ -1014,7 +1057,9 @@ def aggregate_mode(args) -> int:
             f"| {paper['id']} | {group} | {paper.get('pages')} | "
             f"{','.join(str(info['page']) for info in failing) or '-'} | {reason} | "
             f"{description} | {fmt(coverage_info.get('uncovered_share'), 3)} | "
-            f"{fmt(explained, 3)} | {verdict} |")
+            f"{fmt(explained, 3)} | {fmt(residual, 4)} | "
+            f"{fmt(coverage_info.get('residual_after_drawings_page_share'), 4)} | "
+            f"{fmt((first or {}).get('drawings'))} | {verdict} |")
     for group in by_group:
         by_group[group][1] = len([paper for paper in papers if paper.get("group") == group])
     group_rows = ["| Group | Papers | Layout refused | Rate |",
@@ -1030,17 +1075,21 @@ def aggregate_mode(args) -> int:
     # 3. detectors
     detector_rows, primary = detector_evaluation(papers, 0.5)
     sensitivity_rows, sensitivity = detector_evaluation(papers, 0.8)
-    per_paper_rules = ["| Paper | Ref CJK | Ref chars/page | Default containment | a | b | c | d |",
-                       "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    per_paper_rules = ["| Paper | Ref CJK | Default CJK | Ref chars/page | Default "
+                       "containment | Default char ratio | a | b | c | d |",
+                       "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for paper in papers:
         reference = paper.get("reference") or {}
         if not reference.get("chars"):
             continue
         rules = detector_rules(paper)
+        default = paper.get("default") or {}
         per_paper_rules.append(
             f"| {paper['id']} | {fmt(reference.get('cjk_chars'))} | "
+            f"{fmt(default.get('cjk_chars'))} | "
             f"{fmt(reference.get('chars_per_page'), 0)} | "
-            f"{fmt((paper.get('default') or {}).get('containment'), 3)} | "
+            f"{fmt(default.get('containment'), 3)} | "
+            f"{fmt(default.get('char_ratio'), 3)} | "
             f"{fmt(rules['a_char_ratio'])} | {fmt(rules['b_sentences_per_page'])} | "
             f"{fmt(rules['c_nonprintable'])} | {fmt(rules['d_cjk_share'])} |")
 

@@ -11,8 +11,8 @@ use reading_mcp::application::get_text_units::{
     TextUnitCoveragePolicy, TextUnitDirection,
 };
 use reading_mcp::application::ports::{
-    ApplicationError, DocumentRepository, Parser, RetrievedResource, SectionTextUnits,
-    StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
+    ApplicationError, DocumentRepository, OwnedStreamUnit, Parser, RetrievedResource,
+    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::application::text_unit_stream::{
@@ -405,6 +405,537 @@ async fn large_section_pages_preserve_positions_and_eligible_only_is_dense() {
             .collect::<Vec<_>>(),
         (0..256).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn multi_chunk_sections_match_the_planner_for_units_and_every_page() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let sqlite: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("sqlite index should open"));
+    let memory: Arc<dyn TextUnitIndex> = Arc::new(InMemoryTextUnitIndex::default());
+    let document = multi_paragraph_document(240, 10);
+    let paragraphs = document
+        .try_paragraph_text_units()
+        .expect("valid paragraph set");
+    let sentences = document
+        .try_sentence_text_units()
+        .expect("valid sentence set");
+    store_text_units(&*sqlite, &document)
+        .await
+        .expect("sqlite units should persist");
+    store_text_units(&*memory, &document)
+        .await
+        .expect("memory units should persist");
+
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let (chunk_count, mid_chunks): (i64, i64) = connection
+        .query_row(
+            "SELECT h.chunk_count,
+                    (SELECT COUNT(*) FROM section_layout_chunk_v2 c
+                      WHERE c.doc_key = h.doc_key AND c.section_key = h.section_key
+                        AND c.chunk_no > 0 AND c.first_sentence_index > 0)
+               FROM section_layout_v2 h
+              WHERE h.doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("chunk facts should load");
+    drop(connection);
+    assert!(
+        chunk_count >= 3,
+        "the section must span at least three layout chunks, got {chunk_count}"
+    );
+    assert!(
+        mid_chunks >= 1,
+        "at least one chunk must begin inside a paragraph, got {mid_chunks}"
+    );
+
+    compare_section_units_with_the_planner(&*sqlite, &*memory, &document, &paragraphs, &sentences)
+        .await;
+
+    let section = &document.root_sections[0];
+    let units = SectionTextUnits::from_sets(&paragraphs, &sentences, &section.id);
+    for kind in [
+        RequestedTextUnitKind::Paragraph,
+        RequestedTextUnitKind::Sentence,
+    ] {
+        for policy in [
+            TextUnitCoveragePolicy::PreserveSource,
+            TextUnitCoveragePolicy::EligibleOnly,
+        ] {
+            let key = TextUnitStreamKey {
+                document_id: &document.id,
+                section_id: &section.id,
+                kind,
+                policy,
+            };
+            let summary = sqlite
+                .section_stream_summary(key)
+                .await
+                .expect("summary should load")
+                .expect("stream should be stored");
+            assert_eq!(
+                summarize(memory.section_stream_summary(key).await),
+                summarize(sqlite.section_stream_summary(key).await),
+                "summary disagreement for {kind:?}/{policy:?}"
+            );
+            let expected_total = match kind {
+                RequestedTextUnitKind::Paragraph => 240,
+                RequestedTextUnitKind::Sentence => 2_400,
+            };
+            assert_eq!(summary.total_items, expected_total);
+
+            let mut forward = Vec::new();
+            let mut position = 0usize;
+            while position < summary.total_items {
+                let page = sqlite
+                    .section_stream_items(key, TextUnitDirection::Forward, position, 256)
+                    .await
+                    .expect("forward page should load");
+                let planned = memory
+                    .section_stream_items(key, TextUnitDirection::Forward, position, 256)
+                    .await
+                    .expect("planned page should load");
+                assert_eq!(
+                    page, planned,
+                    "forward page disagreement for {kind:?}/{policy:?} at {position}"
+                );
+                assert_eq!(page.len(), (summary.total_items - position).min(256));
+                position += page.len();
+                forward.extend(page);
+            }
+            assert_eq!(forward.len(), summary.total_items);
+            for (index, item) in forward.iter().enumerate() {
+                assert_eq!(
+                    item.position, index,
+                    "dense positions for {kind:?}/{policy:?}"
+                );
+            }
+
+            let mut backward = Vec::new();
+            let mut end = summary.total_items;
+            while end > 0 {
+                let page = sqlite
+                    .section_stream_items(key, TextUnitDirection::Backward, end, 256)
+                    .await
+                    .expect("backward page should load");
+                let planned = memory
+                    .section_stream_items(key, TextUnitDirection::Backward, end, 256)
+                    .await
+                    .expect("planned page should load");
+                assert_eq!(
+                    page, planned,
+                    "backward page disagreement for {kind:?}/{policy:?} at {end}"
+                );
+                assert_eq!(page.len(), end.min(256));
+                end -= page.len();
+                backward.extend(page);
+            }
+            backward.sort_by_key(|item| item.position);
+            assert_eq!(
+                backward, forward,
+                "backward pages must cover the same stream for {kind:?}/{policy:?}"
+            );
+
+            compare_positions(&*sqlite, &*memory, &units, key).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn one_paragraph_one_hundred_thousand_sentences_keeps_every_page_and_unit_addressed() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let index = SqliteTextUnitIndex::open(&database).expect("index should open");
+    let document = large_document(100_000);
+    store_text_units(&index, &document)
+        .await
+        .expect("units should persist");
+    let section_id = document.root_sections[0].id.clone();
+    let key = TextUnitStreamKey {
+        document_id: &document.id,
+        section_id: &section_id,
+        kind: RequestedTextUnitKind::Sentence,
+        policy: TextUnitCoveragePolicy::PreserveSource,
+    };
+
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let chunk_count: i64 = connection
+        .query_row(
+            "SELECT chunk_count FROM section_layout_v2
+              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("chunk count should load");
+    drop(connection);
+    assert!(
+        chunk_count >= 3,
+        "the 100k-sentence section must span at least three layout chunks, got {chunk_count}"
+    );
+
+    let summary = index
+        .section_stream_summary(key)
+        .await
+        .expect("summary should load")
+        .expect("stream should be stored");
+    assert_eq!(summary.total_items, 100_000);
+
+    for start in [0usize, 50_000, 99_744] {
+        let page = index
+            .section_stream_items(key, TextUnitDirection::Forward, start, 256)
+            .await
+            .expect("forward page should load");
+        assert_eq!(
+            page.iter().map(|item| item.position).collect::<Vec<_>>(),
+            (start..(start + 256).min(100_000)).collect::<Vec<_>>()
+        );
+    }
+    for end in [256usize, 50_000, 100_000] {
+        let page = index
+            .section_stream_items(key, TextUnitDirection::Backward, end, 256)
+            .await
+            .expect("backward page should load");
+        assert_eq!(
+            page.iter().map(|item| item.position).collect::<Vec<_>>(),
+            ((end - 256)..end).collect::<Vec<_>>()
+        );
+    }
+
+    let units = index
+        .section_units(&document.id, &section_id)
+        .await
+        .expect("section units should load")
+        .expect("section units should be stored");
+    assert_eq!(units.paragraphs.len(), 1);
+    assert_eq!(units.sentences.len(), 100_000);
+    assert_eq!(units.sentence_coverage.len(), 1);
+    assert!(!units.sentences[0].text.is_empty());
+    assert!(!units.sentences[99_999].text.is_empty());
+    assert_eq!(units.sentences[0].sentence_index, 1);
+    assert_eq!(units.sentences[99_999].sentence_index, 100_000);
+
+    let paragraph = units.paragraphs[0].clone();
+    assert_eq!(
+        index
+            .section_unit(
+                &document.id,
+                &section_id,
+                EffectiveTextUnitKind::Paragraph,
+                paragraph.paragraph_index,
+                None,
+            )
+            .await
+            .expect("paragraph should load"),
+        Some(OwnedStreamUnit::Paragraph(paragraph))
+    );
+    for sentence in [
+        units.sentences[0].clone(),
+        units.sentences[50_000].clone(),
+        units.sentences[99_999].clone(),
+    ] {
+        assert_eq!(
+            index
+                .section_unit(
+                    &document.id,
+                    &section_id,
+                    EffectiveTextUnitKind::Sentence,
+                    sentence.paragraph_index,
+                    Some(sentence.sentence_index),
+                )
+                .await
+                .expect("sentence should load"),
+            Some(OwnedStreamUnit::Sentence(sentence))
+        );
+    }
+    assert_eq!(
+        index
+            .section_unit(
+                &document.id,
+                &section_id,
+                EffectiveTextUnitKind::Sentence,
+                1,
+                Some(100_001),
+            )
+            .await
+            .expect("missing sentence lookup should succeed"),
+        None
+    );
+
+    for policy in [
+        TextUnitCoveragePolicy::PreserveSource,
+        TextUnitCoveragePolicy::EligibleOnly,
+    ] {
+        let key = TextUnitStreamKey { policy, ..key };
+        let expected = [0usize, 50_000, 99_999];
+        for position in expected {
+            let sentence = &units.sentences[position];
+            assert_eq!(
+                index
+                    .section_stream_position(
+                        key,
+                        EffectiveTextUnitKind::Sentence,
+                        sentence.paragraph_index,
+                        Some(sentence.sentence_index),
+                    )
+                    .await
+                    .expect("position should load"),
+                Some(position),
+                "position disagreement at {position} for {policy:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn shuffled_layouts_fall_back_to_linear_scans_and_match_the_planner() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let sqlite: Arc<dyn TextUnitIndex> =
+        Arc::new(SqliteTextUnitIndex::open(&database).expect("sqlite index should open"));
+    let memory: Arc<dyn TextUnitIndex> = Arc::new(InMemoryTextUnitIndex::default());
+    let document = Arc::new(parse_plain().await);
+    let mut paragraphs = document
+        .try_paragraph_text_units()
+        .expect("valid paragraph set");
+    let mut sentences = document
+        .try_sentence_text_units()
+        .expect("valid sentence set");
+    paragraphs.units.reverse();
+    for (source_order, unit) in paragraphs.units.iter_mut().enumerate() {
+        unit.source_order = source_order;
+    }
+    sentences.units.reverse();
+    for (source_order, unit) in sentences.units.iter_mut().enumerate() {
+        unit.source_order = source_order;
+    }
+
+    sqlite
+        .replace_document_sets(
+            &document,
+            Arc::new(paragraphs.clone()),
+            Arc::new(sentences.clone()),
+        )
+        .await
+        .expect("shuffled sets should persist");
+    memory
+        .replace_document_sets(
+            &document,
+            Arc::new(paragraphs.clone()),
+            Arc::new(sentences.clone()),
+        )
+        .await
+        .expect("shuffled sets should persist in memory");
+
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let (sorted_flags, chunk_count): (i64, i64) = connection
+        .query_row(
+            "SELECT sorted_flags, chunk_count FROM section_layout_v2
+              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("layout facts should load");
+    drop(connection);
+    assert_eq!(
+        sorted_flags, 0,
+        "a shuffled layout must not claim sorted flags"
+    );
+    assert_eq!(
+        chunk_count, 1,
+        "the unsorted fallback keeps one whole chunk"
+    );
+
+    compare_section_units_with_the_planner(&*sqlite, &*memory, &document, &paragraphs, &sentences)
+        .await;
+    compare_indexes(&*sqlite, &*memory, &document, &paragraphs, &sentences).await;
+}
+
+#[tokio::test]
+async fn null_section_coverage_and_missing_paragraph_coverage_report_the_exact_errors() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let index = SqliteTextUnitIndex::open(&database).expect("index should open");
+    let document = parse_plain().await;
+    let section_id = document.root_sections[0].id.clone();
+    store_text_units(&index, &document)
+        .await
+        .expect("units should persist");
+
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    connection
+        .execute(
+            "UPDATE section_layout_v2 SET paragraph_coverage_json = NULL
+              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+        )
+        .expect("section coverage should be cleared");
+    drop(connection);
+
+    let expected = format!(
+        "paragraph coverage is unavailable for section {}",
+        section_id.0
+    );
+    for kind in [
+        RequestedTextUnitKind::Paragraph,
+        RequestedTextUnitKind::Sentence,
+    ] {
+        for policy in [
+            TextUnitCoveragePolicy::PreserveSource,
+            TextUnitCoveragePolicy::EligibleOnly,
+        ] {
+            let key = TextUnitStreamKey {
+                document_id: &document.id,
+                section_id: &section_id,
+                kind,
+                policy,
+            };
+            match index.section_stream_summary(key).await {
+                Err(ApplicationError::InvalidRequest(message)) => assert_eq!(message, expected),
+                other => panic!("summary must report the missing section coverage, got {other:?}"),
+            }
+            assert_eq!(
+                index
+                    .section_stream_items(key, TextUnitDirection::Forward, 0, 8)
+                    .await
+                    .expect("items must stay empty without section coverage"),
+                Vec::new()
+            );
+            assert_eq!(
+                index
+                    .section_stream_position(key, EffectiveTextUnitKind::Paragraph, 1, None)
+                    .await
+                    .expect("position must stay unknown without section coverage"),
+                None
+            );
+        }
+    }
+    let units = index
+        .section_units(&document.id, &section_id)
+        .await
+        .expect("section units should load")
+        .expect("section units should be stored");
+    assert!(units.paragraph_coverage.is_none());
+    assert_eq!(units.paragraphs.len(), 3);
+
+    // A stored layout whose planner failed keeps that exact error for every read that plans it.
+    let document = Arc::new(document);
+    let paragraphs = document
+        .try_paragraph_text_units()
+        .expect("valid paragraph set");
+    let mut sentences = document
+        .try_sentence_text_units()
+        .expect("valid sentence set");
+    let missing = sentences
+        .coverage
+        .iter()
+        .position(|coverage| coverage.paragraph_index == 2)
+        .expect("the second paragraph must have coverage");
+    sentences.coverage.remove(missing);
+    index
+        .replace_document_sets(&document, Arc::new(paragraphs), Arc::new(sentences))
+        .await
+        .expect("a planner error must be stored, not raised");
+    let expected = format!(
+        "sentence coverage is unavailable for paragraph 2 in section {}",
+        section_id.0
+    );
+    for kind in [
+        RequestedTextUnitKind::Paragraph,
+        RequestedTextUnitKind::Sentence,
+    ] {
+        for policy in [
+            TextUnitCoveragePolicy::PreserveSource,
+            TextUnitCoveragePolicy::EligibleOnly,
+        ] {
+            let key = TextUnitStreamKey {
+                document_id: &document.id,
+                section_id: &section_id,
+                kind,
+                policy,
+            };
+            match index.section_stream_summary(key).await {
+                Err(ApplicationError::InvalidRequest(message)) => assert_eq!(message, expected),
+                other => panic!("summary must return the stored plan error, got {other:?}"),
+            }
+            match index
+                .section_stream_items(key, TextUnitDirection::Forward, 0, 8)
+                .await
+            {
+                Err(ApplicationError::InvalidRequest(message)) => assert_eq!(message, expected),
+                other => panic!("items must return the stored plan error, got {other:?}"),
+            }
+            match index
+                .section_stream_position(key, EffectiveTextUnitKind::Sentence, 1, Some(1))
+                .await
+            {
+                Err(ApplicationError::InvalidRequest(message)) => assert_eq!(message, expected),
+                other => panic!("position must return the stored plan error, got {other:?}"),
+            }
+        }
+    }
+}
+
+async fn compare_section_units_with_the_planner(
+    sqlite: &dyn TextUnitIndex,
+    memory: &dyn TextUnitIndex,
+    document: &Document,
+    paragraphs: &ParagraphTextUnitSet,
+    sentences: &SentenceTextUnitSet,
+) {
+    for section in all_sections(document) {
+        let units = SectionTextUnits::from_sets(paragraphs, sentences, &section.id);
+        assert_eq!(
+            sqlite
+                .section_units(&document.id, &section.id)
+                .await
+                .expect("sqlite section units should load"),
+            memory
+                .section_units(&document.id, &section.id)
+                .await
+                .expect("memory section units should load"),
+            "section units disagreement for section {}",
+            section.id.0
+        );
+        for paragraph in &units.paragraphs {
+            assert_eq!(
+                sqlite
+                    .section_unit(
+                        &document.id,
+                        &section.id,
+                        EffectiveTextUnitKind::Paragraph,
+                        paragraph.paragraph_index,
+                        None,
+                    )
+                    .await
+                    .expect("sqlite paragraph should load"),
+                Some(OwnedStreamUnit::Paragraph(paragraph.clone())),
+                "paragraph disagreement for section {}/{}",
+                section.id.0,
+                paragraph.paragraph_index
+            );
+        }
+        for sentence in &units.sentences {
+            assert_eq!(
+                sqlite
+                    .section_unit(
+                        &document.id,
+                        &section.id,
+                        EffectiveTextUnitKind::Sentence,
+                        sentence.paragraph_index,
+                        Some(sentence.sentence_index),
+                    )
+                    .await
+                    .expect("sqlite sentence should load"),
+                Some(OwnedStreamUnit::Sentence(sentence.clone())),
+                "sentence disagreement for section {}/{}.{}",
+                section.id.0,
+                sentence.paragraph_index,
+                sentence.sentence_index
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -1196,6 +1727,22 @@ fn large_document(sentence_count: usize) -> Document {
         .collect::<Vec<_>>()
         .join(" ");
     document_with_content("doc:large-stream", &content)
+}
+
+/// A section of `paragraphs` blank-line-separated paragraphs with `sentences` sentences each, sized
+/// so its encoded layout spans several chunks and the chunk cuts land inside paragraphs.
+fn multi_paragraph_document(paragraphs: usize, sentences: usize) -> Document {
+    let words = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let content = (0..paragraphs)
+        .map(|paragraph| {
+            (0..sentences)
+                .map(|sentence| format!("{} prose.", words[(paragraph + sentence) % words.len()]))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    document_with_content("doc:multi-chunk", &content)
 }
 
 fn document_with_content(id: &str, content: &str) -> Document {

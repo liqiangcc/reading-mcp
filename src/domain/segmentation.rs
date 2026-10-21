@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use thiserror::Error;
 
 use super::{
-    Document, NormalizedBlockKind, NormalizedBlockMap, NormalizedBlockMapError,
+    Document, NormalizedBlock, NormalizedBlockKind, NormalizedBlockMap, NormalizedBlockMapError,
     NormalizedDocumentHash, NormalizedTextRange, ParagraphContentClass, ParagraphSectionCoverage,
     ParagraphTextUnitSet, Section, SectionId, SentenceEligibility, SentenceParagraphCoverage,
     SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextUnit, TextUnitKind,
@@ -424,8 +424,11 @@ fn collect_section_segmentation(
     paragraph_source_order: &mut usize,
     sentence_source_order: &mut usize,
 ) -> Result<(), SegmentationError> {
-    let candidates = section_paragraph_candidates(section, block_map);
     let index = section.normalized_text_index();
+    // The section's own blocks, in map order, are also the lookup table for every paragraph's
+    // content class: a paragraph can only be a block of its own section.
+    let blocks = section_blocks(block_map, section);
+    let candidates = section_paragraph_candidates(section, &blocks);
     let paragraph_chars = candidates
         .iter()
         .map(|candidate| candidate.range.len())
@@ -487,7 +490,7 @@ fn collect_section_segmentation(
         let text = index
             .slice(candidate.range)
             .expect("generated paragraph range must be a valid owner slice");
-        let content_class = paragraph_content_class(block_map, &section.id, candidate.range, text);
+        let content_class = paragraph_content_class(&blocks, candidate.range, text);
         let mut eligibility = match content_class {
             ParagraphContentClass::ProseOrUnknown | ParagraphContentClass::NativeParagraph => {
                 SentenceEligibility::Eligible
@@ -587,23 +590,24 @@ fn collect_section_segmentation(
     Ok(())
 }
 
+fn section_blocks<'a>(
+    block_map: Option<&'a NormalizedBlockMap>,
+    section: &Section,
+) -> Vec<&'a NormalizedBlock> {
+    match block_map {
+        Some(block_map) => block_map
+            .blocks
+            .iter()
+            .filter(|block| block.owner_section_id == section.id)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 fn section_paragraph_candidates(
     section: &Section,
-    block_map: Option<&NormalizedBlockMap>,
+    blocks: &[&NormalizedBlock],
 ) -> Vec<ParagraphCandidate> {
-    let Some(block_map) = block_map else {
-        return fallback_paragraph_candidates(
-            &section.content,
-            NormalizedTextRange::new(0, section.normalized_text_len())
-                .expect("whole Section range must be ordered"),
-        );
-    };
-
-    let blocks = block_map
-        .blocks
-        .iter()
-        .filter(|block| block.owner_section_id == section.id)
-        .collect::<Vec<_>>();
     if blocks.is_empty() {
         return fallback_paragraph_candidates(
             &section.content,
@@ -622,13 +626,7 @@ fn section_paragraph_candidates(
         }
         candidates.push(ParagraphCandidate {
             range: block.normalized_range,
-            source: match block.kind {
-                NormalizedBlockKind::Paragraph => ParagraphBoundarySource::NativeParagraph,
-                NormalizedBlockKind::BlockQuote => ParagraphBoundarySource::NativeBlockQuote,
-                NormalizedBlockKind::ListItem => ParagraphBoundarySource::NativeListItem,
-                NormalizedBlockKind::Preformatted => ParagraphBoundarySource::NativePreformatted,
-                NormalizedBlockKind::Table => ParagraphBoundarySource::NativeTable,
-            },
+            source: block_paragraph_source(block.kind),
         });
         cursor = block.normalized_range.end();
     }
@@ -640,6 +638,16 @@ fn section_paragraph_candidates(
     }
 
     candidates
+}
+
+fn block_paragraph_source(kind: NormalizedBlockKind) -> ParagraphBoundarySource {
+    match kind {
+        NormalizedBlockKind::Paragraph => ParagraphBoundarySource::NativeParagraph,
+        NormalizedBlockKind::BlockQuote => ParagraphBoundarySource::NativeBlockQuote,
+        NormalizedBlockKind::ListItem => ParagraphBoundarySource::NativeListItem,
+        NormalizedBlockKind::Preformatted => ParagraphBoundarySource::NativePreformatted,
+        NormalizedBlockKind::Table => ParagraphBoundarySource::NativeTable,
+    }
 }
 
 fn fallback_paragraph_candidates(
@@ -666,16 +674,11 @@ fn fallback_paragraph_candidates(
 }
 
 fn paragraph_content_class(
-    block_map: Option<&NormalizedBlockMap>,
-    owner_section_id: &SectionId,
+    blocks: &[&NormalizedBlock],
     range: NormalizedTextRange,
     text: &str,
 ) -> ParagraphContentClass {
-    if let Some(block) = block_map.and_then(|map| {
-        map.blocks.iter().find(|block| {
-            block.owner_section_id == *owner_section_id && block.normalized_range == range
-        })
-    }) {
+    if let Some(block) = find_section_block(blocks, range) {
         return match block.kind {
             NormalizedBlockKind::Paragraph => ParagraphContentClass::NativeParagraph,
             NormalizedBlockKind::BlockQuote => ParagraphContentClass::BlockQuote,
@@ -686,6 +689,23 @@ fn paragraph_content_class(
     }
 
     classify_fallback_paragraph_content(text)
+}
+
+/// The block a whole-map scan finds first: map order is the block order of the section, and the
+/// validated map keeps those ranges non-overlapping and in order, so a binary search lands on the
+/// same block and ties on a range still resolve to the first block in map order.
+fn find_section_block<'a>(
+    blocks: &[&'a NormalizedBlock],
+    range: NormalizedTextRange,
+) -> Option<&'a NormalizedBlock> {
+    let position = blocks.partition_point(|block| {
+        (block.normalized_range.start(), block.normalized_range.end())
+            < (range.start(), range.end())
+    });
+    blocks
+        .get(position)
+        .filter(|block| block.normalized_range == range)
+        .copied()
 }
 
 fn paragraph_ranges(content: &str) -> Vec<NormalizedTextRange> {
@@ -1202,6 +1222,58 @@ fn strip_line_ending(line: &str) -> &str {
 /// prove it; the cost is one relaxed increment per build.
 #[doc(hidden)]
 pub static SEGMENTATION_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+// ---------------------------------------------------------------------------------------------
+// Test-only: the pre-R5b implementations.
+//
+// `tests/segmentation_speedups.rs` and the real-book check compare each of these against the
+// implementation that replaced it, paragraph by paragraph and section by section, on every fixture
+// and on real books. They are `#[doc(hidden)]`; no production path calls them.
+// ---------------------------------------------------------------------------------------------
+
+/// The content class the pre-R5b code found: a linear scan over the whole block map.
+#[doc(hidden)]
+pub fn paragraph_content_class_whole_map_scan(
+    block_map: Option<&NormalizedBlockMap>,
+    owner_section_id: &SectionId,
+    range: NormalizedTextRange,
+    text: &str,
+) -> ParagraphContentClass {
+    if let Some(block) = block_map.and_then(|map| {
+        map.blocks.iter().find(|block| {
+            block.owner_section_id == *owner_section_id && block.normalized_range == range
+        })
+    }) {
+        return match block.kind {
+            NormalizedBlockKind::Paragraph => ParagraphContentClass::NativeParagraph,
+            NormalizedBlockKind::BlockQuote => ParagraphContentClass::BlockQuote,
+            NormalizedBlockKind::ListItem => ParagraphContentClass::ListItem,
+            NormalizedBlockKind::Preformatted => ParagraphContentClass::Preformatted,
+            NormalizedBlockKind::Table => ParagraphContentClass::Table,
+        };
+    }
+
+    classify_fallback_paragraph_content(text)
+}
+
+/// The content class the current code finds: a binary search over the section's own blocks.
+#[doc(hidden)]
+pub fn paragraph_content_class_in_section(
+    block_map: Option<&NormalizedBlockMap>,
+    owner_section_id: &SectionId,
+    range: NormalizedTextRange,
+    text: &str,
+) -> ParagraphContentClass {
+    let blocks = block_map
+        .map(|map| {
+            map.blocks
+                .iter()
+                .filter(|block| block.owner_section_id == *owner_section_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    paragraph_content_class(&blocks, range, text)
+}
 
 #[cfg(test)]
 mod tests {

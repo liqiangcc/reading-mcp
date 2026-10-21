@@ -45,6 +45,10 @@ pub use segmentation::{
     DocumentSegmentation, ParagraphBoundary, SectionSegmentation, SegmentationError,
     SentenceBoundary, SentenceCoverageBoundary,
 };
+#[doc(hidden)]
+pub use segmentation::{
+    paragraph_content_class_in_section, paragraph_content_class_whole_map_scan,
+};
 pub use text_locator::TextLocator;
 pub use text_unit::{
     ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet, SentenceEligibility,

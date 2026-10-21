@@ -1,17 +1,117 @@
-//! R5b: an EPUB parse must hand back the segmentation it built, so the open segments once.
+//! R5b: the segmentation speed-ups must not move one boundary, class or verdict.
 //!
 //! Every comparison here runs the pre-R5b implementation and the implementation that replaced it on
 //! the same input and asserts that they agree. This file grows one test per speed-up:
-//! - `parse_with_segmentation` returns the segmentation the returned document rebuilds.
+//! - `parse_with_segmentation` returns the segmentation the returned document rebuilds;
+//! - the in-section block lookup finds the class the whole-map scan finds, for every paragraph.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
-use reading_mcp::application::ports::{Parser, RetrievedResource};
-use reading_mcp::domain::{DocumentSource, MediaType};
+use reading_mcp::application::ports::{ApplicationError, Parser, RetrievedResource};
+use reading_mcp::domain::{
+    Document, DocumentSource, MediaType, Section, paragraph_content_class_in_section,
+    paragraph_content_class_whole_map_scan,
+};
 use reading_mcp::parsing::{ArchiveLimits, ParserRouter};
 use zip::write::{SimpleFileOptions, ZipWriter};
+
+#[derive(Default)]
+struct Comparisons {
+    sections: usize,
+    paragraphs: usize,
+    count: usize,
+    samples: Vec<String>,
+}
+
+impl Comparisons {
+    fn mismatch(&mut self, message: String) {
+        self.count += 1;
+        if self.samples.len() < 20 {
+            self.samples.push(message);
+        }
+    }
+
+    fn total_mismatches(&self) -> usize {
+        self.count
+    }
+
+    fn assert_clean(&self, label: &str) {
+        assert_eq!(
+            self.count,
+            0,
+            "{label}: {} mismatch(es) across {} sections and {} paragraphs:\n{}",
+            self.count,
+            self.sections,
+            self.paragraphs,
+            self.samples.join("\n")
+        );
+    }
+}
+
+fn collect_sections<'a>(sections: &'a [Section], out: &mut Vec<&'a Section>) {
+    for section in sections {
+        out.push(section);
+        collect_sections(&section.children, out);
+    }
+}
+
+/// Runs every old-versus-new comparison on one parsed document.
+fn compare_document(label: &str, document: &Document, comparisons: &mut Comparisons) {
+    let block_map = document
+        .normalized_block_map()
+        .expect("fixture block map decodes")
+        .expect("fixture has a normalized block map");
+    let block_map = Some(&block_map);
+    let segmentation = document
+        .try_segmentation()
+        .expect("fixture document segments");
+
+    let mut sections = Vec::new();
+    collect_sections(&document.root_sections, &mut sections);
+    let sections_by_id = sections
+        .into_iter()
+        .map(|section| (section.id.0.as_str(), section))
+        .collect::<BTreeMap<&str, &Section>>();
+
+    for section_segmentation in &segmentation.sections {
+        let Some(section) = sections_by_id.get(section_segmentation.section_id.0.as_str()) else {
+            comparisons.mismatch(format!(
+                "{label} section={} has no owner Section",
+                section_segmentation.section_id.0
+            ));
+            continue;
+        };
+        comparisons.sections += 1;
+        let index = section.normalized_text_index();
+
+        for paragraph in &section_segmentation.paragraphs {
+            comparisons.paragraphs += 1;
+            let range = paragraph.range();
+            let Ok(text) = index.slice(range) else {
+                comparisons.mismatch(format!(
+                    "{label} section={} paragraph={} paragraph range does not slice",
+                    section.id.0,
+                    paragraph.paragraph_index()
+                ));
+                continue;
+            };
+
+            let in_section =
+                paragraph_content_class_in_section(block_map, &section.id, range, text);
+            let whole_map =
+                paragraph_content_class_whole_map_scan(block_map, &section.id, range, text);
+            if in_section != whole_map {
+                comparisons.mismatch(format!(
+                    "{label} section={} paragraph={} content class differs: in-section {in_section:?} vs whole-map {whole_map:?}",
+                    section.id.0,
+                    paragraph.paragraph_index()
+                ));
+            }
+        }
+    }
+}
 
 fn resource(name: &str, media_type: &str, bytes: Vec<u8>) -> RetrievedResource {
     RetrievedResource {
@@ -147,6 +247,93 @@ fn disk_epub_fixtures() -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
+async fn parse_fixture(
+    name: &str,
+    media_type: &str,
+    bytes: Vec<u8>,
+) -> Result<Document, ApplicationError> {
+    let router = ParserRouter::release(100, ArchiveLimits::default());
+    router.parse(resource(name, media_type, bytes)).await
+}
+
+fn text_fixtures() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            "plain",
+            "text/plain",
+            "One. Two. Three.\n\nSecond paragraph here.\n\nStrongInference JohnR.Platt 3642SCIENCE ,NewSeries others.John )provided\n\n天地玄黄，宇宙洪荒。日月盈昃，辰宿列张。\n",
+        ),
+        (
+            "markdown",
+            "text/markdown",
+            r#"# Virtual Memory
+
+Address spaces give each process an isolated memory view.
+
+## Page tables
+
+- First item with one sentence.
+- Second item. With two sentences.
+
+> A quoted thought. It spans sentences.
+
+```rust
+fn main() { println!("Hi."); }
+```
+
+| Column A | Column B |
+|----------|----------|
+| one      | two      |
+
+Vol. 4, No. 2, pp. 100-110, Jan 1901 http://example.com (c) 1901
+
+NNoottee tthhaatt eevveerryy cchhaarraacctteerr iiss ddoouubblleedd.
+"#,
+        ),
+        (
+            "html",
+            "text/html",
+            r#"<!doctype html><html><head><title>Memory</title></head><body><h1>Virtual Memory</h1><p>Orbital memory in HTML.</p><ul><li>List one.</li><li>List two. More text.</li></ul><blockquote>Quote text. Second sentence.</blockquote><pre><code>code block text</code></pre><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table><div>Loose div text. Second sentence. Vol. 4, No. 2, pp. 1-2</div></body></html>"#,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn fixtures_keep_every_segmentation_decision() {
+    let mut comparisons = Comparisons::default();
+
+    for (label, media_type, content) in text_fixtures() {
+        let document = parse_fixture(label, media_type, content.as_bytes().to_vec())
+            .await
+            .expect("fixture parses");
+        compare_document(label, &document, &mut comparisons);
+    }
+
+    for (label, bytes) in epub_fixtures() {
+        let document = parse_fixture(label, "application/epub+zip", bytes)
+            .await
+            .expect("EPUB fixture parses");
+        compare_document(label, &document, &mut comparisons);
+    }
+
+    for (label, bytes) in disk_epub_fixtures() {
+        match parse_fixture(&label, "application/epub+zip", bytes).await {
+            Ok(document) => compare_document(&label, &document, &mut comparisons),
+            Err(error) => println!("{label} skipped: parse error {error}"),
+        }
+    }
+
+    assert!(
+        comparisons.sections > 0 && comparisons.paragraphs > 0,
+        "fixtures compared no sections or paragraphs"
+    );
+    comparisons.assert_clean("fixtures");
+    println!(
+        "fixtures: {} sections, {} paragraphs, 0 mismatches",
+        comparisons.sections, comparisons.paragraphs
+    );
+}
+
 #[tokio::test]
 async fn epub_parse_with_segmentation_returns_the_segmentation_the_document_rebuilds() {
     let mut checked = 0usize;
@@ -227,7 +414,7 @@ async fn real_books_keep_every_segmentation_decision() {
     };
     entries.sort();
 
-    let mut mismatches = 0usize;
+    let mut comparisons = Comparisons::default();
     let mut books = 0usize;
     for path in &entries {
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
@@ -247,14 +434,30 @@ async fn real_books_keep_every_segmentation_decision() {
             .expect("real book parses");
         let parsed = parsed.expect("the EPUB parser builds a segmentation");
         let rebuilt = document.try_segmentation().expect("real book segments");
+
+        let mut book_mismatches = 0usize;
         if parsed.as_ref() != &rebuilt {
-            mismatches += 1;
-            println!("{name} mismatch: parse_with_segmentation != try_segmentation");
+            book_mismatches += 1;
+            comparisons.mismatch(format!(
+                "{name}: parse_with_segmentation returned a different segmentation than the document rebuilds"
+            ));
         }
+        let before = comparisons.total_mismatches();
+        compare_document(name, &document, &mut comparisons);
+        book_mismatches += comparisons.total_mismatches() - before;
         books += 1;
-        println!("{name} mismatches={mismatches}");
+        println!("{name} mismatches={book_mismatches}");
     }
 
-    println!("TOTAL books={books} mismatches={mismatches}");
-    assert_eq!(mismatches, 0, "real books changed a segmentation decision");
+    println!(
+        "TOTAL books={books} sections={} paragraphs={} mismatches={}",
+        comparisons.sections,
+        comparisons.paragraphs,
+        comparisons.total_mismatches()
+    );
+    assert_eq!(
+        comparisons.total_mismatches(),
+        0,
+        "real books changed a segmentation decision"
+    );
 }

@@ -12,6 +12,7 @@ async fn preinitialize_tool_call_is_rejected_without_terminating_stdio_server() 
     command
         .env("READING_MCP_STATE_DIR", "memory")
         .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

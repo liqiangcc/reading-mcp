@@ -8,7 +8,25 @@ Reading MCP 让 MCP Client / Agent 能够**精确地与用户阅读同一份文�
 
 ## 当前能力
 
-当前 runtime 实际暴露 **9 个 MCP Tool**：
+当前 runtime 默认暴露 **7 个 MCP Tool**（v2 短句柄集合）：
+
+```text
+browse
+open
+outline
+search
+cite
+read
+source_view
+```
+
+其中：
+
+- `browse` 负责已授权 Source Workspace 的目录导航与文档发现；
+- `open` 返回短文档句柄，`outline` / `search` / `read` 用句柄推进阅读；
+- `cite` 是唯一返回完整 locator 的 tool，`source_view` 负责从精确位置回到 identity-bound 原始视觉 Source，当前首个实现为 PDF page fidelity review。
+
+设置 `READING_MCP_TOOLS=v1` 仍可选择旧的 **9 个稳定 Tool**：
 
 ```text
 list_documents
@@ -22,11 +40,9 @@ read_document
 get_source_view
 ```
 
-其中：
-
-- `list_directory` 负责已授权 Source Workspace 的目录导航；
-- `list_documents` 负责已知目录 scope 内的可打开文档发现；
-- `get_source_view` 负责从精确 `TextLocator` 回到 identity-bound 原始视觉 Source，当前首个实现为 PDF page fidelity review。
+`READING_MCP_TOOLS=both` 同时暴露两套（16 个）。默认已从 v1 切换为 v2：既有 host
+service 配置若仍需旧 Tool，必须显式设置 `READING_MCP_TOOLS=v1`。详见
+[Runtime Configuration](docs/runtime-configuration.md)。
 
 独立格式 Parser：
 

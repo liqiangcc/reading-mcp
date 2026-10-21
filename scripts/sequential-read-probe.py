@@ -361,6 +361,7 @@ def server_environment(roots: str, state_dir: str) -> dict:
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
     env["READING_MCP_TELEMETRY"] = "false"
+    env["READING_MCP_TOOLS"] = "v1"
     return env
 
 

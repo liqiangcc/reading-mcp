@@ -955,8 +955,8 @@ async fn errors_use_the_v2_vocabulary() {
 async fn tools_switch_selects_the_registered_tools() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
 
-    let default = start_client(directory.path(), &directory.path().join("default"), None).await;
-    let tools = default
+    let v1 = start_client(directory.path(), &directory.path().join("v1"), Some("v1")).await;
+    let tools = v1
         .list_all_tools()
         .await
         .expect("tools/list should succeed");
@@ -970,17 +970,17 @@ async fn tools_switch_selects_the_registered_tools() {
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>(),
-        "the default tool set is v1"
+        "the v1 tool set is the nine stable tools"
     );
     let bytes = serde_json::to_string(&json!({ "tools": tools }))
         .expect("tools serialize")
         .len();
     assert_eq!(
         bytes, DEFAULT_TOOLS_LIST_BYTES,
-        "the default tools/list must stay byte-identical to main; measured {bytes} bytes"
+        "the v1 tools/list must stay byte-identical to main; measured {bytes} bytes"
     );
     // An unregistered v2 tool is rejected.
-    let rejected = default
+    let rejected = v1
         .call_tool(
             CallToolRequestParams::new("open")
                 .with_arguments(arguments(json!({ "source": "unused" }))),
@@ -990,7 +990,7 @@ async fn tools_switch_selects_the_registered_tools() {
         rejected.is_err(),
         "v2 tools must not be callable in v1 mode"
     );
-    default.cancel().await.expect("client should close cleanly");
+    v1.cancel().await.expect("client should close cleanly");
 
     let v2 = start_client(directory.path(), &directory.path().join("v2"), Some("v2")).await;
     let names = v2
@@ -1044,6 +1044,28 @@ async fn tools_switch_selects_the_registered_tools() {
     assert_eq!(names, expected);
     assert_eq!(names.len(), 16);
     both.cancel().await.expect("client should close cleanly");
+}
+
+#[tokio::test]
+async fn the_default_tool_set_is_the_seven_v2_tools() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let client = start_client(directory.path(), &directory.path().join("default"), None).await;
+    let names = client
+        .list_all_tools()
+        .await
+        .expect("tools/list should succeed")
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        V2_TOOLS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>(),
+        "with READING_MCP_TOOLS unset the default tool set is the seven v2 tools"
+    );
+    client.cancel().await.expect("client should close cleanly");
 }
 
 #[tokio::test]

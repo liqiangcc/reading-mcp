@@ -24,7 +24,8 @@ async fn stdio_context_consumes_text_locator_with_tagged_relations() {
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", "memory")
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport = TokioChildProcess::new(command).expect("server process");
     let client = ().serve(transport).await.expect("MCP initialize");
 

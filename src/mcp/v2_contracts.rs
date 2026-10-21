@@ -23,49 +23,49 @@ use crate::domain::TextLocator;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct OpenRequest {
-    /// Local path or public HTTPS URL.
+    /// Path or HTTPS URL.
     pub source: String,
-    /// Re-ingest even when the bytes are cached.
+    /// Re-read changed bytes.
     #[serde(default)]
     pub refresh: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ReadRequest {
-    /// Handle, or a `b:` cursor.
+    /// Handle or next value.
     pub from: String,
-    /// sentence (default) or paragraph.
+    /// sentence or paragraph.
     #[serde(default)]
     pub unit: Option<String>,
-    /// 1-16000 characters; omit for one item.
+    /// Batch char budget.
     #[serde(default)]
     pub max_chars: Option<usize>,
-    /// forward (default) or backward.
+    /// forward or backward.
     #[serde(default)]
     pub direction: Option<String>,
-    /// Preceding items to re-read first, 0-50.
+    /// Items before.
     #[serde(default)]
     pub back: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct BrowseRequest {
-    /// An authorized directory to list; omit to list the configured roots' documents.
+    /// Directory; omit for roots.
     #[serde(default)]
     pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct OutlineRequest {
-    /// A document or section handle.
+    /// Document or section.
     pub at: String,
-    /// Levels below `at` to list, 1-32.
+    /// Levels below at.
     #[serde(default = "default_outline_depth")]
     pub depth: usize,
-    /// Nodes per answer, 1-1000.
+    /// Nodes per answer.
     #[serde(default = "default_outline_limit")]
     pub limit: usize,
-    /// The `next` of a previous outline answer.
+    /// Prior next.
     #[serde(default)]
     pub cursor: Option<String>,
 }
@@ -80,10 +80,11 @@ fn default_outline_limit() -> usize {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SearchRequest {
-    /// A document handle.
+    /// Document handle.
     pub doc: String,
+    /// Search text.
     pub query: String,
-    /// Hits to return, 1-50.
+    /// Hits to return.
     #[serde(default = "default_search_reading_limit")]
     pub limit: usize,
 }
@@ -94,13 +95,13 @@ fn default_search_reading_limit() -> usize {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CiteRequest {
-    /// One or more document, section, paragraph or sentence handles.
+    /// One or more handles.
     pub at: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SourceViewRequest {
-    /// A document, section, paragraph or sentence handle.
+    /// Any handle.
     pub at: String,
 }
 

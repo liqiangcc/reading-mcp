@@ -168,6 +168,7 @@ def server_environment(
     env = dict(os.environ)
     env["READING_MCP_LOCAL_ROOTS"] = os.pathsep.join(roots)
     env["READING_MCP_TELEMETRY"] = "1" if telemetry else "false"
+    env["READING_MCP_TOOLS"] = "v1"
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = (

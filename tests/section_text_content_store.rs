@@ -502,7 +502,8 @@ async fn run_stdio_session(root: &Path, state: &Path, epub: &Path) -> Vec<(Strin
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", state)
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport = TokioChildProcess::new(command).expect("server process");
     let client = ().serve(transport).await.expect("MCP initialize");
 

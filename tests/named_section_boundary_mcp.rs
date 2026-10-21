@@ -35,7 +35,8 @@ FUTURE_BODY_SENTINEL_SHOULD_NOT_APPEAR_IN_STRUCTURE.
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", "memory")
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport =
         TokioChildProcess::new(command).expect("reading-mcp child process should start");
     let client = ().serve(transport).await.expect("MCP initialization should succeed");

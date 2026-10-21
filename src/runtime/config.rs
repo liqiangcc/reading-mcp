@@ -8,13 +8,13 @@ use crate::retrieval::HttpRetrieverConfig;
 
 /// Which tool set `READING_MCP_TOOLS` selects.
 ///
-/// `v1` (the default) is the nine stable tools; `v2` is only the two short-handle tools of this
-/// release; `both` serves them together. A tool that is not registered is absent from `tools/list`
-/// and rejected when called.
+/// `v2` (the default) is the seven short-handle tools; `v1` is the nine stable tools; `both`
+/// serves them together. A tool that is not registered is absent from `tools/list` and rejected
+/// when called.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ToolSet {
-    #[default]
     V1,
+    #[default]
     V2,
     Both,
 }
@@ -149,7 +149,9 @@ impl RuntimeConfig {
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;
         config.telemetry = env_bool("READING_MCP_TELEMETRY", config.telemetry)?;
-        if let Ok(value) = std::env::var("READING_MCP_TOOLS") {
+        if let Ok(value) = std::env::var("READING_MCP_TOOLS")
+            && !value.trim().is_empty()
+        {
             config.tools = ToolSet::parse(&value).ok_or_else(|| {
                 format!("READING_MCP_TOOLS must be one of v1, v2 or both, got {value:?}")
             })?;

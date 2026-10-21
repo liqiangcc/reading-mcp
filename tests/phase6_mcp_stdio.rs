@@ -46,7 +46,8 @@ Processes own resources and execution state.
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", "memory")
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let transport =
         TokioChildProcess::new(command).expect("reading-mcp child process should start");
     let client = ().serve(transport).await.expect("MCP initialization should succeed");
@@ -309,7 +310,8 @@ async fn persistent_stdio_runtime_survives_server_restart() {
     first_command
         .env("READING_MCP_LOCAL_ROOTS", &local_roots)
         .env("READING_MCP_STATE_DIR", &state_dir)
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let first_transport =
         TokioChildProcess::new(first_command).expect("first MCP process should start");
     let first_client =
@@ -337,7 +339,8 @@ async fn persistent_stdio_runtime_survives_server_restart() {
     second_command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", &state_dir)
-        .env("READING_MCP_TELEMETRY", "false");
+        .env("READING_MCP_TELEMETRY", "false")
+        .env("READING_MCP_TOOLS", "v1");
     let second_transport =
         TokioChildProcess::new(second_command).expect("second MCP process should start");
     let second_client =

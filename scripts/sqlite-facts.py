@@ -64,11 +64,13 @@ def database_sizes(database: str) -> dict[str, int]:
     """Return the stored `document_json` and `section_text_v1` byte totals of the one document."""
     connection = sqlite3.connect(database)
     try:
+        # `length()` counts characters for TEXT; the CAST to BLOB makes it count UTF-8 bytes.
         documents = connection.execute(
-            "SELECT COUNT(*), COALESCE(SUM(length(document_json)), 0) FROM documents"
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(document_json AS BLOB))), 0)"
+            " FROM documents"
         ).fetchone()
         chunks = connection.execute(
-            "SELECT COUNT(*), COALESCE(SUM(length(text)), 0) FROM section_text_v1"
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))), 0) FROM section_text_v1"
         ).fetchone()
         return {
             "documents": int(documents[0]),

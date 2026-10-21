@@ -240,8 +240,6 @@ pub fn build_server(
     let read_document = Arc::new(
         ReadDocumentUseCase::new(repository.clone()).with_text_unit_index(text_unit_index.clone()),
     );
-    let get_context =
-        Arc::new(GetContextUseCase::new(repository).with_text_unit_index(text_unit_index.clone()));
     let open_reading = Arc::new(OpenReadingUseCase::new(
         open_document.clone(),
         repository.clone(),
@@ -251,6 +249,8 @@ pub fn build_server(
         repository.clone(),
         text_unit_index.clone(),
     ));
+    let get_context =
+        Arc::new(GetContextUseCase::new(repository).with_text_unit_index(text_unit_index.clone()));
 
     Ok(ReadingMcpServer::from_use_cases(
         open_document,

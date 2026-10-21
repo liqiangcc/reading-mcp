@@ -28,6 +28,18 @@ const V1_TOOLS: [&str; 9] = [
     "search_document",
 ];
 
+/// The v2 tool set: `open`, `read` and the five navigation/citation tools, as `tools/list`
+/// returns them (alphabetical).
+const V2_TOOLS: [&str; 7] = [
+    "browse",
+    "cite",
+    "open",
+    "outline",
+    "read",
+    "search",
+    "source_view",
+];
+
 /// The byte size of the default `tools/list` result on `main`. The v2 switch must not move it.
 const DEFAULT_TOOLS_LIST_BYTES: usize = 38_773;
 
@@ -988,7 +1000,13 @@ async fn tools_switch_selects_the_registered_tools() {
         .into_iter()
         .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["open".to_owned(), "read".to_owned()]);
+    assert_eq!(
+        names,
+        V2_TOOLS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    );
     let rejected = v2
         .call_tool(
             CallToolRequestParams::new("get_text_units").with_arguments(arguments(json!({
@@ -1021,16 +1039,15 @@ async fn tools_switch_selects_the_registered_tools() {
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    expected.push("open".to_owned());
-    expected.push("read".to_owned());
+    expected.extend(V2_TOOLS.iter().map(|name| (*name).to_owned()));
     expected.sort();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 11);
+    assert_eq!(names.len(), 16);
     both.cancel().await.expect("client should close cleanly");
 }
 
 #[tokio::test]
-async fn the_two_v2_tool_definitions_stay_under_two_thousand_bytes() {
+async fn the_seven_v2_tool_definitions_stay_compact() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let client = start_client(directory.path(), &directory.path().join("v2"), Some("v2")).await;
     let tools = client
@@ -1041,8 +1058,8 @@ async fn the_two_v2_tool_definitions_stay_under_two_thousand_bytes() {
         .expect("tools serialize")
         .len();
     assert!(
-        bytes < 2_000,
-        "the two v2 tools must stay under 2000 bytes of tools/list JSON, got {bytes}"
+        bytes < 8_000,
+        "the seven v2 tools must stay under 8000 bytes of tools/list JSON, got {bytes}"
     );
     client.cancel().await.expect("client should close cleanly");
 }

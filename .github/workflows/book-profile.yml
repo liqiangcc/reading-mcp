@@ -113,21 +113,25 @@ jobs:
       - name: V2 sequence equivalence (real books)
         if: always()
         run: READING_MCP_BOOK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test v2_book_equivalence -- --ignored --nocapture
-      - name: V2 evaluation T1/T2
+      - name: V2 evaluation T1-T5
         if: always()
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p book
           docs=""
-          for pair in "zh-large=$BOOKS/zh-large.epub" "en-novel=$BOOKS/en-novel.epub"; do
+          task_books=""
+          for pair in "zh-large=$BOOKS/zh-large.epub" "en-novel=$BOOKS/en-novel.epub" "zh-classic=$BOOKS/zh-classic.epub"; do
             label="${pair%%=*}"
             file="${pair#*=}"
             if [ -f "$file" ]; then
-              docs="${docs:+$docs,}$label=$file"
+              task_books="${task_books:+$task_books,}$label=$file"
+              if [ "$label" != "zh-classic" ]; then
+                docs="${docs:+$docs,}$label=$file"
+              fi
             fi
           done
           args=(--binary target/release/reading-mcp --documents "$docs"
-            --out book/v2-eval.json)
+            --task-books "$task_books" --out book/v2-eval.json)
           python3 scripts/v2-eval.py "${args[@]}"
       - name: Profile the largest inputs with heaptrack
         if: always()

@@ -40,8 +40,8 @@ pub use original_source::{
     OriginalSourceTarget,
 };
 pub use segmentation::{
-    DocumentSegmentation, ParagraphBoundary, SectionSegmentation, SentenceBoundary,
-    SentenceCoverageBoundary,
+    DocumentSegmentation, ParagraphBoundary, SectionSegmentation, SegmentationError,
+    SentenceBoundary, SentenceCoverageBoundary,
 };
 pub use text_locator::TextLocator;
 pub use text_unit::{

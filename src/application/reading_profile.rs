@@ -165,14 +165,14 @@ pub fn build_reading_profile(
         coverage.fallback_chars += section_coverage.fallback_chars;
 
         for paragraph in &section.sentence_coverage {
-            match paragraph.eligibility {
+            match paragraph.eligibility() {
                 SentenceEligibility::Eligible => coverage.sentence_eligible_paragraphs += 1,
                 SentenceEligibility::CoarseParagraphOnly => coverage.coarse_paragraphs += 1,
             }
-            coverage.sentence_count += paragraph.sentence_count;
-            coverage.sentence_chars += paragraph.sentence_chars;
-            coverage.sentence_separator_chars += paragraph.separator_chars;
-            coverage.sentence_coarse_only_chars += paragraph.coarse_only_chars;
+            coverage.sentence_count += paragraph.sentence_count();
+            coverage.sentence_chars += paragraph.sentence_chars();
+            coverage.sentence_separator_chars += paragraph.separator_chars();
+            coverage.sentence_coarse_only_chars += paragraph.coarse_only_chars();
             sentence_paragraphs += 1;
         }
     }

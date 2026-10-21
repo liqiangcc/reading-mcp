@@ -154,8 +154,8 @@ fn inspect_fallback_pdf_with_segmentation(
         .iter()
         .flat_map(|section| section.sentence_coverage.iter())
         .filter(|coverage| {
-            coverage.eligibility == SentenceEligibility::CoarseParagraphOnly
-                && coverage.content_class == ParagraphContentClass::ProseOrUnknown
+            coverage.eligibility() == SentenceEligibility::CoarseParagraphOnly
+                && coverage.content_class() == ParagraphContentClass::ProseOrUnknown
         })
         .count();
     let extraction_errors = document

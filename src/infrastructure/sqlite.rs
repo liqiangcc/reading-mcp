@@ -3576,56 +3576,67 @@ fn build_segmentation_section_layout(
         .paragraphs
         .iter()
         .map(|boundary| LayoutParagraph {
-            paragraph_index: boundary.paragraph_index,
-            source_order: boundary.source_order,
-            start: boundary.range.start(),
-            end: boundary.range.end(),
+            paragraph_index: boundary.paragraph_index(),
+            source_order: boundary.source_order(),
+            start: boundary.range().start(),
+            end: boundary.range().end(),
         })
         .collect();
 
-    let sentences = section
-        .sentences
-        .iter()
-        .map(|boundary| LayoutSentence {
-            paragraph_index: boundary.paragraph_index,
-            sentence_index: boundary.sentence_index,
-            source_order: boundary.source_order,
-            start: boundary.range.start(),
-            end: boundary.range.end(),
-            parent_start: boundary.parent_range.start(),
-            parent_end: boundary.parent_range.end(),
-        })
-        .collect();
+    // Both lists are fallible and their length is known: push into an exactly sized Vec instead of
+    // collecting into a Result, whose size hint is a lower bound and grows by doubling.
+    let mut sentences = Vec::with_capacity(section.sentences.len());
+    for boundary in &section.sentences {
+        // The parent range is not stored on the boundary: it is always the range of the
+        // paragraph this sentence belongs to.
+        let parent = section
+            .paragraph_range(boundary.paragraph_index())
+            .ok_or_else(|| {
+                ApplicationError::TextUnitIndexFailed(format!(
+                    "Sentence {}#p{}.s{} has no parent Paragraph boundary",
+                    section.section_id.0,
+                    boundary.paragraph_index(),
+                    boundary.sentence_index()
+                ))
+            })?;
+        sentences.push(LayoutSentence {
+            paragraph_index: boundary.paragraph_index(),
+            sentence_index: boundary.sentence_index(),
+            source_order: boundary.source_order(),
+            start: boundary.range().start(),
+            end: boundary.range().end(),
+            parent_start: parent.start(),
+            parent_end: parent.end(),
+        });
+    }
 
-    let coverage = section
-        .sentence_coverage
-        .iter()
-        .map(|boundary| {
-            Ok(LayoutCoverage {
-                paragraph_index: boundary.paragraph_index,
-                paragraph_start: boundary.paragraph_range.start(),
-                paragraph_end: boundary.paragraph_range.end(),
-                content_class: u8::try_from(content_class_code(boundary.content_class)).map_err(
-                    |_| {
-                        ApplicationError::TextUnitIndexFailed(
-                            "paragraph content class code does not fit u8".into(),
-                        )
-                    },
-                )?,
-                eligibility: u8::try_from(sentence_eligibility_code(boundary.eligibility))
-                    .map_err(|_| {
-                        ApplicationError::TextUnitIndexFailed(
-                            "sentence eligibility code does not fit u8".into(),
-                        )
-                    })?,
-                paragraph_chars: boundary.paragraph_chars,
-                sentence_chars: boundary.sentence_chars,
-                separator_chars: boundary.separator_chars,
-                coarse_only_chars: boundary.coarse_only_chars,
-                sentence_count: boundary.sentence_count,
-            })
-        })
-        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    let mut coverage = Vec::with_capacity(section.sentence_coverage.len());
+    for boundary in &section.sentence_coverage {
+        coverage.push(LayoutCoverage {
+            paragraph_index: boundary.paragraph_index(),
+            paragraph_start: boundary.paragraph_range().start(),
+            paragraph_end: boundary.paragraph_range().end(),
+            content_class: u8::try_from(content_class_code(boundary.content_class())).map_err(
+                |_| {
+                    ApplicationError::TextUnitIndexFailed(
+                        "paragraph content class code does not fit u8".into(),
+                    )
+                },
+            )?,
+            eligibility: u8::try_from(sentence_eligibility_code(boundary.eligibility())).map_err(
+                |_| {
+                    ApplicationError::TextUnitIndexFailed(
+                        "sentence eligibility code does not fit u8".into(),
+                    )
+                },
+            )?,
+            paragraph_chars: boundary.paragraph_chars(),
+            sentence_chars: boundary.sentence_chars(),
+            separator_chars: boundary.separator_chars(),
+            coarse_only_chars: boundary.coarse_only_chars(),
+            sentence_count: boundary.sentence_count(),
+        });
+    }
 
     Ok(SectionLayout {
         paragraphs,

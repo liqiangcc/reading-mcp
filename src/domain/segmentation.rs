@@ -4,6 +4,8 @@
 //! reading profile and the PDF inspector need coverage, the EPUB validator needs ranges, indices and
 //! orders. Unit structs are materialized from these boundaries where a caller really needs them.
 
+use thiserror::Error;
+
 use super::{
     Document, NormalizedBlockKind, NormalizedBlockMap, NormalizedBlockMapError,
     NormalizedDocumentHash, NormalizedTextRange, ParagraphContentClass, ParagraphSectionCoverage,
@@ -11,6 +13,46 @@ use super::{
     SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TextUnit, TextUnitKind,
     paragraph_text_unit_id, sentence_text_unit_id,
 };
+
+/// Why a document cannot be segmented into boundaries.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum SegmentationError {
+    /// The persisted block evidence is invalid.
+    #[error(transparent)]
+    BlockMap(#[from] NormalizedBlockMapError),
+    /// A boundary offset does not fit the compact 32-bit form.
+    #[error("text segmentation boundary {field} = {value} does not fit the compact 32-bit form")]
+    BoundaryOverflow { field: &'static str, value: usize },
+}
+
+/// A normalized text range as two 32-bit offsets.
+///
+/// `READING_MCP_MAX_NORMALIZED_CHARS` caps a document far below `u32::MAX`, so the compact form is
+/// exact for every document that can be opened; a value that does not fit is an error at
+/// construction, never a truncation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompactRange {
+    start: u32,
+    end: u32,
+}
+
+impl CompactRange {
+    fn try_new(field: &'static str, range: NormalizedTextRange) -> Result<Self, SegmentationError> {
+        Ok(Self {
+            start: compact_offset(field, range.start())?,
+            end: compact_offset(field, range.end())?,
+        })
+    }
+
+    fn range(self) -> NormalizedTextRange {
+        NormalizedTextRange::new(self.start as usize, self.end as usize)
+            .expect("a compact range keeps the order it was built from")
+    }
+}
+
+fn compact_offset(field: &'static str, value: usize) -> Result<u32, SegmentationError> {
+    u32::try_from(value).map_err(|_| SegmentationError::BoundaryOverflow { field, value })
+}
 
 /// One section's segmentation as boundaries.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,41 +66,179 @@ pub struct SectionSegmentation {
     pub sentence_coverage: Vec<SentenceCoverageBoundary>,
 }
 
+/// One paragraph boundary in compact form: three 32-bit fields instead of four machine words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParagraphBoundary {
-    pub paragraph_index: usize,
-    pub source_order: usize,
-    pub range: NormalizedTextRange,
+    paragraph_index: u32,
+    source_order: u32,
+    range: CompactRange,
 }
 
+impl ParagraphBoundary {
+    pub fn new(
+        paragraph_index: usize,
+        source_order: usize,
+        range: NormalizedTextRange,
+    ) -> Result<Self, SegmentationError> {
+        Ok(Self {
+            paragraph_index: compact_offset("paragraph.paragraph_index", paragraph_index)?,
+            source_order: compact_offset("paragraph.source_order", source_order)?,
+            range: CompactRange::try_new("paragraph.range", range)?,
+        })
+    }
+
+    pub fn paragraph_index(&self) -> usize {
+        self.paragraph_index as usize
+    }
+
+    pub fn source_order(&self) -> usize {
+        self.source_order as usize
+    }
+
+    pub fn range(&self) -> NormalizedTextRange {
+        self.range.range()
+    }
+}
+
+/// One sentence boundary in compact form: five 32-bit fields, 20 bytes.
+///
+/// The parent paragraph range is not stored: it is always the range of the paragraph with
+/// `paragraph_index` in the same section, so `SectionSegmentation::paragraph_range` derives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SentenceBoundary {
-    pub paragraph_index: usize,
-    pub sentence_index: usize,
-    pub source_order: usize,
-    pub range: NormalizedTextRange,
-    pub parent_range: NormalizedTextRange,
+    paragraph_index: u32,
+    sentence_index: u32,
+    source_order: u32,
+    range: CompactRange,
 }
 
-/// `SentenceParagraphCoverage` without the owner id and the paragraph `TextUnitId`: the parent range
-/// identifies the paragraph.
+impl SentenceBoundary {
+    pub fn new(
+        paragraph_index: usize,
+        sentence_index: usize,
+        source_order: usize,
+        range: NormalizedTextRange,
+    ) -> Result<Self, SegmentationError> {
+        Ok(Self {
+            paragraph_index: compact_offset("sentence.paragraph_index", paragraph_index)?,
+            sentence_index: compact_offset("sentence.sentence_index", sentence_index)?,
+            source_order: compact_offset("sentence.source_order", source_order)?,
+            range: CompactRange::try_new("sentence.range", range)?,
+        })
+    }
+
+    pub fn paragraph_index(&self) -> usize {
+        self.paragraph_index as usize
+    }
+
+    pub fn sentence_index(&self) -> usize {
+        self.sentence_index as usize
+    }
+
+    pub fn source_order(&self) -> usize {
+        self.source_order as usize
+    }
+
+    pub fn range(&self) -> NormalizedTextRange {
+        self.range.range()
+    }
+}
+
+/// `SentenceParagraphCoverage` without the owner id and the paragraph `TextUnitId`: the paragraph
+/// range identifies the paragraph. Every field is 32 bits wide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SentenceCoverageBoundary {
-    pub paragraph_index: usize,
-    pub paragraph_range: NormalizedTextRange,
-    pub content_class: ParagraphContentClass,
-    pub eligibility: SentenceEligibility,
-    pub paragraph_chars: usize,
-    pub sentence_chars: usize,
-    pub separator_chars: usize,
-    pub coarse_only_chars: usize,
-    pub sentence_count: usize,
+    paragraph_index: u32,
+    paragraph_range: CompactRange,
+    content_class: ParagraphContentClass,
+    eligibility: SentenceEligibility,
+    paragraph_chars: u32,
+    sentence_chars: u32,
+    separator_chars: u32,
+    coarse_only_chars: u32,
+    sentence_count: u32,
+}
+
+impl SentenceCoverageBoundary {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        paragraph_index: usize,
+        paragraph_range: NormalizedTextRange,
+        content_class: ParagraphContentClass,
+        eligibility: SentenceEligibility,
+        paragraph_chars: usize,
+        sentence_chars: usize,
+        separator_chars: usize,
+        coarse_only_chars: usize,
+        sentence_count: usize,
+    ) -> Result<Self, SegmentationError> {
+        Ok(Self {
+            paragraph_index: compact_offset("coverage.paragraph_index", paragraph_index)?,
+            paragraph_range: CompactRange::try_new("coverage.paragraph_range", paragraph_range)?,
+            content_class,
+            eligibility,
+            paragraph_chars: compact_offset("coverage.paragraph_chars", paragraph_chars)?,
+            sentence_chars: compact_offset("coverage.sentence_chars", sentence_chars)?,
+            separator_chars: compact_offset("coverage.separator_chars", separator_chars)?,
+            coarse_only_chars: compact_offset("coverage.coarse_only_chars", coarse_only_chars)?,
+            sentence_count: compact_offset("coverage.sentence_count", sentence_count)?,
+        })
+    }
+
+    pub fn paragraph_index(&self) -> usize {
+        self.paragraph_index as usize
+    }
+
+    pub fn paragraph_range(&self) -> NormalizedTextRange {
+        self.paragraph_range.range()
+    }
+
+    pub fn content_class(&self) -> ParagraphContentClass {
+        self.content_class
+    }
+
+    pub fn eligibility(&self) -> SentenceEligibility {
+        self.eligibility
+    }
+
+    pub fn paragraph_chars(&self) -> usize {
+        self.paragraph_chars as usize
+    }
+
+    pub fn sentence_chars(&self) -> usize {
+        self.sentence_chars as usize
+    }
+
+    pub fn separator_chars(&self) -> usize {
+        self.separator_chars as usize
+    }
+
+    pub fn coarse_only_chars(&self) -> usize {
+        self.coarse_only_chars as usize
+    }
+
+    pub fn sentence_count(&self) -> usize {
+        self.sentence_count as usize
+    }
 }
 
 /// All sections, depth-first pre-order (the order `collect_section_paragraphs` walks).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DocumentSegmentation {
     pub sections: Vec<SectionSegmentation>,
+}
+
+impl SectionSegmentation {
+    /// The range of the paragraph at the 1-based `paragraph_index` in this section.
+    ///
+    /// Paragraphs are pushed in index order starting at 1, so the slot is `paragraph_index - 1`;
+    /// the index check keeps the answer honest if that ever changes.
+    pub fn paragraph_range(&self, paragraph_index: usize) -> Option<NormalizedTextRange> {
+        self.paragraphs
+            .get(paragraph_index.checked_sub(1)?)
+            .filter(|paragraph| paragraph.paragraph_index() == paragraph_index)
+            .map(ParagraphBoundary::range)
+    }
 }
 
 impl DocumentSegmentation {
@@ -97,7 +277,7 @@ impl DocumentSegmentation {
 
             for boundary in &section.paragraphs {
                 let text = index
-                    .slice(boundary.range)
+                    .slice(boundary.range())
                     .expect("generated paragraph range must be a valid owner slice")
                     .to_string();
                 paragraph_set.units.push(TextUnit {
@@ -105,17 +285,17 @@ impl DocumentSegmentation {
                         &document.id,
                         normalized_document_hash,
                         &section.section_id,
-                        boundary.paragraph_index,
-                        boundary.range,
+                        boundary.paragraph_index(),
+                        boundary.range(),
                     ),
                     document_id: document.id.clone(),
                     content_hash: document.content_hash.clone(),
                     normalized_document_hash: normalized_document_hash.clone(),
                     owner_section_id: section.section_id.clone(),
                     kind: TextUnitKind::Paragraph,
-                    paragraph_index: boundary.paragraph_index,
-                    source_order: boundary.source_order,
-                    normalized_range: boundary.range,
+                    paragraph_index: boundary.paragraph_index(),
+                    source_order: boundary.source_order(),
+                    normalized_range: boundary.range(),
                     text,
                     segmentation_version: TEXT_SEGMENTATION_VERSION.into(),
                 });
@@ -123,33 +303,36 @@ impl DocumentSegmentation {
 
             for boundary in &section.sentences {
                 let text = index
-                    .slice(boundary.range)
+                    .slice(boundary.range())
                     .expect("generated sentence range must be a valid owner slice")
                     .to_string();
+                let parent_range = section
+                    .paragraph_range(boundary.paragraph_index())
+                    .expect("generated sentence must have its parent paragraph boundary");
                 sentence_set.units.push(SentenceTextUnit {
                     id: sentence_text_unit_id(
                         &document.id,
                         normalized_document_hash,
                         &section.section_id,
-                        boundary.paragraph_index,
-                        boundary.sentence_index,
-                        boundary.range,
+                        boundary.paragraph_index(),
+                        boundary.sentence_index(),
+                        boundary.range(),
                     ),
                     document_id: document.id.clone(),
                     content_hash: document.content_hash.clone(),
                     normalized_document_hash: normalized_document_hash.clone(),
                     owner_section_id: section.section_id.clone(),
-                    paragraph_index: boundary.paragraph_index,
-                    sentence_index: boundary.sentence_index,
+                    paragraph_index: boundary.paragraph_index(),
+                    sentence_index: boundary.sentence_index(),
                     parent_paragraph_id: paragraph_text_unit_id(
                         &document.id,
                         normalized_document_hash,
                         &section.section_id,
-                        boundary.paragraph_index,
-                        boundary.parent_range,
+                        boundary.paragraph_index(),
+                        parent_range,
                     ),
-                    source_order: boundary.source_order,
-                    normalized_range: boundary.range,
+                    source_order: boundary.source_order(),
+                    normalized_range: boundary.range(),
                     text,
                     segmentation_version: TEXT_SEGMENTATION_VERSION.into(),
                 });
@@ -162,17 +345,17 @@ impl DocumentSegmentation {
                         &document.id,
                         normalized_document_hash,
                         &section.section_id,
-                        coverage.paragraph_index,
-                        coverage.paragraph_range,
+                        coverage.paragraph_index(),
+                        coverage.paragraph_range(),
                     ),
-                    paragraph_index: coverage.paragraph_index,
-                    content_class: coverage.content_class,
-                    eligibility: coverage.eligibility,
-                    paragraph_chars: coverage.paragraph_chars,
-                    sentence_chars: coverage.sentence_chars,
-                    separator_chars: coverage.separator_chars,
-                    coarse_only_chars: coverage.coarse_only_chars,
-                    sentence_count: coverage.sentence_count,
+                    paragraph_index: coverage.paragraph_index(),
+                    content_class: coverage.content_class(),
+                    eligibility: coverage.eligibility(),
+                    paragraph_chars: coverage.paragraph_chars(),
+                    sentence_chars: coverage.sentence_chars(),
+                    separator_chars: coverage.separator_chars(),
+                    coarse_only_chars: coverage.coarse_only_chars(),
+                    sentence_count: coverage.sentence_count(),
                 });
             }
         }
@@ -183,9 +366,9 @@ impl DocumentSegmentation {
 
 impl Document {
     /// Decodes the persisted block evidence once and segments the document into boundaries.
-    pub fn try_segmentation(&self) -> Result<DocumentSegmentation, NormalizedBlockMapError> {
+    pub fn try_segmentation(&self) -> Result<DocumentSegmentation, SegmentationError> {
         let block_map = self.normalized_block_map()?;
-        Ok(self.build_segmentation(block_map.as_ref()))
+        self.build_segmentation(block_map.as_ref())
     }
 
     pub fn segmentation(&self) -> DocumentSegmentation {
@@ -193,7 +376,10 @@ impl Document {
             .expect("canonical normalized block map must be valid for text segmentation")
     }
 
-    fn build_segmentation(&self, block_map: Option<&NormalizedBlockMap>) -> DocumentSegmentation {
+    fn build_segmentation(
+        &self,
+        block_map: Option<&NormalizedBlockMap>,
+    ) -> Result<DocumentSegmentation, SegmentationError> {
         let mut sections = Vec::new();
         let mut paragraph_source_order = 0usize;
         let mut sentence_source_order = 0usize;
@@ -205,10 +391,10 @@ impl Document {
                 &mut sections,
                 &mut paragraph_source_order,
                 &mut sentence_source_order,
-            );
+            )?;
         }
 
-        DocumentSegmentation { sections }
+        Ok(DocumentSegmentation { sections })
     }
 }
 
@@ -234,7 +420,7 @@ fn collect_section_segmentation(
     out: &mut Vec<SectionSegmentation>,
     paragraph_source_order: &mut usize,
     sentence_source_order: &mut usize,
-) {
+) -> Result<(), SegmentationError> {
     let candidates = section_paragraph_candidates(section, block_map);
     let index = section.normalized_text_index();
     let paragraph_chars = candidates
@@ -324,29 +510,28 @@ fn collect_section_segmentation(
         }
 
         if eligibility == SentenceEligibility::CoarseParagraphOnly {
-            sentence_coverage.push(SentenceCoverageBoundary {
+            sentence_coverage.push(SentenceCoverageBoundary::new(
                 paragraph_index,
-                paragraph_range: candidate.range,
+                candidate.range,
                 content_class,
                 eligibility,
-                paragraph_chars: candidate.range.len(),
-                sentence_chars: 0,
-                separator_chars: 0,
-                coarse_only_chars: candidate.range.len(),
-                sentence_count: 0,
-            });
+                candidate.range.len(),
+                0,
+                0,
+                candidate.range.len(),
+                0,
+            )?);
         } else {
             let ranges = sentence_ranges(text, candidate.range);
             let sentence_chars = ranges.iter().map(|range| range.len()).sum::<usize>();
 
             for (sentence_offset, range) in ranges.iter().copied().enumerate() {
-                sentences.push(SentenceBoundary {
+                sentences.push(SentenceBoundary::new(
                     paragraph_index,
-                    sentence_index: sentence_offset + 1,
-                    source_order: *sentence_source_order,
+                    sentence_offset + 1,
+                    *sentence_source_order,
                     range,
-                    parent_range: candidate.range,
-                });
+                )?);
                 *sentence_source_order += 1;
             }
 
@@ -354,25 +539,29 @@ fn collect_section_segmentation(
                 candidate.range.len().checked_sub(sentence_chars).expect(
                     "generated sentence ranges must remain inside the containing Paragraph",
                 );
-            sentence_coverage.push(SentenceCoverageBoundary {
+            sentence_coverage.push(SentenceCoverageBoundary::new(
                 paragraph_index,
-                paragraph_range: candidate.range,
+                candidate.range,
                 content_class,
                 eligibility,
-                paragraph_chars: candidate.range.len(),
+                candidate.range.len(),
                 sentence_chars,
                 separator_chars,
-                coarse_only_chars: 0,
-                sentence_count: ranges.len(),
-            });
+                0,
+                ranges.len(),
+            )?);
         }
 
-        paragraphs.push(ParagraphBoundary {
+        paragraphs.push(ParagraphBoundary::new(
             paragraph_index,
             source_order,
-            range: candidate.range,
-        });
+            candidate.range,
+        )?);
     }
+
+    // The sentence count is only known once every paragraph is scanned, so the Vec grew by
+    // doubling. Release the overshoot once per section instead of segmenting a second time.
+    sentences.shrink_to_fit();
 
     out.push(SectionSegmentation {
         section_id: section.id.clone(),
@@ -389,8 +578,10 @@ fn collect_section_segmentation(
             out,
             paragraph_source_order,
             sentence_source_order,
-        );
+        )?;
     }
+
+    Ok(())
 }
 
 fn section_paragraph_candidates(
@@ -1001,4 +1192,317 @@ fn is_table_delimiter_cell(cell: &str) -> bool {
 fn strip_line_ending(line: &str) -> &str {
     let line = line.strip_suffix('\n').unwrap_or(line);
     line.strip_suffix('\r').unwrap_or(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use super::*;
+    use crate::domain::{ContentHash, DocumentId, DocumentSource, Location, MediaType, TextUnitId};
+
+    fn section(
+        id: &str,
+        parent_id: Option<&str>,
+        content: &str,
+        children: Vec<Section>,
+    ) -> Section {
+        Section {
+            id: SectionId(id.into()),
+            parent_id: parent_id.map(|id| SectionId(id.into())),
+            title: id.into(),
+            level: 1,
+            content: content.into(),
+            location: Location::default(),
+            children,
+        }
+    }
+
+    fn document(root_sections: Vec<Section>) -> Document {
+        let source = DocumentSource("fixture://compact-boundaries".into());
+        let content_hash = ContentHash::of_bytes(b"compact-boundaries");
+        Document {
+            id: DocumentId::derive(&source, &content_hash),
+            source,
+            title: "Compact boundaries".into(),
+            media_type: MediaType("application/epub+zip".into()),
+            content_hash,
+            metadata: BTreeMap::new(),
+            root_sections,
+        }
+    }
+
+    /// One expected paragraph: its text, its content class and its sentence texts.
+    type ExpectedParagraph = (&'static str, ParagraphContentClass, Vec<&'static str>);
+    /// One expected section: its id and its paragraphs.
+    type ExpectedSection = (&'static str, Vec<ExpectedParagraph>);
+
+    /// Two prose paragraphs (ASCII sentences), one fenced code paragraph, and a nested CJK
+    /// section whose source orders continue its parent's.
+    fn fixtures() -> Vec<(&'static str, Document)> {
+        vec![
+            (
+                "mixed",
+                document(vec![section(
+                    "s1",
+                    None,
+                    "Alpha one. Alpha two.\n\nBeta three! Beta four?\n\n```\ncode block\n```\n",
+                    vec![section("s2", Some("s1"), "第一句。第二句！\n", Vec::new())],
+                )]),
+            ),
+            (
+                "single",
+                document(vec![section(
+                    "only",
+                    None,
+                    "Only one sentence here.\n",
+                    Vec::new(),
+                )]),
+            ),
+        ]
+    }
+
+    /// Every field the pre-compaction `ParagraphBoundary`, `SentenceBoundary` and
+    /// `SentenceCoverageBoundary` stored, read back through the compact accessors.
+    #[test]
+    fn compact_boundaries_round_trip_every_field() {
+        let (label, document) = fixtures().remove(0);
+        let segmentation = document.segmentation();
+
+        let expected: Vec<ExpectedSection> = vec![
+            (
+                "s1",
+                vec![
+                    (
+                        "Alpha one. Alpha two.",
+                        ParagraphContentClass::ProseOrUnknown,
+                        vec!["Alpha one.", "Alpha two."],
+                    ),
+                    (
+                        "Beta three! Beta four?",
+                        ParagraphContentClass::ProseOrUnknown,
+                        vec!["Beta three!", "Beta four?"],
+                    ),
+                    (
+                        "```\ncode block\n```",
+                        ParagraphContentClass::CodeBlock,
+                        vec![],
+                    ),
+                ],
+            ),
+            (
+                "s2",
+                vec![(
+                    "第一句。第二句！",
+                    ParagraphContentClass::ProseOrUnknown,
+                    vec!["第一句。", "第二句！"],
+                )],
+            ),
+        ];
+
+        assert_eq!(label, "mixed");
+        assert_eq!(segmentation.sections.len(), expected.len());
+        let mut paragraph_source_order = 0usize;
+        let mut sentence_source_order = 0usize;
+
+        for (section, (section_id, paragraphs)) in segmentation.sections.iter().zip(expected) {
+            assert_eq!(section.section_id.0, section_id);
+            let owner = document
+                .find_section(&section.section_id)
+                .expect("segmented section must exist in its document");
+            let index = owner.normalized_text_index();
+
+            assert_eq!(section.paragraphs.len(), paragraphs.len());
+            assert_eq!(
+                section.sentences.len(),
+                paragraphs
+                    .iter()
+                    .map(|(_, _, sentences)| sentences.len())
+                    .sum::<usize>()
+            );
+            assert_eq!(section.sentence_coverage.len(), paragraphs.len());
+
+            let mut sentence_offset = 0usize;
+            for (offset, (boundary, (text, content_class, expected_sentences))) in
+                section.paragraphs.iter().zip(paragraphs).enumerate()
+            {
+                assert_eq!(boundary.paragraph_index(), offset + 1);
+                assert_eq!(boundary.source_order(), paragraph_source_order);
+                assert_eq!(
+                    index
+                        .slice(boundary.range())
+                        .expect("paragraph range must be an owner slice"),
+                    text
+                );
+
+                let paragraph_range = boundary.range();
+                let coverage = &section.sentence_coverage[offset];
+                assert_eq!(coverage.paragraph_index(), offset + 1);
+                assert_eq!(coverage.paragraph_range(), paragraph_range);
+                assert_eq!(coverage.content_class(), content_class);
+                assert_eq!(coverage.sentence_count(), expected_sentences.len());
+
+                let mut sentence_chars = 0usize;
+                for (sentence_index, sentence_text) in expected_sentences.iter().enumerate() {
+                    let sentence = &section.sentences[sentence_offset];
+                    assert_eq!(sentence.paragraph_index(), offset + 1);
+                    assert_eq!(sentence.sentence_index(), sentence_index + 1);
+                    assert_eq!(sentence.source_order(), sentence_source_order);
+                    assert_eq!(
+                        index
+                            .slice(sentence.range())
+                            .expect("sentence range must be an owner slice"),
+                        *sentence_text
+                    );
+                    // The dropped `parent_range`, derived back from the paragraph.
+                    assert_eq!(
+                        section.paragraph_range(sentence.paragraph_index()),
+                        Some(paragraph_range)
+                    );
+                    sentence_chars += sentence.range().len();
+                    sentence_offset += 1;
+                    sentence_source_order += 1;
+                }
+
+                let paragraph_chars = text.chars().count();
+                assert_eq!(coverage.paragraph_chars(), paragraph_chars);
+                assert_eq!(coverage.sentence_chars(), sentence_chars);
+                // A coarse paragraph keeps its whole text as coarse-only chars and reports no
+                // separator chars of its own.
+                assert_eq!(
+                    coverage.separator_chars(),
+                    if expected_sentences.is_empty() {
+                        0
+                    } else {
+                        paragraph_chars - sentence_chars
+                    }
+                );
+                assert_eq!(
+                    coverage.coarse_only_chars(),
+                    if expected_sentences.is_empty() {
+                        paragraph_chars
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    coverage.eligibility(),
+                    if expected_sentences.is_empty() {
+                        SentenceEligibility::CoarseParagraphOnly
+                    } else {
+                        SentenceEligibility::Eligible
+                    }
+                );
+                paragraph_source_order += 1;
+            }
+            assert_eq!(sentence_offset, section.sentences.len());
+        }
+
+        assert_eq!(paragraph_source_order, 4);
+        assert_eq!(sentence_source_order, 6);
+    }
+
+    /// The parent range is no longer stored, so it must be exactly what the paragraph of the same
+    /// section says it is — for every sentence of every fixture.
+    #[test]
+    fn derived_parent_range_equals_the_parent_paragraph_for_every_sentence() {
+        for (label, document) in fixtures() {
+            let segmentation = document.segmentation();
+            let hash = document.normalized_document_hash();
+            let (_, sentence_units) = segmentation.materialize(&document, &hash);
+            let coverage_ids: HashMap<(String, usize), TextUnitId> = sentence_units
+                .coverage
+                .iter()
+                .map(|coverage| {
+                    (
+                        (
+                            coverage.owner_section_id.0.clone(),
+                            coverage.paragraph_index,
+                        ),
+                        coverage.paragraph_id.clone(),
+                    )
+                })
+                .collect();
+
+            let mut sentences = 0usize;
+            for section in &segmentation.sections {
+                for sentence in &section.sentences {
+                    let parent = section
+                        .paragraph_range(sentence.paragraph_index())
+                        .unwrap_or_else(|| {
+                            panic!("fixture {label}: sentence has no parent paragraph")
+                        });
+                    // Exactly one paragraph contains the sentence text, and it is the one the
+                    // sentence names: that range is the value the old struct stored.
+                    let containing = section
+                        .paragraphs
+                        .iter()
+                        .filter(|paragraph| {
+                            paragraph.range().start() <= sentence.range().start()
+                                && sentence.range().end() <= paragraph.range().end()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(containing.len(), 1, "fixture {label}");
+                    assert_eq!(
+                        containing[0].paragraph_index(),
+                        sentence.paragraph_index(),
+                        "fixture {label}"
+                    );
+                    assert_eq!(containing[0].range(), parent, "fixture {label}");
+                    sentences += 1;
+                }
+            }
+            assert!(sentences > 0, "fixture {label} has no sentences");
+
+            // Materialization builds the parent id from the derived range and the coverage id from
+            // the paragraph's own range: equal ids prove both ranges are the same value.
+            for unit in &sentence_units.units {
+                let coverage_id = coverage_ids
+                    .get(&(unit.owner_section_id.0.clone(), unit.paragraph_index))
+                    .unwrap_or_else(|| {
+                        panic!("fixture {label}: sentence paragraph has no coverage")
+                    });
+                assert_eq!(&unit.parent_paragraph_id, coverage_id, "fixture {label}");
+            }
+        }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn a_boundary_that_does_not_fit_32_bits_is_an_error() {
+        let range = NormalizedTextRange::new(0, 8).expect("ordered fixture range");
+        assert!(SentenceBoundary::new(1, 1, 0, range).is_ok());
+        assert!(ParagraphBoundary::new(1, 0, range).is_ok());
+        assert_eq!(
+            SentenceBoundary::new(usize::MAX, 1, 0, range),
+            Err(SegmentationError::BoundaryOverflow {
+                field: "sentence.paragraph_index",
+                value: usize::MAX,
+            })
+        );
+        assert_eq!(
+            ParagraphBoundary::new(1, usize::MAX, range),
+            Err(SegmentationError::BoundaryOverflow {
+                field: "paragraph.source_order",
+                value: usize::MAX,
+            })
+        );
+        assert_eq!(
+            SentenceCoverageBoundary::new(
+                1,
+                range,
+                ParagraphContentClass::ProseOrUnknown,
+                SentenceEligibility::Eligible,
+                8,
+                8,
+                0,
+                0,
+                usize::MAX,
+            ),
+            Err(SegmentationError::BoundaryOverflow {
+                field: "coverage.sentence_count",
+                value: usize::MAX,
+            })
+        );
+    }
 }

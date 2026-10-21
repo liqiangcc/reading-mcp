@@ -1271,7 +1271,7 @@ fn validate_blocks_and_text_units(
         };
         let index = owner.normalized_text_index();
         for (expected_paragraph_index, paragraph) in (1usize..).zip(section.paragraphs.iter()) {
-            if paragraph.source_order != expected_paragraph_source_order {
+            if paragraph.source_order() != expected_paragraph_source_order {
                 push_error(
                     findings,
                     "text_units",
@@ -1279,8 +1279,8 @@ fn validate_blocks_and_text_units(
                     format!(
                         "Paragraph {}#p{} has source_order {}, expected {}",
                         section_id.0,
-                        paragraph.paragraph_index,
-                        paragraph.source_order,
+                        paragraph.paragraph_index(),
+                        paragraph.source_order(),
                         expected_paragraph_source_order
                     ),
                 );
@@ -1288,18 +1288,19 @@ fn validate_blocks_and_text_units(
             expected_paragraph_source_order += 1;
             // A boundary carries no text, so its text is the slice: validity of the range is the
             // whole check the materialized `slice == text` comparison made.
-            if index.slice(paragraph.range).is_err() {
+            if index.slice(paragraph.range()).is_err() {
                 push_error(
                     findings,
                     "text_units",
                     "paragraph_exact_slice_mismatch",
                     format!(
                         "Paragraph {}#p{} is not the exact persisted owner slice",
-                        section_id.0, paragraph.paragraph_index
+                        section_id.0,
+                        paragraph.paragraph_index()
                     ),
                 );
             }
-            if paragraph.paragraph_index != expected_paragraph_index {
+            if paragraph.paragraph_index() != expected_paragraph_index {
                 push_error(
                     findings,
                     "text_units",
@@ -1307,18 +1308,18 @@ fn validate_blocks_and_text_units(
                     format!(
                         "Paragraph {}#p{} has index {}, expected {} in owner {:?}",
                         section_id.0,
-                        paragraph.paragraph_index,
-                        paragraph.paragraph_index,
+                        paragraph.paragraph_index(),
+                        paragraph.paragraph_index(),
                         expected_paragraph_index,
                         section_id.0
                     ),
                 );
             }
-            coverage.text_units.paragraph_chars += paragraph.range.len();
+            coverage.text_units.paragraph_chars += paragraph.range().len();
             paragraph_ranges.insert((
                 section_id.clone(),
-                paragraph.range.start(),
-                paragraph.range.end(),
+                paragraph.range().start(),
+                paragraph.range().end(),
             ));
         }
 
@@ -1384,7 +1385,7 @@ fn validate_blocks_and_text_units(
         let index = owner.normalized_text_index();
         let mut expected_sentence_index = HashMap::<(usize, usize), usize>::new();
         for sentence in &section.sentences {
-            if sentence.source_order != expected_sentence_source_order {
+            if sentence.source_order() != expected_sentence_source_order {
                 push_error(
                     findings,
                     "text_units",
@@ -1392,26 +1393,43 @@ fn validate_blocks_and_text_units(
                     format!(
                         "Sentence {}#p{}.s{} has source_order {}, expected {}",
                         section_id.0,
-                        sentence.paragraph_index,
-                        sentence.sentence_index,
-                        sentence.source_order,
+                        sentence.paragraph_index(),
+                        sentence.sentence_index(),
+                        sentence.source_order(),
                         expected_sentence_source_order
                     ),
                 );
             }
             expected_sentence_source_order += 1;
-            if index.slice(sentence.range).is_err() {
+            if index.slice(sentence.range()).is_err() {
                 push_error(
                     findings,
                     "text_units",
                     "sentence_exact_slice_mismatch",
                     format!(
                         "Sentence {}#p{}.s{} is not the exact persisted owner slice",
-                        section_id.0, sentence.paragraph_index, sentence.sentence_index
+                        section_id.0,
+                        sentence.paragraph_index(),
+                        sentence.sentence_index()
                     ),
                 );
             }
-            let parent = (sentence.parent_range.start(), sentence.parent_range.end());
+            // The parent range is derived: a sentence belongs to the paragraph with its index.
+            let Some(parent_range) = section.paragraph_range(sentence.paragraph_index()) else {
+                push_error(
+                    findings,
+                    "text_units",
+                    "sentence_missing_parent_paragraph",
+                    format!(
+                        "Sentence {}#p{}.s{} parent Paragraph is missing",
+                        section_id.0,
+                        sentence.paragraph_index(),
+                        sentence.sentence_index()
+                    ),
+                );
+                continue;
+            };
+            let parent = (parent_range.start(), parent_range.end());
             if !paragraph_ranges.contains(&(section_id.clone(), parent.0, parent.1)) {
                 push_error(
                     findings,
@@ -1419,24 +1437,28 @@ fn validate_blocks_and_text_units(
                     "sentence_missing_parent_paragraph",
                     format!(
                         "Sentence {}#p{}.s{} parent Paragraph is missing",
-                        section_id.0, sentence.paragraph_index, sentence.sentence_index
+                        section_id.0,
+                        sentence.paragraph_index(),
+                        sentence.sentence_index()
                     ),
                 );
                 continue;
             }
-            if sentence.range.start() < parent.0 || sentence.range.end() > parent.1 {
+            if sentence.range().start() < parent.0 || sentence.range().end() > parent.1 {
                 push_error(
                     findings,
                     "text_units",
                     "sentence_outside_parent_paragraph",
                     format!(
                         "Sentence {}#p{}.s{} is not contained by its parent Paragraph",
-                        section_id.0, sentence.paragraph_index, sentence.sentence_index
+                        section_id.0,
+                        sentence.paragraph_index(),
+                        sentence.sentence_index()
                     ),
                 );
             }
             let expected = expected_sentence_index.entry(parent).or_insert(1usize);
-            if sentence.sentence_index != *expected {
+            if sentence.sentence_index() != *expected {
                 push_error(
                     findings,
                     "text_units",
@@ -1444,22 +1466,22 @@ fn validate_blocks_and_text_units(
                     format!(
                         "Sentence {}#p{}.s{} has index {}, expected {}",
                         section_id.0,
-                        sentence.paragraph_index,
-                        sentence.sentence_index,
-                        sentence.sentence_index,
+                        sentence.paragraph_index(),
+                        sentence.sentence_index(),
+                        sentence.sentence_index(),
                         *expected
                     ),
                 );
             }
             *expected += 1;
-            coverage.text_units.sentence_chars += sentence.range.len();
+            coverage.text_units.sentence_chars += sentence.range().len();
         }
 
         for sentence_coverage in &section.sentence_coverage {
-            if sentence_coverage.sentence_chars
-                + sentence_coverage.separator_chars
-                + sentence_coverage.coarse_only_chars
-                != sentence_coverage.paragraph_chars
+            if sentence_coverage.sentence_chars()
+                + sentence_coverage.separator_chars()
+                + sentence_coverage.coarse_only_chars()
+                != sentence_coverage.paragraph_chars()
             {
                 push_error(
                     findings,
@@ -1467,13 +1489,14 @@ fn validate_blocks_and_text_units(
                     "sentence_coverage_invariant_failed",
                     format!(
                         "Sentence coverage for Paragraph {}#p{} does not partition its current Paragraph text",
-                        section_id.0, sentence_coverage.paragraph_index
+                        section_id.0,
+                        sentence_coverage.paragraph_index()
                     ),
                 );
             }
-            coverage.text_units.sentence_separator_chars += sentence_coverage.separator_chars;
-            coverage.text_units.sentence_coarse_only_chars += sentence_coverage.coarse_only_chars;
-            if sentence_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly {
+            coverage.text_units.sentence_separator_chars += sentence_coverage.separator_chars();
+            coverage.text_units.sentence_coarse_only_chars += sentence_coverage.coarse_only_chars();
+            if sentence_coverage.eligibility() == SentenceEligibility::CoarseParagraphOnly {
                 coverage.text_units.coarse_paragraphs += 1;
             }
         }
@@ -1492,8 +1515,8 @@ fn validate_blocks_and_text_units(
                     ranges_overlap(
                         block.normalized_range.start(),
                         block.normalized_range.end(),
-                        sentence.range.start(),
-                        sentence.range.end(),
+                        sentence.range().start(),
+                        sentence.range().end(),
                     )
                 })
             });

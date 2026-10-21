@@ -40,7 +40,8 @@ const V2_TOOLS: [&str; 7] = [
     "source_view",
 ];
 
-/// The byte size of the default `tools/list` result on `main`. The v2 switch must not move it.
+/// The byte size of the `tools/list` result with `READING_MCP_TOOLS=v1` on `main`. The v2 switch
+/// must not move it.
 const DEFAULT_TOOLS_LIST_BYTES: usize = 38_773;
 
 // ------------------------------------------------------------------------------------------------
@@ -1080,8 +1081,8 @@ async fn the_seven_v2_tool_definitions_stay_compact() {
         .expect("tools serialize")
         .len();
     assert!(
-        bytes < 8_000,
-        "the seven v2 tools must stay under 8000 bytes of tools/list JSON, got {bytes}"
+        bytes < 3_600,
+        "the seven v2 tools must stay under 3600 bytes of tools/list JSON, got {bytes}"
     );
     client.cancel().await.expect("client should close cleanly");
 }

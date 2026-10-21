@@ -1,7 +1,7 @@
-//! Benchmark-only profile of the section-text scan on real books: how long each phase of
-//! `SqliteTextUnitIndex::scan_lexical` takes, and how many sections, paragraphs and sentences it
-//! evaluates. Ignored by default; the book-profile workflow runs it with
-//! `READING_MCP_SEARCH_PROFILE_DIR` pointing at the downloaded books.
+//! Benchmark-only profile of the section-text scan on real books: how long a cold and a warm search
+//! take, how long each phase of a warm `SqliteTextUnitIndex::scan_lexical` takes, and how many
+//! sections, paragraphs and sentences it evaluates. Ignored by default; the book-profile workflow
+//! runs it with `READING_MCP_SEARCH_PROFILE_DIR` pointing at the downloaded books.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -13,17 +13,21 @@ use reading_mcp::infrastructure::{
 };
 use reading_mcp::parsing::{ArchiveLimits, ParserRouter};
 
-/// The queries the book profile reports: one per shape the books are known for, plus a zero-hit one.
-const QUERIES: [&str; 6] = [
+/// The queries the book profile reports: one per shape the books are known for, plus a single char
+/// that occurs everywhere, a relaxed English multi-word query and a zero-hit one.
+const QUERIES: [&str; 8] = [
     "皇帝",
     "節度使",
     "太祖",
     "Pierre",
     "寶玉",
     "不存在的詞組甲乙",
+    "的",
+    "Pierre Natasha quasar",
 ];
 
-const RUNS: usize = 5;
+/// Warm searches after the cold one; the median of these is the warm number.
+const WARM_RUNS: usize = 5;
 const LIMIT: usize = 10;
 
 #[tokio::test]
@@ -100,14 +104,14 @@ async fn scan_search_phases_on_real_books() {
             println!("{label}: save error: {error}");
             continue;
         }
-        let index = match SqliteSearchIndex::open(&database) {
-            Ok(index) => index,
+        let stored = match SqliteSearchIndex::open(&database) {
+            Ok(stored) => stored,
             Err(error) => {
                 println!("{label}: index open error: {error}");
                 continue;
             }
         };
-        if let Err(error) = index.index(&document).await {
+        if let Err(error) = stored.index(&document).await {
             println!("{label}: index error: {error}");
             continue;
         }
@@ -122,44 +126,76 @@ async fn scan_search_phases_on_real_books() {
         println!("### {label}");
         println!();
         println!(
-            "| Query | Hits | search ms (median) | read_text | section_prefilter | layout_decode | \
-             paragraphs | sentences | sort | sections passed / scanned | units evaluated |"
+            "| Query | Hits | cold ms | warm ms (median) | warm read_text | warm \
+             section_prefilter | warm layout_decode | warm paragraphs | warm sentences | warm sort | \
+             sections passed / scanned | units evaluated |"
         );
-        println!("|---|---|---|---|---|---|---|---|---|---|---|");
+        println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
 
         for query in QUERIES {
-            let mut times: Vec<Duration> = Vec::with_capacity(RUNS);
+            // Cold: the first search on a freshly opened index over the stored database, so no cache
+            // survives from an earlier query.
+            let index = match SqliteSearchIndex::open(&database) {
+                Ok(index) => index,
+                Err(error) => {
+                    println!("| {query} | index open error: {error} | | | | | | | | | | |");
+                    continue;
+                }
+            };
+            let start = Instant::now();
+            match index.search_lexical(&document.id, query, LIMIT).await {
+                Ok(_) => {}
+                Err(error) => {
+                    println!("| {query} | cold search error: {error} | | | | | | | | | | |");
+                    continue;
+                }
+            }
+            let cold = start.elapsed();
+
+            // Warm: the next searches on that same index, whose cache the cold search filled.
+            let mut times: Vec<Duration> = Vec::with_capacity(WARM_RUNS);
             let mut hits = 0usize;
-            let mut timings: Option<ScanTimings> = None;
-            for run in 1..=RUNS {
+            let mut failed = false;
+            for _ in 0..WARM_RUNS {
                 let start = Instant::now();
                 match index.search_lexical(&document.id, query, LIMIT).await {
                     Ok(found) => hits = found.len(),
                     Err(error) => {
-                        println!("| {query} | search error: {error} | | | | | | | | | |");
+                        println!("| {query} | warm search error: {error} | | | | | | | | | | |");
+                        failed = true;
                         break;
                     }
                 }
                 times.push(start.elapsed());
-                if run == RUNS {
-                    match units.scan_lexical_profile(&document.id, query, LIMIT).await {
-                        Ok(profile) => timings = profile,
-                        Err(error) => {
-                            println!("| {query} | profile error: {error} | | | | | | | | | |");
-                            break;
-                        }
-                    }
-                }
             }
-            if times.len() != RUNS {
+            if failed {
                 continue;
             }
             times.sort();
-            let median = times[RUNS / 2];
-            let timings = timings.unwrap_or_default();
+            let warm = times[WARM_RUNS / 2];
+
+            // The phase columns describe a warm pass: the profile store fills its own cache on the
+            // first call, so the second call is the one reported.
+            let mut timings = ScanTimings::default();
+            let mut profile_failed = false;
+            for pass in 0..2 {
+                match units.scan_lexical_profile(&document.id, query, LIMIT).await {
+                    Ok(Some(profile)) if pass == 1 => timings = profile,
+                    Ok(_) => {}
+                    Err(error) => {
+                        println!("| {query} | profile error: {error} | | | | | | | | | | |");
+                        profile_failed = true;
+                        break;
+                    }
+                }
+            }
+            if profile_failed {
+                continue;
+            }
             println!(
-                "| {query} | {hits} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {} |",
-                millis(median),
+                "| {query} | {hits} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {} |",
+                millis(cold),
+                millis(warm),
                 millis(timings.read_text),
                 millis(timings.section_prefilter),
                 millis(timings.layout_decode),

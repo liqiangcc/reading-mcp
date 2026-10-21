@@ -435,13 +435,7 @@ impl LexicalQuery {
 
     /// Prefilter on a larger lowered text that contains the candidates: could every token be in it?
     pub(crate) fn may_contain_all(&self, lowered_container: &str) -> bool {
-        let folded;
-        let container = if self.fold {
-            folded = lowered_container.replace('ς', "σ");
-            folded.as_str()
-        } else {
-            lowered_container
-        };
+        let container = self.prefilter_container(lowered_container);
         self.prefilter
             .iter()
             .all(|token| container.contains(token.as_str()))
@@ -449,16 +443,43 @@ impl LexicalQuery {
 
     /// Prefilter on a larger lowered text that contains the candidates: could any token be in it?
     pub(crate) fn may_contain_any(&self, lowered_container: &str) -> bool {
-        let folded;
-        let container = if self.fold {
-            folded = lowered_container.replace('ς', "σ");
-            folded.as_str()
-        } else {
-            lowered_container
-        };
+        let container = self.prefilter_container(lowered_container);
         self.prefilter
             .iter()
             .any(|token| container.contains(token.as_str()))
+    }
+
+    /// How many prefilter tokens a lowered container holds, counted with the folding `may_contain_all`
+    /// uses, so the count is a superset of the tokens `relaxed_count` and `strict_match` can find.
+    pub(crate) fn contained_token_count(&self, lowered_container: &str) -> usize {
+        let container = self.prefilter_container(lowered_container);
+        self.prefilter
+            .iter()
+            .filter(|token| container.contains(token.as_str()))
+            .count()
+    }
+
+    /// The most a unit inside a container whose lowered text is `lowered_container` can score: the
+    /// phrase bonus, every token the container holds and the largest kind bonus (a sentence's 1.0).
+    ///
+    /// A query that folds a sigma always counts the phrase, because `to_lowercase` maps `Σ` by
+    /// position: a unit slice can hold the phrase where the container it was cut from does not.
+    pub(crate) fn container_bound(&self, lowered_container: &str, contained_tokens: usize) -> f32 {
+        let phrase = if self.fold || lowered_container.contains(self.raw_lowered.as_str()) {
+            4.0
+        } else {
+            0.0
+        };
+        phrase + contained_tokens as f32 + 1.0
+    }
+
+    /// The container a prefilter runs on: folded when the query folds a sigma, as `to_lowercase` does.
+    fn prefilter_container<'a>(&self, lowered_container: &'a str) -> Cow<'a, str> {
+        if self.fold {
+            Cow::Owned(lowered_container.replace('ς', "σ"))
+        } else {
+            Cow::Borrowed(lowered_container)
+        }
     }
 }
 
@@ -878,6 +899,75 @@ mod tests {
             );
         }
         assert!(cjk_samples >= 5, "only {cjk_samples} all-CJK samples");
+    }
+
+    /// The bound a scan prunes on: no unit inside a container may score above it.
+    #[test]
+    fn container_bound_covers_every_unit_of_the_container() {
+        let samples = [
+            ("皇帝在朝堂上讨论虚拟内存机制与页表映射。", "皇帝"),
+            ("皇帝 内存 与页表", "皇帝 内存"),
+            ("節度使與太祖論兵於朝。", "節度使"),
+            ("ΟΔΟΣ.ΟΔΟΣ", "οδος"),
+            (
+                "ΟΔΟΣ.ΟΔΟΣ closes paragraph. Memory of ΣΟΦΟΣ.ΟΔΟΣ stays.",
+                "οδος",
+            ),
+            ("Memory Layout of the tables", "memory"),
+            ("Memory Layout of the tables", "memory quasar"),
+            ("The layout of οδος.οδος repeats in memory", "memory"),
+            ("İstanbul is a city", "istanbul"),
+            ("没有匹配的一行", "皇帝"),
+        ];
+        let mut checked = 0usize;
+        for (text, raw_query) in samples {
+            let query = LexicalQuery::new(raw_query).expect("query tokens");
+            let lowered = lowercase_fast(text);
+            let bound = query.container_bound(&lowered, query.contained_token_count(&lowered));
+            let boundaries: Vec<usize> = text
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain([text.len()])
+                .collect();
+            for start in 0..boundaries.len() - 1 {
+                for end in start + 1..boundaries.len().min(start + 6) {
+                    let slice = &text[boundaries[start]..boundaries[end]];
+                    let slice_lowered = lowercase_fast(slice);
+                    for kind in [SearchHitKind::Sentence, SearchHitKind::Paragraph] {
+                        let matched = query.relaxed_count(slice, &slice_lowered);
+                        if matched > 0 {
+                            let score = score_lowered_with_phrase(
+                                &slice_lowered,
+                                &query.raw_lowered,
+                                kind,
+                                matched,
+                                None,
+                            );
+                            assert!(
+                                score <= bound,
+                                "relaxed score {score} above bound {bound} for {raw_query:?} on {slice:?}"
+                            );
+                            checked += 1;
+                        }
+                        if query.strict_match(slice, &slice_lowered) {
+                            let score = score_lowered_with_phrase(
+                                &slice_lowered,
+                                &query.raw_lowered,
+                                kind,
+                                query.token_count(),
+                                None,
+                            );
+                            assert!(
+                                score <= bound,
+                                "strict score {score} above bound {bound} for {raw_query:?} on {slice:?}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "only {checked} unit scores checked");
     }
 
     #[test]

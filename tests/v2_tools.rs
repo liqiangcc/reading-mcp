@@ -482,7 +482,7 @@ async fn search_returns_sentence_handles_that_read_at_the_match() {
     assert_eq!(hits.len(), 3, "three Alpha sentences: {found}");
     assert_eq!(found["total"], 3);
     assert!(
-        found["sections"].as_object().expect("sections").len() >= 1,
+        !found["sections"].as_object().expect("sections").is_empty(),
         "the sections map names the hit sections"
     );
     for hit in hits {

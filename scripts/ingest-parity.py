@@ -12,7 +12,9 @@ database into one text file per side:
   `section_id`, `char_len`, `paragraph_coverage_json` and the whole-section layout hex. The v3
   `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
   re-encoded as that blob;
-- section text: one sha256 per section over its chunks in order, plus `char_len`.
+- section text: one sha256 per section over its chunks in order, plus `char_len`;
+- reads: the v1 text-unit/context/read/search sequence and the v2 short-handle sequence, on one
+  server per side, every payload compared byte for byte after wall-clock keys are dropped.
 
 It then compares A against B per input, prints one markdown table and writes unified diffs (first
 200 lines each) into the output directory for anything that differs. It exits 1 when any input
@@ -525,7 +527,7 @@ def layout_rows(connection: sqlite3.Connection) -> list[str]:
         ):
             layout_hex = merge_chunk_layouts(
                 chunks.get((document_id, section_key), [])
-            ).hex()
+            ).hex().upper()
             rows.append(
                 "\t".join(
                     "" if value is None else str(value)
@@ -632,14 +634,306 @@ def safe_label(label: str) -> str:
     )
 
 
+CURSOR_CHECKSUM_DOMAIN = b"reading-mcp/text-unit-cursor-checksum/v1\0"
+
+
+def pick_read_section(structure) -> str | None:
+    """The top-level section covering the most body order, ties broken by document order."""
+    if not isinstance(structure, dict):
+        return None
+    sections = structure.get("sections")
+    if not isinstance(sections, list) or not sections:
+        return None
+    stream = structure.get("stream")
+    total_nodes = stream.get("total_nodes") if isinstance(stream, dict) else None
+    best = None
+    for index, node in enumerate(sections):
+        if not isinstance(node, dict):
+            continue
+        start = node.get("body_order")
+        end = total_nodes
+        if index + 1 < len(sections) and isinstance(sections[index + 1], dict):
+            end = sections[index + 1].get("body_order")
+        if not isinstance(start, int) or not isinstance(end, int):
+            continue
+        if best is None or end - start > best[0]:
+            best = (end - start, start, node.get("section_id"))
+    if best is None:
+        first = sections[0]
+        return first.get("section_id") if isinstance(first, dict) else None
+    return best[2]
+
+
+def text_unit_cursor(
+    opened: dict,
+    structure: dict,
+    section_id: str,
+    kind: str,
+    direction: str,
+    policy: str,
+    next_index: int,
+    total_items: int,
+) -> str:
+    """Rebuilds a resume cursor at `next_index` with the encoding `text_unit_cursor.rs` uses.
+
+    The claims are serialized in declaration order and checksummed, so the server accepts this
+    exactly like a cursor it issued itself; that is what makes a middle-of-stream read one call.
+    """
+    claims = {
+        "schema_version": "text-unit-cursor/v1",
+        "document_id": opened["document_id"],
+        "content_hash": opened["content_hash"],
+        "normalized_document_hash": opened["normalized_document_hash"],
+        "section_id": section_id,
+        "segmentation_version": structure["segmentation_version"],
+        "requested_kind": kind,
+        "direction": direction,
+        "coverage_policy": policy,
+        "next_index": next_index,
+        "total_items": total_items,
+    }
+    claims_bytes = json.dumps(claims, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    checksum = "sha256:" + hashlib.sha256(
+        CURSOR_CHECKSUM_DOMAIN + claims_bytes
+    ).hexdigest()
+    envelope = json.dumps(
+        {"claims": claims, "checksum": checksum},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "tuc1." + envelope.hex()
+
+
+def run_v1_reads(call, source: str, records: list[dict]) -> None:
+    """Records the design note's §4 read sequence: text units, context, reads, search.
+
+    Runs on the same server as the v2 sequence, after `open_document`, on the largest top-level
+    section so the page boundaries are non-trivial.
+    """
+    opened = call("open_document", {"source": os.path.abspath(source)})
+    records.append({"step": "v1 open_document", "payload": opened})
+    document_id = opened.get("document_id") if isinstance(opened, dict) else None
+    if not isinstance(document_id, str):
+        return
+
+    structure = call("get_document_structure", {"document_id": document_id, "max_depth": 1})
+    records.append({"step": "v1 get_document_structure", "payload": structure})
+    section = pick_read_section(structure)
+    if not isinstance(section, str):
+        return
+
+    first_locators: dict[str, dict] = {}
+    first_texts: dict[str, str] = {}
+    for kind in ("paragraph", "sentence"):
+        for policy in ("preserve_source", "eligible_only"):
+            label = f"{kind}/{policy}"
+            base = {
+                "document_id": document_id,
+                "section_id": section,
+                "requested_kind": kind,
+                "coverage_policy": policy,
+            }
+
+            def text_units(**extra):
+                return call("get_text_units", {**base, **extra})
+
+            start = text_units(direction="forward", max_items=1)
+            records.append({"step": f"v1 {label} forward start", "payload": start})
+            items = start.get("items") if isinstance(start, dict) else None
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                locator = items[0].get("locator")
+                text = items[0].get("text")
+                if isinstance(locator, dict):
+                    first_locators.setdefault(kind, locator)
+                if isinstance(text, str):
+                    first_texts.setdefault(kind, text)
+            stream = start.get("stream") if isinstance(start, dict) else None
+            total = stream.get("total_items") if isinstance(stream, dict) else None
+            if not isinstance(total, int) or total <= 0:
+                continue
+
+            batch = text_units(direction="forward", max_items=256)
+            records.append({"step": f"v1 {label} forward 256", "payload": batch})
+            follow = batch.get("next_cursor") if isinstance(batch, dict) else None
+            if isinstance(follow, str):
+                records.append(
+                    {
+                        "step": f"v1 {label} forward continue",
+                        "payload": text_units(
+                            direction="forward", max_items=256, cursor=follow
+                        ),
+                    }
+                )
+
+            anchor = None
+            middle = total // 2
+            if 0 < middle < total:
+                middle_page = text_units(
+                    direction="forward",
+                    max_items=256,
+                    cursor=text_unit_cursor(
+                        opened, structure, section, kind, "forward", policy, middle, total
+                    ),
+                )
+                records.append({"step": f"v1 {label} forward middle", "payload": middle_page})
+                middle_items = middle_page.get("items")
+                if (
+                    isinstance(middle_items, list)
+                    and middle_items
+                    and isinstance(middle_items[0], dict)
+                ):
+                    anchor = middle_items[0].get("locator")
+            end_page = text_units(
+                direction="forward",
+                max_items=1,
+                cursor=text_unit_cursor(
+                    opened, structure, section, kind, "forward", policy, total - 1, total
+                ),
+            )
+            records.append({"step": f"v1 {label} forward end", "payload": end_page})
+            records.append(
+                {
+                    "step": f"v1 {label} backward end 1",
+                    "payload": text_units(direction="backward", max_items=1),
+                }
+            )
+            records.append(
+                {
+                    "step": f"v1 {label} backward end 256",
+                    "payload": text_units(direction="backward", max_items=256),
+                }
+            )
+
+            if not isinstance(anchor, dict):
+                anchor = first_locators.get(kind)
+            if isinstance(anchor, dict):
+                anchored = text_units(
+                    direction="forward", max_items=1, anchor_locator=anchor
+                )
+                records.append({"step": f"v1 {label} anchored", "payload": anchored})
+                follow = anchored.get("next_cursor") if isinstance(anchored, dict) else None
+                if isinstance(follow, str):
+                    records.append(
+                        {
+                            "step": f"v1 {label} anchored continue",
+                            "payload": text_units(
+                                direction="forward", max_items=256, cursor=follow
+                            ),
+                        }
+                    )
+
+    paragraph_locator = first_locators.get("paragraph")
+    sentence_locator = first_locators.get("sentence")
+    if isinstance(paragraph_locator, dict):
+        records.append(
+            {
+                "step": "v1 get_context paragraph",
+                "payload": call(
+                    "get_context",
+                    {
+                        "document_id": document_id,
+                        "target_locator": paragraph_locator,
+                        "relation": {
+                            "type": "neighbor",
+                            "unit": "paragraph",
+                            "before": 1,
+                            "after": 1,
+                        },
+                    },
+                ),
+            }
+        )
+    if isinstance(sentence_locator, dict):
+        records.append(
+            {
+                "step": "v1 get_context sentence",
+                "payload": call(
+                    "get_context",
+                    {
+                        "document_id": document_id,
+                        "target_locator": sentence_locator,
+                        "relation": {
+                            "type": "neighbor",
+                            "unit": "sentence",
+                            "before": 2,
+                            "after": 2,
+                        },
+                    },
+                ),
+            }
+        )
+        records.append(
+            {
+                "step": "v1 get_context container",
+                "payload": call(
+                    "get_context",
+                    {
+                        "document_id": document_id,
+                        "target_locator": sentence_locator,
+                        "relation": {"type": "container", "kind": "paragraph"},
+                    },
+                ),
+            }
+        )
+    records.append(
+        {
+            "step": "v1 get_context section container",
+            "payload": call(
+                "get_context",
+                {
+                    "document_id": document_id,
+                    "section_id": section,
+                    "relation": {"type": "container", "kind": "section"},
+                },
+            ),
+        }
+    )
+
+    records.append(
+        {
+            "step": "v1 read_document section",
+            "payload": call(
+                "read_document",
+                {"document_id": document_id, "section_id": section, "max_chars": 512},
+            ),
+        }
+    )
+    if isinstance(paragraph_locator, dict):
+        records.append(
+            {
+                "step": "v1 read_document locator",
+                "payload": call(
+                    "read_document",
+                    {
+                        "document_id": document_id,
+                        "target_locator": paragraph_locator,
+                        "max_chars": 512,
+                    },
+                ),
+            }
+        )
+
+    query = first_texts.get("sentence", "").strip()[:24] or "reading"
+    records.append(
+        {
+            "step": "v1 search_document",
+            "payload": call(
+                "search_document",
+                {"document_id": document_id, "query": query, "limit": 5},
+            ),
+        }
+    )
+
+
 def run_read_probe(
     binary: str, source: str, state_dir: str, timeout: float, log_path: str
 ) -> list[dict]:
-    """Reopens the stored state and records the v2 read sequence, both tools registered.
+    """Reopens the stored state and records the v1 and v2 read sequences, both tools registered.
 
-    `open` returns the short document handle; five `read` calls follow `next`; the next call uses
-    `back=2`; the last one asks for a 2000-char batch from the section start. Every response is
-    kept so two binaries can be compared call by call.
+    The v1 sequence (`run_v1_reads`) covers text units, context, reads and search; then `open`
+    returns the short document handle, five `read` calls follow `next`, the next call uses `back=2`
+    and the last one asks for a 2000-char batch from the section start. Every response is kept so
+    two binaries can be compared call by call.
     """
     env = server_environment(state_dir, os.path.dirname(os.path.abspath(source)))
     env["READING_MCP_TOOLS"] = "both"
@@ -687,6 +981,8 @@ def run_read_probe(
             if failure is not None:
                 return [{"step": "initialize", "payload": {"error": failure}}]
             send(process, INITIALIZED_NOTIFICATION)
+
+            run_v1_reads(call, source, records)
 
             opened = call("open", {"source": os.path.abspath(source)})
             records.append({"step": "v2 open", "payload": opened})

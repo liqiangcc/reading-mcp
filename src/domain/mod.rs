@@ -47,7 +47,9 @@ pub use segmentation::{
 };
 #[doc(hidden)]
 pub use segmentation::{
-    paragraph_content_class_in_section, paragraph_content_class_whole_map_scan,
+    ParagraphBoundarySource, ParagraphCandidate, paragraph_content_class_in_section,
+    paragraph_content_class_whole_map_scan, section_paragraph_candidates_indexed,
+    section_paragraph_candidates_linear_scan,
 };
 pub use text_locator::TextLocator;
 pub use text_unit::{

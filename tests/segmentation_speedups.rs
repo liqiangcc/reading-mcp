@@ -3,7 +3,8 @@
 //! Every comparison here runs the pre-R5b implementation and the implementation that replaced it on
 //! the same input and asserts that they agree. This file grows one test per speed-up:
 //! - `parse_with_segmentation` returns the segmentation the returned document rebuilds;
-//! - the in-section block lookup finds the class the whole-map scan finds, for every paragraph.
+//! - the in-section block lookup finds the class the whole-map scan finds, for every paragraph;
+//! - indexed slicing yields the candidate list the linear slicing yields, for every section.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
@@ -12,7 +13,8 @@ use std::path::{Path, PathBuf};
 use reading_mcp::application::ports::{ApplicationError, Parser, RetrievedResource};
 use reading_mcp::domain::{
     Document, DocumentSource, MediaType, Section, paragraph_content_class_in_section,
-    paragraph_content_class_whole_map_scan,
+    paragraph_content_class_whole_map_scan, section_paragraph_candidates_indexed,
+    section_paragraph_candidates_linear_scan,
 };
 use reading_mcp::parsing::{ArchiveLimits, ParserRouter};
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -85,6 +87,17 @@ fn compare_document(label: &str, document: &Document, comparisons: &mut Comparis
         };
         comparisons.sections += 1;
         let index = section.normalized_text_index();
+
+        let indexed = section_paragraph_candidates_indexed(section, block_map);
+        let linear = section_paragraph_candidates_linear_scan(section, block_map);
+        if indexed != linear {
+            comparisons.mismatch(format!(
+                "{label} section={} candidate lists differ: indexed {} vs linear {} entries",
+                section.id.0,
+                indexed.len(),
+                linear.len()
+            ));
+        }
 
         for paragraph in &section_segmentation.paragraphs {
             comparisons.paragraphs += 1;

@@ -54,7 +54,7 @@ impl<'a> SectionTexts<'a> {
         if self.texts.contains_key(section_id) {
             return Ok(());
         }
-        let text = match self.repository {
+        let text = match &self.repository {
             None => self
                 .document
                 .find_section(section_id)
@@ -90,7 +90,7 @@ impl<'a> SectionTexts<'a> {
         if let Some(len) = self.char_lens.get(section_id) {
             return Ok(*len);
         }
-        let len = match self.repository {
+        let len = match &self.repository {
             None => self
                 .document
                 .find_section(section_id)

@@ -674,6 +674,10 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
             from.starts_with("b:"),
             "a backward `next` must be a b: cursor: {from}"
         );
+        assert!(
+            expected > 0,
+            "the backward walk must not pass the book start"
+        );
         // No `direction` here: the cursor prefix carries it.
         step = payload(&v2_read(&client, &from, json!({})).await);
         expected -= 1;
@@ -681,10 +685,6 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
             step["at"].as_str(),
             Some(walked[expected].handle.as_str()),
             "a backward step from a cursor must report the item it read: {step}"
-        );
-        assert!(
-            expected > 0,
-            "the backward walk must not pass the book start"
         );
     }
     assert_eq!(

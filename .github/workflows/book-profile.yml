@@ -40,6 +40,9 @@ jobs:
       - name: Unit text equals range slice (real books)
         if: always()
         run: READING_MCP_SLICE_CHECK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test unit_text_slices -- --ignored --nocapture
+      - name: Stored streams equal the planner (real books)
+        if: always()
+        run: READING_MCP_BOOK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test real_books_stream_parity -- --ignored --nocapture
       - name: Scan search phases (real books)
         if: always()
         run: READING_MCP_SEARCH_PROFILE_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test search_scan_profile -- --ignored --nocapture

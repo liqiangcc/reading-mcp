@@ -8,7 +8,8 @@ on a fresh state directory, and then reads the resulting database directly:
   `cache_size`, `temp_store` and `mmap_size` (the last three are the connection defaults, which is
   what the server runs with because it sets none of them);
 - the byte length of the `documents.document_json` row, the JSON that still carries the full text;
-- the total byte length of that document's `section_text_v1` chunks.
+- the total byte length of that document's section text chunks (`section_text_v2`, or the older
+  `section_text_v1`).
 
 Standard library only. Inputs are either a synthetic CJK document of a given size, generated the
 way `scripts/memory-profile.py` generates them (`--cjk-mib`), or existing files given as
@@ -61,7 +62,7 @@ def database_pragmas(database: str) -> dict[str, object]:
 
 
 def database_sizes(database: str) -> dict[str, int]:
-    """Return the stored `document_json` and `section_text_v1` byte totals of the one document."""
+    """Return the stored `document_json` and section-text byte totals of the one document."""
     connection = sqlite3.connect(database)
     try:
         # `length()` counts characters for TEXT; the CAST to BLOB makes it count UTF-8 bytes.
@@ -69,8 +70,15 @@ def database_sizes(database: str) -> dict[str, int]:
             "SELECT COUNT(*), COALESCE(SUM(length(CAST(document_json AS BLOB))), 0)"
             " FROM documents"
         ).fetchone()
+        table = (
+            "section_text_v2"
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'section_text_v2'"
+            ).fetchone()
+            else "section_text_v1"
+        )
         chunks = connection.execute(
-            "SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))), 0) FROM section_text_v1"
+            f"SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))), 0) FROM {table}"
         ).fetchone()
         return {
             "documents": int(documents[0]),

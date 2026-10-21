@@ -20,7 +20,7 @@ use crate::domain::{
 };
 
 /// Lexical search over the stored section text: no full-text index is built, the candidates are found by
-/// scanning `section_text_v1` and the unit boundaries of `section_layout_v1`.
+/// scanning `section_text_v2` and the unit boundaries of `section_layout_v2`.
 pub struct SqliteSearchIndex {
     repository: Arc<dyn DocumentRepository>,
     units: Arc<SqliteTextUnitIndex>,

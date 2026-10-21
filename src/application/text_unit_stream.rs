@@ -20,7 +20,7 @@ pub const TEXT_UNIT_STREAM_VERSION: &str = "text-unit-stream/v1";
 
 /// Version of the whole stored TextUnit index (documents, sections, items, coverage, streams, summaries).
 /// Bump it when the store layout or its meaning changes so documents are re-ingested on reopen.
-pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v3";
+pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v4";
 
 /// A borrowed unit of a section stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +227,47 @@ pub fn plan_section_stream_desc(
     coverage: &[ParagraphCoverageDesc],
     requested_kind: RequestedTextUnitKind,
 ) -> Result<SectionStreamPlanDesc, ApplicationError> {
+    let mut entries = Vec::new();
+    let counts = walk_section_stream(
+        section_id,
+        paragraphs,
+        section_coverage,
+        sentences,
+        coverage,
+        requested_kind,
+        &mut |entry| entries.push(entry),
+    )?;
+    Ok(SectionStreamPlanDesc {
+        entries,
+        preserve_source: counts.preserve_source,
+        eligible_only: counts.eligible_only,
+    })
+}
+
+/// The summary side of one stream kind: both coverages and both totals, accumulated in one pass over
+/// the same entries the planner emits. Ingest uses this so it never materializes a sentence stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SectionStreamCounts {
+    pub total_items_preserve: usize,
+    pub total_items_eligible: usize,
+    pub preserve_source: TextUnitEnumerationCoverage,
+    pub eligible_only: TextUnitEnumerationCoverage,
+}
+
+/// Walks the section stream of `requested_kind` once, emitting each entry in planner order and
+/// accumulating the summary counters the planner reports. This is the single implementation of the
+/// stream order and of the coverage counters: [`plan_section_stream_desc`] collects the entries and
+/// the store counts them while cutting chunks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_section_stream(
+    section_id: &SectionId,
+    paragraphs: &[ParagraphDesc],
+    section_coverage: Option<&SectionCoverageDesc>,
+    sentences: &[SentenceDesc],
+    coverage: &[ParagraphCoverageDesc],
+    requested_kind: RequestedTextUnitKind,
+    emit: &mut dyn FnMut(StreamEntryDesc),
+) -> Result<SectionStreamCounts, ApplicationError> {
     let section_coverage = section_coverage.ok_or_else(|| {
         ApplicationError::InvalidRequest(format!(
             "paragraph coverage is unavailable for section {}",
@@ -264,7 +305,16 @@ pub fn plan_section_stream_desc(
         .map(|coverage| coverage.separator_chars)
         .sum::<usize>();
 
-    let mut entries = Vec::new();
+    let mut total = 0usize;
+    let mut eligible_total = 0usize;
+    let mut represented_paragraphs = 0usize;
+    let mut represented_sentences = 0usize;
+    let mut eligible_represented_paragraphs = 0usize;
+    let mut eligible_represented_sentences = 0usize;
+    let mut coarse_non_prose_items = 0usize;
+    let mut coarse_structural_items = 0usize;
+    let mut intentionally_skipped = 0usize;
+
     for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
         let paragraph_coverage = coverage_by_paragraph
             .get(&paragraph.paragraph_index)
@@ -277,24 +327,56 @@ pub fn plan_section_stream_desc(
             })?;
         let is_coarse = paragraph_coverage.eligibility == SentenceEligibility::CoarseParagraphOnly;
 
+        let mut emit_entry = |unit: UnitRef, degradation: Option<&'static str>, char_count| {
+            let entry = StreamEntryDesc {
+                unit,
+                content_class: paragraph_coverage.content_class,
+                degradation,
+                char_count,
+                eligible: match requested_kind {
+                    RequestedTextUnitKind::Paragraph => !is_coarse,
+                    RequestedTextUnitKind::Sentence if is_coarse => false,
+                    RequestedTextUnitKind::Sentence => true,
+                },
+            };
+            total += 1;
+            match entry.unit {
+                UnitRef::Paragraph(_) => represented_paragraphs += 1,
+                UnitRef::Sentence(_) => represented_sentences += 1,
+            }
+            if entry.eligible {
+                eligible_total += 1;
+                match entry.unit {
+                    UnitRef::Paragraph(_) => eligible_represented_paragraphs += 1,
+                    UnitRef::Sentence(_) => eligible_represented_sentences += 1,
+                }
+            } else {
+                intentionally_skipped += 1;
+                if requested_kind == RequestedTextUnitKind::Sentence {
+                    if is_coarse_structural_class(entry.content_class) {
+                        coarse_structural_items += 1;
+                    } else {
+                        coarse_non_prose_items += 1;
+                    }
+                }
+            }
+            emit(entry);
+        };
+
         match requested_kind {
             RequestedTextUnitKind::Paragraph => {
-                entries.push(StreamEntryDesc {
-                    unit: UnitRef::Paragraph(paragraph_index),
-                    content_class: paragraph_coverage.content_class,
-                    degradation: None,
-                    char_count: paragraph.char_count,
-                    eligible: !is_coarse,
-                });
+                emit_entry(
+                    UnitRef::Paragraph(paragraph_index),
+                    None,
+                    paragraph.char_count,
+                );
             }
             RequestedTextUnitKind::Sentence if is_coarse => {
-                entries.push(StreamEntryDesc {
-                    unit: UnitRef::Paragraph(paragraph_index),
-                    content_class: paragraph_coverage.content_class,
-                    degradation: Some(coarse_degradation(paragraph_coverage.content_class)),
-                    char_count: paragraph.char_count,
-                    eligible: false,
-                });
+                emit_entry(
+                    UnitRef::Paragraph(paragraph_index),
+                    Some(coarse_degradation(paragraph_coverage.content_class)),
+                    paragraph.char_count,
+                );
             }
             RequestedTextUnitKind::Sentence => {
                 for sentence_index in sentences_by_paragraph
@@ -303,51 +385,15 @@ pub fn plan_section_stream_desc(
                     .flatten()
                 {
                     let sentence = &sentences[*sentence_index];
-                    entries.push(StreamEntryDesc {
-                        unit: UnitRef::Sentence(*sentence_index),
-                        content_class: paragraph_coverage.content_class,
-                        degradation: None,
-                        char_count: sentence.char_count,
-                        eligible: true,
-                    });
+                    emit_entry(
+                        UnitRef::Sentence(*sentence_index),
+                        None,
+                        sentence.char_count,
+                    );
                 }
             }
         }
     }
-
-    let intentionally_skipped = entries.iter().filter(|entry| !entry.eligible).count();
-    let preserve_represented_paragraphs = entries
-        .iter()
-        .filter(|entry| matches!(entry.unit, UnitRef::Paragraph(_)))
-        .count();
-    let preserve_represented_sentences = entries
-        .iter()
-        .filter(|entry| matches!(entry.unit, UnitRef::Sentence(_)))
-        .count();
-    let eligible_represented_paragraphs = entries
-        .iter()
-        .filter(|entry| entry.eligible && matches!(entry.unit, UnitRef::Paragraph(_)))
-        .count();
-    let eligible_represented_sentences = entries
-        .iter()
-        .filter(|entry| entry.eligible && matches!(entry.unit, UnitRef::Sentence(_)))
-        .count();
-    let (coarse_non_prose_items, coarse_structural_items) = if requested_kind
-        == RequestedTextUnitKind::Sentence
-    {
-        (
-            entries
-                .iter()
-                .filter(|entry| !entry.eligible && !is_coarse_structural_class(entry.content_class))
-                .count(),
-            entries
-                .iter()
-                .filter(|entry| !entry.eligible && is_coarse_structural_class(entry.content_class))
-                .count(),
-        )
-    } else {
-        (0, 0)
-    };
 
     let preserve_source = TextUnitEnumerationCoverage {
         owner_chars: section_coverage.owner_chars,
@@ -357,8 +403,8 @@ pub fn plan_section_stream_desc(
         sentence_eligible_paragraphs,
         non_prose_paragraphs,
         coarse_structural_paragraphs,
-        represented_paragraphs: preserve_represented_paragraphs,
-        represented_sentences: preserve_represented_sentences,
+        represented_paragraphs,
+        represented_sentences,
         coarse_non_prose_items,
         coarse_structural_items,
         intentionally_skipped: 0,
@@ -375,8 +421,9 @@ pub fn plan_section_stream_desc(
         ..preserve_source.clone()
     };
 
-    Ok(SectionStreamPlanDesc {
-        entries,
+    Ok(SectionStreamCounts {
+        total_items_preserve: total,
+        total_items_eligible: eligible_total,
         preserve_source,
         eligible_only,
     })

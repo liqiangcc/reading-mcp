@@ -40,6 +40,9 @@ jobs:
       - name: Unit text equals range slice (real books)
         if: always()
         run: READING_MCP_SLICE_CHECK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test unit_text_slices -- --ignored --nocapture
+      - name: Stored streams equal the planner (real books)
+        if: always()
+        run: READING_MCP_BOOK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test real_books_stream_parity -- --ignored --nocapture
       - name: Scan search phases (real books)
         if: always()
         run: READING_MCP_SEARCH_PROFILE_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test search_scan_profile -- --ignored --nocapture
@@ -86,6 +89,27 @@ jobs:
           args=(--binary target/release/reading-mcp --documents "$docs"
             --out book/sequential.json)
           python3 scripts/sequential-read-probe.py "${args[@]}"
+      - name: Chunked layout deep-next profile (cjk-64mib)
+        if: always()
+        run: |
+          mkdir -p book
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("memory_profile", "scripts/memory-profile.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.write_cjk_document(os.path.join("book", "cjk-64mib.txt"), 64 * 1024 * 1024)
+          PY
+          python3 scripts/deep-next-probe.py \
+            --binary target/release/reading-mcp \
+            --document book/cjk-64mib.txt \
+            --calls 200 \
+            --start-fraction 0.5 \
+            --io-bytes \
+            --rss-phases \
+            --env READING_MCP_TOOLS=both \
+            --out book/deep-next-cjk-64mib.json
       - name: V2 sequence equivalence (real books)
         if: always()
         run: READING_MCP_BOOK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test v2_book_equivalence -- --ignored --nocapture
@@ -145,3 +169,158 @@ jobs:
         with:
           name: book-profile
           path: book/
+
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the base tree
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          git worktree add base-src FETCH_HEAD
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the head binary
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Build the base binary
+        run: |
+          cargo build --release --locked --bin reading-mcp \
+            --manifest-path base-src/Cargo.toml --target-dir base-target
+      - name: Download zh-large
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p "$BOOKS"
+          curl -fsSL --retry 3 -o "$BOOKS/zh-large.epub" \
+            "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"
+      - name: Generate cjk-64mib
+        run: |
+          mkdir -p "$RUNNER_TEMP/inputs"
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("memory_profile", "scripts/memory-profile.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.write_cjk_document(
+              os.path.join(os.environ["RUNNER_TEMP"], "inputs", "cjk-64mib.txt"),
+              64 * 1024 * 1024,
+          )
+          PY
+      - name: Measure deep reads on main first, then the branch
+        run: |
+          set -uo pipefail
+          BOOKS="$RUNNER_TEMP/books"
+          GEN="$RUNNER_TEMP/inputs"
+          run() { # label bin doc [probe flags...]
+            local label="$1" bin="$2" doc="$3"
+            shift 3
+            python3 scripts/deep-next-probe.py \
+              --binary "$bin" --document "$doc" \
+              --largest-section --io-bytes --rss-phases \
+              --env READING_MCP_TOOLS=both \
+              --out "$out/$label.json" "$@" \
+              || echo "::warning::probe failed: $label"
+          }
+          for side in base head; do
+            if [ "$side" = base ]; then bin=base-target/release/reading-mcp; else bin=target/release/reading-mcp; fi
+            out="measure-$side"
+            mkdir -p "$out"
+            for doc in "$GEN/cjk-64mib.txt" "$BOOKS/zh-large.epub"; do
+              name="$(basename "$doc")"
+              name="${name%.*}"
+              for kind in sentence paragraph; do
+                for policy in preserve_source eligible_only; do
+                  for fraction in 0 0.5 0.99; do
+                    run "$name-next-$kind-$policy-$fraction" "$bin" "$doc" \
+                      --mode next --kind "$kind" --policy "$policy" \
+                      --start-fraction "$fraction" --calls 2000
+                  done
+                done
+              done
+              run "$name-page256" "$bin" "$doc" \
+                --mode next --kind sentence --policy preserve_source \
+                --start-fraction 0.5 --calls 100 --max-items 256
+              run "$name-anchored" "$bin" "$doc" \
+                --mode anchored --kind sentence --policy preserve_source \
+                --start-fraction 0.5 --calls 200
+              run "$name-context" "$bin" "$doc" \
+                --mode context --kind sentence --policy preserve_source \
+                --start-fraction 0.5 --calls 200
+              run "$name-read" "$bin" "$doc" \
+                --mode read --kind sentence --policy preserve_source \
+                --start-fraction 0.5 --calls 50 --max-chars 2000
+            done
+            python3 scripts/sqlite-facts.py \
+              --binary "$bin" --out-dir "$RUNNER_TEMP/facts-$side" \
+              --documents "cjk-64mib=$GEN/cjk-64mib.txt" \
+              --documents "zh-large=$BOOKS/zh-large.epub" \
+              | tee "facts-$side.txt" || echo "::warning::sqlite facts failed for $side"
+          done
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          def fmt(value):
+              if value is None:
+                  return ""
+              if isinstance(value, float):
+                  return f"{value:.3f}"
+              return str(value)
+
+          lines = [
+              "| side | doc | mode | kind | policy | start | max_items | calls | mean ms | median ms | p95 ms | rchar/call | read_bytes/call | open s | rss after reads MiB | position | total items |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+          ]
+          for path in sorted(glob.glob("measure-*/*.json")):
+              side = os.path.basename(os.path.dirname(path)).removeprefix("measure-")
+              with open(path, encoding="utf-8") as handle:
+                  data = json.load(handle)
+              doc = os.path.basename(data.get("document", "")).split(".")[0]
+              rss_kib = data.get("rss_phases", {}).get("after_reads")
+              lines.append(
+                  "| {side} | {doc} | {mode} | {kind} | {policy} | {start:.2f} | {items} | {calls} | "
+                  "{mean} | {median} | {p95} | {rchar} | {read_bytes} | {open_s} | {rss} | {pos} | {total} |".format(
+                      side=side,
+                      doc=doc,
+                      mode=data.get("mode"),
+                      kind=data.get("kind"),
+                      policy=data.get("policy"),
+                      start=data.get("start_fraction", 0.0),
+                      items=data.get("max_items"),
+                      calls=data.get("calls", 0),
+                      mean=fmt(data.get("mean_ms")),
+                      median=fmt(data.get("median_ms")),
+                      p95=fmt(data.get("p95_ms")),
+                      rchar=fmt(data.get("io_rchar_mean")),
+                      read_bytes=fmt(data.get("io_read_bytes_mean")),
+                      open_s=fmt(data.get("open_seconds")),
+                      rss=fmt(None if rss_kib is None else round(rss_kib / 1024.0, 1)),
+                      pos=data.get("start_position"),
+                      total=data.get("total_items"),
+                  )
+              )
+          table = "\n".join(lines) + "\n"
+          with open("measure-table.md", "w", encoding="utf-8") as handle:
+              handle.write(table)
+          print(table)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(table)
+          PY
+      - name: Upload measurement data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2c4-measure-${{ github.run_id }}
+          path: |
+            measure-base/
+            measure-head/
+            measure-table.md
+            facts-base.txt
+            facts-head.txt

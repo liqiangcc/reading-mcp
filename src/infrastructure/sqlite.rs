@@ -14,11 +14,12 @@ use super::lexical::{
     score_lowered_with_phrase,
 };
 use super::section_layout::{
-    CHUNK_CHARS, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
+    CHUNK_CHARS, LAYOUT_CHUNK_BYTES, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
 };
 use super::sqlite_support::{open_connection, run_sqlite};
 use crate::application::get_text_units::{
     EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
+    TextUnitEnumerationCoverage,
 };
 use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
@@ -26,8 +27,8 @@ use crate::application::ports::{
     SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use crate::application::text_unit_stream::{
-    ParagraphCoverageDesc, ParagraphDesc, SectionCoverageDesc, SectionStreamPlanDesc, SentenceDesc,
-    UnitRef, plan_section_stream_desc,
+    ParagraphCoverageDesc, ParagraphDesc, SectionCoverageDesc, SectionStreamCounts, SentenceDesc,
+    UnitRef, walk_section_stream,
 };
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSegmentation, DocumentSource, Location, MediaType,
@@ -82,292 +83,6 @@ impl DocumentCache {
 
     fn remove(&mut self, id: &DocumentId) {
         self.entries.retain(|(cached, _, _)| cached != id);
-    }
-}
-
-/// How many decoded section layouts `SqliteTextUnitIndex` keeps in memory.
-const SECTION_LAYOUT_CACHE_CAPACITY: usize = 32;
-
-/// A stream plan plus the lookups that make each read cost O(page): built once per cached layout and kind.
-struct PlannedStream {
-    plan: Arc<SectionStreamPlanDesc>,
-    /// Indices into `plan.entries` of the eligible entries, ascending (EligibleOnly position k = eligible[k]).
-    eligible: Vec<u32>,
-    /// Entry index of `UnitRef::Paragraph(p)` at [p], or u32::MAX when that paragraph is not in the stream.
-    paragraph_entry: Vec<u32>,
-    /// Entry index of `UnitRef::Sentence(s)` at [s], or u32::MAX.
-    sentence_entry: Vec<u32>,
-}
-
-/// Why a kind's stream index could not be built. Cached as the message, like plan errors always were.
-enum PlannedStreamFailure {
-    /// The planner refused the section; the message is the planner's.
-    Plan(String),
-    /// The section has more entries than the `u32` index can address.
-    Index(String),
-}
-
-impl PlannedStreamFailure {
-    fn to_error(&self) -> ApplicationError {
-        match self {
-            Self::Plan(message) => ApplicationError::InvalidRequest(message.clone()),
-            Self::Index(message) => ApplicationError::TextUnitIndexFailed(message.clone()),
-        }
-    }
-}
-
-/// One decoded section layout, its planner descriptors and the stream plans built from them.
-struct CachedSectionLayout {
-    doc_key: i64,
-    section_key: i64,
-    section_id: SectionId,
-    char_len: usize,
-    paragraph_coverage: Option<ParagraphSectionCoverage>,
-    layout: Arc<SectionLayout>,
-    paragraphs: Vec<ParagraphDesc>,
-    sentences: Vec<SentenceDesc>,
-    coverage: Vec<ParagraphCoverageDesc>,
-    section_coverage: Option<SectionCoverageDesc>,
-    paragraph_plan: OnceLock<Result<Arc<PlannedStream>, PlannedStreamFailure>>,
-    sentence_plan: OnceLock<Result<Arc<PlannedStream>, PlannedStreamFailure>>,
-    /// `layout.paragraphs` is strictly increasing by `paragraph_index`, so a slot can be binary searched.
-    paragraphs_sorted: bool,
-    /// `layout.sentences` is strictly increasing by `(paragraph_index, sentence_index)`.
-    sentences_sorted: bool,
-}
-
-impl CachedSectionLayout {
-    fn new(
-        doc_key: i64,
-        section_key: i64,
-        section_id: SectionId,
-        char_len: usize,
-        paragraph_coverage: Option<ParagraphSectionCoverage>,
-        layout: SectionLayout,
-    ) -> Result<Self, ApplicationError> {
-        let paragraphs: Vec<ParagraphDesc> = layout
-            .paragraphs
-            .iter()
-            .map(|paragraph| ParagraphDesc {
-                paragraph_index: paragraph.paragraph_index,
-                char_count: paragraph.end - paragraph.start,
-            })
-            .collect();
-        let sentences: Vec<SentenceDesc> = layout
-            .sentences
-            .iter()
-            .map(|sentence| SentenceDesc {
-                paragraph_index: sentence.paragraph_index,
-                sentence_index: sentence.sentence_index,
-                char_count: sentence.end - sentence.start,
-            })
-            .collect();
-        let coverage = layout
-            .coverage
-            .iter()
-            .map(|coverage| {
-                Ok(ParagraphCoverageDesc {
-                    paragraph_index: coverage.paragraph_index,
-                    content_class: content_class_from_code(i64::from(coverage.content_class))?,
-                    eligibility: sentence_eligibility_from_code(i64::from(coverage.eligibility))?,
-                    separator_chars: coverage.separator_chars,
-                })
-            })
-            .collect::<Result<Vec<_>, ApplicationError>>()?;
-        let section_coverage = paragraph_coverage
-            .as_ref()
-            .map(|coverage| SectionCoverageDesc {
-                owner_chars: coverage.owner_chars,
-                separator_chars: coverage.separator_chars,
-                paragraph_count: coverage.paragraph_count,
-            });
-        let paragraphs_sorted = layout
-            .paragraphs
-            .windows(2)
-            .all(|pair| pair[0].paragraph_index < pair[1].paragraph_index);
-        let sentences_sorted = layout.sentences.windows(2).all(|pair| {
-            (pair[0].paragraph_index, pair[0].sentence_index)
-                < (pair[1].paragraph_index, pair[1].sentence_index)
-        });
-        Ok(Self {
-            doc_key,
-            section_key,
-            section_id,
-            char_len,
-            paragraph_coverage,
-            layout: Arc::new(layout),
-            paragraphs,
-            sentences,
-            coverage,
-            section_coverage,
-            paragraph_plan: OnceLock::new(),
-            sentence_plan: OnceLock::new(),
-            paragraphs_sorted,
-            sentences_sorted,
-        })
-    }
-
-    /// The stream plan of `kind`, for callers that need only the plan.
-    fn plan(
-        &self,
-        kind: RequestedTextUnitKind,
-    ) -> Result<Arc<SectionStreamPlanDesc>, ApplicationError> {
-        Ok(Arc::clone(&self.planned(kind)?.plan))
-    }
-
-    /// The stream plan of `kind` plus the per-unit lookups the read paths use, built once per kind.
-    fn planned(&self, kind: RequestedTextUnitKind) -> Result<Arc<PlannedStream>, ApplicationError> {
-        let cell = match kind {
-            RequestedTextUnitKind::Paragraph => &self.paragraph_plan,
-            RequestedTextUnitKind::Sentence => &self.sentence_plan,
-        };
-        let planned = cell.get_or_init(|| {
-            build_planned_stream(
-                &self.section_id,
-                &self.paragraphs,
-                self.section_coverage.as_ref(),
-                &self.sentences,
-                &self.coverage,
-                kind,
-            )
-            .map(Arc::new)
-        });
-        match planned {
-            Ok(planned) => Ok(Arc::clone(planned)),
-            Err(failure) => Err(failure.to_error()),
-        }
-    }
-
-    /// The slot of the paragraph with `paragraph_index` in `layout.paragraphs`, or `None` when absent.
-    fn paragraph_slot(&self, paragraph_index: usize) -> Option<usize> {
-        if self.paragraphs_sorted {
-            self.layout
-                .paragraphs
-                .binary_search_by_key(&paragraph_index, |paragraph| paragraph.paragraph_index)
-                .ok()
-        } else {
-            self.layout
-                .paragraphs
-                .iter()
-                .position(|paragraph| paragraph.paragraph_index == paragraph_index)
-        }
-    }
-
-    /// The slot of the sentence at `(paragraph_index, sentence_index)` in `layout.sentences`.
-    fn sentence_slot(&self, paragraph_index: usize, sentence_index: usize) -> Option<usize> {
-        if self.sentences_sorted {
-            self.layout
-                .sentences
-                .binary_search_by_key(&(paragraph_index, sentence_index), |sentence| {
-                    (sentence.paragraph_index, sentence.sentence_index)
-                })
-                .ok()
-        } else {
-            self.layout.sentences.iter().position(|sentence| {
-                sentence.paragraph_index == paragraph_index
-                    && sentence.sentence_index == sentence_index
-            })
-        }
-    }
-}
-
-/// Builds one kind's stream index in a single pass over the planned entries.
-fn build_planned_stream(
-    section_id: &SectionId,
-    paragraphs: &[ParagraphDesc],
-    section_coverage: Option<&SectionCoverageDesc>,
-    sentences: &[SentenceDesc],
-    coverage: &[ParagraphCoverageDesc],
-    kind: RequestedTextUnitKind,
-) -> Result<PlannedStream, PlannedStreamFailure> {
-    let plan = plan_section_stream_desc(
-        section_id,
-        paragraphs,
-        section_coverage,
-        sentences,
-        coverage,
-        kind,
-    )
-    .map_err(|error| PlannedStreamFailure::Plan(error.to_string()))?;
-    // `u32::MAX` is the "not in this stream" sentinel, so at most `u32::MAX - 1` entries are addressable.
-    let max_entries = u32::MAX as usize - 1;
-    if plan.entries.len() > max_entries {
-        return Err(PlannedStreamFailure::Index(format!(
-            "section {} has {} {} stream entries, more than the {max_entries} the index can address",
-            section_id.0,
-            plan.entries.len(),
-            kind.as_str()
-        )));
-    }
-    let mut eligible = Vec::new();
-    let mut paragraph_entry = vec![u32::MAX; paragraphs.len()];
-    let mut sentence_entry = vec![u32::MAX; sentences.len()];
-    for (position, entry) in plan.entries.iter().enumerate() {
-        let index = u32::try_from(position).map_err(|_| {
-            PlannedStreamFailure::Index(format!(
-                "section {} {} stream entry {position} does not fit in u32",
-                section_id.0,
-                kind.as_str()
-            ))
-        })?;
-        if entry.eligible {
-            eligible.push(index);
-        }
-        let (table, slot) = match entry.unit {
-            UnitRef::Paragraph(slot) => (&mut paragraph_entry, slot),
-            UnitRef::Sentence(slot) => (&mut sentence_entry, slot),
-        };
-        // The first entry of a unit wins, exactly like the linear `position` scan the reads used before.
-        match table.get_mut(slot) {
-            Some(cell) if *cell == u32::MAX => *cell = index,
-            _ => {}
-        }
-    }
-    Ok(PlannedStream {
-        plan: Arc::new(plan),
-        eligible,
-        paragraph_entry,
-        sentence_entry,
-    })
-}
-
-/// Most recently used section layouts, front first. `data_version` is `PRAGMA data_version` at the
-/// time the entries were loaded, so a commit from another connection invalidates them.
-#[derive(Default)]
-struct SectionLayoutCache {
-    data_version: Option<i64>,
-    entries: VecDeque<Arc<CachedSectionLayout>>,
-}
-
-impl SectionLayoutCache {
-    fn sync_version(&mut self, data_version: i64) {
-        if self.data_version != Some(data_version) {
-            self.entries.clear();
-            self.data_version = Some(data_version);
-        }
-    }
-
-    fn get(&mut self, doc_key: i64, section_key: i64) -> Option<Arc<CachedSectionLayout>> {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.doc_key == doc_key && entry.section_key == section_key)?;
-        let entry = self.entries.remove(index)?;
-        let result = Arc::clone(&entry);
-        self.entries.push_front(entry);
-        Some(result)
-    }
-
-    fn insert(&mut self, entry: Arc<CachedSectionLayout>) {
-        self.entries.retain(|cached| {
-            cached.doc_key != entry.doc_key || cached.section_key != entry.section_key
-        });
-        self.entries.push_front(entry);
-        self.entries.truncate(SECTION_LAYOUT_CACHE_CAPACITY);
-    }
-
-    fn remove_document(&mut self, doc_key: i64) {
-        self.entries.retain(|cached| cached.doc_key != doc_key);
     }
 }
 
@@ -763,12 +478,12 @@ impl DocumentRepository for SqliteDocumentRepository {
 }
 
 /// The `content_store` value of a `document_json` row that keeps no section text inline: every
-/// section's text is in `section_text_v1` for the same document version.
-const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v1";
+/// section's text is in `section_text_v2` for the same document version.
+const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v2";
 
-/// Whether `document`'s section text is stored in `section_text_v1` for exactly this document
+/// Whether `document`'s section text is stored in `section_text_v2` for exactly this document
 /// version, so that `document_json` may leave it out: the unit row names this document and hash for
-/// the current `TEXT_SEGMENTATION_VERSION`, and `section_layout_v1` holds exactly one row per
+/// the current `TEXT_SEGMENTATION_VERSION`, and `section_layout_v2` holds exactly one row per
 /// section, in depth-first document order, whose `char_len` is that section's char count.
 fn section_text_is_stored(
     connection: &Connection,
@@ -776,7 +491,7 @@ fn section_text_is_stored(
     normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<bool, ApplicationError> {
     if !has_table(connection, "text_unit_documents_v2")?
-        || !has_table(connection, "section_layout_v1")?
+        || !has_table(connection, "section_layout_v2")?
     {
         return Ok(false);
     }
@@ -832,10 +547,10 @@ fn has_table(connection: &Connection, table: &str) -> Result<bool, ApplicationEr
         .map_err(repository_error)
 }
 
-/// The `char_len` of one document's `section_layout_v1` rows, in `section_key` order.
+/// The `char_len` of one document's `section_layout_v2` rows, in `section_key` order.
 fn section_char_lens(connection: &Connection, doc_key: i64) -> Result<Vec<i64>, ApplicationError> {
     let mut statement = connection
-        .prepare("SELECT char_len FROM section_layout_v1 WHERE doc_key = ?1 ORDER BY section_key")
+        .prepare("SELECT char_len FROM section_layout_v2 WHERE doc_key = ?1 ORDER BY section_key")
         .map_err(repository_error)?;
     let rows = statement
         .query_map(params![doc_key], |row| row.get::<_, i64>(0))
@@ -975,8 +690,11 @@ impl OpenResultStore for SqliteOpenResultStore {
 pub struct SqliteTextUnitIndex {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
-    cache: Arc<Mutex<SectionLayoutCache>>,
     /// The section texts the last scanned document was scanned from. One document at a time.
+    ///
+    /// The only in-process caches the store keeps are this #194 scan text cache and the
+    /// `DocumentCache` in `SqliteDocumentRepository`: no per-call TextUnit read path holds or
+    /// consults any other cache.
     scan_text: Arc<Mutex<Option<Arc<ScanTextStore>>>>,
 }
 
@@ -1035,40 +753,87 @@ impl SqliteTextUnitIndex {
                  DROP TABLE IF EXISTS text_unit_stream_summaries_v2;",
             )
             .map_err(text_unit_index_error)?;
+        // The v3 store kept one whole-section layout blob and the text in `WITHOUT ROWID` tables,
+        // so every per-call read unpacked a whole record at every b-tree level. The v4 store cuts
+        // both into rowid tables: chunked layout rows and chunked text rows. Dropping is
+        // idempotent, so an old database opens, keeps its `documents` rows, and re-ingests its
+        // documents on their next open.
         connection
             .execute_batch(
-                "CREATE TABLE IF NOT EXISTS text_unit_documents_v2 (
+                "DROP TABLE IF EXISTS section_layout_v1;
+                 DROP TABLE IF EXISTS section_text_v1;
+                 CREATE TABLE IF NOT EXISTS text_unit_documents_v2 (
                     doc_key INTEGER PRIMARY KEY,
                     document_id TEXT NOT NULL UNIQUE,
                     content_hash TEXT NOT NULL,
                     normalized_document_hash TEXT NOT NULL,
                     segmentation_version TEXT NOT NULL
                  );
-                 CREATE TABLE IF NOT EXISTS section_text_v1 (
+                 CREATE TABLE IF NOT EXISTS section_text_v2 (
                     doc_key INTEGER NOT NULL,
                     section_key INTEGER NOT NULL,
                     chunk_no INTEGER NOT NULL,
                     text TEXT NOT NULL,
-                    PRIMARY KEY (doc_key, section_key, chunk_no)
-                 ) WITHOUT ROWID;
-                 CREATE TABLE IF NOT EXISTS section_layout_v1 (
+                    UNIQUE(doc_key, section_key, chunk_no)
+                 );
+                 CREATE TABLE IF NOT EXISTS section_layout_v2 (
                     doc_key INTEGER NOT NULL,
                     section_key INTEGER NOT NULL,
                     section_id TEXT NOT NULL,
                     char_len INTEGER NOT NULL,
                     paragraph_coverage_json TEXT,
-                    layout BLOB NOT NULL,
-                    PRIMARY KEY (doc_key, section_key)
-                 ) WITHOUT ROWID;
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_section_layout_v1_id
-                    ON section_layout_v1(doc_key, section_id);",
+                    plan_error TEXT,
+                    paragraph_count INTEGER NOT NULL,
+                    sentence_count INTEGER NOT NULL,
+                    chunk_count INTEGER NOT NULL,
+                    sorted_flags INTEGER NOT NULL,
+                    total_items_paragraph_preserve INTEGER NOT NULL,
+                    total_items_paragraph_eligible INTEGER NOT NULL,
+                    total_items_sentence_preserve INTEGER NOT NULL,
+                    total_items_sentence_eligible INTEGER NOT NULL,
+                    coverage_paragraph_preserve_json TEXT NOT NULL,
+                    coverage_paragraph_eligible_json TEXT NOT NULL,
+                    coverage_sentence_preserve_json TEXT NOT NULL,
+                    coverage_sentence_eligible_json TEXT NOT NULL,
+                    UNIQUE(doc_key, section_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_section_layout_v2_section_key
+                    ON section_layout_v2(doc_key, section_key);
+                 CREATE TABLE IF NOT EXISTS section_layout_chunk_v2 (
+                    doc_key INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    chunk_no INTEGER NOT NULL,
+                    first_paragraph_index INTEGER NOT NULL,
+                    first_sentence_index INTEGER NOT NULL,
+                    paragraph_slot INTEGER NOT NULL,
+                    sentence_slot INTEGER NOT NULL,
+                    paragraph_entry INTEGER NOT NULL,
+                    sentence_entry INTEGER NOT NULL,
+                    eligible_paragraph_entry INTEGER NOT NULL,
+                    eligible_sentence_entry INTEGER NOT NULL,
+                    paragraph_count INTEGER NOT NULL,
+                    sentence_count INTEGER NOT NULL,
+                    blob BLOB NOT NULL,
+                    UNIQUE(doc_key, section_key, chunk_no)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_section_layout_chunk_v2_paragraph_entry
+                    ON section_layout_chunk_v2(doc_key, section_key, paragraph_entry);
+                 CREATE INDEX IF NOT EXISTS idx_section_layout_chunk_v2_sentence_entry
+                    ON section_layout_chunk_v2(doc_key, section_key, sentence_entry);
+                 CREATE INDEX IF NOT EXISTS idx_section_layout_chunk_v2_eligible_paragraph_entry
+                    ON section_layout_chunk_v2(doc_key, section_key, eligible_paragraph_entry);
+                 CREATE INDEX IF NOT EXISTS idx_section_layout_chunk_v2_eligible_sentence_entry
+                    ON section_layout_chunk_v2(doc_key, section_key, eligible_sentence_entry);
+                 CREATE INDEX IF NOT EXISTS idx_section_layout_chunk_v2_first
+                    ON section_layout_chunk_v2(
+                        doc_key, section_key, first_paragraph_index, first_sentence_index
+                    );",
             )
             .map_err(text_unit_index_error)?;
         drop_legacy_lexical_search_tables(&connection)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
-            cache: Arc::new(Mutex::new(SectionLayoutCache::default())),
             scan_text: Arc::new(Mutex::new(None)),
         })
     }
@@ -1108,9 +873,9 @@ impl SqliteTextUnitIndex {
         }
     }
 
-    /// The stored `section_layout_v1` rows of `document_id`, in `section_key` order, as
-    /// `(section_id, encoded layout)`. Diagnostics only: it proves that ingesting from units and
-    /// ingesting from boundaries write identical rows.
+    /// The stored layouts of `document_id`, in `section_key` order, as `(section_id, encoded
+    /// whole-section layout)`. Diagnostics only: it proves that ingesting from units and ingesting
+    /// from boundaries write identical rows.
     pub async fn stored_section_layouts(
         &self,
         document_id: &DocumentId,
@@ -1120,22 +885,33 @@ impl SqliteTextUnitIndex {
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
+                let doc_key: i64 = connection
+                    .query_row(
+                        "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+                        params![&document_id.0],
+                        |row| row.get(0),
+                    )
+                    .map_err(text_unit_index_error)?;
                 let mut statement = connection
                     .prepare(
-                        "SELECT l.section_id, l.layout
-                           FROM section_layout_v1 l
-                           JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
-                          WHERE d.document_id = ?1
+                        "SELECT l.section_id, l.section_key
+                           FROM section_layout_v2 l
+                          WHERE l.doc_key = ?1
                           ORDER BY l.section_key",
                     )
                     .map_err(text_unit_index_error)?;
                 let rows = statement
-                    .query_map(params![&document_id.0], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    .query_map(params![doc_key], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                     })
                     .map_err(text_unit_index_error)?;
-                rows.collect::<Result<Vec<_>, _>>()
-                    .map_err(text_unit_index_error)
+                let mut layouts = Vec::new();
+                for row in rows {
+                    let (section_id, section_key) = row.map_err(text_unit_index_error)?;
+                    let layout = load_whole_section_layout(connection, doc_key, section_key)?;
+                    layouts.push((section_id, layout.encode()?));
+                }
+                Ok(layouts)
             },
         )
         .await
@@ -1145,8 +921,9 @@ impl SqliteTextUnitIndex {
     /// index. `Ok(None)` when this document's units are not stored for the current
     /// `TEXT_SEGMENTATION_VERSION`, or were stored for another normalized document hash.
     ///
-    /// The scan reads the stored section text and the stored unit boundaries directly. It never uses
-    /// the layout cache, so it cannot evict the layouts the reader has cached.
+    /// The scan reads the stored section text and the stored unit boundaries directly. Every layout
+    /// chunk is decoded into one whole-section layout, so the scan answers exactly what the v3
+    /// whole-layout row answered.
     /// The scan's cache, thread count and pruning are the caller's: production passes
     /// [`ScanOptions::production`], and the differential tests pass the plain scan of R2c step 3.
     pub(crate) async fn scan_lexical(
@@ -1595,20 +1372,6 @@ impl<'a> SectionScanner<'a> {
         query.container_bound(lowered, tokens)
     }
 
-    /// Decodes one section's stored layout and scans it.
-    fn scan_section_blob(
-        &mut self,
-        section: &PlannedSection,
-        blob: &[u8],
-        text: &ScanSectionText,
-        section_ids: &[SectionId],
-    ) -> Result<(), ApplicationError> {
-        self.timer.begin();
-        let layout = SectionLayout::decode(blob)?;
-        self.timer.end(ScanPhase::LayoutDecode);
-        self.scan_section(section, text, &layout, section_ids)
-    }
-
     /// Scans one section's paragraphs and sentences. `section` is its index in the section id list.
     fn scan_section(
         &mut self,
@@ -1902,12 +1665,6 @@ fn scan_planned_serial(
     pass: &ScanPass<'_>,
 ) -> Result<Option<(Vec<ScannedUnitHit>, ScanTimings)>, ApplicationError> {
     let mut timer = ScanTimer::new(pass.collect_timings);
-    let mut layout_statement = connection
-        .prepare_cached(
-            "SELECT layout FROM section_layout_v1
-             WHERE doc_key = ?1 AND section_key = ?2",
-        )
-        .map_err(text_unit_index_error)?;
     let mut scanner = SectionScanner::new(pass);
     for section in planned {
         if scanner.skips(section.bound) {
@@ -1917,10 +1674,7 @@ fn scan_planned_serial(
         let text = scan_section_text(connection, pass.store, meta.doc_key, section.section_key)?;
         timer.end(ScanPhase::ReadText);
         timer.begin();
-        let layout_blob: Vec<u8> = layout_statement
-            .query_row(params![meta.doc_key, section.section_key], |row| row.get(0))
-            .map_err(text_unit_index_error)?;
-        let layout = SectionLayout::decode(&layout_blob)?;
+        let layout = load_whole_section_layout(connection, meta.doc_key, section.section_key)?;
         timer.end(ScanPhase::LayoutDecode);
         scanner.scan_section(section, &text, &layout, section_ids)?;
     }
@@ -1942,12 +1696,6 @@ fn scan_planned_parallel(
     let Some(store) = pass.store else {
         return Ok(None);
     };
-    let mut layout_statement = connection
-        .prepare_cached(
-            "SELECT layout FROM section_layout_v1
-             WHERE doc_key = ?1 AND section_key = ?2",
-        )
-        .map_err(text_unit_index_error)?;
     let mut timer = ScanTimer::new(pass.collect_timings);
     let workers = parallel_map(
         threads,
@@ -1956,16 +1704,14 @@ fn scan_planned_parallel(
         |index| {
             let section = &planned[index];
             timer.begin();
-            let layout_blob: Vec<u8> = layout_statement
-                .query_row(params![meta.doc_key, section.section_key], |row| row.get(0))
-                .map_err(text_unit_index_error)?;
+            let layout = load_whole_section_layout(connection, meta.doc_key, section.section_key)?;
             timer.end(ScanPhase::LayoutDecode);
-            Ok(Some(layout_blob))
+            Ok(Some(layout))
         },
-        |scanner: &mut SectionScanner<'_>, index, layout_blob: Vec<u8>| {
+        |scanner: &mut SectionScanner<'_>, index, layout: SectionLayout| {
             let section = &planned[index];
             match stored_section_text(store, section.section_key) {
-                Ok(text) => scanner.scan_section_blob(section, &layout_blob, &text, section_ids),
+                Ok(text) => scanner.scan_section(section, &text, &layout, section_ids),
                 Err(error) => Err(error),
             }
         },
@@ -2005,12 +1751,6 @@ fn scan_sections_interleaved(
     pass: &ScanPass<'_>,
 ) -> Result<(Vec<SectionId>, Vec<ScannedUnitHit>, ScanTimings), ApplicationError> {
     let mut timer = ScanTimer::new(pass.collect_timings);
-    let mut layout_statement = connection
-        .prepare_cached(
-            "SELECT layout FROM section_layout_v1
-             WHERE doc_key = ?1 AND section_key = ?2",
-        )
-        .map_err(text_unit_index_error)?;
     let mut section_ids: Vec<SectionId> = Vec::new();
     let mut scanner = SectionScanner::new(pass);
 
@@ -2028,10 +1768,7 @@ fn scan_sections_interleaved(
         timer.tally(|timings| timings.sections_passed_prefilter += 1);
 
         timer.begin();
-        let layout_blob: Vec<u8> = layout_statement
-            .query_row(params![meta.doc_key, section_key], |row| row.get(0))
-            .map_err(text_unit_index_error)?;
-        let layout = SectionLayout::decode(&layout_blob)?;
+        let layout = load_whole_section_layout(connection, meta.doc_key, *section_key)?;
         timer.end(ScanPhase::LayoutDecode);
         let section = PlannedSection {
             section: section_ids.len(),
@@ -2078,7 +1815,7 @@ fn stored_sections(
     let mut statement = connection
         .prepare(
             "SELECT section_key, section_id, char_len
-             FROM section_layout_v1
+             FROM section_layout_v2
              WHERE doc_key = ?1
              ORDER BY section_key ASC",
         )
@@ -2251,11 +1988,8 @@ enum SectionLayoutSource<'a> {
 }
 
 impl SectionLayoutSource<'_> {
-    fn paragraph_coverage_json(
-        &self,
-        section_id: &SectionId,
-    ) -> Result<Option<String>, ApplicationError> {
-        let coverage = match self {
+    fn paragraph_coverage(&self, section_id: &SectionId) -> Option<&ParagraphSectionCoverage> {
+        match self {
             Self::Units(groups) => groups
                 .get(section_id)
                 .and_then(|group| group.paragraph_coverage),
@@ -2263,7 +1997,14 @@ impl SectionLayoutSource<'_> {
                 .get(section_id)
                 .copied()
                 .map(|section| &section.paragraph_coverage),
-        };
+        }
+    }
+
+    fn paragraph_coverage_json(
+        &self,
+        section_id: &SectionId,
+    ) -> Result<Option<String>, ApplicationError> {
+        let coverage = self.paragraph_coverage(section_id);
         match coverage {
             Some(coverage) => Ok(Some(
                 serde_json::to_string(&StoredParagraphCoverage::from_coverage(coverage))
@@ -2295,10 +2036,583 @@ fn empty_section_layout() -> SectionLayout {
     }
 }
 
-/// Writes one document's `section_text_v1` chunks and `section_layout_v1` rows in a transaction.
+/// One stored chunk's byte ranges into the whole-section layout. Paragraphs and sentences are
+/// contiguous slices; coverage is a contiguous slice too because the chunker only cuts sorted
+/// sections, where coverage is ordered by paragraph index.
+#[derive(Clone, Debug)]
+struct ChunkRange {
+    chunk_no: usize,
+    first_paragraph_index: usize,
+    first_sentence_index: usize,
+    paragraph_slot: usize,
+    sentence_slot: usize,
+    paragraph_start: usize,
+    paragraph_end: usize,
+    sentence_start: usize,
+    sentence_end: usize,
+    coverage_start: usize,
+    coverage_end: usize,
+    /// A chunk that carries only the next sentence run of one paragraph: no paragraph record and
+    /// exactly that paragraph's coverage record.
+    mid_paragraph: bool,
+}
+
+/// One chunk ready to write: its ranges and the stream entry offsets the planner would assign.
+#[derive(Clone, Debug)]
+struct ChunkRow {
+    range: ChunkRange,
+    paragraph_entry: usize,
+    sentence_entry: usize,
+    eligible_paragraph_entry: usize,
+    eligible_sentence_entry: usize,
+    paragraph_entries: usize,
+    paragraph_eligible_entries: usize,
+    sentence_entries: usize,
+    sentence_eligible_entries: usize,
+}
+
+/// The header row's counters for one kind: summary totals and both coverages.
+struct StoredKindSummary {
+    total_preserve: usize,
+    total_eligible: usize,
+    preserve_json: String,
+    eligible_json: String,
+}
+
+impl StoredKindSummary {
+    fn from_counts(counts: &SectionStreamCounts) -> Result<Self, ApplicationError> {
+        Ok(Self {
+            total_preserve: counts.total_items_preserve,
+            total_eligible: counts.total_items_eligible,
+            preserve_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(
+                &counts.preserve_source,
+            ))
+            .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?,
+            eligible_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(
+                &counts.eligible_only,
+            ))
+            .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?,
+        })
+    }
+
+    fn zero() -> Self {
+        let coverage = TextUnitEnumerationCoverage {
+            owner_chars: 0,
+            section_separator_chars: 0,
+            sentence_separator_chars: 0,
+            paragraph_count: 0,
+            sentence_eligible_paragraphs: 0,
+            non_prose_paragraphs: 0,
+            coarse_structural_paragraphs: 0,
+            represented_paragraphs: 0,
+            represented_sentences: 0,
+            coarse_non_prose_items: 0,
+            coarse_structural_items: 0,
+            intentionally_skipped: 0,
+            unsupported_gaps: 0,
+            source_complete: true,
+        };
+        Self {
+            total_preserve: 0,
+            total_eligible: 0,
+            preserve_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(&coverage))
+                .unwrap_or_else(|_| "{}".into()),
+            eligible_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(&coverage))
+                .unwrap_or_else(|_| "{}".into()),
+        }
+    }
+}
+
+type SectionDescriptors = (
+    Vec<ParagraphDesc>,
+    Vec<SentenceDesc>,
+    Vec<ParagraphCoverageDesc>,
+    Option<SectionCoverageDesc>,
+);
+
+fn build_section_descriptors(
+    layout: &SectionLayout,
+    section_coverage: Option<&ParagraphSectionCoverage>,
+) -> Result<SectionDescriptors, ApplicationError> {
+    let paragraphs = layout
+        .paragraphs
+        .iter()
+        .map(|paragraph| ParagraphDesc {
+            paragraph_index: paragraph.paragraph_index,
+            char_count: paragraph.end - paragraph.start,
+        })
+        .collect();
+    let sentences = layout
+        .sentences
+        .iter()
+        .map(|sentence| SentenceDesc {
+            paragraph_index: sentence.paragraph_index,
+            sentence_index: sentence.sentence_index,
+            char_count: sentence.end - sentence.start,
+        })
+        .collect();
+    let coverage = layout
+        .coverage
+        .iter()
+        .map(|coverage| {
+            Ok(ParagraphCoverageDesc {
+                paragraph_index: coverage.paragraph_index,
+                content_class: content_class_from_code(i64::from(coverage.content_class))?,
+                eligibility: sentence_eligibility_from_code(i64::from(coverage.eligibility))?,
+                separator_chars: coverage.separator_chars,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    let section_coverage = section_coverage.map(|coverage| SectionCoverageDesc {
+        owner_chars: coverage.owner_chars,
+        separator_chars: coverage.separator_chars,
+        paragraph_count: coverage.paragraph_count,
+    });
+    Ok((paragraphs, sentences, coverage, section_coverage))
+}
+
+fn uvarint_len(value: u64) -> usize {
+    let mut value = value;
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
+fn zigzag_len(value: i64) -> usize {
+    let encoded = ((value as u64) << 1) ^ ((value >> 63) as u64);
+    uvarint_len(encoded)
+}
+
+fn delta_len(value: usize, previous: usize) -> usize {
+    zigzag_len(value as i64 - previous as i64)
+}
+
+fn paragraph_cost(
+    paragraph: &LayoutParagraph,
+    first_index: usize,
+    previous: Option<&LayoutParagraph>,
+) -> usize {
+    let previous_source = previous.map_or(0, |value| value.source_order);
+    let previous_start = previous.map_or(0, |value| value.start);
+    let previous_end = previous.map_or(0, |value| value.end);
+    uvarint_len((paragraph.paragraph_index - first_index) as u64)
+        + delta_len(paragraph.source_order, previous_source)
+        + delta_len(paragraph.start, previous_start)
+        + delta_len(paragraph.end, previous_end)
+}
+
+fn sentence_cost(
+    sentence: &LayoutSentence,
+    first_index: usize,
+    previous: Option<&LayoutSentence>,
+) -> usize {
+    let previous_source = previous.map_or(0, |value| value.source_order);
+    let previous_start = previous.map_or(0, |value| value.start);
+    let previous_end = previous.map_or(0, |value| value.end);
+    let previous_parent_start = previous.map_or(0, |value| value.parent_start);
+    let previous_parent_end = previous.map_or(0, |value| value.parent_end);
+    uvarint_len((sentence.paragraph_index - first_index) as u64)
+        + uvarint_len(sentence.sentence_index as u64)
+        + delta_len(sentence.source_order, previous_source)
+        + delta_len(sentence.start, previous_start)
+        + delta_len(sentence.end, previous_end)
+        + delta_len(sentence.parent_start, previous_parent_start)
+        + delta_len(sentence.parent_end, previous_parent_end)
+}
+
+fn coverage_cost(
+    coverage: &LayoutCoverage,
+    first_index: usize,
+    previous: Option<&LayoutCoverage>,
+) -> usize {
+    let previous_start = previous.map_or(0, |value| value.paragraph_start);
+    let previous_end = previous.map_or(0, |value| value.paragraph_end);
+    uvarint_len((coverage.paragraph_index - first_index) as u64)
+        + delta_len(coverage.paragraph_start, previous_start)
+        + delta_len(coverage.paragraph_end, previous_end)
+        + uvarint_len(u64::from(coverage.content_class))
+        + uvarint_len(u64::from(coverage.eligibility))
+        + uvarint_len(coverage.paragraph_chars as u64)
+        + uvarint_len(coverage.sentence_chars as u64)
+        + uvarint_len(coverage.separator_chars as u64)
+        + uvarint_len(coverage.coarse_only_chars as u64)
+        + uvarint_len(coverage.sentence_count as u64)
+}
+
+/// Cuts a sorted layout into chunks of about [`LAYOUT_CHUNK_BYTES`]. A paragraph whose sentences
+/// alone exceed the budget gets one chunk with its paragraph record and then chunks carrying only
+/// its coverage record and the next sentence run. An unsorted layout is one chunk, so in-chunk
+/// semantics are exactly the linear scan's.
+fn build_chunk_ranges(layout: &SectionLayout, sorted: bool) -> Vec<ChunkRange> {
+    let whole = !sorted
+        || layout.paragraphs.is_empty()
+        || layout
+            .coverage
+            .windows(2)
+            .any(|pair| pair[0].paragraph_index >= pair[1].paragraph_index);
+    if whole {
+        let first_paragraph_index = layout
+            .paragraphs
+            .iter()
+            .map(|paragraph| paragraph.paragraph_index)
+            .chain(
+                layout
+                    .sentences
+                    .iter()
+                    .map(|sentence| sentence.paragraph_index),
+            )
+            .chain(
+                layout
+                    .coverage
+                    .iter()
+                    .map(|coverage| coverage.paragraph_index),
+            )
+            .min()
+            .unwrap_or(0);
+        return vec![ChunkRange {
+            chunk_no: 0,
+            first_paragraph_index,
+            first_sentence_index: 0,
+            paragraph_slot: 0,
+            sentence_slot: 0,
+            paragraph_start: 0,
+            paragraph_end: layout.paragraphs.len(),
+            sentence_start: 0,
+            sentence_end: layout.sentences.len(),
+            coverage_start: 0,
+            coverage_end: layout.coverage.len(),
+            mid_paragraph: false,
+        }];
+    }
+
+    let mut coverage_slots = HashMap::new();
+    for (slot, coverage) in layout.coverage.iter().enumerate() {
+        coverage_slots.insert(coverage.paragraph_index, slot);
+    }
+    let mut sentences_by_paragraph: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (slot, sentence) in layout.sentences.iter().enumerate() {
+        sentences_by_paragraph
+            .entry(sentence.paragraph_index)
+            .or_default()
+            .push(slot);
+    }
+
+    fn regular_range(
+        paragraph_index: usize,
+        paragraph_slot: usize,
+        sentence_slot: usize,
+        coverage_slot: Option<usize>,
+    ) -> ChunkRange {
+        let (coverage_start, coverage_end) =
+            coverage_slot.map(|slot| (slot, slot + 1)).unwrap_or((0, 0));
+        ChunkRange {
+            chunk_no: 0,
+            first_paragraph_index: paragraph_index,
+            first_sentence_index: 0,
+            paragraph_slot,
+            sentence_slot,
+            paragraph_start: paragraph_slot,
+            paragraph_end: paragraph_slot,
+            sentence_start: sentence_slot,
+            sentence_end: sentence_slot,
+            coverage_start,
+            coverage_end,
+            mid_paragraph: false,
+        }
+    }
+
+    fn mid_range(
+        paragraph_index: usize,
+        paragraph_slot: usize,
+        sentence_slot: usize,
+        sentence_index: usize,
+        coverage_slot: Option<usize>,
+    ) -> ChunkRange {
+        let (coverage_start, coverage_end) =
+            coverage_slot.map(|slot| (slot, slot + 1)).unwrap_or((0, 0));
+        ChunkRange {
+            chunk_no: 0,
+            first_paragraph_index: paragraph_index,
+            first_sentence_index: sentence_index,
+            paragraph_slot,
+            sentence_slot,
+            paragraph_start: paragraph_slot,
+            paragraph_end: paragraph_slot,
+            sentence_start: sentence_slot,
+            sentence_end: sentence_slot,
+            coverage_start,
+            coverage_end,
+            mid_paragraph: true,
+        }
+    }
+
+    fn flush(pending: &mut Option<(ChunkRange, usize)>, chunks: &mut Vec<ChunkRange>) {
+        if let Some((mut range, _)) = pending.take() {
+            range.chunk_no = chunks.len();
+            chunks.push(range);
+        }
+    }
+
+    let mut chunks = Vec::new();
+    let mut pending: Option<(ChunkRange, usize)> = None;
+    let mut sentence_cursor = 0usize;
+
+    for (p_slot, paragraph) in layout.paragraphs.iter().enumerate() {
+        let sentence_slots = sentences_by_paragraph
+            .get(&paragraph.paragraph_index)
+            .cloned()
+            .unwrap_or_default();
+        let coverage_slot = coverage_slots.get(&paragraph.paragraph_index).copied();
+
+        if let Some((range, estimated)) = pending.as_ref() {
+            let paragraph_estimate = paragraph_cost(paragraph, range.first_paragraph_index, None);
+            let coverage_estimate = coverage_slot.map_or(0, |slot| {
+                coverage_cost(&layout.coverage[slot], range.first_paragraph_index, None)
+            });
+            let non_empty = range.paragraph_end > range.paragraph_start
+                || range.sentence_end > range.sentence_start;
+            if range.mid_paragraph
+                || (non_empty
+                    && *estimated + paragraph_estimate + coverage_estimate > LAYOUT_CHUNK_BYTES)
+            {
+                flush(&mut pending, &mut chunks);
+            }
+        }
+        if pending.is_none() {
+            pending = Some((
+                regular_range(
+                    paragraph.paragraph_index,
+                    p_slot,
+                    sentence_cursor,
+                    coverage_slot,
+                ),
+                8,
+            ));
+        }
+
+        {
+            let (range, estimated) = pending.as_mut().expect("a chunk must be open");
+            *estimated += paragraph_cost(paragraph, range.first_paragraph_index, None);
+            if let Some(slot) = coverage_slot {
+                *estimated +=
+                    coverage_cost(&layout.coverage[slot], range.first_paragraph_index, None);
+                if range.coverage_end == 0 {
+                    range.coverage_start = slot;
+                    range.coverage_end = slot + 1;
+                } else {
+                    range.coverage_start = range.coverage_start.min(slot);
+                    range.coverage_end = range.coverage_end.max(slot + 1);
+                }
+            }
+            range.paragraph_end = p_slot + 1;
+        }
+
+        let mut previous_sentence: Option<&LayoutSentence> = None;
+        for sentence_slot in sentence_slots {
+            let sentence = &layout.sentences[sentence_slot];
+
+            if let Some((range, estimated)) = pending.as_ref() {
+                let sentence_estimate =
+                    sentence_cost(sentence, range.first_paragraph_index, previous_sentence);
+                let non_empty = range.paragraph_end > range.paragraph_start
+                    || range.sentence_end > range.sentence_start;
+                if !range.mid_paragraph
+                    && non_empty
+                    && *estimated + sentence_estimate > LAYOUT_CHUNK_BYTES
+                {
+                    flush(&mut pending, &mut chunks);
+                }
+            }
+            if pending.is_none() {
+                pending = Some((
+                    mid_range(
+                        paragraph.paragraph_index,
+                        p_slot,
+                        sentence_slot,
+                        sentence.sentence_index,
+                        coverage_slot,
+                    ),
+                    8,
+                ));
+            }
+
+            let flush_mid = {
+                let (range, estimated) = pending.as_mut().expect("a chunk must be open");
+                let shrunk =
+                    sentence_cost(sentence, range.first_paragraph_index, previous_sentence);
+                *estimated += shrunk;
+                range.sentence_end = sentence_slot + 1;
+                range.mid_paragraph && *estimated + 64 > LAYOUT_CHUNK_BYTES
+            };
+            previous_sentence = Some(sentence);
+            sentence_cursor = sentence_slot + 1;
+            if flush_mid {
+                flush(&mut pending, &mut chunks);
+            }
+        }
+
+        if pending
+            .as_ref()
+            .is_some_and(|(range, _)| range.mid_paragraph)
+        {
+            flush(&mut pending, &mut chunks);
+        }
+    }
+    flush(&mut pending, &mut chunks);
+    chunks
+}
+
+/// Encodes one chunk's local layout: paragraph indices are relative to the chunk's first paragraph
+/// and every delta base starts at zero, which `SectionLayout::encode` does for any slice.
+fn chunk_layout(layout: &SectionLayout, range: &ChunkRange) -> SectionLayout {
+    let first = range.first_paragraph_index;
+    let relative = |paragraph_index: usize| paragraph_index - first;
+    let mut paragraphs = Vec::new();
+    let mut sentences = Vec::new();
+    if range.mid_paragraph {
+        // A mid chunk keeps the paragraph record so the stream walk can emit its sentence run.
+        // The write path still records `paragraph_count = 0`, and reassembly drops the duplicate.
+        let mut paragraph = layout.paragraphs[range.paragraph_start].clone();
+        paragraph.paragraph_index = relative(paragraph.paragraph_index);
+        paragraphs.push(paragraph);
+    } else {
+        for paragraph in &layout.paragraphs[range.paragraph_start..range.paragraph_end] {
+            let mut paragraph = paragraph.clone();
+            paragraph.paragraph_index = relative(paragraph.paragraph_index);
+            paragraphs.push(paragraph);
+        }
+    }
+    for sentence in &layout.sentences[range.sentence_start..range.sentence_end] {
+        let mut sentence = sentence.clone();
+        sentence.paragraph_index = relative(sentence.paragraph_index);
+        sentences.push(sentence);
+    }
+    let coverage = layout.coverage[range.coverage_start..range.coverage_end]
+        .iter()
+        .map(|coverage| {
+            let mut coverage = coverage.clone();
+            coverage.paragraph_index = relative(coverage.paragraph_index);
+            coverage
+        })
+        .collect();
+    SectionLayout {
+        paragraphs,
+        sentences,
+        coverage,
+    }
+}
+
+/// Assigns every planner entry to the chunk that holds its unit, and returns the two kinds'
+/// header summaries plus the per-chunk stream starts.
+fn plan_chunk_starts(
+    section_id: &SectionId,
+    layout: &SectionLayout,
+    section_coverage: Option<&ParagraphSectionCoverage>,
+    chunks: &mut [ChunkRow],
+) -> Result<(StoredKindSummary, StoredKindSummary, Option<String>), ApplicationError> {
+    let (paragraphs, sentences, coverage, section_coverage) =
+        build_section_descriptors(layout, section_coverage)?;
+    let mut summaries = Vec::with_capacity(2);
+    for kind in [
+        RequestedTextUnitKind::Paragraph,
+        RequestedTextUnitKind::Sentence,
+    ] {
+        let mut cursor = 0usize;
+        let counts = walk_section_stream(
+            section_id,
+            &paragraphs,
+            section_coverage.as_ref(),
+            &sentences,
+            &coverage,
+            kind,
+            &mut |entry| {
+                let slot = match entry.unit {
+                    UnitRef::Paragraph(slot) | UnitRef::Sentence(slot) => slot,
+                };
+                // Entries arrive in array order, so the cursor only moves forward.
+                loop {
+                    if cursor >= chunks.len() {
+                        break;
+                    }
+                    let (start, end) = match entry.unit {
+                        UnitRef::Paragraph(_) => (
+                            chunks[cursor].range.paragraph_start,
+                            chunks[cursor].range.paragraph_end,
+                        ),
+                        UnitRef::Sentence(_) => (
+                            chunks[cursor].range.sentence_start,
+                            chunks[cursor].range.sentence_end,
+                        ),
+                    };
+                    if start <= slot && slot < end {
+                        break;
+                    }
+                    if slot >= end {
+                        cursor += 1;
+                        continue;
+                    }
+                    cursor += 1;
+                }
+                if let Some(chunk) = chunks.get_mut(cursor) {
+                    let counts = match (kind, entry.unit) {
+                        (RequestedTextUnitKind::Paragraph, _) => (
+                            &mut chunk.paragraph_entries,
+                            &mut chunk.paragraph_eligible_entries,
+                        ),
+                        (RequestedTextUnitKind::Sentence, _) => (
+                            &mut chunk.sentence_entries,
+                            &mut chunk.sentence_eligible_entries,
+                        ),
+                    };
+                    *counts.0 += 1;
+                    if entry.eligible {
+                        *counts.1 += 1;
+                    }
+                }
+            },
+        );
+        match counts {
+            Ok(counts) => summaries.push(StoredKindSummary::from_counts(&counts)?),
+            Err(error) => {
+                let message = match error {
+                    ApplicationError::InvalidRequest(message) => message,
+                    other => other.to_string(),
+                };
+                return Ok((
+                    StoredKindSummary::zero(),
+                    StoredKindSummary::zero(),
+                    Some(message),
+                ));
+            }
+        }
+    }
+    let paragraph_summary = summaries.remove(0);
+    let sentence_summary = summaries.remove(0);
+
+    let mut paragraph_entry = 0usize;
+    let mut eligible_paragraph_entry = 0usize;
+    let mut sentence_entry = 0usize;
+    let mut eligible_sentence_entry = 0usize;
+    for chunk in chunks.iter_mut() {
+        chunk.paragraph_entry = paragraph_entry;
+        chunk.eligible_paragraph_entry = eligible_paragraph_entry;
+        chunk.sentence_entry = sentence_entry;
+        chunk.eligible_sentence_entry = eligible_sentence_entry;
+        paragraph_entry += chunk.paragraph_entries;
+        eligible_paragraph_entry += chunk.paragraph_eligible_entries;
+        sentence_entry += chunk.sentence_entries;
+        eligible_sentence_entry += chunk.sentence_eligible_entries;
+    }
+    Ok((paragraph_summary, sentence_summary, None))
+}
+
+/// Writes one document's `section_text_v2` chunks, `section_layout_v2` headers and
+/// `section_layout_chunk_v2` rows in a transaction.
 fn write_document_sections(
     connection: &mut Connection,
-    cache: &Mutex<SectionLayoutCache>,
     document: &Document,
     normalized_document_hash: &NormalizedDocumentHash,
     source: &SectionLayoutSource<'_>,
@@ -2335,13 +2649,19 @@ fn write_document_sections(
 
     transaction
         .execute(
-            "DELETE FROM section_text_v1 WHERE doc_key = ?1",
+            "DELETE FROM section_text_v2 WHERE doc_key = ?1",
             params![doc_key],
         )
         .map_err(text_unit_index_error)?;
     transaction
         .execute(
-            "DELETE FROM section_layout_v1 WHERE doc_key = ?1",
+            "DELETE FROM section_layout_chunk_v2 WHERE doc_key = ?1",
+            params![doc_key],
+        )
+        .map_err(text_unit_index_error)?;
+    transaction
+        .execute(
+            "DELETE FROM section_layout_v2 WHERE doc_key = ?1",
             params![doc_key],
         )
         .map_err(text_unit_index_error)?;
@@ -2363,20 +2683,57 @@ fn write_document_sections(
     {
         let mut chunk_statement = transaction
             .prepare(
-                "INSERT INTO section_text_v1(doc_key, section_key, chunk_no, text)
+                "INSERT INTO section_text_v2(doc_key, section_key, chunk_no, text)
                  VALUES (?1, ?2, ?3, ?4)",
             )
             .map_err(text_unit_index_error)?;
-        let mut layout_statement = transaction
+        let mut header_statement = transaction
             .prepare(
-                "INSERT INTO section_layout_v1(
+                "INSERT INTO section_layout_v2(
                     doc_key,
                     section_key,
                     section_id,
                     char_len,
                     paragraph_coverage_json,
-                    layout
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    plan_error,
+                    paragraph_count,
+                    sentence_count,
+                    chunk_count,
+                    sorted_flags,
+                    total_items_paragraph_preserve,
+                    total_items_paragraph_eligible,
+                    total_items_sentence_preserve,
+                    total_items_sentence_eligible,
+                    coverage_paragraph_preserve_json,
+                    coverage_paragraph_eligible_json,
+                    coverage_sentence_preserve_json,
+                    coverage_sentence_eligible_json
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                 )",
+            )
+            .map_err(text_unit_index_error)?;
+        let mut chunk_row_statement = transaction
+            .prepare(
+                "INSERT INTO section_layout_chunk_v2(
+                    doc_key,
+                    section_key,
+                    chunk_no,
+                    first_paragraph_index,
+                    first_sentence_index,
+                    paragraph_slot,
+                    sentence_slot,
+                    paragraph_entry,
+                    sentence_entry,
+                    eligible_paragraph_entry,
+                    eligible_sentence_entry,
+                    paragraph_count,
+                    sentence_count,
+                    blob
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                 )",
             )
             .map_err(text_unit_index_error)?;
 
@@ -2384,26 +2741,91 @@ fn write_document_sections(
             let section_key = section_keys[&section.id];
             insert_section_text(&mut chunk_statement, doc_key, section_key, &section.content)?;
 
+            let paragraph_coverage = source.paragraph_coverage(&section.id);
             let paragraph_coverage_json = source.paragraph_coverage_json(&section.id)?;
-            let layout_blob = source.layout(&section.id)?.encode()?;
-            layout_statement
+            let layout = source.layout(&section.id)?;
+            let paragraphs_sorted = layout
+                .paragraphs
+                .windows(2)
+                .all(|pair| pair[0].paragraph_index < pair[1].paragraph_index);
+            let sentences_sorted = layout.sentences.windows(2).all(|pair| {
+                (pair[0].paragraph_index, pair[0].sentence_index)
+                    < (pair[1].paragraph_index, pair[1].sentence_index)
+            });
+            let sorted = paragraphs_sorted && sentences_sorted;
+            let ranges = build_chunk_ranges(&layout, sorted);
+            let mut chunks = ranges
+                .into_iter()
+                .map(|range| ChunkRow {
+                    range,
+                    paragraph_entry: 0,
+                    sentence_entry: 0,
+                    eligible_paragraph_entry: 0,
+                    eligible_sentence_entry: 0,
+                    paragraph_entries: 0,
+                    paragraph_eligible_entries: 0,
+                    sentence_entries: 0,
+                    sentence_eligible_entries: 0,
+                })
+                .collect::<Vec<_>>();
+            let (paragraph_summary, sentence_summary, plan_error) =
+                plan_chunk_starts(&section.id, &layout, paragraph_coverage, &mut chunks)?;
+
+            let mut sorted_flags = 0i64;
+            if paragraphs_sorted {
+                sorted_flags |= 1;
+            }
+            if sentences_sorted {
+                sorted_flags |= 2;
+            }
+            header_statement
                 .execute(params![
                     doc_key,
                     section_key,
                     &section.id.0,
                     usize_to_i64(section.normalized_text_len())?,
                     paragraph_coverage_json,
-                    layout_blob,
+                    plan_error,
+                    usize_to_i64(layout.paragraphs.len())?,
+                    usize_to_i64(layout.sentences.len())?,
+                    usize_to_i64(chunks.len())?,
+                    sorted_flags,
+                    usize_to_i64(paragraph_summary.total_preserve)?,
+                    usize_to_i64(paragraph_summary.total_eligible)?,
+                    usize_to_i64(sentence_summary.total_preserve)?,
+                    usize_to_i64(sentence_summary.total_eligible)?,
+                    paragraph_summary.preserve_json,
+                    paragraph_summary.eligible_json,
+                    sentence_summary.preserve_json,
+                    sentence_summary.eligible_json,
                 ])
                 .map_err(text_unit_index_error)?;
+
+            for chunk in &chunks {
+                let blob = chunk_layout(&layout, &chunk.range).encode()?;
+                chunk_row_statement
+                    .execute(params![
+                        doc_key,
+                        section_key,
+                        usize_to_i64(chunk.range.chunk_no)?,
+                        usize_to_i64(chunk.range.first_paragraph_index)?,
+                        usize_to_i64(chunk.range.first_sentence_index)?,
+                        usize_to_i64(chunk.range.paragraph_slot)?,
+                        usize_to_i64(chunk.range.sentence_slot)?,
+                        usize_to_i64(chunk.paragraph_entry)?,
+                        usize_to_i64(chunk.sentence_entry)?,
+                        usize_to_i64(chunk.eligible_paragraph_entry)?,
+                        usize_to_i64(chunk.eligible_sentence_entry)?,
+                        usize_to_i64(chunk.range.paragraph_end - chunk.range.paragraph_start)?,
+                        usize_to_i64(chunk.range.sentence_end - chunk.range.sentence_start)?,
+                        blob,
+                    ])
+                    .map_err(text_unit_index_error)?;
+            }
         }
     }
 
     transaction.commit().map_err(text_unit_index_error)?;
-    let mut cache = cache.lock().map_err(|_| {
-        ApplicationError::TextUnitIndexFailed("section layout cache lock poisoned".into())
-    })?;
-    cache.remove_document(doc_key);
     Ok(())
 }
 
@@ -2507,13 +2929,12 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         document_id: &DocumentId,
     ) -> Result<Vec<TextUnit>, ApplicationError> {
         let document_id = document_id.clone();
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 if let Some(meta) = load_stored_document(connection, &document_id)? {
-                    return paragraph_units_from_layout(connection, &cache, &meta);
+                    return paragraph_units_from_layout(connection, &meta);
                 }
                 legacy_list_document(connection, &document_id)
             },
@@ -2530,7 +2951,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         validate_paragraph_units(&document.id, &paragraphs.units)?;
 
         let document = Arc::clone(document);
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -2569,7 +2989,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
                 write_document_sections(
                     connection,
-                    &cache,
                     &document,
                     &normalized_document_hash,
                     &SectionLayoutSource::Units(&groups),
@@ -2587,7 +3006,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
         let document = Arc::clone(document);
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -2600,7 +3018,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     .collect::<HashMap<_, _>>();
                 write_document_sections(
                     connection,
-                    &cache,
                     &document,
                     &normalized_document_hash,
                     &SectionLayoutSource::Segmentation(&sections),
@@ -2619,7 +3036,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Option<SectionTextUnits>, ApplicationError> {
         let document_id = document_id.clone();
         let section_id = section_id.clone();
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -2630,9 +3046,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Ok(None);
                 }
-                let Some(entry) =
-                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
-                else {
+                let Some(header) = load_section_header(connection, &meta, &section_id)? else {
                     return Ok(Some(SectionTextUnits {
                         paragraphs: Vec::new(),
                         paragraph_coverage: None,
@@ -2641,12 +3055,18 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     }));
                 };
 
-                let text =
-                    load_section_text(connection, meta.doc_key, entry.section_key, entry.char_len)?;
+                let layout =
+                    load_whole_section_layout(connection, meta.doc_key, header.section_key)?;
+                let text = load_section_text(
+                    connection,
+                    meta.doc_key,
+                    header.section_key,
+                    header.char_len,
+                )?;
                 let index = NormalizedTextIndex::new(&text);
 
-                let mut paragraphs = Vec::with_capacity(entry.layout.paragraphs.len());
-                for paragraph in &entry.layout.paragraphs {
+                let mut paragraphs = Vec::with_capacity(layout.paragraphs.len());
+                for paragraph in &layout.paragraphs {
                     let unit_text =
                         slice_section_text(&index, paragraph.start, paragraph.end, "paragraph")?;
                     paragraphs.push(rebuild_paragraph_unit(
@@ -2660,8 +3080,8 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     )?);
                 }
 
-                let mut sentences = Vec::with_capacity(entry.layout.sentences.len());
-                for sentence in &entry.layout.sentences {
+                let mut sentences = Vec::with_capacity(layout.sentences.len());
+                for sentence in &layout.sentences {
                     let unit_text =
                         slice_section_text(&index, sentence.start, sentence.end, "sentence")?;
                     sentences.push(rebuild_sentence_unit(
@@ -2678,8 +3098,8 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                     )?);
                 }
 
-                let mut sentence_coverage = Vec::with_capacity(entry.layout.coverage.len());
-                for coverage in &entry.layout.coverage {
+                let mut sentence_coverage = Vec::with_capacity(layout.coverage.len());
+                for coverage in &layout.coverage {
                     let paragraph_range =
                         stored_normalized_range(coverage.paragraph_start, coverage.paragraph_end)?;
                     sentence_coverage.push(SentenceParagraphCoverage {
@@ -2706,7 +3126,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
                 Ok(Some(SectionTextUnits {
                     paragraphs,
-                    paragraph_coverage: entry.paragraph_coverage.clone(),
+                    paragraph_coverage: header.paragraph_coverage.clone(),
                     sentences,
                     sentence_coverage,
                 }))
@@ -2725,7 +3145,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Option<OwnedStreamUnit>, ApplicationError> {
         let document_id = document_id.clone();
         let section_id = section_id.clone();
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -2736,69 +3155,81 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Err(stale_text_units(&document_id));
                 }
-                let Some(entry) =
-                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
-                else {
+                let Some(header) = load_section_header(connection, &meta, &section_id)? else {
                     return Err(stale_text_units(&document_id));
                 };
 
-                match unit_kind {
+                let (chunk, unit, start, end) = match unit_kind {
                     EffectiveTextUnitKind::Paragraph => {
-                        let Some(slot) = entry.paragraph_slot(paragraph_index) else {
-                            return Ok(None);
-                        };
-                        let Some(paragraph) = entry.layout.paragraphs.get(slot) else {
-                            return Ok(None);
-                        };
-                        let text = load_text_slice(
+                        let Some(chunk) = load_section_chunk_at_paragraph(
                             connection,
                             meta.doc_key,
-                            entry.section_key,
-                            paragraph.start,
-                            paragraph.end,
-                        )?;
-                        Ok(Some(OwnedStreamUnit::Paragraph(rebuild_paragraph_unit(
-                            &meta,
-                            &section_id,
-                            usize_to_i64(paragraph.paragraph_index)?,
-                            usize_to_i64(paragraph.source_order)?,
-                            usize_to_i64(paragraph.start)?,
-                            usize_to_i64(paragraph.end)?,
-                            text,
-                        )?)))
+                            header.section_key,
+                            paragraph_index,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        let Some(local_index) =
+                            paragraph_index.checked_sub(chunk.first_paragraph_index)
+                        else {
+                            return Ok(None);
+                        };
+                        let Some(slot) = chunk
+                            .layout
+                            .paragraphs
+                            .iter()
+                            .position(|paragraph| paragraph.paragraph_index == local_index)
+                        else {
+                            return Ok(None);
+                        };
+                        let start = chunk.layout.paragraphs[slot].start;
+                        let end = chunk.layout.paragraphs[slot].end;
+                        (chunk, UnitRef::Paragraph(slot), start, end)
                     }
                     EffectiveTextUnitKind::Sentence => {
                         let Some(sentence_index) = sentence_index else {
                             return Ok(None);
                         };
-                        let Some(slot) = entry.sentence_slot(paragraph_index, sentence_index)
+                        let Some(chunk) = load_section_chunk_at_sentence(
+                            connection,
+                            meta.doc_key,
+                            header.section_key,
+                            paragraph_index,
+                            sentence_index,
+                        )?
                         else {
                             return Ok(None);
                         };
-                        let Some(sentence) = entry.layout.sentences.get(slot) else {
+                        let Some(local_index) =
+                            paragraph_index.checked_sub(chunk.first_paragraph_index)
+                        else {
                             return Ok(None);
                         };
-                        let text = load_text_slice(
-                            connection,
-                            meta.doc_key,
-                            entry.section_key,
-                            sentence.start,
-                            sentence.end,
-                        )?;
-                        Ok(Some(OwnedStreamUnit::Sentence(rebuild_sentence_unit(
-                            &meta,
-                            &section_id,
-                            usize_to_i64(sentence.paragraph_index)?,
-                            usize_to_i64(sentence.sentence_index)?,
-                            usize_to_i64(sentence.source_order)?,
-                            usize_to_i64(sentence.start)?,
-                            usize_to_i64(sentence.end)?,
-                            Some(usize_to_i64(sentence.parent_start)?),
-                            Some(usize_to_i64(sentence.parent_end)?),
-                            text,
-                        )?)))
+                        let Some(slot) = chunk.layout.sentences.iter().position(|sentence| {
+                            sentence.paragraph_index == local_index
+                                && sentence.sentence_index == sentence_index
+                        }) else {
+                            return Ok(None);
+                        };
+                        let start = chunk.layout.sentences[slot].start;
+                        let end = chunk.layout.sentences[slot].end;
+                        (chunk, UnitRef::Sentence(slot), start, end)
                     }
-                }
+                };
+
+                let text =
+                    load_text_slice(connection, meta.doc_key, header.section_key, start, end)?;
+                let index = NormalizedTextIndex::new(&text);
+                Ok(Some(build_owned_unit(
+                    &meta,
+                    &section_id,
+                    &chunk.layout,
+                    chunk.first_paragraph_index,
+                    unit,
+                    &index,
+                    start,
+                )?))
             },
         )
         .await
@@ -2812,7 +3243,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -2823,24 +3253,37 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Ok(None);
                 }
-                let Some(entry) =
-                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
-                else {
-                    // A stored document whose section has no layout row behaves like the v2 store's
-                    // section without paragraph coverage: the planner reports it as unavailable.
+                let Some(header) = load_section_header(connection, &meta, &section_id)? else {
                     return Err(ApplicationError::InvalidRequest(format!(
                         "paragraph coverage is unavailable for section {}",
                         section_id.0
                     )));
                 };
-                let plan = entry.plan(kind)?;
-                let (total_items, coverage) = match policy {
-                    TextUnitCoveragePolicy::PreserveSource => {
-                        (plan.entries.len(), plan.preserve_source.clone())
-                    }
-                    TextUnitCoveragePolicy::EligibleOnly => (
-                        entry.planned(kind)?.eligible.len(),
-                        plan.eligible_only.clone(),
+                if let Some(error) = header.plan_error.as_deref() {
+                    return Err(ApplicationError::InvalidRequest(error.to_owned()));
+                }
+                if header.paragraph_coverage.is_none() {
+                    return Err(ApplicationError::InvalidRequest(format!(
+                        "paragraph coverage is unavailable for section {}",
+                        section_id.0
+                    )));
+                }
+                let (total_items, coverage) = match (kind, policy) {
+                    (RequestedTextUnitKind::Paragraph, TextUnitCoveragePolicy::PreserveSource) => (
+                        header.paragraph_total_preserve,
+                        header.paragraph_preserve_coverage,
+                    ),
+                    (RequestedTextUnitKind::Paragraph, TextUnitCoveragePolicy::EligibleOnly) => (
+                        header.paragraph_total_eligible,
+                        header.paragraph_eligible_coverage,
+                    ),
+                    (RequestedTextUnitKind::Sentence, TextUnitCoveragePolicy::PreserveSource) => (
+                        header.sentence_total_preserve,
+                        header.sentence_preserve_coverage,
+                    ),
+                    (RequestedTextUnitKind::Sentence, TextUnitCoveragePolicy::EligibleOnly) => (
+                        header.sentence_total_eligible,
+                        header.sentence_eligible_coverage,
                     ),
                 };
                 Ok(Some(TextUnitStreamSummary {
@@ -2863,7 +3306,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -2871,20 +3313,28 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
                     return Ok(Vec::new());
                 };
-                let Some(entry) =
-                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
-                else {
+                let Some(header) = load_section_header(connection, &meta, &section_id)? else {
                     return Ok(Vec::new());
                 };
-                if entry.section_coverage.is_none() {
+                if header.paragraph_coverage.is_none() {
                     return Ok(Vec::new());
                 }
-                let planned = entry.planned(kind)?;
-                let entries = &planned.plan.entries;
-
-                let total = match policy {
-                    TextUnitCoveragePolicy::PreserveSource => entries.len(),
-                    TextUnitCoveragePolicy::EligibleOnly => planned.eligible.len(),
+                if let Some(error) = header.plan_error.as_deref() {
+                    return Err(ApplicationError::InvalidRequest(error.to_owned()));
+                }
+                let total = match (kind, policy) {
+                    (RequestedTextUnitKind::Paragraph, TextUnitCoveragePolicy::PreserveSource) => {
+                        header.paragraph_total_preserve
+                    }
+                    (RequestedTextUnitKind::Paragraph, TextUnitCoveragePolicy::EligibleOnly) => {
+                        header.paragraph_total_eligible
+                    }
+                    (RequestedTextUnitKind::Sentence, TextUnitCoveragePolicy::PreserveSource) => {
+                        header.sentence_total_preserve
+                    }
+                    (RequestedTextUnitKind::Sentence, TextUnitCoveragePolicy::EligibleOnly) => {
+                        header.sentence_total_eligible
+                    }
                 };
                 let (start, end) = match direction {
                     TextUnitDirection::Forward => {
@@ -2895,51 +3345,16 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         (end.saturating_sub(limit), end)
                     }
                 };
-                // Stream position k of the chosen policy maps to entry `planned.entry_index(k)`.
-                let entry_index = |stream_position: usize| match policy {
-                    TextUnitCoveragePolicy::PreserveSource => stream_position,
-                    TextUnitCoveragePolicy::EligibleOnly => {
-                        planned.eligible[stream_position] as usize
-                    }
-                };
-
-                let range =
-                    (start..end).try_fold(None::<(usize, usize)>, |range, stream_position| {
-                        let item = &entries[entry_index(stream_position)];
-                        let (unit_start, unit_end) = unit_char_range(&entry.layout, item.unit)?;
-                        Ok::<_, ApplicationError>(Some(match range {
-                            None => (unit_start, unit_end),
-                            Some((range_start, range_end)) => {
-                                (range_start.min(unit_start), range_end.max(unit_end))
-                            }
-                        }))
-                    })?;
-                let (range_start, range_text) = match range {
-                    Some((range_start, range_end)) => (
-                        range_start,
-                        load_text_slice(
-                            connection,
-                            meta.doc_key,
-                            entry.section_key,
-                            range_start,
-                            range_end,
-                        )?,
-                    ),
-                    None => (0, String::new()),
-                };
-                let text_index = NormalizedTextIndex::new(&range_text);
-                let mut items = Vec::with_capacity(end - start);
-                for stream_position in start..end {
-                    let item = &entries[entry_index(stream_position)];
-                    items.push(StoredStreamItem {
-                        position: stream_position,
-                        unit: build_owned_unit(&meta, &entry, item.unit, &text_index, range_start)?,
-                        content_class: item.content_class,
-                        degradation: item.degradation.map(str::to_owned),
-                        char_count: item.char_count,
-                    });
-                }
-                Ok(items)
+                collect_chunk_stream_items(
+                    connection,
+                    &meta,
+                    &section_id,
+                    &header,
+                    kind,
+                    policy,
+                    start,
+                    end,
+                )
             },
         )
         .await
@@ -2956,7 +3371,6 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
-        let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -2964,54 +3378,115 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
                     return Ok(None);
                 };
-                let Some(entry) =
-                    load_cached_section_layout(connection, &cache, &meta, &section_id)?
-                else {
+                let Some(header) = load_section_header(connection, &meta, &section_id)? else {
                     return Ok(None);
                 };
-                if entry.section_coverage.is_none() {
+                if header.paragraph_coverage.is_none() {
                     return Ok(None);
                 }
-                let target = match unit_kind {
+                if let Some(error) = header.plan_error.as_deref() {
+                    return Err(ApplicationError::InvalidRequest(error.to_owned()));
+                }
+                let (chunk, target) = match unit_kind {
                     EffectiveTextUnitKind::Paragraph => {
                         if sentence_index.is_some() {
                             return Ok(None);
                         }
-                        entry
-                            .paragraph_slot(paragraph_index)
-                            .map(UnitRef::Paragraph)
+                        let Some(chunk) = load_section_chunk_at_paragraph(
+                            connection,
+                            meta.doc_key,
+                            header.section_key,
+                            paragraph_index,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        let Some(local_index) =
+                            paragraph_index.checked_sub(chunk.first_paragraph_index)
+                        else {
+                            return Ok(None);
+                        };
+                        let Some(slot) = chunk
+                            .layout
+                            .paragraphs
+                            .iter()
+                            .position(|paragraph| paragraph.paragraph_index == local_index)
+                        else {
+                            return Ok(None);
+                        };
+                        (chunk, UnitRef::Paragraph(slot))
                     }
                     EffectiveTextUnitKind::Sentence => {
                         let Some(sentence_index) = sentence_index else {
                             return Ok(None);
                         };
-                        entry
-                            .sentence_slot(paragraph_index, sentence_index)
-                            .map(UnitRef::Sentence)
-                    }
-                };
-                let Some(target) = target else {
-                    return Ok(None);
-                };
-                let planned = entry.planned(kind)?;
-                let entry_index = match target {
-                    UnitRef::Paragraph(slot) => planned.paragraph_entry.get(slot),
-                    UnitRef::Sentence(slot) => planned.sentence_entry.get(slot),
-                }
-                .copied()
-                .filter(|index| *index != u32::MAX);
-                let Some(entry_index) = entry_index else {
-                    return Ok(None);
-                };
-                match policy {
-                    TextUnitCoveragePolicy::PreserveSource => Ok(Some(entry_index as usize)),
-                    TextUnitCoveragePolicy::EligibleOnly => {
-                        if !planned.plan.entries[entry_index as usize].eligible {
+                        let Some(chunk) = load_section_chunk_at_sentence(
+                            connection,
+                            meta.doc_key,
+                            header.section_key,
+                            paragraph_index,
+                            sentence_index,
+                        )?
+                        else {
                             return Ok(None);
-                        }
-                        Ok(planned.eligible.binary_search(&entry_index).ok())
+                        };
+                        let Some(local_index) =
+                            paragraph_index.checked_sub(chunk.first_paragraph_index)
+                        else {
+                            return Ok(None);
+                        };
+                        let Some(slot) = chunk.layout.sentences.iter().position(|sentence| {
+                            sentence.paragraph_index == local_index
+                                && sentence.sentence_index == sentence_index
+                        }) else {
+                            return Ok(None);
+                        };
+                        (chunk, UnitRef::Sentence(slot))
                     }
+                };
+
+                let (paragraphs, sentences, coverage, section_coverage) =
+                    build_section_descriptors(&chunk.layout, header.paragraph_coverage.as_ref())?;
+                let mut entries = Vec::new();
+                walk_section_stream(
+                    &section_id,
+                    &paragraphs,
+                    section_coverage.as_ref(),
+                    &sentences,
+                    &coverage,
+                    kind,
+                    &mut |entry| entries.push(entry),
+                )?;
+                let mut eligible_seen = 0usize;
+                for (local_index, entry) in entries.iter().enumerate() {
+                    if entry.unit != target {
+                        if entry.eligible {
+                            eligible_seen += 1;
+                        }
+                        continue;
+                    }
+                    return Ok(match policy {
+                        TextUnitCoveragePolicy::PreserveSource => Some(match kind {
+                            RequestedTextUnitKind::Paragraph => chunk.paragraph_entry + local_index,
+                            RequestedTextUnitKind::Sentence => chunk.sentence_entry + local_index,
+                        }),
+                        TextUnitCoveragePolicy::EligibleOnly => {
+                            if !entry.eligible {
+                                None
+                            } else {
+                                Some(match kind {
+                                    RequestedTextUnitKind::Paragraph => {
+                                        chunk.eligible_paragraph_entry + eligible_seen
+                                    }
+                                    RequestedTextUnitKind::Sentence => {
+                                        chunk.eligible_sentence_entry + eligible_seen
+                                    }
+                                })
+                            }
+                        }
+                    });
                 }
+                Ok(None)
             },
         )
         .await
@@ -3099,8 +3574,8 @@ fn load_stored_document(
              FROM text_unit_documents_v2
              WHERE document_id = ?1
                AND EXISTS (
-                    SELECT 1 FROM section_layout_v1
-                    WHERE section_layout_v1.doc_key = text_unit_documents_v2.doc_key
+                    SELECT 1 FROM section_layout_v2
+                    WHERE section_layout_v2.doc_key = text_unit_documents_v2.doc_key
                )",
             params![&document_id.0],
             |row| {
@@ -3117,70 +3592,552 @@ fn load_stored_document(
         .map_err(text_unit_index_error)
 }
 
-fn load_cached_section_layout(
+/// One `section_layout_v2` row: the counters and coverages the stream reads without touching the
+/// layout chunks.
+struct SectionHeader {
+    section_key: i64,
+    char_len: usize,
+    paragraph_coverage: Option<ParagraphSectionCoverage>,
+    plan_error: Option<String>,
+    chunk_count: usize,
+    paragraph_total_preserve: usize,
+    paragraph_total_eligible: usize,
+    sentence_total_preserve: usize,
+    sentence_total_eligible: usize,
+    paragraph_preserve_coverage: TextUnitEnumerationCoverage,
+    paragraph_eligible_coverage: TextUnitEnumerationCoverage,
+    sentence_preserve_coverage: TextUnitEnumerationCoverage,
+    sentence_eligible_coverage: TextUnitEnumerationCoverage,
+}
+
+/// One decoded `section_layout_chunk_v2` row. `layout` holds indices relative to
+/// `first_paragraph_index`; offsets remain section-global.
+#[derive(Clone)]
+struct SectionChunk {
+    chunk_no: usize,
+    first_paragraph_index: usize,
+    paragraph_entry: usize,
+    sentence_entry: usize,
+    eligible_paragraph_entry: usize,
+    eligible_sentence_entry: usize,
+    paragraph_count: usize,
+    layout: SectionLayout,
+}
+
+impl SectionChunk {
+    /// A mid chunk carries the next sentence run of a paragraph and no paragraph entry. The whole
+    /// fallback of an empty section also has `paragraph_count == 0` but is chunk 0, never a mid.
+    fn is_mid_paragraph(&self) -> bool {
+        self.paragraph_count == 0 && self.chunk_no > 0
+    }
+}
+
+fn decode_stream_coverage(json: &str) -> Result<TextUnitEnumerationCoverage, ApplicationError> {
+    let stored: StoredStreamCoverage = serde_json::from_str(json)
+        .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
+    Ok(stored.into_coverage())
+}
+
+fn load_section_header(
     connection: &Connection,
-    cache: &Mutex<SectionLayoutCache>,
     meta: &StoredUnitDocument,
     section_id: &SectionId,
-) -> Result<Option<Arc<CachedSectionLayout>>, ApplicationError> {
-    let data_version: i64 = connection
-        .query_row("PRAGMA data_version", [], |row| row.get(0))
-        .map_err(text_unit_index_error)?;
-    let mut cache = cache.lock().map_err(|_| {
-        ApplicationError::TextUnitIndexFailed("section layout cache lock poisoned".into())
-    })?;
-    cache.sync_version(data_version);
-
-    let row = connection
+) -> Result<Option<SectionHeader>, ApplicationError> {
+    connection
         .query_row(
-            "SELECT section_key, char_len, paragraph_coverage_json
-             FROM section_layout_v1
-             WHERE doc_key = ?1 AND section_id = ?2",
+            "SELECT section_key, char_len, paragraph_coverage_json, plan_error,
+                    paragraph_count, sentence_count, chunk_count,
+                    total_items_paragraph_preserve, total_items_paragraph_eligible,
+                    total_items_sentence_preserve, total_items_sentence_eligible,
+                    coverage_paragraph_preserve_json, coverage_paragraph_eligible_json,
+                    coverage_sentence_preserve_json, coverage_sentence_eligible_json
+               FROM section_layout_v2
+              WHERE doc_key = ?1 AND section_id = ?2",
             params![meta.doc_key, &section_id.0],
             |row| {
+                let paragraph_coverage_json: Option<String> = row.get(2)?;
+                let paragraph_preserve: String = row.get(11)?;
+                let paragraph_eligible: String = row.get(12)?;
+                let sentence_preserve: String = row.get(13)?;
+                let sentence_eligible: String = row.get(14)?;
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    paragraph_coverage_json,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    paragraph_preserve,
+                    paragraph_eligible,
+                    sentence_preserve,
+                    sentence_eligible,
                 ))
             },
         )
         .optional()
-        .map_err(text_unit_index_error)?;
-    let Some((section_key, char_len, coverage_json)) = row else {
-        return Ok(None);
-    };
-    if let Some(entry) = cache.get(meta.doc_key, section_key) {
-        return Ok(Some(entry));
-    }
+        .map_err(text_unit_index_error)?
+        .map(|row| -> Result<SectionHeader, ApplicationError> {
+            let _ = (row.4, row.5);
+            Ok(SectionHeader {
+                section_key: row.0,
+                char_len: i64_to_usize(row.1, "char_len")?,
+                paragraph_coverage: row
+                    .2
+                    .map(
+                        |json| -> Result<ParagraphSectionCoverage, ApplicationError> {
+                            let stored: StoredParagraphCoverage = serde_json::from_str(&json)
+                                .map_err(|error| {
+                                    ApplicationError::TextUnitIndexFailed(error.to_string())
+                                })?;
+                            Ok(stored.into_coverage())
+                        },
+                    )
+                    .transpose()?,
+                plan_error: row.3,
+                chunk_count: i64_to_usize(row.6, "chunk_count")?,
+                paragraph_total_preserve: i64_to_usize(row.7, "paragraph total")?,
+                paragraph_total_eligible: i64_to_usize(row.8, "paragraph eligible total")?,
+                sentence_total_preserve: i64_to_usize(row.9, "sentence total")?,
+                sentence_total_eligible: i64_to_usize(row.10, "sentence eligible total")?,
+                paragraph_preserve_coverage: decode_stream_coverage(&row.11)?,
+                paragraph_eligible_coverage: decode_stream_coverage(&row.12)?,
+                sentence_preserve_coverage: decode_stream_coverage(&row.13)?,
+                sentence_eligible_coverage: decode_stream_coverage(&row.14)?,
+            })
+        })
+        .transpose()
+}
 
-    let layout_blob: Vec<u8> = connection
-        .query_row(
-            "SELECT layout FROM section_layout_v1 WHERE doc_key = ?1 AND section_key = ?2",
-            params![meta.doc_key, section_key],
-            |row| row.get(0),
+const SECTION_CHUNK_COLUMNS: &str = "chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot, sentence_slot, paragraph_entry, sentence_entry, eligible_paragraph_entry, eligible_sentence_entry, paragraph_count, sentence_count, blob";
+
+fn decode_section_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SectionChunk> {
+    let _: i64 = row.get(2)?;
+    let _: i64 = row.get(3)?;
+    let _: i64 = row.get(4)?;
+    let _: i64 = row.get(10)?;
+    Ok(SectionChunk {
+        chunk_no: row.get::<_, i64>(0)?.try_into().unwrap_or(usize::MAX),
+        first_paragraph_index: row.get::<_, i64>(1)?.try_into().unwrap_or(usize::MAX),
+        paragraph_entry: row.get::<_, i64>(5)?.try_into().unwrap_or(usize::MAX),
+        sentence_entry: row.get::<_, i64>(6)?.try_into().unwrap_or(usize::MAX),
+        eligible_paragraph_entry: row.get::<_, i64>(7)?.try_into().unwrap_or(usize::MAX),
+        eligible_sentence_entry: row.get::<_, i64>(8)?.try_into().unwrap_or(usize::MAX),
+        paragraph_count: row.get::<_, i64>(9)?.try_into().unwrap_or(usize::MAX),
+        layout: SectionLayout {
+            paragraphs: Vec::new(),
+            sentences: Vec::new(),
+            coverage: Vec::new(),
+        },
+    })
+}
+
+fn decode_section_chunk(
+    mut chunk: SectionChunk,
+    blob: &[u8],
+) -> Result<SectionChunk, ApplicationError> {
+    chunk.layout = SectionLayout::decode(blob)?;
+    Ok(chunk)
+}
+
+fn read_section_chunk(
+    connection: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Option<SectionChunk>, ApplicationError> {
+    let mut statement = connection
+        .prepare_cached(sql)
+        .map_err(text_unit_index_error)?;
+    let row = statement
+        .query_row(params, |row| {
+            let chunk = decode_section_chunk_row(row)?;
+            let blob: Vec<u8> = row.get(11)?;
+            Ok((chunk, blob))
+        })
+        .optional()
+        .map_err(text_unit_index_error)?;
+    row.map(|(chunk, blob)| decode_section_chunk(chunk, &blob))
+        .transpose()
+}
+
+fn load_section_chunk_at_paragraph(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+    paragraph_index: usize,
+) -> Result<Option<SectionChunk>, ApplicationError> {
+    read_section_chunk(
+        connection,
+        "SELECT chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot,
+                sentence_slot, paragraph_entry, sentence_entry, eligible_paragraph_entry,
+                eligible_sentence_entry, paragraph_count, sentence_count, blob
+           FROM section_layout_chunk_v2
+          WHERE doc_key = ?1 AND section_key = ?2
+            AND first_paragraph_index <= ?3 AND paragraph_count > 0
+          ORDER BY first_paragraph_index DESC, chunk_no DESC
+          LIMIT 1",
+        params![doc_key, section_key, usize_to_i64(paragraph_index)?],
+    )
+}
+
+fn load_section_chunk_at_sentence(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+    paragraph_index: usize,
+    sentence_index: usize,
+) -> Result<Option<SectionChunk>, ApplicationError> {
+    read_section_chunk(
+        connection,
+        "SELECT chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot,
+                sentence_slot, paragraph_entry, sentence_entry, eligible_paragraph_entry,
+                eligible_sentence_entry, paragraph_count, sentence_count, blob
+           FROM section_layout_chunk_v2
+          WHERE doc_key = ?1 AND section_key = ?2
+            AND first_paragraph_index <= ?3
+            AND (first_paragraph_index < ?3 OR first_sentence_index <= ?4)
+          ORDER BY first_paragraph_index DESC, first_sentence_index DESC, chunk_no DESC
+          LIMIT 1",
+        params![
+            doc_key,
+            section_key,
+            usize_to_i64(paragraph_index)?,
+            usize_to_i64(sentence_index)?
+        ],
+    )
+}
+
+fn load_section_chunks_from(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+    from_chunk: usize,
+) -> Result<Vec<SectionChunk>, ApplicationError> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot,
+                    sentence_slot, paragraph_entry, sentence_entry, eligible_paragraph_entry,
+                    eligible_sentence_entry, paragraph_count, sentence_count, blob
+               FROM section_layout_chunk_v2
+              WHERE doc_key = ?1 AND section_key = ?2 AND chunk_no >= ?3
+              ORDER BY chunk_no ASC",
         )
         .map_err(text_unit_index_error)?;
-    let layout = SectionLayout::decode(&layout_blob)?;
-    let paragraph_coverage = coverage_json
-        .map(
-            |json| -> Result<ParagraphSectionCoverage, ApplicationError> {
-                let stored: StoredParagraphCoverage = serde_json::from_str(&json)
-                    .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
-                Ok(stored.into_coverage())
+    let rows = statement
+        .query_map(
+            params![doc_key, section_key, usize_to_i64(from_chunk)?],
+            |row| {
+                let chunk = decode_section_chunk_row(row)?;
+                let blob: Vec<u8> = row.get(11)?;
+                Ok((chunk, blob))
             },
         )
-        .transpose()?;
-    let entry = Arc::new(CachedSectionLayout::new(
+        .map_err(text_unit_index_error)?;
+    let mut chunks = Vec::new();
+    for row in rows {
+        let (chunk, blob) = row.map_err(text_unit_index_error)?;
+        chunks.push(decode_section_chunk(chunk, &blob)?);
+    }
+    Ok(chunks)
+}
+
+fn load_section_chunk_at_no(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+    chunk_no: usize,
+) -> Result<Option<SectionChunk>, ApplicationError> {
+    read_section_chunk(
+        connection,
+        "SELECT chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot,
+                sentence_slot, paragraph_entry, sentence_entry, eligible_paragraph_entry,
+                eligible_sentence_entry, paragraph_count, sentence_count, blob
+           FROM section_layout_chunk_v2
+          WHERE doc_key = ?1 AND section_key = ?2 AND chunk_no = ?3",
+        params![doc_key, section_key, usize_to_i64(chunk_no)?],
+    )
+}
+
+fn reassemble_section_layout(chunks: &[SectionChunk]) -> SectionLayout {
+    let mut paragraphs = Vec::new();
+    let mut sentences = Vec::new();
+    let mut coverage = Vec::new();
+    let mut seen_paragraphs = std::collections::HashSet::new();
+    let mut seen_coverage = std::collections::HashSet::new();
+    for chunk in chunks {
+        let base = chunk.first_paragraph_index;
+        for paragraph in &chunk.layout.paragraphs {
+            let mut paragraph = paragraph.clone();
+            paragraph.paragraph_index += base;
+            if chunk.is_mid_paragraph() && !seen_paragraphs.insert(paragraph.paragraph_index) {
+                continue;
+            }
+            if !chunk.is_mid_paragraph() {
+                seen_paragraphs.insert(paragraph.paragraph_index);
+            }
+            paragraphs.push(paragraph);
+        }
+        for sentence in &chunk.layout.sentences {
+            let mut sentence = sentence.clone();
+            sentence.paragraph_index += base;
+            sentences.push(sentence);
+        }
+        for record in &chunk.layout.coverage {
+            let mut record = record.clone();
+            record.paragraph_index += base;
+            if chunk.is_mid_paragraph() && !seen_coverage.insert(record.paragraph_index) {
+                continue;
+            }
+            if !chunk.is_mid_paragraph() {
+                seen_coverage.insert(record.paragraph_index);
+            }
+            coverage.push(record);
+        }
+    }
+    SectionLayout {
+        paragraphs,
+        sentences,
+        coverage,
+    }
+}
+
+/// Reads exactly the entries of `[start, end)` from the chunks those entries live in. Each chunk is
+/// decoded once and walked with the same planner rules as ingest, so page order and positions match
+/// the whole-section plan.
+#[allow(clippy::too_many_arguments)]
+fn collect_chunk_stream_items(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    section_id: &SectionId,
+    header: &SectionHeader,
+    kind: RequestedTextUnitKind,
+    policy: TextUnitCoveragePolicy,
+    start: usize,
+    end: usize,
+) -> Result<Vec<StoredStreamItem>, ApplicationError> {
+    if start >= end {
+        return Ok(Vec::new());
+    }
+    let Some(mut chunk) = load_section_chunk_for_stream_position(
+        connection,
         meta.doc_key,
-        section_key,
-        section_id.clone(),
-        i64_to_usize(char_len, "char_len")?,
-        paragraph_coverage,
-        layout,
-    )?);
-    cache.insert(Arc::clone(&entry));
-    Ok(Some(entry))
+        header.section_key,
+        kind,
+        policy,
+        start,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+
+    struct PageUnit {
+        position: usize,
+        chunk_index: usize,
+        unit: UnitRef,
+        unit_start: usize,
+        unit_end: usize,
+        content_class: ParagraphContentClass,
+        degradation: Option<&'static str>,
+        char_count: usize,
+    }
+
+    // A page loads its text once, from the first selected unit's start to the last one's end, as
+    // the planner-backed index does; each unit keeps its own range into that slice.
+    let mut chunks: Vec<SectionChunk> = Vec::new();
+    let mut pending: Vec<PageUnit> = Vec::with_capacity(end - start);
+    let mut chunk_no = chunk.chunk_no;
+    'chunks: loop {
+        if kind == RequestedTextUnitKind::Paragraph && chunk.is_mid_paragraph() {
+            match load_section_chunk_at_no(
+                connection,
+                meta.doc_key,
+                header.section_key,
+                chunk_no + 1,
+            )? {
+                Some(next) => {
+                    chunk = next;
+                    chunk_no += 1;
+                    continue;
+                }
+                None => break,
+            }
+        }
+        let chunk_index = chunks.len();
+        chunks.push(chunk.clone());
+        let (paragraphs, sentences, coverage, section_coverage) =
+            build_section_descriptors(&chunk.layout, header.paragraph_coverage.as_ref())?;
+        let mut entries = Vec::new();
+        walk_section_stream(
+            section_id,
+            &paragraphs,
+            section_coverage.as_ref(),
+            &sentences,
+            &coverage,
+            kind,
+            &mut |entry| entries.push(entry),
+        )?;
+
+        let mut eligible_local = 0usize;
+        for (local_index, entry) in entries.iter().enumerate() {
+            if matches!(policy, TextUnitCoveragePolicy::EligibleOnly) && !entry.eligible {
+                continue;
+            }
+            let stream_position = match policy {
+                TextUnitCoveragePolicy::PreserveSource => match kind {
+                    RequestedTextUnitKind::Paragraph => chunk.paragraph_entry + local_index,
+                    RequestedTextUnitKind::Sentence => chunk.sentence_entry + local_index,
+                },
+                TextUnitCoveragePolicy::EligibleOnly => {
+                    let position = match kind {
+                        RequestedTextUnitKind::Paragraph => {
+                            chunk.eligible_paragraph_entry + eligible_local
+                        }
+                        RequestedTextUnitKind::Sentence => {
+                            chunk.eligible_sentence_entry + eligible_local
+                        }
+                    };
+                    if entry.eligible {
+                        eligible_local += 1;
+                    }
+                    position
+                }
+            };
+            if stream_position >= end {
+                break 'chunks;
+            }
+            if stream_position < start {
+                continue;
+            }
+            let (unit_start, unit_end) = unit_char_range(&chunk.layout, entry.unit)?;
+            pending.push(PageUnit {
+                position: stream_position,
+                chunk_index,
+                unit: entry.unit,
+                unit_start,
+                unit_end,
+                content_class: entry.content_class,
+                degradation: entry.degradation,
+                char_count: entry.char_count,
+            });
+        }
+
+        chunk_no += 1;
+        if chunk_no >= header.chunk_count {
+            break;
+        }
+        let Some(next) =
+            load_section_chunk_at_no(connection, meta.doc_key, header.section_key, chunk_no)?
+        else {
+            break;
+        };
+        chunk = next;
+    }
+
+    let Some((range_start, range_end)) =
+        pending.iter().fold(None::<(usize, usize)>, |range, unit| {
+            Some(match range {
+                None => (unit.unit_start, unit.unit_end),
+                Some((start, end)) => (start.min(unit.unit_start), end.max(unit.unit_end)),
+            })
+        })
+    else {
+        return Ok(Vec::new());
+    };
+    let text = load_text_slice(
+        connection,
+        meta.doc_key,
+        header.section_key,
+        range_start,
+        range_end,
+    )?;
+    let index = NormalizedTextIndex::new(&text);
+    let mut items = Vec::with_capacity(pending.len());
+    for unit in pending {
+        let chunk = &chunks[unit.chunk_index];
+        items.push(StoredStreamItem {
+            position: unit.position,
+            unit: build_owned_unit(
+                meta,
+                section_id,
+                &chunk.layout,
+                chunk.first_paragraph_index,
+                unit.unit,
+                &index,
+                range_start,
+            )?,
+            content_class: unit.content_class,
+            degradation: unit.degradation.map(str::to_owned),
+            char_count: unit.char_count,
+        });
+    }
+    Ok(items)
+}
+
+fn load_whole_section_layout(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+) -> Result<SectionLayout, ApplicationError> {
+    let chunks = load_section_chunks_from(connection, doc_key, section_key, 0)?;
+    Ok(reassemble_section_layout(&chunks))
+}
+
+fn stream_choice_field(
+    kind: RequestedTextUnitKind,
+    policy: TextUnitCoveragePolicy,
+) -> &'static str {
+    match (kind, policy) {
+        (RequestedTextUnitKind::Paragraph, TextUnitCoveragePolicy::PreserveSource) => {
+            "paragraph_entry"
+        }
+        (RequestedTextUnitKind::Paragraph, TextUnitCoveragePolicy::EligibleOnly) => {
+            "eligible_paragraph_entry"
+        }
+        (RequestedTextUnitKind::Sentence, TextUnitCoveragePolicy::PreserveSource) => {
+            "sentence_entry"
+        }
+        (RequestedTextUnitKind::Sentence, TextUnitCoveragePolicy::EligibleOnly) => {
+            "eligible_sentence_entry"
+        }
+    }
+}
+
+fn stream_count_field(kind: RequestedTextUnitKind) -> &'static str {
+    match kind {
+        RequestedTextUnitKind::Paragraph => "paragraph_count > 0",
+        // A coarse paragraph is a sentence-stream entry without a sentence record, so a chunk can
+        // have stream entries with `sentence_count == 0` but `paragraph_count > 0`.
+        RequestedTextUnitKind::Sentence => "(sentence_count > 0 OR paragraph_count > 0)",
+    }
+}
+
+fn load_section_chunk_for_stream_position(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+    kind: RequestedTextUnitKind,
+    policy: TextUnitCoveragePolicy,
+    position: usize,
+) -> Result<Option<SectionChunk>, ApplicationError> {
+    let choice = stream_choice_field(kind, policy);
+    let count = stream_count_field(kind);
+    let sql = format!(
+        "SELECT {SECTION_CHUNK_COLUMNS}
+           FROM section_layout_chunk_v2
+          WHERE doc_key = ?1 AND section_key = ?2
+            AND {choice} <= ?3 AND {count}
+          ORDER BY {choice} DESC, chunk_no DESC
+          LIMIT 1"
+    );
+    read_section_chunk(
+        connection,
+        &sql,
+        params![doc_key, section_key, usize_to_i64(position)?],
+    )
 }
 
 fn load_section_text(
@@ -3212,7 +4169,7 @@ fn load_section_text_unchecked(
     let mut statement = connection
         .prepare_cached(
             "SELECT chunk_no, text
-             FROM section_text_v1
+             FROM section_text_v2
              WHERE doc_key = ?1 AND section_key = ?2
              ORDER BY chunk_no ASC",
         )
@@ -3251,7 +4208,7 @@ fn load_text_slice(
     let mut statement = connection
         .prepare(
             "SELECT chunk_no, text
-             FROM section_text_v1
+             FROM section_text_v2
              WHERE doc_key = ?1 AND section_key = ?2
                AND chunk_no BETWEEN ?3 AND ?4
              ORDER BY chunk_no ASC",
@@ -3351,13 +4308,12 @@ fn slice_section_text_str<'a>(
 
 fn paragraph_units_from_layout(
     connection: &Connection,
-    cache: &Mutex<SectionLayoutCache>,
     meta: &StoredUnitDocument,
 ) -> Result<Vec<TextUnit>, ApplicationError> {
     let mut statement = connection
         .prepare(
             "SELECT section_key, section_id
-             FROM section_layout_v1
+             FROM section_layout_v2
              WHERE doc_key = ?1
              ORDER BY section_key ASC",
         )
@@ -3372,12 +4328,18 @@ fn paragraph_units_from_layout(
     for row in rows {
         let (_section_key, section_id) = row.map_err(text_unit_index_error)?;
         let section_id = SectionId(section_id);
-        let Some(entry) = load_cached_section_layout(connection, cache, meta, &section_id)? else {
+        let Some(header) = load_section_header(connection, meta, &section_id)? else {
             continue;
         };
-        let text = load_section_text(connection, meta.doc_key, entry.section_key, entry.char_len)?;
+        let layout = load_whole_section_layout(connection, meta.doc_key, header.section_key)?;
+        let text = load_section_text(
+            connection,
+            meta.doc_key,
+            header.section_key,
+            header.char_len,
+        )?;
         let index = NormalizedTextIndex::new(&text);
-        for paragraph in &entry.layout.paragraphs {
+        for paragraph in &layout.paragraphs {
             let unit_text =
                 slice_section_text(&index, paragraph.start, paragraph.end, "paragraph")?;
             units.push(rebuild_paragraph_unit(
@@ -3747,14 +4709,16 @@ fn slice_loaded_text(
 
 fn build_owned_unit(
     meta: &StoredUnitDocument,
-    entry: &CachedSectionLayout,
+    section_id: &SectionId,
+    layout: &SectionLayout,
+    first_paragraph_index: usize,
     unit: UnitRef,
     index: &NormalizedTextIndex<'_>,
     base: usize,
 ) -> Result<OwnedStreamUnit, ApplicationError> {
     match unit {
         UnitRef::Paragraph(unit_index) => {
-            let paragraph = entry.layout.paragraphs.get(unit_index).ok_or_else(|| {
+            let paragraph = layout.paragraphs.get(unit_index).ok_or_else(|| {
                 ApplicationError::TextUnitIndexFailed(format!(
                     "stream references missing paragraph descriptor {unit_index}"
                 ))
@@ -3762,8 +4726,8 @@ fn build_owned_unit(
             let text = slice_loaded_text(index, base, paragraph.start, paragraph.end, "paragraph")?;
             Ok(OwnedStreamUnit::Paragraph(rebuild_paragraph_unit(
                 meta,
-                &entry.section_id,
-                usize_to_i64(paragraph.paragraph_index)?,
+                section_id,
+                usize_to_i64(paragraph.paragraph_index + first_paragraph_index)?,
                 usize_to_i64(paragraph.source_order)?,
                 usize_to_i64(paragraph.start)?,
                 usize_to_i64(paragraph.end)?,
@@ -3771,7 +4735,7 @@ fn build_owned_unit(
             )?))
         }
         UnitRef::Sentence(unit_index) => {
-            let sentence = entry.layout.sentences.get(unit_index).ok_or_else(|| {
+            let sentence = layout.sentences.get(unit_index).ok_or_else(|| {
                 ApplicationError::TextUnitIndexFailed(format!(
                     "stream references missing sentence descriptor {unit_index}"
                 ))
@@ -3779,8 +4743,8 @@ fn build_owned_unit(
             let text = slice_loaded_text(index, base, sentence.start, sentence.end, "sentence")?;
             Ok(OwnedStreamUnit::Sentence(rebuild_sentence_unit(
                 meta,
-                &entry.section_id,
-                usize_to_i64(sentence.paragraph_index)?,
+                section_id,
+                usize_to_i64(sentence.paragraph_index + first_paragraph_index)?,
                 usize_to_i64(sentence.sentence_index)?,
                 usize_to_i64(sentence.source_order)?,
                 usize_to_i64(sentence.start)?,
@@ -3792,6 +4756,7 @@ fn build_owned_unit(
         }
     }
 }
+
 fn rebuild_paragraph_unit(
     meta: &StoredUnitDocument,
     section_id: &SectionId,
@@ -4064,7 +5029,7 @@ impl StoredDocument {
     }
 
     /// Decodes the document. `connection` and `stored_hash` are read only when the row keeps its
-    /// section text in `section_text_v1`; `stored_hash` is the hash of the `documents` row, if it
+    /// section text in `section_text_v2`; `stored_hash` is the hash of the `documents` row, if it
     /// has one.
     fn into_document(
         self,
@@ -4117,7 +5082,7 @@ fn stale_section_text(document_id: &DocumentId, reason: &str) -> ApplicationErro
     ))
 }
 
-/// Fills every section's `content` from `section_text_v1`, in depth-first section order, which is
+/// Fills every section's `content` from `section_text_v2`, in depth-first section order, which is
 /// the order `write_document_sections` assigns `section_key` in.
 fn load_document_section_text(
     connection: &Connection,
@@ -4218,7 +5183,7 @@ struct StoredSection {
 
 impl StoredSection {
     /// `omit_content` writes an empty `content` instead of a copy of the section's text, for rows
-    /// whose text is stored in `section_text_v1`.
+    /// whose text is stored in `section_text_v2`.
     fn from_section(section: &Section, omit_content: bool) -> Self {
         Self {
             id: section.id.0.clone(),
@@ -4339,11 +5304,69 @@ impl StoredParagraphCoverage {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct StoredStreamCoverage {
+    owner_chars: usize,
+    section_separator_chars: usize,
+    sentence_separator_chars: usize,
+    paragraph_count: usize,
+    sentence_eligible_paragraphs: usize,
+    non_prose_paragraphs: usize,
+    coarse_structural_paragraphs: usize,
+    represented_paragraphs: usize,
+    represented_sentences: usize,
+    coarse_non_prose_items: usize,
+    coarse_structural_items: usize,
+    intentionally_skipped: usize,
+    unsupported_gaps: usize,
+    source_complete: bool,
+}
+
+impl StoredStreamCoverage {
+    fn from_coverage(coverage: &TextUnitEnumerationCoverage) -> Self {
+        Self {
+            owner_chars: coverage.owner_chars,
+            section_separator_chars: coverage.section_separator_chars,
+            sentence_separator_chars: coverage.sentence_separator_chars,
+            paragraph_count: coverage.paragraph_count,
+            sentence_eligible_paragraphs: coverage.sentence_eligible_paragraphs,
+            non_prose_paragraphs: coverage.non_prose_paragraphs,
+            coarse_structural_paragraphs: coverage.coarse_structural_paragraphs,
+            represented_paragraphs: coverage.represented_paragraphs,
+            represented_sentences: coverage.represented_sentences,
+            coarse_non_prose_items: coverage.coarse_non_prose_items,
+            coarse_structural_items: coverage.coarse_structural_items,
+            intentionally_skipped: coverage.intentionally_skipped,
+            unsupported_gaps: coverage.unsupported_gaps,
+            source_complete: coverage.source_complete,
+        }
+    }
+
+    fn into_coverage(self) -> TextUnitEnumerationCoverage {
+        TextUnitEnumerationCoverage {
+            owner_chars: self.owner_chars,
+            section_separator_chars: self.section_separator_chars,
+            sentence_separator_chars: self.sentence_separator_chars,
+            paragraph_count: self.paragraph_count,
+            sentence_eligible_paragraphs: self.sentence_eligible_paragraphs,
+            non_prose_paragraphs: self.non_prose_paragraphs,
+            coarse_structural_paragraphs: self.coarse_structural_paragraphs,
+            represented_paragraphs: self.represented_paragraphs,
+            represented_sentences: self.represented_sentences,
+            coarse_non_prose_items: self.coarse_non_prose_items,
+            coarse_structural_items: self.coarse_structural_items,
+            intentionally_skipped: self.intentionally_skipped,
+            unsupported_gaps: self.unsupported_gaps,
+            source_complete: self.source_complete,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Short-handle key lookups (v2).
 //
 // The v2 tools address a document by `text_unit_documents_v2.doc_key` and a section by
-// `section_layout_v1.section_key` instead of by the long canonical ids. These four lookups are the
+// `section_layout_v2.section_key` instead of by the long canonical ids. These four lookups are the
 // only bridge between the two namings. They are appended here, after the rest of the store, so they
 // never conflict with in-flight work on the scan and layout code above.
 // ---------------------------------------------------------------------------------------------
@@ -4379,7 +5402,7 @@ fn stored_document_id_at_key(
         .map_err(text_unit_index_error)
 }
 
-/// `section_layout_v1.section_key` of one section of `document_id`.
+/// `section_layout_v2.section_key` of one section of `document_id`.
 fn stored_section_key(
     connection: &Connection,
     document_id: &DocumentId,
@@ -4388,7 +5411,7 @@ fn stored_section_key(
     connection
         .query_row(
             "SELECT l.section_key
-               FROM section_layout_v1 l
+               FROM section_layout_v2 l
                JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
               WHERE d.document_id = ?1 AND l.section_id = ?2",
             params![&document_id.0, &section_id.0],
@@ -4407,7 +5430,7 @@ fn stored_section_id_at_key(
     connection
         .query_row(
             "SELECT l.section_id
-               FROM section_layout_v1 l
+               FROM section_layout_v2 l
                JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
               WHERE d.document_id = ?1 AND l.section_key = ?2",
             params![&document_id.0, section_key],
@@ -4421,106 +5444,6 @@ fn stored_section_id_at_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn layout_paragraph(paragraph_index: usize, start: usize, end: usize) -> LayoutParagraph {
-        LayoutParagraph {
-            paragraph_index,
-            source_order: paragraph_index,
-            start,
-            end,
-        }
-    }
-
-    fn layout_sentence(
-        paragraph_index: usize,
-        sentence_index: usize,
-        start: usize,
-        end: usize,
-    ) -> LayoutSentence {
-        LayoutSentence {
-            paragraph_index,
-            sentence_index,
-            source_order: paragraph_index * 10 + sentence_index,
-            start,
-            end,
-            parent_start: start,
-            parent_end: end,
-        }
-    }
-
-    fn cached(layout: SectionLayout) -> CachedSectionLayout {
-        CachedSectionLayout::new(0, 0, SectionId("section://slots".into()), 64, None, layout)
-            .expect("the synthetic layout should cache")
-    }
-
-    /// The slot lookups must return the first match, whatever the layout order: the binary search is only
-    /// allowed to answer when the layout is strictly increasing, and the linear scan must answer otherwise.
-    #[test]
-    fn slot_lookups_match_a_linear_scan_for_sorted_and_unsorted_layouts() {
-        let sorted = cached(SectionLayout {
-            paragraphs: vec![
-                layout_paragraph(0, 0, 10),
-                layout_paragraph(2, 10, 20),
-                layout_paragraph(5, 20, 30),
-            ],
-            sentences: vec![
-                layout_sentence(0, 0, 0, 5),
-                layout_sentence(0, 1, 5, 10),
-                layout_sentence(2, 0, 10, 20),
-            ],
-            coverage: vec![],
-        });
-        let unsorted = cached(SectionLayout {
-            paragraphs: vec![
-                layout_paragraph(5, 20, 30),
-                layout_paragraph(0, 0, 10),
-                layout_paragraph(2, 10, 20),
-            ],
-            sentences: vec![
-                layout_sentence(2, 0, 10, 20),
-                layout_sentence(0, 1, 5, 10),
-                layout_sentence(0, 0, 0, 5),
-            ],
-            coverage: vec![],
-        });
-
-        assert!(
-            sorted.paragraphs_sorted && sorted.sentences_sorted,
-            "the ascending layout must be detected as sorted"
-        );
-        assert!(
-            !unsorted.paragraphs_sorted && !unsorted.sentences_sorted,
-            "the shuffled layout must not be detected as sorted"
-        );
-
-        for entry in [&sorted, &unsorted] {
-            for paragraph_index in 0..8 {
-                let expected = entry
-                    .layout
-                    .paragraphs
-                    .iter()
-                    .position(|paragraph| paragraph.paragraph_index == paragraph_index);
-                assert_eq!(
-                    entry.paragraph_slot(paragraph_index),
-                    expected,
-                    "paragraph slot disagreement for paragraph {paragraph_index}"
-                );
-            }
-            for paragraph_index in 0..4 {
-                for sentence_index in 0..3 {
-                    let expected = entry.layout.sentences.iter().position(|sentence| {
-                        sentence.paragraph_index == paragraph_index
-                            && sentence.sentence_index == sentence_index
-                    });
-                    assert_eq!(
-                        entry.sentence_slot(paragraph_index, sentence_index),
-                        expected,
-                        "sentence slot disagreement for {paragraph_index}.{sentence_index}"
-                    );
-                }
-            }
-        }
-    }
 
     /// The fast unit scan — cache, threads and pruning — must return exactly the units of the plain
     /// one, as whole vectors.

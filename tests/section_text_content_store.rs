@@ -1,4 +1,4 @@
-//! `document_json` keeps no section text when `section_text_v1` already stores it for the same
+//! `document_json` keeps no section text when `section_text_v2` already stores it for the same
 //! document version, and reads it back on load.
 
 use std::collections::BTreeMap;
@@ -7,10 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use reading_mcp::application::get_text_units::{RequestedTextUnitKind, TextUnitCoveragePolicy};
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievalOptions, RetrievedResource, Retriever,
-    SourcePolicy, TextUnitIndex,
+    SourcePolicy, TextUnitIndex, TextUnitStreamKey,
 };
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
@@ -203,7 +204,7 @@ async fn runtime_open_stores_no_section_text_and_a_new_repository_reads_it_back(
     let stored = stored_json(&database, &document.id);
     assert_eq!(
         stored["content_store"],
-        Value::String("section_text_v1".into())
+        Value::String("section_text_v2".into())
     );
     assert_eq!(
         assert_empty_contents(&stored["root_sections"]),
@@ -286,7 +287,7 @@ async fn a_missing_section_text_chunk_makes_the_row_stale() {
     let connection = Connection::open(&database).expect("database should open");
     let removed = connection
         .execute(
-            "DELETE FROM section_text_v1 WHERE doc_key = ?1 AND section_key = 1",
+            "DELETE FROM section_text_v2 WHERE doc_key = ?1 AND section_key = 1",
             params![doc_key],
         )
         .expect("chunk should delete");
@@ -318,7 +319,7 @@ async fn a_changed_section_char_len_makes_the_row_stale() {
     let connection = Connection::open(&database).expect("database should open");
     connection
         .execute(
-            "UPDATE section_layout_v1 SET char_len = char_len + 1
+            "UPDATE section_layout_v2 SET char_len = char_len + 1
               WHERE doc_key = ?1 AND section_key = 1",
             params![doc_key],
         )
@@ -334,6 +335,149 @@ async fn a_changed_section_char_len_makes_the_row_stale() {
         matches!(error, ApplicationError::StaleDocument(_)),
         "expected StaleDocument, got {error:?}"
     );
+}
+
+#[tokio::test]
+async fn a_v1_content_store_name_is_reported_as_stale() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let (database, document) = open_with_section_text(directory.path()).await;
+    let mut stored: Value = serde_json::from_str(&stored_json_text(&database, &document.id))
+        .expect("stored document should be JSON");
+    stored["content_store"] = json!("section_text_v1");
+    let connection = Connection::open(&database).expect("database should open");
+    connection
+        .execute(
+            "UPDATE documents SET document_json = ?1 WHERE id = ?2",
+            params![stored.to_string(), &document.id.0],
+        )
+        .expect("content store name should update");
+    drop(connection);
+
+    let reopened = SqliteDocumentRepository::open(&database).expect("repository should reopen");
+    let error = reopened
+        .get(&document.id)
+        .await
+        .expect_err("a removed content store must not load");
+    assert!(
+        matches!(error, ApplicationError::StaleDocument(_)),
+        "expected StaleDocument, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("unknown store section_text_v1"),
+        "stale message should name the removed store: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .ends_with("explicit source reopen required"),
+        "stale message should ask for a reopen: {error}"
+    );
+}
+
+#[tokio::test]
+async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let (database, document) = open_with_section_text(directory.path()).await;
+    let mut stored: Value = serde_json::from_str(&stored_json_text(&database, &document.id))
+        .expect("stored document should be JSON");
+    stored["content_store"] = json!("section_text_v1");
+    let connection = Connection::open(&database).expect("database should open");
+    connection
+        .execute(
+            "UPDATE documents SET document_json = ?1 WHERE id = ?2",
+            params![stored.to_string(), &document.id.0],
+        )
+        .expect("content store name should update");
+    // Rewrite the column order of a database written before this change: one text and one layout
+    // table, no header and no layout chunks.
+    connection
+        .execute_batch(
+            "CREATE TABLE section_text_v1 (
+                doc_key INTEGER NOT NULL,
+                section_key INTEGER NOT NULL,
+                chunk_no INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                PRIMARY KEY (doc_key, section_key, chunk_no)
+             ) WITHOUT ROWID;
+             INSERT INTO section_text_v1
+                SELECT doc_key, section_key, chunk_no, text FROM section_text_v2;
+             CREATE TABLE section_layout_v1 (
+                doc_key INTEGER NOT NULL,
+                section_key INTEGER NOT NULL,
+                section_id TEXT NOT NULL,
+                char_len INTEGER NOT NULL,
+                paragraph_coverage_json TEXT,
+                layout BLOB NOT NULL,
+                PRIMARY KEY (doc_key, section_key)
+             ) WITHOUT ROWID;
+             INSERT INTO section_layout_v1
+                SELECT doc_key, section_key, section_id, char_len, paragraph_coverage_json, x'00'
+                  FROM section_layout_v2;
+             DROP TABLE section_text_v2;
+             DROP TABLE section_layout_chunk_v2;
+             DROP TABLE section_layout_v2;",
+        )
+        .expect("old tables should replace the v4 tables");
+    drop(connection);
+
+    let section_id = document.root_sections[0].id.clone();
+    let index = SqliteTextUnitIndex::open(&database).expect("old database should open");
+    let summary = index
+        .section_stream_summary(TextUnitStreamKey {
+            document_id: &document.id,
+            section_id: &section_id,
+            kind: RequestedTextUnitKind::Sentence,
+            policy: TextUnitCoveragePolicy::PreserveSource,
+        })
+        .await
+        .expect("an old database must still answer");
+    assert!(
+        summary.is_none(),
+        "a document without layout rows must read as not stored"
+    );
+    drop(index);
+
+    let reopened = SqliteDocumentRepository::open(&database).expect("repository should reopen");
+    assert!(
+        matches!(
+            reopened.get(&document.id).await,
+            Err(ApplicationError::StaleDocument(_))
+        ),
+        "a v1 row must report stale until the source is reopened"
+    );
+    drop(reopened);
+
+    let (database, reparsed) = open_with_section_text(directory.path()).await;
+    assert_eq!(reparsed, document);
+    let stored = stored_json(&database, &document.id);
+    assert_eq!(
+        stored["content_store"],
+        Value::String("section_text_v2".into())
+    );
+    assert_eq!(
+        assert_empty_contents(&stored["root_sections"]),
+        document.section_count(),
+        "the re-ingested row must keep its text out of `document_json`"
+    );
+    let index = SqliteTextUnitIndex::open(&database).expect("index should reopen");
+    let summary = index
+        .section_stream_summary(TextUnitStreamKey {
+            document_id: &document.id,
+            section_id: &section_id,
+            kind: RequestedTextUnitKind::Sentence,
+            policy: TextUnitCoveragePolicy::PreserveSource,
+        })
+        .await
+        .expect("summary should load")
+        .expect("the re-ingest must store a summary");
+    assert!(summary.total_items > 0);
+    let reopened = SqliteDocumentRepository::open(&database).expect("repository should reopen");
+    let loaded = reopened
+        .get(&document.id)
+        .await
+        .expect("document should load")
+        .expect("document should exist");
+    assert_eq!(*loaded, document);
 }
 
 #[tokio::test]

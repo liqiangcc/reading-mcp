@@ -7,9 +7,16 @@ The probe speaks newline-delimited JSON-RPC MCP over stdio against a release bin
 2. seek to `--start-fraction` of the section's sentence stream with a few large pages, still
    without perf, so that the profile holds only the deep reads;
 3. attach `perf record -F 999 -g --call-graph fp` to the already-running server and run
-   `--calls` forward `get_text_units` calls (`max_items` 1, `preserve_source`) that follow
-   `next_cursor`, timing each one;
+   `--calls` timed reads of `--mode`, timing each one:
+   - `next` (default): forward `get_text_units` calls of `--max-items` that follow `next_cursor`;
+   - `anchored`: `get_text_units` calls anchored at the unit at the seek position;
+   - `context`: `get_context` calls on that unit (two neighbours each side);
+   - `read`: `read_document` calls on that unit's exact locator.
+   `--kind` and `--policy` choose the stream and the unit;
 4. stop perf and report the mean/median/p95 ms per call plus the perf file path.
+
+`--largest-section` picks the section with the largest `--kind`/`--policy` stream instead of the
+`--start-fraction` one, and `--max-items`/`--max-chars` bound each timed payload.
 
 If `perf record -p` cannot attach, the probe falls back to starting the server under
 `perf record ... -- <binary>` with the same state directory, and says so in `perf_mode`; that
@@ -46,12 +53,6 @@ INITIALIZE_MESSAGE = {
 INITIALIZED_NOTIFICATION = {
     "jsonrpc": "2.0",
     "method": "notifications/initialized",
-}
-
-TEXT_UNIT_BASE = {
-    "requested_kind": "sentence",
-    "direction": "forward",
-    "coverage_policy": "preserve_source",
 }
 
 REQUEST_TIMEOUT = 900.0
@@ -275,6 +276,103 @@ def text_units(server: Server, arguments: dict) -> dict:
     return payload
 
 
+def text_unit_base(kind: str, policy: str) -> dict:
+    return {
+        "requested_kind": kind,
+        "direction": "forward",
+        "coverage_policy": policy,
+    }
+
+
+def largest_section(
+    server: Server,
+    document_id: str,
+    sections: list[dict],
+    kind: str,
+    policy: str,
+) -> tuple[int, int, int]:
+    """The section with the most `kind`/`policy` stream items; returns (index, items, calls)."""
+    best_index = 0
+    best_total = -1
+    calls = 0
+    for index, section in enumerate(sections):
+        arguments = {
+            "document_id": document_id,
+            "section_id": section["section_id"],
+            **text_unit_base(kind, policy),
+            "max_items": 1,
+        }
+        try:
+            payload = text_units(server, arguments)
+        except ProbeError:
+            # A section without coverage of the requested kind cannot hold the largest stream.
+            continue
+        calls += 1
+        total = payload["stream"].get("total_items")
+        if isinstance(total, int) and total > best_total:
+            best_index, best_total = index, total
+    if best_total <= 0:
+        raise ProbeError(f"no section reports a {kind}/{policy} stream")
+    return best_index, best_total, calls
+
+
+def section_unit_locator(
+    server: Server,
+    document_id: str,
+    section_id: str,
+    cursor: str | None,
+    kind: str,
+    policy: str,
+) -> dict:
+    """The locator of the unit at the seek position, read untimed."""
+    arguments = {
+        "document_id": document_id,
+        "section_id": section_id,
+        **text_unit_base(kind, policy),
+        "max_items": 1,
+    }
+    if cursor is not None:
+        arguments["cursor"] = cursor
+    payload = text_units(server, arguments)
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        raise ProbeError("the seek position has no unit to anchor on")
+    locator = items[0].get("locator")
+    if not isinstance(locator, dict):
+        raise ProbeError("the anchor unit has no locator")
+    return locator
+
+
+def choose_section(
+    server: Server,
+    document_id: str,
+    sections: list[dict],
+    args: argparse.Namespace,
+) -> tuple[int, str, int, int]:
+    """Pick the profiled section: (index, section_id, total_items, selection_calls)."""
+    selection_calls = 0
+    if args.largest_section:
+        index, _, selection_calls = largest_section(
+            server, document_id, sections, args.kind, args.policy
+        )
+    else:
+        index = min(len(sections) - 1, int(len(sections) * args.start_fraction))
+    section_id = sections[index]["section_id"]
+    head = text_units(
+        server,
+        {
+            "document_id": document_id,
+            "section_id": section_id,
+            **text_unit_base(args.kind, args.policy),
+            "max_items": 1,
+        },
+    )
+    total_items = head["stream"].get("total_items")
+    if not isinstance(total_items, int) or total_items <= 0:
+        raise ProbeError(f"section reported {total_items!r} stream items")
+    return index, section_id, total_items, selection_calls
+
+
 def open_document(server: Server, source: str) -> str:
     payload = tool_payload(server.tool("open_document", {"source": source}))
     if not isinstance(payload, dict):
@@ -290,6 +388,8 @@ def seek(
     document_id: str,
     section_id: str,
     target: int,
+    kind: str,
+    policy: str,
     page: int = SEEK_PAGE,
 ) -> tuple[str | None, int, int]:
     """Page forward to `target` stream position; return (cursor, position, calls)."""
@@ -301,7 +401,7 @@ def seek(
         arguments = {
             "document_id": document_id,
             "section_id": section_id,
-            **TEXT_UNIT_BASE,
+            **text_unit_base(kind, policy),
             "max_items": want,
         }
         if cursor is not None:
@@ -354,28 +454,110 @@ def stop_perf(process: subprocess.Popen, timeout: float = 180.0) -> int | None:
         return None
 
 
-def run_reads(server: Server, document_id: str, section_id: str, cursor: str | None, calls: int):
-    """Run `calls` forward one-item reads from `cursor`, timing each."""
+def proc_io(pid: int) -> dict[str, int]:
+    """The kernel I/O counters of a process; empty when `/proc` is unavailable."""
+    counters: dict[str, int] = {}
+    try:
+        with open(f"/proc/{pid}/io", encoding="ascii") as handle:
+            for line in handle:
+                name, _, value = line.partition(":")
+                try:
+                    counters[name.strip()] = int(value.strip())
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return counters
+
+
+def proc_rss_kib(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def io_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    keys = ("rchar", "wchar", "syscr", "syscw", "read_bytes", "write_bytes")
+    return {key: after.get(key, 0) - before.get(key, 0) for key in keys}
+
+
+def run_reads(
+    server: Server,
+    document_id: str,
+    section_id: str,
+    cursor: str | None,
+    calls: int,
+    kind: str,
+    policy: str,
+    max_items: int,
+    measure_io: bool = False,
+):
+    """Run `calls` forward `max_items` reads from `cursor`, following `next_cursor`."""
     seconds: list[float] = []
+    io_per_call: list[dict[str, int]] = []
     position = None
     for _ in range(calls):
         arguments = {
             "document_id": document_id,
             "section_id": section_id,
-            **TEXT_UNIT_BASE,
-            "max_items": 1,
+            **text_unit_base(kind, policy),
+            "max_items": max_items,
         }
         if cursor is not None:
             arguments["cursor"] = cursor
+        before_io = proc_io(server.process.pid) if measure_io else None
         start = time.monotonic()
         payload = text_units(server, arguments)
         seconds.append(time.monotonic() - start)
+        if before_io is not None:
+            after_io = proc_io(server.process.pid)
+            io_per_call.append(io_delta(before_io, after_io))
         stream = payload["stream"]
         position = stream.get("end_index")
         cursor = payload.get("next_cursor")
         if not cursor:
             break
-    return seconds, position
+    return seconds, io_per_call, position
+
+
+def run_repeated(
+    server: Server,
+    tool: str,
+    arguments: dict,
+    calls: int,
+    measure_io: bool = False,
+):
+    """Run the same `tool` call `calls` times, timing each."""
+    seconds: list[float] = []
+    io_per_call: list[dict[str, int]] = []
+    for _ in range(calls):
+        before_io = proc_io(server.process.pid) if measure_io else None
+        start = time.monotonic()
+        server.tool(tool, arguments)
+        seconds.append(time.monotonic() - start)
+        if before_io is not None:
+            after_io = proc_io(server.process.pid)
+            io_per_call.append(io_delta(before_io, after_io))
+    return seconds, io_per_call, None
+
+
+def summarize_io(io_per_call: list[dict[str, int]]) -> dict[str, float | int]:
+    if not io_per_call:
+        return {}
+    read_bytes = [entry.get("read_bytes", 0) for entry in io_per_call]
+    rchar = [entry.get("rchar", 0) for entry in io_per_call]
+    return {
+        "io_calls": len(io_per_call),
+        "io_read_bytes_mean": round(statistics.fmean(read_bytes), 1),
+        "io_read_bytes_total": sum(read_bytes),
+        "io_rchar_mean": round(statistics.fmean(rchar), 1),
+        "io_rchar_total": sum(rchar),
+    }
 
 
 def summarize(seconds: list[float]) -> dict:
@@ -406,6 +588,10 @@ def probe(args: argparse.Namespace) -> int:
         raise ProbeError("--start-fraction must be in [0, 1)")
     if not 1 <= args.seek_page <= SEEK_PAGE:
         raise ProbeError(f"--seek-page must be in [1, {SEEK_PAGE}]")
+    if not 1 <= args.max_items <= SEEK_PAGE:
+        raise ProbeError(f"--max-items must be in [1, {SEEK_PAGE}]")
+    if args.max_chars is not None and args.max_chars <= 0:
+        raise ProbeError("--max-chars must be positive")
 
     scratch_root = os.path.join(os.getcwd(), ".tmp")
     os.makedirs(scratch_root, exist_ok=True)
@@ -435,36 +621,40 @@ def probe(args: argparse.Namespace) -> int:
     seek_calls = 0
     total_items = None
     start_position = None
+    rss_phases: dict[str, int] = {}
     try:
         server.initialize()
         opened = time.monotonic()
         document_id = open_document(server, document)
         open_seconds = time.monotonic() - opened
+        if args.rss_phases:
+            rss = proc_rss_kib(server.process.pid)
+            if rss is not None:
+                rss_phases["after_open"] = rss
         sections = read_structure(server, document_id)
         if not sections:
             raise ProbeError("document has no sections")
-        index = min(len(sections) - 1, int(len(sections) * args.start_fraction))
-        section_id = sections[index]["section_id"]
-
-        head = text_units(
-            server,
-            {
-                "document_id": document_id,
-                "section_id": section_id,
-                **TEXT_UNIT_BASE,
-                "max_items": 1,
-            },
+        index, section_id, total_items, selection_calls = choose_section(
+            server, document_id, sections, args
         )
-        total_items = head["stream"].get("total_items")
-        if not isinstance(total_items, int) or total_items <= 0:
-            raise ProbeError(f"section reported {total_items!r} stream items")
         target = int(total_items * args.start_fraction)
         cursor, start_position, seek_calls = seek(
-            server, document_id, section_id, target, args.seek_page
+            server,
+            document_id,
+            section_id,
+            target,
+            args.kind,
+            args.policy,
+            args.seek_page,
         )
+        if args.rss_phases:
+            rss = proc_rss_kib(server.process.pid)
+            if rss is not None:
+                rss_phases["after_seek"] = rss
         print(
             f"opened in {open_seconds:.2f} s; section {index}/{len(sections)} has "
-            f"{total_items} sentences; seeked to {start_position} in {seek_calls} pages",
+            f"{total_items} {args.kind} items; seeked to {start_position} in "
+            f"{seek_calls} pages",
             flush=True,
         )
 
@@ -485,30 +675,78 @@ def probe(args: argparse.Namespace) -> int:
                 server.initialize()
                 document_id = open_document(server, document)
                 sections = read_structure(server, document_id)
-                index = min(len(sections) - 1, int(len(sections) * args.start_fraction))
-                section_id = sections[index]["section_id"]
-                head = text_units(
-                    server,
-                    {
-                        "document_id": document_id,
-                        "section_id": section_id,
-                        **TEXT_UNIT_BASE,
-                        "max_items": 1,
-                    },
+                index, section_id, total_items, _ = choose_section(
+                    server, document_id, sections, args
                 )
-                total_items = head["stream"].get("total_items")
                 cursor, start_position, seek_calls = seek(
                     server,
                     document_id,
                     section_id,
                     int(total_items * args.start_fraction),
+                    args.kind,
+                    args.policy,
                     args.seek_page,
                 )
                 print(f"wrapper open done; seeked to {start_position}", flush=True)
 
-        seconds, end_position = run_reads(
-            server, document_id, section_id, cursor, args.calls
-        )
+        if args.mode == "next":
+            seconds, io_per_call, end_position = run_reads(
+                server,
+                document_id,
+                section_id,
+                cursor,
+                args.calls,
+                args.kind,
+                args.policy,
+                args.max_items,
+                measure_io=args.io_bytes,
+            )
+        else:
+            locator = section_unit_locator(
+                server, document_id, section_id, cursor, args.kind, args.policy
+            )
+            if args.mode == "anchored":
+                tool = "get_text_units"
+                timed_arguments = {
+                    "document_id": document_id,
+                    "section_id": section_id,
+                    **text_unit_base(args.kind, args.policy),
+                    "anchor_locator": locator,
+                    "max_items": args.max_items,
+                }
+            elif args.mode == "context":
+                tool = "get_context"
+                timed_arguments = {
+                    "document_id": document_id,
+                    "target_locator": locator,
+                    "relation": {
+                        "type": "neighbor",
+                        "unit": args.kind,
+                        "before": 2,
+                        "after": 2,
+                    },
+                    "before": 2,
+                    "after": 2,
+                }
+            else:
+                tool = "read_document"
+                timed_arguments = {
+                    "document_id": document_id,
+                    "target_locator": locator,
+                }
+            if args.max_chars is not None:
+                timed_arguments["max_chars"] = args.max_chars
+            seconds, io_per_call, end_position = run_repeated(
+                server,
+                tool,
+                timed_arguments,
+                args.calls,
+                measure_io=args.io_bytes,
+            )
+        if args.rss_phases:
+            rss = proc_rss_kib(server.process.pid)
+            if rss is not None:
+                rss_phases["after_reads"] = rss
     finally:
         server.close()
         if perf_process is not None:
@@ -516,6 +754,14 @@ def probe(args: argparse.Namespace) -> int:
             print(f"perf exited with {code}", flush=True)
 
     summary = summarize(seconds)
+    io_summary = {
+        "io_calls": 0,
+        "io_read_bytes_mean": 0.0,
+        "io_read_bytes_total": 0,
+        "io_rchar_mean": 0.0,
+        "io_rchar_total": 0,
+        **summarize_io(io_per_call),
+    }
     perf_bytes = os.path.getsize(perf_out) if perf_out and os.path.exists(perf_out) else 0
     if perf_out and perf_bytes < 4096:
         print(f"::warning::perf data {perf_out} is only {perf_bytes} bytes", file=sys.stderr)
@@ -525,7 +771,14 @@ def probe(args: argparse.Namespace) -> int:
         "state_dir": state_dir,
         "section_index": index,
         "sections": len(sections),
+        "largest_section": args.largest_section,
+        "selection_calls": selection_calls,
         "total_items": total_items,
+        "mode": args.mode,
+        "kind": args.kind,
+        "policy": args.policy,
+        "max_items": args.max_items,
+        "max_chars": args.max_chars,
         "start_fraction": args.start_fraction,
         "start_position": start_position,
         "end_position": end_position,
@@ -535,7 +788,10 @@ def probe(args: argparse.Namespace) -> int:
         "perf_mode": perf_mode,
         "perf_out": perf_out,
         "perf_bytes": perf_bytes,
+        "io_bytes": args.io_bytes,
+        "rss_phases": rss_phases if args.rss_phases else {},
         **summary,
+        **io_summary,
     }
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -544,9 +800,19 @@ def probe(args: argparse.Namespace) -> int:
         handle.write("\n")
 
     print(
-        "calls={calls} mean_ms={mean_ms} median_ms={median_ms} p95_ms={p95_ms} "
-        "max_ms={max_ms} perf_mode={perf_mode} perf_out={perf_out}".format(
-            perf_mode=perf_mode, perf_out=perf_out, **summary
+        "mode={mode} kind={kind} policy={policy} max_items={max_items} "
+        "fraction={start_fraction} calls={calls} mean_ms={mean_ms} median_ms={median_ms} "
+        "p95_ms={p95_ms} max_ms={max_ms} io_rchar_mean={io_rchar_mean} "
+        "io_read_bytes_mean={io_read_bytes_mean} perf_mode={perf_mode} "
+        "perf_out={perf_out}".format(
+            mode=args.mode,
+            kind=args.kind,
+            policy=args.policy,
+            max_items=args.max_items,
+            start_fraction=args.start_fraction,
+            perf_mode=perf_mode,
+            perf_out=perf_out,
+            **{**summary, **io_summary},
         ),
         flush=True,
     )
@@ -557,12 +823,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Profile deep get_text_units reads under perf.")
     parser.add_argument("--binary", required=True, help="reading-mcp release binary")
     parser.add_argument("--document", required=True, help="document to open and read")
-    parser.add_argument("--calls", type=int, required=True, help="timed get_text_units calls")
+    parser.add_argument("--calls", type=int, required=True, help="timed calls")
     parser.add_argument(
         "--start-fraction",
         type=float,
         default=0.5,
-        help="fraction of the chosen section's sentence stream to start at",
+        help="fraction of the chosen section's kind stream to start at",
     )
     parser.add_argument("--perf", default="perf", help="perf binary")
     parser.add_argument(
@@ -572,6 +838,51 @@ def main() -> int:
         help=f"sentence items per untimed seek page (server limit {SEEK_PAGE})",
     )
     parser.add_argument("--perf-out", default=None, help="perf data output path")
+    parser.add_argument(
+        "--mode",
+        choices=("next", "anchored", "context", "read"),
+        default="next",
+        help="timed read: cursor pages, anchored get_text_units, get_context or read_document",
+    )
+    parser.add_argument(
+        "--kind",
+        choices=("sentence", "paragraph"),
+        default="sentence",
+        help="stream kind to seek, read and anchor on",
+    )
+    parser.add_argument(
+        "--policy",
+        choices=("preserve_source", "eligible_only"),
+        default="preserve_source",
+        help="coverage policy of the stream",
+    )
+    parser.add_argument(
+        "--max-items",
+        type=int,
+        default=1,
+        help="items per timed get_text_units page (server limit 256)",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=None,
+        help="max_chars for context and read modes",
+    )
+    parser.add_argument(
+        "--largest-section",
+        action="store_true",
+        help="profile the section with the most stream items instead of the start-fraction one",
+    )
+    parser.add_argument(
+        "--io-bytes",
+        action="store_true",
+        help="record /proc/<pid>/io read-byte deltas around every timed call",
+    )
+    parser.add_argument(
+        "--rss-phases",
+        action="store_true",
+        help="record VmRSS after open, after seek and after the timed reads",
+    )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", required=True, help="JSON result path")
     args = parser.parse_args()

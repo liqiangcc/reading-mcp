@@ -533,7 +533,7 @@ fn section_layout_rows(database: &std::path::Path, document: &Document) -> i64 {
     let connection = rusqlite::Connection::open(database).expect("inspect");
     connection
         .query_row(
-            "SELECT count(*) FROM section_layout_v1
+            "SELECT count(*) FROM section_layout_v2
              WHERE doc_key = (
                 SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1
              )",

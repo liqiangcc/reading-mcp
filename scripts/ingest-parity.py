@@ -6,11 +6,15 @@ directory, calls `open_document`, saves the tool payload, stops the server, and 
 database into one text file per side:
 
 - `documents`: `id`, `content_hash` and `document_json`, compared as parsed objects after the
-  section text of a row that keeps it in `section_text_v1` (its `content_store` key) is put back
-  in depth-first section order from that document's chunks;
-- `section_layout_v1` joined to `text_unit_documents_v2` and ordered by document then
-  `section_key`: `section_id`, `char_len`, `paragraph_coverage_json` and `hex(layout)`;
-- `section_text_v1`: one sha256 per section over its chunks in order, plus `char_len`.
+  section text of a row that keeps it in `section_text_v1` or `section_text_v2` (its
+  `content_store` key) is put back in depth-first section order from that document's chunks;
+- layouts joined to `text_unit_documents_v2` and ordered by document then `section_key`:
+  `section_id`, `char_len`, `paragraph_coverage_json` and the whole-section layout hex. The v3
+  `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
+  re-encoded as that blob;
+- section text: one sha256 per section over its chunks in order, plus `char_len`;
+- reads: the v1 text-unit/context/read/search sequence and the v2 short-handle sequence, on one
+  server per side, every payload compared byte for byte after wall-clock keys are dropped.
 
 It then compares A against B per input, prints one markdown table and writes unified diffs (first
 200 lines each) into the output directory for anything that differs. It exits 1 when any input
@@ -24,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+from collections import defaultdict
 import hashlib
 import itertools
 import json
@@ -70,8 +75,9 @@ BLOCK_COLUMNS = {
     "text": "text",
 }
 
-# The `content_store` value of a row that keeps no section text inline.
-SECTION_TEXT_STORE = "section_text_v1"
+# The `content_store` values of a row that keeps no section text inline: v3 used
+# `section_text_v1`, v4 uses `section_text_v2`.
+SECTION_TEXT_STORES = ("section_text_v1", "section_text_v2")
 
 # Wall-clock fields that must never take part in a parity comparison.
 WALL_CLOCK_KEYS = {
@@ -263,7 +269,7 @@ def rebuild_document_json(document_json: str, texts: dict[int, str]) -> str:
     stored = json.loads(document_json)
     if not isinstance(stored, dict):
         return json.dumps(stored, ensure_ascii=False, sort_keys=True)
-    if stored.pop("content_store", None) == SECTION_TEXT_STORE:
+    if stored.pop("content_store", None) in SECTION_TEXT_STORES:
         fill_section_text(stored.get("root_sections") or [], texts, itertools.count())
     return json.dumps(stored, ensure_ascii=False, sort_keys=True)
 
@@ -273,6 +279,305 @@ def fill_section_text(sections: list, texts: dict[int, str], keys) -> None:
     for section in sections:
         section["content"] = texts.get(next(keys), "")
         fill_section_text(section.get("children") or [], texts, keys)
+
+
+# ---------------------------------------------------------------------------------------------
+# Section layout codec.
+#
+# `section_layout_v1` stored one whole-section blob; `section_layout_v2` stores the same encoding
+# cut into chunks. To compare the two schemas, decode every chunk (local paragraph indices and
+# per-chunk delta bases) into absolute records and re-encode them as one v1 blob. The encoder is the
+# one in `src/infrastructure/section_layout.rs`: version byte, three counts, unsigned LEB128 varints,
+# and ZigZag deltas from the previous value in the same list (starting at zero).
+# ---------------------------------------------------------------------------------------------
+
+
+class BlobReader:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.pos = 0
+
+    def byte(self) -> int:
+        value = self.data[self.pos]
+        self.pos += 1
+        return value
+
+    def uvarint(self) -> int:
+        value = 0
+        shift = 0
+        while True:
+            byte = self.byte()
+            value |= (byte & 0x7F) << shift
+            if byte < 0x80:
+                return value
+            shift += 7
+
+    def delta(self) -> int:
+        encoded = self.uvarint()
+        return (encoded >> 1) ^ -(encoded & 1)
+
+
+def put_uvarint(out: bytearray, value: int) -> None:
+    while value >= 0x80:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+
+
+def put_delta(out: bytearray, value: int, previous: int) -> int:
+    delta = value - previous
+    put_uvarint(out, (delta << 1) ^ (delta >> 63))
+    return value
+
+
+def decode_layout(data: bytes) -> dict:
+    reader = BlobReader(data)
+    version = reader.byte()
+    if version != 1:
+        raise ValueError(f"unsupported section layout version {version}")
+    paragraphs = []
+    source = start = end = 0
+    for _ in range(reader.uvarint()):
+        paragraph_index = reader.uvarint()
+        source = source + reader.delta()
+        start = start + reader.delta()
+        end = end + reader.delta()
+        paragraphs.append((paragraph_index, source, start, end))
+    sentences = []
+    source = start = end = parent_start = parent_end = 0
+    for _ in range(reader.uvarint()):
+        paragraph_index = reader.uvarint()
+        sentence_index = reader.uvarint()
+        source = source + reader.delta()
+        start = start + reader.delta()
+        end = end + reader.delta()
+        parent_start = parent_start + reader.delta()
+        parent_end = parent_end + reader.delta()
+        sentences.append(
+            (
+                paragraph_index,
+                sentence_index,
+                source,
+                start,
+                end,
+                parent_start,
+                parent_end,
+            )
+        )
+    coverage = []
+    paragraph_start = paragraph_end = 0
+    for _ in range(reader.uvarint()):
+        paragraph_index = reader.uvarint()
+        paragraph_start = paragraph_start + reader.delta()
+        paragraph_end = paragraph_end + reader.delta()
+        coverage.append(
+            (
+                paragraph_index,
+                paragraph_start,
+                paragraph_end,
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+            )
+        )
+    if reader.pos != len(data):
+        raise ValueError(f"section layout has {len(data) - reader.pos} trailing bytes")
+    return {"paragraphs": paragraphs, "sentences": sentences, "coverage": coverage}
+
+
+def encode_layout(layout: dict) -> bytes:
+    out = bytearray([1])
+    paragraphs = layout["paragraphs"]
+    put_uvarint(out, len(paragraphs))
+    source = start = end = 0
+    for paragraph_index, item_source, item_start, item_end in paragraphs:
+        put_uvarint(out, paragraph_index)
+        source = put_delta(out, item_source, source)
+        start = put_delta(out, item_start, start)
+        end = put_delta(out, item_end, end)
+    sentences = layout["sentences"]
+    put_uvarint(out, len(sentences))
+    source = start = end = parent_start = parent_end = 0
+    for (
+        paragraph_index,
+        sentence_index,
+        item_source,
+        item_start,
+        item_end,
+        item_parent_start,
+        item_parent_end,
+    ) in sentences:
+        put_uvarint(out, paragraph_index)
+        put_uvarint(out, sentence_index)
+        source = put_delta(out, item_source, source)
+        start = put_delta(out, item_start, start)
+        end = put_delta(out, item_end, end)
+        parent_start = put_delta(out, item_parent_start, parent_start)
+        parent_end = put_delta(out, item_parent_end, parent_end)
+    coverage = layout["coverage"]
+    put_uvarint(out, len(coverage))
+    paragraph_start = paragraph_end = 0
+    for record in coverage:
+        paragraph_index, item_start, item_end = record[0], record[1], record[2]
+        put_uvarint(out, paragraph_index)
+        paragraph_start = put_delta(out, item_start, paragraph_start)
+        paragraph_end = put_delta(out, item_end, paragraph_end)
+        for value in record[3:]:
+            put_uvarint(out, value)
+    return bytes(out)
+
+
+def rebase_chunk_layout(layout: dict, base: int) -> dict:
+    return {
+        "paragraphs": [
+            (paragraph_index + base, source, start, end)
+            for paragraph_index, source, start, end in layout["paragraphs"]
+        ],
+        "sentences": [
+            (
+                paragraph_index + base,
+                sentence_index,
+                source,
+                start,
+                end,
+                parent_start,
+                parent_end,
+            )
+            for (
+                paragraph_index,
+                sentence_index,
+                source,
+                start,
+                end,
+                parent_start,
+                parent_end,
+            ) in layout["sentences"]
+        ],
+        "coverage": [
+            (record[0] + base, *record[1:]) for record in layout["coverage"]
+        ],
+    }
+
+
+def merge_chunk_layouts(chunks: list[tuple[int, bool, bytes]]) -> bytes:
+    """`chunks` are `(first_paragraph_index, paragraph_count == 0, blob)` in `chunk_no` order."""
+    merged = {"paragraphs": [], "sentences": [], "coverage": []}
+    seen_paragraphs = set()
+    seen_coverage = set()
+    for base, is_mid, blob in chunks:
+        layout = rebase_chunk_layout(decode_layout(blob), base)
+        for paragraph in layout["paragraphs"]:
+            if is_mid and paragraph[0] in seen_paragraphs:
+                continue
+            seen_paragraphs.add(paragraph[0])
+            merged["paragraphs"].append(paragraph)
+        merged["sentences"].extend(layout["sentences"])
+        for record in layout["coverage"]:
+            if is_mid and record[0] in seen_coverage:
+                continue
+            seen_coverage.add(record[0])
+            merged["coverage"].append(record)
+    return encode_layout(merged)
+
+
+def table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def layout_rows(connection: sqlite3.Connection) -> list[str]:
+    if table_exists(connection, "section_layout_chunk_v2"):
+        chunks: dict[tuple[str, int], list[tuple[int, bool, bytes]]] = defaultdict(list)
+        for (
+            document_id,
+            section_key,
+            chunk_no,
+            first_paragraph,
+            paragraph_count,
+            blob,
+        ) in connection.execute(
+            """
+            SELECT d.document_id, c.section_key, c.chunk_no, c.first_paragraph_index,
+                   c.paragraph_count, c.blob
+              FROM section_layout_chunk_v2 c
+              JOIN text_unit_documents_v2 d ON d.doc_key = c.doc_key
+             ORDER BY d.document_id, c.section_key, c.chunk_no
+            """
+        ):
+            chunks[(document_id, section_key)].append(
+                (first_paragraph, paragraph_count == 0 and chunk_no > 0, bytes(blob))
+            )
+        rows = []
+        for document_id, section_key, section_id, char_len, coverage_json in connection.execute(
+            """
+            SELECT d.document_id, l.section_key, l.section_id, l.char_len,
+                   l.paragraph_coverage_json
+              FROM section_layout_v2 l
+              JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
+             ORDER BY d.document_id, l.section_key
+            """
+        ):
+            layout_hex = merge_chunk_layouts(
+                chunks.get((document_id, section_key), [])
+            ).hex().upper()
+            rows.append(
+                "\t".join(
+                    "" if value is None else str(value)
+                    for value in (document_id, section_key, section_id, char_len, coverage_json)
+                )
+                + "\t"
+                + layout_hex
+            )
+        return rows
+
+    return [
+        "\t".join("" if value is None else str(value) for value in row)
+        for row in connection.execute(
+            """
+            SELECT d.document_id,
+                   l.section_key,
+                   l.section_id,
+                   l.char_len,
+                   l.paragraph_coverage_json,
+                   hex(l.layout)
+              FROM section_layout_v1 l
+              JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
+             ORDER BY d.document_id, l.section_key
+            """
+        )
+    ]
+
+
+def text_rows(connection: sqlite3.Connection) -> list[str]:
+    table = (
+        "section_text_v2"
+        if table_exists(connection, "section_text_v2")
+        else "section_text_v1"
+    )
+    sections: dict[tuple[str, int], list[str]] = {}
+    for document_id, section_key, text in connection.execute(
+        f"""
+        SELECT d.document_id, t.section_key, t.text
+          FROM {table} t
+          JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
+         ORDER BY d.document_id, t.section_key, t.chunk_no
+        """
+    ):
+        sections.setdefault((document_id, section_key), []).append(text)
+    rows = []
+    for (document_id, section_key), chunks in sorted(sections.items()):
+        joined = "".join(chunks)
+        digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+        rows.append(f"{document_id}\t{section_key}\t{digest}\t{len(joined)}")
+    return rows
 
 
 def dump_state(database: str) -> dict:
@@ -289,46 +594,31 @@ def dump_state(database: str) -> dict:
                 "SELECT id, content_hash, document_json FROM documents ORDER BY id"
             )
         )
-
-        for row in connection.execute(
-            """
-            SELECT d.document_id,
-                   l.section_key,
-                   l.section_id,
-                   l.char_len,
-                   l.paragraph_coverage_json,
-                   hex(l.layout)
-              FROM section_layout_v1 l
-              JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
-             ORDER BY d.document_id, l.section_key
-            """
-        ):
-            blocks["layouts"].append("\t".join("" if value is None else str(value) for value in row))
-
-        sections: dict[tuple[str, int], list[str]] = {}
+        blocks["layouts"] = layout_rows(connection)
+        blocks["text"] = text_rows(connection)
+        texts_by_document: dict[str, dict[int, str]] = defaultdict(dict)
+        table = (
+            "section_text_v2"
+            if table_exists(connection, "section_text_v2")
+            else "section_text_v1"
+        )
         for document_id, section_key, text in connection.execute(
-            """
+            f"""
             SELECT d.document_id, t.section_key, t.text
-              FROM section_text_v1 t
+              FROM {table} t
               JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
              ORDER BY d.document_id, t.section_key, t.chunk_no
             """
         ):
-            sections.setdefault((document_id, section_key), []).append(text)
-        for (document_id, section_key), chunks in sorted(sections.items()):
-            joined = "".join(chunks)
-            digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
-            blocks["text"].append(f"{document_id}\t{section_key}\t{digest}\t{len(joined)}")
+            texts_by_document[document_id].setdefault(section_key, "")
+            texts_by_document[document_id][section_key] += text
     finally:
         connection.close()
 
     for document_id, content_hash, document_json in documents:
-        texts = {
-            section_key: "".join(chunks)
-            for (document, section_key), chunks in sections.items()
-            if document == document_id
-        }
-        rebuilt = rebuild_document_json(document_json, texts)
+        rebuilt = rebuild_document_json(
+            document_json, texts_by_document.get(document_id, {})
+        )
         blocks["documents"].append(f"{document_id}\t{content_hash}\t{rebuilt}")
 
     return {name: "\n".join(lines) + "\n" for name, lines in blocks.items()}
@@ -344,6 +634,418 @@ def safe_label(label: str) -> str:
     )
 
 
+CURSOR_CHECKSUM_DOMAIN = b"reading-mcp/text-unit-cursor-checksum/v1\0"
+
+
+def pick_read_section(structure) -> str | None:
+    """The top-level section covering the most body order, ties broken by document order."""
+    if not isinstance(structure, dict):
+        return None
+    sections = structure.get("sections")
+    if not isinstance(sections, list) or not sections:
+        return None
+    stream = structure.get("stream")
+    total_nodes = stream.get("total_nodes") if isinstance(stream, dict) else None
+    best = None
+    for index, node in enumerate(sections):
+        if not isinstance(node, dict):
+            continue
+        start = node.get("body_order")
+        end = total_nodes
+        if index + 1 < len(sections) and isinstance(sections[index + 1], dict):
+            end = sections[index + 1].get("body_order")
+        if not isinstance(start, int) or not isinstance(end, int):
+            continue
+        if best is None or end - start > best[0]:
+            best = (end - start, start, node.get("section_id"))
+    if best is None:
+        first = sections[0]
+        return first.get("section_id") if isinstance(first, dict) else None
+    return best[2]
+
+
+def text_unit_cursor(
+    opened: dict,
+    structure: dict,
+    section_id: str,
+    kind: str,
+    direction: str,
+    policy: str,
+    next_index: int,
+    total_items: int,
+) -> str:
+    """Rebuilds a resume cursor at `next_index` with the encoding `text_unit_cursor.rs` uses.
+
+    The claims are serialized in declaration order and checksummed, so the server accepts this
+    exactly like a cursor it issued itself; that is what makes a middle-of-stream read one call.
+    """
+    claims = {
+        "schema_version": "text-unit-cursor/v1",
+        "document_id": opened["document_id"],
+        "content_hash": opened["content_hash"],
+        "normalized_document_hash": opened["normalized_document_hash"],
+        "section_id": section_id,
+        "segmentation_version": structure["segmentation_version"],
+        "requested_kind": kind,
+        "direction": direction,
+        "coverage_policy": policy,
+        "next_index": next_index,
+        "total_items": total_items,
+    }
+    claims_bytes = json.dumps(claims, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    checksum = "sha256:" + hashlib.sha256(
+        CURSOR_CHECKSUM_DOMAIN + claims_bytes
+    ).hexdigest()
+    envelope = json.dumps(
+        {"claims": claims, "checksum": checksum},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "tuc1." + envelope.hex()
+
+
+def run_v1_reads(call, source: str, records: list[dict]) -> None:
+    """Records the design note's §4 read sequence: text units, context, reads, search.
+
+    Runs on the same server as the v2 sequence, after `open_document`, on the largest top-level
+    section so the page boundaries are non-trivial.
+    """
+    opened = call("open_document", {"source": os.path.abspath(source)})
+    records.append({"step": "v1 open_document", "payload": opened})
+    document_id = opened.get("document_id") if isinstance(opened, dict) else None
+    if not isinstance(document_id, str):
+        return
+
+    structure = call("get_document_structure", {"document_id": document_id, "max_depth": 1})
+    records.append({"step": "v1 get_document_structure", "payload": structure})
+    section = pick_read_section(structure)
+    if not isinstance(section, str):
+        return
+
+    first_locators: dict[str, dict] = {}
+    first_texts: dict[str, str] = {}
+    for kind in ("paragraph", "sentence"):
+        for policy in ("preserve_source", "eligible_only"):
+            label = f"{kind}/{policy}"
+            base = {
+                "document_id": document_id,
+                "section_id": section,
+                "requested_kind": kind,
+                "coverage_policy": policy,
+            }
+
+            def text_units(**extra):
+                return call("get_text_units", {**base, **extra})
+
+            start = text_units(direction="forward", max_items=1)
+            records.append({"step": f"v1 {label} forward start", "payload": start})
+            items = start.get("items") if isinstance(start, dict) else None
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                locator = items[0].get("locator")
+                text = items[0].get("text")
+                if isinstance(locator, dict):
+                    first_locators.setdefault(kind, locator)
+                if isinstance(text, str):
+                    first_texts.setdefault(kind, text)
+            stream = start.get("stream") if isinstance(start, dict) else None
+            total = stream.get("total_items") if isinstance(stream, dict) else None
+            if not isinstance(total, int) or total <= 0:
+                continue
+
+            batch = text_units(direction="forward", max_items=256)
+            records.append({"step": f"v1 {label} forward 256", "payload": batch})
+            follow = batch.get("next_cursor") if isinstance(batch, dict) else None
+            if isinstance(follow, str):
+                records.append(
+                    {
+                        "step": f"v1 {label} forward continue",
+                        "payload": text_units(
+                            direction="forward", max_items=256, cursor=follow
+                        ),
+                    }
+                )
+
+            anchor = None
+            middle = total // 2
+            if 0 < middle < total:
+                middle_page = text_units(
+                    direction="forward",
+                    max_items=256,
+                    cursor=text_unit_cursor(
+                        opened, structure, section, kind, "forward", policy, middle, total
+                    ),
+                )
+                records.append({"step": f"v1 {label} forward middle", "payload": middle_page})
+                middle_items = middle_page.get("items")
+                if (
+                    isinstance(middle_items, list)
+                    and middle_items
+                    and isinstance(middle_items[0], dict)
+                ):
+                    anchor = middle_items[0].get("locator")
+            end_page = text_units(
+                direction="forward",
+                max_items=1,
+                cursor=text_unit_cursor(
+                    opened, structure, section, kind, "forward", policy, total - 1, total
+                ),
+            )
+            records.append({"step": f"v1 {label} forward end", "payload": end_page})
+            records.append(
+                {
+                    "step": f"v1 {label} backward end 1",
+                    "payload": text_units(direction="backward", max_items=1),
+                }
+            )
+            records.append(
+                {
+                    "step": f"v1 {label} backward end 256",
+                    "payload": text_units(direction="backward", max_items=256),
+                }
+            )
+
+            if not isinstance(anchor, dict):
+                anchor = first_locators.get(kind)
+            if isinstance(anchor, dict):
+                anchored = text_units(
+                    direction="forward", max_items=1, anchor_locator=anchor
+                )
+                records.append({"step": f"v1 {label} anchored", "payload": anchored})
+                follow = anchored.get("next_cursor") if isinstance(anchored, dict) else None
+                if isinstance(follow, str):
+                    records.append(
+                        {
+                            "step": f"v1 {label} anchored continue",
+                            "payload": text_units(
+                                direction="forward", max_items=256, cursor=follow
+                            ),
+                        }
+                    )
+
+    paragraph_locator = first_locators.get("paragraph")
+    sentence_locator = first_locators.get("sentence")
+    if isinstance(paragraph_locator, dict):
+        records.append(
+            {
+                "step": "v1 get_context paragraph",
+                "payload": call(
+                    "get_context",
+                    {
+                        "document_id": document_id,
+                        "target_locator": paragraph_locator,
+                        "relation": {
+                            "type": "neighbor",
+                            "unit": "paragraph",
+                            "before": 1,
+                            "after": 1,
+                        },
+                    },
+                ),
+            }
+        )
+    if isinstance(sentence_locator, dict):
+        records.append(
+            {
+                "step": "v1 get_context sentence",
+                "payload": call(
+                    "get_context",
+                    {
+                        "document_id": document_id,
+                        "target_locator": sentence_locator,
+                        "relation": {
+                            "type": "neighbor",
+                            "unit": "sentence",
+                            "before": 2,
+                            "after": 2,
+                        },
+                    },
+                ),
+            }
+        )
+        records.append(
+            {
+                "step": "v1 get_context container",
+                "payload": call(
+                    "get_context",
+                    {
+                        "document_id": document_id,
+                        "target_locator": sentence_locator,
+                        "relation": {"type": "container", "kind": "paragraph"},
+                    },
+                ),
+            }
+        )
+    records.append(
+        {
+            "step": "v1 get_context section container",
+            "payload": call(
+                "get_context",
+                {
+                    "document_id": document_id,
+                    "section_id": section,
+                    "relation": {"type": "container", "kind": "section"},
+                },
+            ),
+        }
+    )
+
+    records.append(
+        {
+            "step": "v1 read_document section",
+            "payload": call(
+                "read_document",
+                {"document_id": document_id, "section_id": section, "max_chars": 512},
+            ),
+        }
+    )
+    if isinstance(paragraph_locator, dict):
+        records.append(
+            {
+                "step": "v1 read_document locator",
+                "payload": call(
+                    "read_document",
+                    {
+                        "document_id": document_id,
+                        "target_locator": paragraph_locator,
+                        "max_chars": 512,
+                    },
+                ),
+            }
+        )
+
+    query = first_texts.get("sentence", "").strip()[:24] or "reading"
+    records.append(
+        {
+            "step": "v1 search_document",
+            "payload": call(
+                "search_document",
+                {"document_id": document_id, "query": query, "limit": 5},
+            ),
+        }
+    )
+
+
+def run_read_probe(
+    binary: str, source: str, state_dir: str, timeout: float, log_path: str
+) -> list[dict]:
+    """Reopens the stored state and records the v1 and v2 read sequences, both tools registered.
+
+    The v1 sequence (`run_v1_reads`) covers text units, context, reads and search; then `open`
+    returns the short document handle, five `read` calls follow `next`, the next call uses `back=2`
+    and the last one asks for a 2000-char batch from the section start. Every response is kept so
+    two binaries can be compared call by call.
+    """
+    env = server_environment(state_dir, os.path.dirname(os.path.abspath(source)))
+    env["READING_MCP_TOOLS"] = "both"
+    records: list[dict] = []
+    with open(log_path, "wb") as log_handle:
+        process = subprocess.Popen(
+            [binary],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=log_handle,
+            env=env,
+        )
+        responses: queue.Queue = queue.Queue()
+        reader = threading.Thread(
+            target=pump_stdout, args=(process.stdout, responses), daemon=True
+        )
+        reader.start()
+        request_id = 0
+
+        def call(name: str, arguments: dict) -> dict:
+            nonlocal request_id
+            request_id += 1
+            send(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
+            response = read_response(responses, request_id, timeout)
+            failure = error_text(response)
+            if failure is not None:
+                return {"error": failure}
+            result = response.get("result")
+            payload = tool_payload(result if isinstance(result, dict) else {})
+            return payload if payload is not None else {"error": "no JSON payload"}
+
+        try:
+            send(process, INITIALIZE_MESSAGE)
+            initialized = read_response(responses, 1, timeout)
+            request_id = 1
+            failure = error_text(initialized)
+            if failure is not None:
+                return [{"step": "initialize", "payload": {"error": failure}}]
+            send(process, INITIALIZED_NOTIFICATION)
+
+            run_v1_reads(call, source, records)
+
+            opened = call("open", {"source": os.path.abspath(source)})
+            records.append({"step": "v2 open", "payload": opened})
+            document = opened.get("doc") if isinstance(opened, dict) else None
+            top = opened.get("top") if isinstance(opened, dict) else None
+            section = None
+            if isinstance(top, list) and top:
+                first = top[0]
+                if isinstance(first, (list, tuple)) and first:
+                    section = first[0]
+                elif isinstance(first, str):
+                    section = first
+            if not isinstance(document, str) or not isinstance(section, str):
+                return records
+
+            payload = call("read", {"from": section})
+            records.append({"step": "read from section", "payload": payload})
+            cursor = payload.get("next") if isinstance(payload, dict) else None
+            for index in range(5):
+                if not isinstance(cursor, str):
+                    break
+                payload = call("read", {"from": cursor})
+                records.append({"step": f"read next {index + 1}", "payload": payload})
+                cursor = payload.get("next") if isinstance(payload, dict) else None
+
+            back_from = cursor if isinstance(cursor, str) else section
+            records.append(
+                {
+                    "step": "read back 2",
+                    "payload": call("read", {"from": back_from, "back": 2}),
+                }
+            )
+            records.append(
+                {
+                    "step": "read batch 2000",
+                    "payload": call(
+                        "read", {"from": section, "max_chars": 2000}
+                    ),
+                }
+            )
+        except (TimeoutError, RuntimeError, ProbeError) as error:
+            records.append(
+                {"step": "probe", "payload": {"error": f"{type(error).__name__}: {error}"}}
+            )
+            try:
+                process.kill()
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+        finally:
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except Exception:  # noqa: BLE001 - server may already be gone
+                pass
+            try:
+                process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=30)
+            reader.join(timeout=1.0)
+    return drop_wall_clock(records)
+
+
 def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeout: float) -> dict:
     """Opens `path` with `binary` on a fresh state directory and returns its comparable facts."""
     side_dir = os.path.join(out_dir, "runs", safe_label(label), side)
@@ -357,13 +1059,20 @@ def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeou
         os.path.join(side_dir, "server.log"),
     )
     dump = dump_state(os.path.join(state_dir, STATE_DATABASE))
-    return {"payload": payload, "dump": dump}
+    reads = run_read_probe(
+        binary,
+        path,
+        state_dir,
+        timeout,
+        os.path.join(side_dir, "read-server.log"),
+    )
+    return {"payload": payload, "dump": dump, "reads": reads}
 
 
 def compare(label: str, left: dict, right: dict, out_dir: str) -> dict:
     """Compares one input's A and B facts, writes diffs for differences, and returns the columns."""
     columns = {column: "same" for column in BLOCK_COLUMNS.values()}
-    columns = {"payload": "same", **columns}
+    columns = {"payload": "same", "reads": "same", **columns}
     diffs = []
 
     left_payload = payload_text(left["payload"])
@@ -372,11 +1081,22 @@ def compare(label: str, left: dict, right: dict, out_dir: str) -> dict:
         columns["payload"] = "DIFF"
         diffs.append(difflib_text(label, "open payload", left_payload, right_payload))
 
+    left_reads = payload_text(left["reads"])
+    right_reads = payload_text(right["reads"])
+    if left_reads != right_reads:
+        columns["reads"] = "DIFF"
+        diffs.append(difflib_text(label, "reads", left_reads, right_reads))
+
     for block in DUMP_BLOCKS:
         column = BLOCK_COLUMNS[block]
         if left["dump"][block] != right["dump"][block]:
             columns[column] = "DIFF"
             diffs.append(difflib_text(label, column, left["dump"][block], right["dump"][block]))
+            if block == "layouts":
+                detail = layout_block_diff(left["dump"][block], right["dump"][block])
+                if detail:
+                    print(f"{label}: {detail}", flush=True)
+                    diffs.append(detail + "\n")
 
     if diffs:
         with open(
@@ -397,6 +1117,56 @@ def difflib_text(label: str, block: str, left: str, right: str, limit: int = 200
         )
     )
     return "".join(diff[:limit])
+
+
+def layout_block_diff(
+    left_text: str, right_text: str, limit: int = 4
+) -> str | None:
+    """Returns a compact first-mismatch summary for the layouts block, if it can be decoded."""
+    left_rows = left_text.splitlines()
+    right_rows = right_text.splitlines()
+    if len(left_rows) != len(right_rows):
+        return f"layouts row count A={len(left_rows)} B={len(right_rows)}"
+    for row_index, (left_row, right_row) in enumerate(zip(left_rows, right_rows)):
+        if left_row == right_row:
+            continue
+        left_fields = left_row.split("\t")
+        right_fields = right_row.split("\t")
+        if len(left_fields) != len(right_fields):
+            return f"layouts row {row_index} field count A={len(left_fields)} B={len(right_fields)}"
+        for field_index, (left_field, right_field) in enumerate(
+            zip(left_fields[:-1], right_fields[:-1])
+        ):
+            if left_field != right_field:
+                return (
+                    f"layouts row {row_index} field {field_index}: "
+                    f"A={left_field!r} B={right_field!r}"
+                )
+        try:
+            left_layout = decode_layout(bytes.fromhex(left_fields[-1]))
+            right_layout = decode_layout(bytes.fromhex(right_fields[-1]))
+        except (ValueError, KeyError) as error:
+            return f"layouts row {row_index} blob decode failed: {error}"
+        for part in ("paragraphs", "sentences", "coverage"):
+            left_records = left_layout[part]
+            right_records = right_layout[part]
+            if left_records == right_records:
+                continue
+            if len(left_records) != len(right_records):
+                return (
+                    f"section {left_fields[2]} {part} count "
+                    f"A={len(left_records)} B={len(right_records)}"
+                )
+            for record_index, (left_record, right_record) in enumerate(
+                zip(left_records, right_records)
+            ):
+                if left_record != right_record:
+                    return (
+                        f"section {left_fields[2]} {part}[{record_index}]: "
+                        f"A={left_record} B={right_record}"
+                    )
+        return f"section {left_fields[2]} blob length A={len(left_fields[-1])} B={len(right_fields[-1])}"
+    return None
 
 
 def parse_inputs(spec: str) -> list[tuple[str, str]]:
@@ -430,7 +1200,9 @@ def main() -> int:
     failed = False
     for label, path in inputs:
         if not os.path.isfile(path):
-            rows.append((label, "missing", "missing", "missing", "missing", "DIFF"))
+            rows.append(
+                (label, "missing", "missing", "missing", "missing", "missing", "DIFF")
+            )
             failed = True
             continue
         left = run_side(args.binary_a, "a", label, path, args.out, args.timeout_seconds)
@@ -442,6 +1214,7 @@ def main() -> int:
             (
                 label,
                 columns["payload"],
+                columns["reads"],
                 columns["documents (rebuilt)"],
                 columns["layouts"],
                 columns["text"],
@@ -451,8 +1224,10 @@ def main() -> int:
         print(f"{label}: {result}", flush=True)
 
     print()
-    print("| Input | open payload | documents (rebuilt) | layouts | text | result |")
-    print("| --- | --- | --- | --- | --- | --- |")
+    print(
+        "| Input | open payload | reads | documents (rebuilt) | layouts | text | result |"
+    )
+    print("| --- | --- | --- | --- | --- | --- | --- |")
     for row in rows:
         print("| " + " | ".join(row) + " |")
 

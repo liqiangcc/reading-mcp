@@ -504,7 +504,7 @@ async fn real_books_unit_text_equals_range_slice() {
 }
 
 /// Stores the same document through the unit path and through the boundary path and asserts that
-/// every stored `section_layout_v1` row is byte-identical. Returns the number of sections compared.
+/// every stored `section_layout_v2` row is byte-identical. Returns the number of sections compared.
 async fn compare_section_layouts(document: &Arc<Document>) -> usize {
     let segmentation = Arc::new(
         document

@@ -463,7 +463,7 @@ async fn forward_next_is_the_next_items_own_handle() {
 
         let mut from = doc;
         let mut expected: Option<String> = None;
-        let mut items = 0usize;
+        let mut count = 0usize;
         loop {
             let payload = payload(&v2_read(&client, &from, json!({})).await);
             let item = flat_item(&payload, &from).expect("{name}: a single item");
@@ -473,8 +473,8 @@ async fn forward_next_is_the_next_items_own_handle() {
                     "{name}: the previous `next` must read at its own item"
                 );
             }
-            items += 1;
-            assert!(items < 100_000, "{name}: the walk must terminate");
+            count += 1;
+            assert!(count < 100_000, "{name}: the walk must terminate");
             match payload.get("next").and_then(Value::as_str) {
                 Some(next) => {
                     assert!(
@@ -487,7 +487,7 @@ async fn forward_next_is_the_next_items_own_handle() {
                 None => break,
             }
         }
-        assert!(items > 0, "{name}: the fixture must have items");
+        assert!(count > 0, "{name}: the fixture must have items");
     }
 
     client.cancel().await.expect("client should close cleanly");
@@ -617,20 +617,20 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
     );
 
     // A document handle names no item, so the answer says which item it read.
-    let payload = payload(&v2_read(&client, &doc, json!({})).await);
+    let from_doc = payload(&v2_read(&client, &doc, json!({})).await);
     assert_eq!(
-        payload["at"].as_str(),
+        from_doc["at"].as_str(),
         Some(walked[0].handle.as_str()),
-        "a document handle must report the item it read: {payload}"
+        "a document handle must report the item it read: {from_doc}"
     );
 
     // A section handle names no item either.
     let (section_at, section_handle) = &boundaries[1];
-    let payload = payload(&v2_read(&client, section_handle, json!({})).await);
+    let from_section = payload(&v2_read(&client, section_handle, json!({})).await);
     assert_eq!(
-        payload["at"].as_str(),
+        from_section["at"].as_str(),
         Some(walked[*section_at].handle.as_str()),
-        "a section handle must report the item it read: {payload}"
+        "a section handle must report the item it read: {from_section}"
     );
 
     // A paragraph handle in sentence mode reads that paragraph's first sentence.
@@ -643,24 +643,24 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
         .map(|(head, _)| head)
         .expect("a sentence handle has a sentence part")
         .to_owned();
-    let payload = payload(&v2_read(&client, &paragraph, json!({})).await);
+    let from_paragraph = payload(&v2_read(&client, &paragraph, json!({})).await);
     assert!(
-        payload.get("at").is_some(),
-        "a paragraph handle must report the sentence it read: {payload}"
+        from_paragraph.get("at").is_some(),
+        "a paragraph handle must report the sentence it read: {from_paragraph}"
     );
 
     // Every backward single step returns another item, so `at` is always present.
     let mut from = walked.last().expect("the walk is non-empty").handle.clone();
     let mut expected = walked.len() - 1;
     loop {
-        let payload = payload(&v2_read(&client, &from, json!({ "direction": "backward" })).await);
+        let step = payload(&v2_read(&client, &from, json!({ "direction": "backward" })).await);
         expected -= 1;
         assert_eq!(
-            payload["at"].as_str(),
+            step["at"].as_str(),
             Some(walked[expected].handle.as_str()),
-            "a backward step must report the item it read: {payload}"
+            "a backward step must report the item it read: {step}"
         );
-        match payload.get("next").and_then(Value::as_str) {
+        match step.get("next").and_then(Value::as_str) {
             Some(next) => from = next.to_owned(),
             None => break,
         }

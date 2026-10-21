@@ -172,3 +172,38 @@ Recomputing it (`document.normalized_document_hash()`) hashes every section's `i
 `content`, the normalized block projection, the binding map and the OCR derivation
 (`src/domain/normalized_text.rs:169-211`); the load only does so when the
 `normalized_document_hash` column is `NULL`.
+
+## 3. R1c-3c: how each text use is served
+
+Section 1 lists what each reader touches on the decoded `Document`. This section is the exhaustive
+list of the places that read a section's **text** (or a text length) that is reachable from the
+readers R1c-3c switches to `DocumentRepository::get_light_with_hash` — v1 `get_text_units`,
+`get_context`, `read_document`, `search_document`, v2 `read` (`read_reading`), v2 `open`
+(`open_reading`), v2 `outline`, v2 `search`, v2 `cite`, and
+`SqliteSearchIndex::search_lexical_with_options` — and how each one is served once the document
+carries no section `content`. Line numbers are `origin/main` at the start of
+`perf/r1c3c-light-readers` (`3867ee8`).
+
+| # | site | what it reads | served by |
+| --- | --- | --- | --- |
+| 1 | `reading_support.rs:25-38` `render_section_shallow`, reached from `get_context.rs:356` (section neighbour: `before + after + 1` sections) and `get_context.rs:637` (section container: one section) | `section.content` | one `repository.load_section_text(id, section_id)` per rendered section (`SectionTexts::text`); `render_section_shallow` now takes that text as a parameter |
+| 2 | `reading_support.rs:19-23` `render_section_tree` / `:83-94` `render_tree_into`, reached from `read_document.rs:120` (`continue_read`) and `read_document.rs:215` (`execute` → `read_section_segment`) | `section.content` of every section in the rendered **subtree** | `SectionTexts::fill_subtree` loads `load_section_text` for every section of the subtree in document order, then `render_section_tree` renders from that map; the cost stays O(subtree text), the output is unchanged |
+| 3 | `read_document.rs:281` `section.normalized_text_slice(target.range)` (`read_exact`, `continue_exact`) | one section's text | one `load_section_text` of the owner section; the slice is taken from that string |
+| 4 | `locator_resolution.rs:73-83` `section.normalized_text_len()` for a `Section`-kind locator, reached from `get_text_units` (`anchor_locator`), `get_context` (`target_locator`), `read_document` (`read_exact`/`continue_exact`), `search_document` (every section-kind hit) | the **length** of one section's normalized text | `DocumentRepository::load_section_char_len`, i.e. the stored `section_layout_v2.char_len` of that section (one indexed row). It is exactly `Section::normalized_text_len()`: `write_document_sections` stores `section.normalized_text_len()` (`sqlite.rs:3149`) and both `section_text_is_stored` (`sqlite.rs:887-893`) and the light load verify it against the text they read (`sqlite.rs:798-803`) |
+| 5 | `locator_resolution.rs:85-95` `section.validate_normalized_range(range)` for a `CharacterRange`-kind locator, reached from `read_document` `read_exact`/`continue_exact` | the length of one section's normalized text | the same `load_section_char_len` (#4) |
+| 6 | `outline_reading.rs:158` `section.content.chars().count()` (v2 `outline` reports `chars` per listed section) | the length of one section's normalized text | the same `load_section_char_len` (#4), one call per listed section |
+| 7 | `ports.rs:326-333` the **default** `DocumentRepository::load_section_text` | `s.content` of the full document | unchanged: it is the correct-but-not-light implementation other repositories keep. `SqliteDocumentRepository` overrides it (one `section_text_v2` read) and falls back to this behaviour for a row that keeps its text inline |
+| 8 | `derived_text_units.rs:32` `document.try_segmentation()` (reads every section's text and `normalized_block_map`), reached from `get_context.rs:262`, `read_document.rs:199`, `search_document.rs:94`, `source_view.rs:140` when the use case was built **without** a `TextUnitIndex` | every section's text and the block map | those use cases keep loading the full document when no text-unit index was supplied (`get_context`, `read_document`, `search_document`); the runtime always supplies one (`runtime/mod.rs:235-269`), so production reads light. `get_text_units` takes its index as a constructor argument and therefore always reads light — its `DerivedTextUnits` (tests) owns its own full document |
+| 9 | `body_order.rs:66-72` `epub_structure_map` (a heavy metadata entry, up to 0.84 MB on 宋史), reached from `read_reading.rs:385-390` `reading_order` | the EPUB structure map, deserialized and validated per call | the stored `document_body_order_v1` row: one row read and one JSON array parse (`DocumentRepository::body_order`); the row is written by `save_shared` from the full document, and a document saved before this change falls back to the full computation |
+| 10 | `cite_reading.rs:120` `section_body_order(&resolved.document)` (v2 `cite` → v2 `source_view`'s document-handle locator) | the EPUB structure map | left as is: it is on the `source_view` path, which R1c-3d migrates. It is reached only for a PDF, whose order is the canonical tree walk and needs no metadata |
+| 11 | `get_document_structure.rs:177`, `:207` and `source_view.rs:225` (`original_source_binding_map`), `:133-137` | body order / binding map / one section's text | **not in this task**: R1c-3d |
+
+Two more consequences of the light document are worth recording, because neither reads text but both
+depend on the document being the **same** one the full load returned:
+
+- `SqliteSearchIndex::search_lexical_with_options` (`sqlite_search_index.rs:349-351`) used to load the
+  document a second time inside a `search_document` call. It now takes the light document and its
+  normalized hash from the caller (`SearchIndex::search_lexical_in`) and loads light itself only when
+  it is called on its own, so a `search_document` call loads the document once.
+- `open_reading.rs:116` `Arc::unwrap_or_clone(document)` deep-cloned the decoded document on every
+  `open`. The use case now reads the light `Arc` and never clones it.

@@ -58,6 +58,7 @@ impl SqliteSearchIndex {
     }
 
     /// One strict or relaxed pass: the section title hits and the paragraph and sentence hits.
+    #[allow(clippy::too_many_arguments)]
     async fn scan_pass(
         &self,
         document: &Document,
@@ -83,7 +84,7 @@ impl SqliteSearchIndex {
 
         let Some((section_ids, scanned)) = self
             .units
-            .scan_lexical_with_options(
+            .scan_lexical(
                 &document.id,
                 normalized_document_hash,
                 Arc::clone(query),

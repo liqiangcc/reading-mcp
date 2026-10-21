@@ -164,7 +164,7 @@ impl OutlineReadingUseCase {
 }
 
 /// The preorder listing of `roots`, at most `depth` levels below the scope.
-fn preorder<'a>(roots: &'a [Section], depth: usize) -> Vec<&'a Section> {
+fn preorder(roots: &[Section], depth: usize) -> Vec<&Section> {
     let mut output = Vec::new();
     for root in roots {
         collect(root, 1, depth, &mut output);
@@ -172,7 +172,7 @@ fn preorder<'a>(roots: &'a [Section], depth: usize) -> Vec<&'a Section> {
     output
 }
 
-fn collect<'a>(section: &'a Section, level: usize, depth: usize, output: &mut Vec<&'a Section>) {
+fn collect(section: &Section, level: usize, depth: usize, output: &mut Vec<&Section>) {
     if level > depth {
         return;
     }

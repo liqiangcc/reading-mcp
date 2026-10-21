@@ -225,6 +225,14 @@ fn batch_items(payload: &Value) -> Vec<V2Item> {
         .collect()
 }
 
+/// The `next` value of one `read` answer, when it has one.
+fn next_of(payload: &Value) -> Option<String> {
+    payload
+        .get("next")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 /// Every item of a batch answer, from its JSON payload.
 fn items(result: &CallToolResult) -> Vec<V2Item> {
     batch_items(&payload(result))
@@ -461,12 +469,12 @@ async fn forward_next_is_the_next_items_own_handle() {
             .expect("doc handle")
             .to_owned();
 
-        let mut from = doc;
+        let mut from: Option<String> = Some(doc);
         let mut expected: Option<String> = None;
         let mut count = 0usize;
-        loop {
-            let payload = payload(&v2_read(&client, &from, json!({})).await);
-            let item = flat_item(&payload, &from).expect("{name}: a single item");
+        while let Some(handle) = from.take() {
+            let payload = payload(&v2_read(&client, &handle, json!({})).await);
+            let item = flat_item(&payload, &handle).expect("{name}: a single item");
             if let Some(expected) = expected.take() {
                 assert_eq!(
                     item.handle, expected,
@@ -475,16 +483,13 @@ async fn forward_next_is_the_next_items_own_handle() {
             }
             count += 1;
             assert!(count < 100_000, "{name}: the walk must terminate");
-            match payload.get("next").and_then(Value::as_str) {
-                Some(next) => {
-                    assert!(
-                        !next.starts_with("r:") && !next.starts_with("b:"),
-                        "{name}: a forward `next` must be a plain handle, got {next}"
-                    );
-                    expected = Some(next.to_owned());
-                    from = next.to_owned();
-                }
-                None => break,
+            if let Some(next) = next_of(&payload) {
+                assert!(
+                    !next.starts_with("r:") && !next.starts_with("b:"),
+                    "{name}: a forward `next` must be a plain handle, got {next}"
+                );
+                expected = Some(next.clone());
+                from = Some(next);
             }
         }
         assert!(count > 0, "{name}: the fixture must have items");
@@ -663,11 +668,8 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
         step.get("at").is_none(),
         "the handle's own item must not repeat in `at`: {step}"
     );
-    loop {
-        match step.get("next").and_then(Value::as_str) {
-            Some(next) => from = next.to_owned(),
-            None => break,
-        }
+    while let Some(next) = next_of(&step) {
+        from = next;
         assert!(
             from.starts_with("b:"),
             "a backward `next` must be a b: cursor: {from}"

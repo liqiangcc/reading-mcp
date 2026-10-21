@@ -298,8 +298,7 @@ async fn compare_positions(
         key.kind,
     )
     .expect("the planner should plan every stored section");
-    let mut expected: BTreeMap<(EffectiveTextUnitKind, usize, Option<usize>), usize> =
-        BTreeMap::new();
+    let mut expected: BTreeMap<(&'static str, usize, Option<usize>), usize> = BTreeMap::new();
     let mut eligible_position = 0usize;
     for (position, entry) in plan.entries.iter().enumerate() {
         let position = match key.policy {
@@ -314,11 +313,13 @@ async fn compare_positions(
             }
         };
         let unit = match entry.unit {
-            StreamUnit::Paragraph(unit) => {
-                (EffectiveTextUnitKind::Paragraph, unit.paragraph_index, None)
-            }
+            StreamUnit::Paragraph(unit) => (
+                EffectiveTextUnitKind::Paragraph.as_str(),
+                unit.paragraph_index,
+                None,
+            ),
             StreamUnit::Sentence(unit) => (
-                EffectiveTextUnitKind::Sentence,
+                EffectiveTextUnitKind::Sentence.as_str(),
                 unit.paragraph_index,
                 Some(unit.sentence_index),
             ),
@@ -357,7 +358,7 @@ async fn compare_positions(
             }
         };
         let expected = expected
-            .get(&(unit_kind, paragraph_index, sentence_index))
+            .get(&(unit_kind.as_str(), paragraph_index, sentence_index))
             .copied();
         if actual != expected {
             report.mismatches.push(format!(

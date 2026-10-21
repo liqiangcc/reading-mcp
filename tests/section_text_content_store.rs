@@ -1,4 +1,4 @@
-//! `document_json` keeps no section text when `section_text_v1` already stores it for the same
+//! `document_json` keeps no section text when `section_text_v2` already stores it for the same
 //! document version, and reads it back on load.
 
 use std::collections::BTreeMap;
@@ -203,7 +203,7 @@ async fn runtime_open_stores_no_section_text_and_a_new_repository_reads_it_back(
     let stored = stored_json(&database, &document.id);
     assert_eq!(
         stored["content_store"],
-        Value::String("section_text_v1".into())
+        Value::String("section_text_v2".into())
     );
     assert_eq!(
         assert_empty_contents(&stored["root_sections"]),
@@ -286,7 +286,7 @@ async fn a_missing_section_text_chunk_makes_the_row_stale() {
     let connection = Connection::open(&database).expect("database should open");
     let removed = connection
         .execute(
-            "DELETE FROM section_text_v1 WHERE doc_key = ?1 AND section_key = 1",
+            "DELETE FROM section_text_v2 WHERE doc_key = ?1 AND section_key = 1",
             params![doc_key],
         )
         .expect("chunk should delete");
@@ -318,7 +318,7 @@ async fn a_changed_section_char_len_makes_the_row_stale() {
     let connection = Connection::open(&database).expect("database should open");
     connection
         .execute(
-            "UPDATE section_layout_v1 SET char_len = char_len + 1
+            "UPDATE section_layout_v2 SET char_len = char_len + 1
               WHERE doc_key = ?1 AND section_key = 1",
             params![doc_key],
         )

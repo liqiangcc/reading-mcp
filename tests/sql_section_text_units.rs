@@ -260,6 +260,20 @@ async fn sqlite_section_units_read_long_sections_across_chunks() {
     store_text_units(&*index, &document)
         .await
         .expect("long units should persist");
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let chunk_count: i64 = connection
+        .query_row(
+            "SELECT chunk_count FROM section_layout_v2
+              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("chunk count should load");
+    drop(connection);
+    assert!(
+        chunk_count >= 3,
+        "the long section must span at least three layout chunks, got {chunk_count}"
+    );
 
     for section in all_sections(&document) {
         let expected = SectionTextUnits::from_sets(&paragraphs, &sentences, &section.id);
@@ -280,7 +294,7 @@ async fn sqlite_section_units_read_long_sections_across_chunks() {
 }
 
 #[tokio::test]
-async fn replacing_sets_twice_invalidates_the_section_layout_cache() {
+async fn replacing_sets_twice_updates_the_stored_section_layout() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let database = directory.path().join("state.sqlite");
     let index: Arc<dyn TextUnitIndex> =

@@ -354,9 +354,49 @@ def stop_perf(process: subprocess.Popen, timeout: float = 180.0) -> int | None:
         return None
 
 
-def run_reads(server: Server, document_id: str, section_id: str, cursor: str | None, calls: int):
+def proc_io(pid: int) -> dict[str, int]:
+    """The kernel I/O counters of a process; empty when `/proc` is unavailable."""
+    counters: dict[str, int] = {}
+    try:
+        with open(f"/proc/{pid}/io", encoding="ascii") as handle:
+            for line in handle:
+                name, _, value = line.partition(":")
+                try:
+                    counters[name.strip()] = int(value.strip())
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return counters
+
+
+def proc_rss_kib(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def io_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    keys = ("rchar", "wchar", "syscr", "syscw", "read_bytes", "write_bytes")
+    return {key: after.get(key, 0) - before.get(key, 0) for key in keys}
+
+
+def run_reads(
+    server: Server,
+    document_id: str,
+    section_id: str,
+    cursor: str | None,
+    calls: int,
+    measure_io: bool = False,
+):
     """Run `calls` forward one-item reads from `cursor`, timing each."""
     seconds: list[float] = []
+    io_per_call: list[dict[str, int]] = []
     position = None
     for _ in range(calls):
         arguments = {
@@ -367,15 +407,33 @@ def run_reads(server: Server, document_id: str, section_id: str, cursor: str | N
         }
         if cursor is not None:
             arguments["cursor"] = cursor
+        before_io = proc_io(server.process.pid) if measure_io else None
         start = time.monotonic()
         payload = text_units(server, arguments)
         seconds.append(time.monotonic() - start)
+        if before_io is not None:
+            after_io = proc_io(server.process.pid)
+            io_per_call.append(io_delta(before_io, after_io))
         stream = payload["stream"]
         position = stream.get("end_index")
         cursor = payload.get("next_cursor")
         if not cursor:
             break
-    return seconds, position
+    return seconds, io_per_call, position
+
+
+def summarize_io(io_per_call: list[dict[str, int]]) -> dict[str, float | int]:
+    if not io_per_call:
+        return {}
+    read_bytes = [entry.get("read_bytes", 0) for entry in io_per_call]
+    rchar = [entry.get("rchar", 0) for entry in io_per_call]
+    return {
+        "io_calls": len(io_per_call),
+        "io_read_bytes_mean": round(statistics.fmean(read_bytes), 1),
+        "io_read_bytes_total": sum(read_bytes),
+        "io_rchar_mean": round(statistics.fmean(rchar), 1),
+        "io_rchar_total": sum(rchar),
+    }
 
 
 def summarize(seconds: list[float]) -> dict:
@@ -435,11 +493,16 @@ def probe(args: argparse.Namespace) -> int:
     seek_calls = 0
     total_items = None
     start_position = None
+    rss_phases: dict[str, int] = {}
     try:
         server.initialize()
         opened = time.monotonic()
         document_id = open_document(server, document)
         open_seconds = time.monotonic() - opened
+        if args.rss_phases:
+            rss = proc_rss_kib(server.process.pid)
+            if rss is not None:
+                rss_phases["after_open"] = rss
         sections = read_structure(server, document_id)
         if not sections:
             raise ProbeError("document has no sections")
@@ -462,6 +525,10 @@ def probe(args: argparse.Namespace) -> int:
         cursor, start_position, seek_calls = seek(
             server, document_id, section_id, target, args.seek_page
         )
+        if args.rss_phases:
+            rss = proc_rss_kib(server.process.pid)
+            if rss is not None:
+                rss_phases["after_seek"] = rss
         print(
             f"opened in {open_seconds:.2f} s; section {index}/{len(sections)} has "
             f"{total_items} sentences; seeked to {start_position} in {seek_calls} pages",
@@ -506,9 +573,18 @@ def probe(args: argparse.Namespace) -> int:
                 )
                 print(f"wrapper open done; seeked to {start_position}", flush=True)
 
-        seconds, end_position = run_reads(
-            server, document_id, section_id, cursor, args.calls
+        seconds, io_per_call, end_position = run_reads(
+            server,
+            document_id,
+            section_id,
+            cursor,
+            args.calls,
+            measure_io=args.io_bytes,
         )
+        if args.rss_phases:
+            rss = proc_rss_kib(server.process.pid)
+            if rss is not None:
+                rss_phases["after_reads"] = rss
     finally:
         server.close()
         if perf_process is not None:
@@ -516,6 +592,14 @@ def probe(args: argparse.Namespace) -> int:
             print(f"perf exited with {code}", flush=True)
 
     summary = summarize(seconds)
+    io_summary = {
+        "io_calls": 0,
+        "io_read_bytes_mean": 0.0,
+        "io_read_bytes_total": 0,
+        "io_rchar_mean": 0.0,
+        "io_rchar_total": 0,
+        **summarize_io(io_per_call),
+    }
     perf_bytes = os.path.getsize(perf_out) if perf_out and os.path.exists(perf_out) else 0
     if perf_out and perf_bytes < 4096:
         print(f"::warning::perf data {perf_out} is only {perf_bytes} bytes", file=sys.stderr)
@@ -535,7 +619,10 @@ def probe(args: argparse.Namespace) -> int:
         "perf_mode": perf_mode,
         "perf_out": perf_out,
         "perf_bytes": perf_bytes,
+        "io_bytes": args.io_bytes,
+        "rss_phases": rss_phases if args.rss_phases else {},
         **summary,
+        **io_summary,
     }
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -545,7 +632,8 @@ def probe(args: argparse.Namespace) -> int:
 
     print(
         "calls={calls} mean_ms={mean_ms} median_ms={median_ms} p95_ms={p95_ms} "
-        "max_ms={max_ms} perf_mode={perf_mode} perf_out={perf_out}".format(
+        "max_ms={max_ms} io_read_bytes_mean={io_read_bytes_mean} "
+        "perf_mode={perf_mode} perf_out={perf_out}".format(
             perf_mode=perf_mode, perf_out=perf_out, **summary
         ),
         flush=True,
@@ -572,6 +660,16 @@ def main() -> int:
         help=f"sentence items per untimed seek page (server limit {SEEK_PAGE})",
     )
     parser.add_argument("--perf-out", default=None, help="perf data output path")
+    parser.add_argument(
+        "--io-bytes",
+        action="store_true",
+        help="record /proc/<pid>/io read-byte deltas around every timed call",
+    )
+    parser.add_argument(
+        "--rss-phases",
+        action="store_true",
+        help="record VmRSS after open, after seek and after the timed reads",
+    )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", required=True, help="JSON result path")
     args = parser.parse_args()

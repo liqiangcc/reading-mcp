@@ -331,6 +331,20 @@ async fn large_section_pages_preserve_positions_and_eligible_only_is_dense() {
         .await
         .expect("units should persist");
     let section_id = document.root_sections[0].id.clone();
+    let connection = rusqlite::Connection::open(&database).expect("database should open");
+    let chunk_count: i64 = connection
+        .query_row(
+            "SELECT chunk_count FROM section_layout_v2
+              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
+            rusqlite::params![&document.id.0],
+            |row| row.get(0),
+        )
+        .expect("chunk count should load");
+    drop(connection);
+    assert!(
+        chunk_count >= 3,
+        "the 5000-sentence section must span at least three layout chunks, got {chunk_count}"
+    );
 
     let preserve_key = TextUnitStreamKey {
         document_id: &document.id,
@@ -425,7 +439,7 @@ async fn replacing_the_unit_sets_replaces_the_section_text_and_layout_rows() {
         rusqlite::Connection::open(&database).expect("database should open for row counts");
     let text_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM section_text_v1
+            "SELECT COUNT(*) FROM section_text_v2
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
@@ -433,7 +447,7 @@ async fn replacing_the_unit_sets_replaces_the_section_text_and_layout_rows() {
         .expect("section text rows should count");
     let layout_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM section_layout_v1
+            "SELECT COUNT(*) FROM section_layout_v2
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
@@ -592,7 +606,7 @@ async fn replacing_the_unit_sets_twice_keeps_one_set_of_rows_and_the_same_doc_ke
     let database = directory.path().join("state.sqlite");
     let index = SqliteTextUnitIndex::open(&database).expect("index should open");
     let document = parse_markdown().await;
-    let tables = ["section_text_v1", "section_layout_v1"];
+    let tables = ["section_text_v2", "section_layout_v2"];
 
     store_text_units(&index, &document)
         .await
@@ -666,7 +680,7 @@ async fn missing_section_layout_is_reported_as_stale() {
     rusqlite::Connection::open(&database)
         .expect("database should open")
         .execute(
-            "DELETE FROM section_layout_v1
+            "DELETE FROM section_layout_v2
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&document.id.0],
         )
@@ -947,7 +961,7 @@ async fn stored_context_reports_stale_instead_of_deriving_after_stream_rows_are_
     let connection = rusqlite::Connection::open(&database).expect("database should open");
     connection
         .execute(
-            "DELETE FROM section_layout_v1
+            "DELETE FROM section_layout_v2
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&document.id.0],
         )

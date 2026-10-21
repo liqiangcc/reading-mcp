@@ -6,11 +6,13 @@ directory, calls `open_document`, saves the tool payload, stops the server, and 
 database into one text file per side:
 
 - `documents`: `id`, `content_hash` and `document_json`, compared as parsed objects after the
-  section text of a row that keeps it in `section_text_v1` (its `content_store` key) is put back
-  in depth-first section order from that document's chunks;
-- `section_layout_v1` joined to `text_unit_documents_v2` and ordered by document then
-  `section_key`: `section_id`, `char_len`, `paragraph_coverage_json` and `hex(layout)`;
-- `section_text_v1`: one sha256 per section over its chunks in order, plus `char_len`.
+  section text of a row that keeps it in `section_text_v1` or `section_text_v2` (its
+  `content_store` key) is put back in depth-first section order from that document's chunks;
+- layouts joined to `text_unit_documents_v2` and ordered by document then `section_key`:
+  `section_id`, `char_len`, `paragraph_coverage_json` and the whole-section layout hex. The v3
+  `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
+  re-encoded as that blob;
+- section text: one sha256 per section over its chunks in order, plus `char_len`.
 
 It then compares A against B per input, prints one markdown table and writes unified diffs (first
 200 lines each) into the output directory for anything that differs. It exits 1 when any input
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+from collections import defaultdict
 import hashlib
 import itertools
 import json
@@ -70,8 +73,9 @@ BLOCK_COLUMNS = {
     "text": "text",
 }
 
-# The `content_store` value of a row that keeps no section text inline.
-SECTION_TEXT_STORE = "section_text_v1"
+# The `content_store` values of a row that keeps no section text inline: v3 used
+# `section_text_v1`, v4 uses `section_text_v2`.
+SECTION_TEXT_STORES = ("section_text_v1", "section_text_v2")
 
 # Wall-clock fields that must never take part in a parity comparison.
 WALL_CLOCK_KEYS = {
@@ -263,7 +267,7 @@ def rebuild_document_json(document_json: str, texts: dict[int, str]) -> str:
     stored = json.loads(document_json)
     if not isinstance(stored, dict):
         return json.dumps(stored, ensure_ascii=False, sort_keys=True)
-    if stored.pop("content_store", None) == SECTION_TEXT_STORE:
+    if stored.pop("content_store", None) in SECTION_TEXT_STORES:
         fill_section_text(stored.get("root_sections") or [], texts, itertools.count())
     return json.dumps(stored, ensure_ascii=False, sort_keys=True)
 
@@ -273,6 +277,305 @@ def fill_section_text(sections: list, texts: dict[int, str], keys) -> None:
     for section in sections:
         section["content"] = texts.get(next(keys), "")
         fill_section_text(section.get("children") or [], texts, keys)
+
+
+# ---------------------------------------------------------------------------------------------
+# Section layout codec.
+#
+# `section_layout_v1` stored one whole-section blob; `section_layout_v2` stores the same encoding
+# cut into chunks. To compare the two schemas, decode every chunk (local paragraph indices and
+# per-chunk delta bases) into absolute records and re-encode them as one v1 blob. The encoder is the
+# one in `src/infrastructure/section_layout.rs`: version byte, three counts, unsigned LEB128 varints,
+# and ZigZag deltas from the previous value in the same list (starting at zero).
+# ---------------------------------------------------------------------------------------------
+
+
+class BlobReader:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.pos = 0
+
+    def byte(self) -> int:
+        value = self.data[self.pos]
+        self.pos += 1
+        return value
+
+    def uvarint(self) -> int:
+        value = 0
+        shift = 0
+        while True:
+            byte = self.byte()
+            value |= (byte & 0x7F) << shift
+            if byte < 0x80:
+                return value
+            shift += 7
+
+    def delta(self) -> int:
+        encoded = self.uvarint()
+        return (encoded >> 1) ^ -(encoded & 1)
+
+
+def put_uvarint(out: bytearray, value: int) -> None:
+    while value >= 0x80:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+
+
+def put_delta(out: bytearray, value: int, previous: int) -> int:
+    delta = value - previous
+    put_uvarint(out, (delta << 1) ^ (delta >> 63))
+    return value
+
+
+def decode_layout(data: bytes) -> dict:
+    reader = BlobReader(data)
+    version = reader.byte()
+    if version != 1:
+        raise ValueError(f"unsupported section layout version {version}")
+    paragraphs = []
+    source = start = end = 0
+    for _ in range(reader.uvarint()):
+        paragraph_index = reader.uvarint()
+        source = source + reader.delta()
+        start = start + reader.delta()
+        end = end + reader.delta()
+        paragraphs.append((paragraph_index, source, start, end))
+    sentences = []
+    source = start = end = parent_start = parent_end = 0
+    for _ in range(reader.uvarint()):
+        paragraph_index = reader.uvarint()
+        sentence_index = reader.uvarint()
+        source = source + reader.delta()
+        start = start + reader.delta()
+        end = end + reader.delta()
+        parent_start = parent_start + reader.delta()
+        parent_end = parent_end + reader.delta()
+        sentences.append(
+            (
+                paragraph_index,
+                sentence_index,
+                source,
+                start,
+                end,
+                parent_start,
+                parent_end,
+            )
+        )
+    coverage = []
+    paragraph_start = paragraph_end = 0
+    for _ in range(reader.uvarint()):
+        paragraph_index = reader.uvarint()
+        paragraph_start = paragraph_start + reader.delta()
+        paragraph_end = paragraph_end + reader.delta()
+        coverage.append(
+            (
+                paragraph_index,
+                paragraph_start,
+                paragraph_end,
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+                reader.uvarint(),
+            )
+        )
+    if reader.pos != len(data):
+        raise ValueError(f"section layout has {len(data) - reader.pos} trailing bytes")
+    return {"paragraphs": paragraphs, "sentences": sentences, "coverage": coverage}
+
+
+def encode_layout(layout: dict) -> bytes:
+    out = bytearray([1])
+    paragraphs = layout["paragraphs"]
+    put_uvarint(out, len(paragraphs))
+    source = start = end = 0
+    for paragraph_index, item_source, item_start, item_end in paragraphs:
+        put_uvarint(out, paragraph_index)
+        source = put_delta(out, item_source, source)
+        start = put_delta(out, item_start, start)
+        end = put_delta(out, item_end, end)
+    sentences = layout["sentences"]
+    put_uvarint(out, len(sentences))
+    source = start = end = parent_start = parent_end = 0
+    for (
+        paragraph_index,
+        sentence_index,
+        item_source,
+        item_start,
+        item_end,
+        item_parent_start,
+        item_parent_end,
+    ) in sentences:
+        put_uvarint(out, paragraph_index)
+        put_uvarint(out, sentence_index)
+        source = put_delta(out, item_source, source)
+        start = put_delta(out, item_start, start)
+        end = put_delta(out, item_end, end)
+        parent_start = put_delta(out, item_parent_start, parent_start)
+        parent_end = put_delta(out, item_parent_end, parent_end)
+    coverage = layout["coverage"]
+    put_uvarint(out, len(coverage))
+    paragraph_start = paragraph_end = 0
+    for record in coverage:
+        paragraph_index, item_start, item_end = record[0], record[1], record[2]
+        put_uvarint(out, paragraph_index)
+        paragraph_start = put_delta(out, item_start, paragraph_start)
+        paragraph_end = put_delta(out, item_end, paragraph_end)
+        for value in record[3:]:
+            put_uvarint(out, value)
+    return bytes(out)
+
+
+def rebase_chunk_layout(layout: dict, base: int) -> dict:
+    return {
+        "paragraphs": [
+            (paragraph_index + base, source, start, end)
+            for paragraph_index, source, start, end in layout["paragraphs"]
+        ],
+        "sentences": [
+            (
+                paragraph_index + base,
+                sentence_index,
+                source,
+                start,
+                end,
+                parent_start,
+                parent_end,
+            )
+            for (
+                paragraph_index,
+                sentence_index,
+                source,
+                start,
+                end,
+                parent_start,
+                parent_end,
+            ) in layout["sentences"]
+        ],
+        "coverage": [
+            (record[0] + base, *record[1:]) for record in layout["coverage"]
+        ],
+    }
+
+
+def merge_chunk_layouts(chunks: list[tuple[int, bool, bytes]]) -> bytes:
+    """`chunks` are `(first_paragraph_index, paragraph_count == 0, blob)` in `chunk_no` order."""
+    merged = {"paragraphs": [], "sentences": [], "coverage": []}
+    seen_paragraphs = set()
+    seen_coverage = set()
+    for base, is_mid, blob in chunks:
+        layout = rebase_chunk_layout(decode_layout(blob), base)
+        for paragraph in layout["paragraphs"]:
+            if is_mid and paragraph[0] in seen_paragraphs:
+                continue
+            seen_paragraphs.add(paragraph[0])
+            merged["paragraphs"].append(paragraph)
+        merged["sentences"].extend(layout["sentences"])
+        for record in layout["coverage"]:
+            if is_mid and record[0] in seen_coverage:
+                continue
+            seen_coverage.add(record[0])
+            merged["coverage"].append(record)
+    return encode_layout(merged)
+
+
+def table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def layout_rows(connection: sqlite3.Connection) -> list[str]:
+    if table_exists(connection, "section_layout_chunk_v2"):
+        chunks: dict[tuple[str, int], list[tuple[int, bool, bytes]]] = defaultdict(list)
+        for (
+            document_id,
+            section_key,
+            chunk_no,
+            first_paragraph,
+            paragraph_count,
+            blob,
+        ) in connection.execute(
+            """
+            SELECT d.document_id, c.section_key, c.chunk_no, c.first_paragraph_index,
+                   c.paragraph_count, c.blob
+              FROM section_layout_chunk_v2 c
+              JOIN text_unit_documents_v2 d ON d.doc_key = c.doc_key
+             ORDER BY d.document_id, c.section_key, c.chunk_no
+            """
+        ):
+            chunks[(document_id, section_key)].append(
+                (first_paragraph, paragraph_count == 0 and chunk_no > 0, bytes(blob))
+            )
+        rows = []
+        for document_id, section_key, section_id, char_len, coverage_json in connection.execute(
+            """
+            SELECT d.document_id, l.section_key, l.section_id, l.char_len,
+                   l.paragraph_coverage_json
+              FROM section_layout_v2 l
+              JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
+             ORDER BY d.document_id, l.section_key
+            """
+        ):
+            layout_hex = merge_chunk_layouts(
+                chunks.get((document_id, section_key), [])
+            ).hex()
+            rows.append(
+                "\t".join(
+                    "" if value is None else str(value)
+                    for value in (document_id, section_key, section_id, char_len, coverage_json)
+                )
+                + "\t"
+                + layout_hex
+            )
+        return rows
+
+    return [
+        "\t".join("" if value is None else str(value) for value in row)
+        for row in connection.execute(
+            """
+            SELECT d.document_id,
+                   l.section_key,
+                   l.section_id,
+                   l.char_len,
+                   l.paragraph_coverage_json,
+                   hex(l.layout)
+              FROM section_layout_v1 l
+              JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
+             ORDER BY d.document_id, l.section_key
+            """
+        )
+    ]
+
+
+def text_rows(connection: sqlite3.Connection) -> list[str]:
+    table = (
+        "section_text_v2"
+        if table_exists(connection, "section_text_v2")
+        else "section_text_v1"
+    )
+    sections: dict[tuple[str, int], list[str]] = {}
+    for document_id, section_key, text in connection.execute(
+        f"""
+        SELECT d.document_id, t.section_key, t.text
+          FROM {table} t
+          JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
+         ORDER BY d.document_id, t.section_key, t.chunk_no
+        """
+    ):
+        sections.setdefault((document_id, section_key), []).append(text)
+    rows = []
+    for (document_id, section_key), chunks in sorted(sections.items()):
+        joined = "".join(chunks)
+        digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+        rows.append(f"{document_id}\t{section_key}\t{digest}\t{len(joined)}")
+    return rows
 
 
 def dump_state(database: str) -> dict:
@@ -289,46 +592,31 @@ def dump_state(database: str) -> dict:
                 "SELECT id, content_hash, document_json FROM documents ORDER BY id"
             )
         )
-
-        for row in connection.execute(
-            """
-            SELECT d.document_id,
-                   l.section_key,
-                   l.section_id,
-                   l.char_len,
-                   l.paragraph_coverage_json,
-                   hex(l.layout)
-              FROM section_layout_v1 l
-              JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
-             ORDER BY d.document_id, l.section_key
-            """
-        ):
-            blocks["layouts"].append("\t".join("" if value is None else str(value) for value in row))
-
-        sections: dict[tuple[str, int], list[str]] = {}
+        blocks["layouts"] = layout_rows(connection)
+        blocks["text"] = text_rows(connection)
+        texts_by_document: dict[str, dict[int, str]] = defaultdict(dict)
+        table = (
+            "section_text_v2"
+            if table_exists(connection, "section_text_v2")
+            else "section_text_v1"
+        )
         for document_id, section_key, text in connection.execute(
-            """
+            f"""
             SELECT d.document_id, t.section_key, t.text
-              FROM section_text_v1 t
+              FROM {table} t
               JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
              ORDER BY d.document_id, t.section_key, t.chunk_no
             """
         ):
-            sections.setdefault((document_id, section_key), []).append(text)
-        for (document_id, section_key), chunks in sorted(sections.items()):
-            joined = "".join(chunks)
-            digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
-            blocks["text"].append(f"{document_id}\t{section_key}\t{digest}\t{len(joined)}")
+            texts_by_document[document_id].setdefault(section_key, "")
+            texts_by_document[document_id][section_key] += text
     finally:
         connection.close()
 
     for document_id, content_hash, document_json in documents:
-        texts = {
-            section_key: "".join(chunks)
-            for (document, section_key), chunks in sections.items()
-            if document == document_id
-        }
-        rebuilt = rebuild_document_json(document_json, texts)
+        rebuilt = rebuild_document_json(
+            document_json, texts_by_document.get(document_id, {})
+        )
         blocks["documents"].append(f"{document_id}\t{content_hash}\t{rebuilt}")
 
     return {name: "\n".join(lines) + "\n" for name, lines in blocks.items()}
@@ -344,6 +632,124 @@ def safe_label(label: str) -> str:
     )
 
 
+def run_read_probe(
+    binary: str, source: str, state_dir: str, timeout: float, log_path: str
+) -> list[dict]:
+    """Reopens the stored state and records the v2 read sequence, both tools registered.
+
+    `open` returns the short document handle; five `read` calls follow `next`; the next call uses
+    `back=2`; the last one asks for a 2000-char batch from the section start. Every response is
+    kept so two binaries can be compared call by call.
+    """
+    env = server_environment(state_dir, os.path.dirname(os.path.abspath(source)))
+    env["READING_MCP_TOOLS"] = "both"
+    records: list[dict] = []
+    with open(log_path, "wb") as log_handle:
+        process = subprocess.Popen(
+            [binary],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=log_handle,
+            env=env,
+        )
+        responses: queue.Queue = queue.Queue()
+        reader = threading.Thread(
+            target=pump_stdout, args=(process.stdout, responses), daemon=True
+        )
+        reader.start()
+        request_id = 0
+
+        def call(name: str, arguments: dict) -> dict:
+            nonlocal request_id
+            request_id += 1
+            send(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
+            response = read_response(responses, request_id, timeout)
+            failure = error_text(response)
+            if failure is not None:
+                return {"error": failure}
+            result = response.get("result")
+            payload = tool_payload(result if isinstance(result, dict) else {})
+            return payload if payload is not None else {"error": "no JSON payload"}
+
+        try:
+            send(process, INITIALIZE_MESSAGE)
+            initialized = read_response(responses, 1, timeout)
+            request_id = 1
+            failure = error_text(initialized)
+            if failure is not None:
+                return [{"step": "initialize", "payload": {"error": failure}}]
+            send(process, INITIALIZED_NOTIFICATION)
+
+            opened = call("open", {"source": os.path.abspath(source)})
+            records.append({"step": "v2 open", "payload": opened})
+            document = opened.get("doc") if isinstance(opened, dict) else None
+            top = opened.get("top") if isinstance(opened, dict) else None
+            section = None
+            if isinstance(top, list) and top:
+                first = top[0]
+                if isinstance(first, (list, tuple)) and first:
+                    section = first[0]
+                elif isinstance(first, str):
+                    section = first
+            if not isinstance(document, str) or not isinstance(section, str):
+                return records
+
+            payload = call("read", {"from": section})
+            records.append({"step": "read from section", "payload": payload})
+            cursor = payload.get("next") if isinstance(payload, dict) else None
+            for index in range(5):
+                if not isinstance(cursor, str):
+                    break
+                payload = call("read", {"from": cursor})
+                records.append({"step": f"read next {index + 1}", "payload": payload})
+                cursor = payload.get("next") if isinstance(payload, dict) else None
+
+            back_from = cursor if isinstance(cursor, str) else section
+            records.append(
+                {
+                    "step": "read back 2",
+                    "payload": call("read", {"from": back_from, "back": 2}),
+                }
+            )
+            records.append(
+                {
+                    "step": "read batch 2000",
+                    "payload": call(
+                        "read", {"from": section, "max_chars": 2000}
+                    ),
+                }
+            )
+        except (TimeoutError, RuntimeError, ProbeError) as error:
+            records.append(
+                {"step": "probe", "payload": {"error": f"{type(error).__name__}: {error}"}}
+            )
+            try:
+                process.kill()
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+        finally:
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except Exception:  # noqa: BLE001 - server may already be gone
+                pass
+            try:
+                process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=30)
+            reader.join(timeout=1.0)
+    return drop_wall_clock(records)
+
+
 def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeout: float) -> dict:
     """Opens `path` with `binary` on a fresh state directory and returns its comparable facts."""
     side_dir = os.path.join(out_dir, "runs", safe_label(label), side)
@@ -357,13 +763,20 @@ def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeou
         os.path.join(side_dir, "server.log"),
     )
     dump = dump_state(os.path.join(state_dir, STATE_DATABASE))
-    return {"payload": payload, "dump": dump}
+    reads = run_read_probe(
+        binary,
+        path,
+        state_dir,
+        timeout,
+        os.path.join(side_dir, "read-server.log"),
+    )
+    return {"payload": payload, "dump": dump, "reads": reads}
 
 
 def compare(label: str, left: dict, right: dict, out_dir: str) -> dict:
     """Compares one input's A and B facts, writes diffs for differences, and returns the columns."""
     columns = {column: "same" for column in BLOCK_COLUMNS.values()}
-    columns = {"payload": "same", **columns}
+    columns = {"payload": "same", "reads": "same", **columns}
     diffs = []
 
     left_payload = payload_text(left["payload"])
@@ -371,6 +784,12 @@ def compare(label: str, left: dict, right: dict, out_dir: str) -> dict:
     if left_payload != right_payload:
         columns["payload"] = "DIFF"
         diffs.append(difflib_text(label, "open payload", left_payload, right_payload))
+
+    left_reads = payload_text(left["reads"])
+    right_reads = payload_text(right["reads"])
+    if left_reads != right_reads:
+        columns["reads"] = "DIFF"
+        diffs.append(difflib_text(label, "reads", left_reads, right_reads))
 
     for block in DUMP_BLOCKS:
         column = BLOCK_COLUMNS[block]
@@ -430,7 +849,9 @@ def main() -> int:
     failed = False
     for label, path in inputs:
         if not os.path.isfile(path):
-            rows.append((label, "missing", "missing", "missing", "missing", "DIFF"))
+            rows.append(
+                (label, "missing", "missing", "missing", "missing", "missing", "DIFF")
+            )
             failed = True
             continue
         left = run_side(args.binary_a, "a", label, path, args.out, args.timeout_seconds)
@@ -442,6 +863,7 @@ def main() -> int:
             (
                 label,
                 columns["payload"],
+                columns["reads"],
                 columns["documents (rebuilt)"],
                 columns["layouts"],
                 columns["text"],
@@ -451,8 +873,10 @@ def main() -> int:
         print(f"{label}: {result}", flush=True)
 
     print()
-    print("| Input | open payload | documents (rebuilt) | layouts | text | result |")
-    print("| --- | --- | --- | --- | --- | --- |")
+    print(
+        "| Input | open payload | reads | documents (rebuilt) | layouts | text | result |"
+    )
+    print("| --- | --- | --- | --- | --- | --- | --- |")
     for row in rows:
         print("| " + " | ".join(row) + " |")
 

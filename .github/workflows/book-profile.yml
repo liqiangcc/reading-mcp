@@ -86,6 +86,27 @@ jobs:
           args=(--binary target/release/reading-mcp --documents "$docs"
             --out book/sequential.json)
           python3 scripts/sequential-read-probe.py "${args[@]}"
+      - name: Chunked layout deep-next profile (cjk-64mib)
+        if: always()
+        run: |
+          mkdir -p book
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("memory_profile", "scripts/memory-profile.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.write_cjk_document(os.path.join("book", "cjk-64mib.txt"), 64 * 1024 * 1024)
+          PY
+          python3 scripts/deep-next-probe.py \
+            --binary target/release/reading-mcp \
+            --document book/cjk-64mib.txt \
+            --calls 200 \
+            --start-fraction 0.5 \
+            --io-bytes \
+            --rss-phases \
+            --env READING_MCP_TOOLS=both \
+            --out book/deep-next-cjk-64mib.json
       - name: V2 sequence equivalence (real books)
         if: always()
         run: READING_MCP_BOOK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test v2_book_equivalence -- --ignored --nocapture

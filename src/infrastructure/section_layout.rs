@@ -7,8 +7,12 @@
 
 use crate::application::ports::ApplicationError;
 
-/// Number of Unicode scalars stored per `section_text_v1` chunk.
+/// Number of Unicode scalars stored per `section_text_v2` chunk.
 pub(crate) const CHUNK_CHARS: usize = 16_384;
+
+/// The payload budget of one `section_layout_chunk_v2` row: a chunk stops before the next paragraph
+/// or sentence would make its encoded layout larger than this.
+pub(crate) const LAYOUT_CHUNK_BYTES: usize = 8 * 1024;
 
 const SECTION_LAYOUT_VERSION: u8 = 1;
 

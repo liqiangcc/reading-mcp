@@ -1,0 +1,133 @@
+name: R2c4 chunked layout
+
+# `workflow_dispatch` only fires for a workflow that already exists on the default branch, so a
+# `bench/r2c4-*` push is how this branch runs the parity gate and the read profile. Both
+# `bench/r2c4-tmp` and `bench/r2c4-chunk` select the same head commit; the labels distinguish the
+# runs in the artifact names.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/r2c4-*']
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the base tree
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          git worktree add base-src FETCH_HEAD
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the head binary
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Build the base binary
+        run: |
+          cargo build --release --locked --bin reading-mcp \
+            --manifest-path base-src/Cargo.toml --target-dir base-target
+      - name: Download public-domain books
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p "$BOOKS"
+          download() {
+            local url="$1" out="$2"
+            if curl -fsSL --retry 3 -o "$out" "$url"; then
+              echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+            else
+              echo "::warning::failed to download $url"
+              rm -f "$out"
+            fi
+            return 0
+          }
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" "$BOOKS/en-novel.epub"
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$BOOKS/zh-large.epub"
+      - name: Generate cjk-64mib
+        run: |
+          mkdir -p "$RUNNER_TEMP/inputs"
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("memory_profile", "scripts/memory-profile.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.write_cjk_document(
+              os.path.join(os.environ["RUNNER_TEMP"], "inputs", "cjk-64mib.txt"),
+              64 * 1024 * 1024,
+          )
+          PY
+      - name: Run ingest parity (tmp vs chunk)
+        run: |
+          set -euo pipefail
+          BOOKS="$RUNNER_TEMP/books"
+          GEN="$RUNNER_TEMP/inputs"
+          inputs=""
+          add() { inputs="${inputs:+$inputs,}$1=$2"; }
+          for pair in "zh-large=$BOOKS/zh-large.epub" "en-novel=$BOOKS/en-novel.epub" \
+                      "cjk-64mib=$GEN/cjk-64mib.txt"; do
+            label="${pair%%=*}"
+            file="${pair#*=}"
+            if [ -f "$file" ]; then add "$label" "$file"; fi
+          done
+          mkdir -p "parity-${{ github.ref_name }}"
+          python3 scripts/ingest-parity.py \
+            --binary-a base-target/release/reading-mcp \
+            --binary-b target/release/reading-mcp \
+            --inputs "$inputs" \
+            --out "parity-${{ github.ref_name }}" | tee "parity-${{ github.ref_name }}/table.md"
+          cat "parity-${{ github.ref_name }}/table.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload parity data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2c4-parity-${{ github.ref_name }}
+          path: parity-${{ github.ref_name }}/
+
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Profile deep Next at 50% of cjk-64mib
+        run: |
+          mkdir -p "profile-${{ github.ref_name }}"
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("memory_profile", "scripts/memory-profile.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.write_cjk_document(
+              os.path.join(os.environ["RUNNER_TEMP"], "cjk-64mib.txt"),
+              64 * 1024 * 1024,
+          )
+          PY
+          python3 scripts/deep-next-probe.py \
+            --binary target/release/reading-mcp \
+            --document "$RUNNER_TEMP/cjk-64mib.txt" \
+            --calls 200 \
+            --start-fraction 0.5 \
+            --io-bytes \
+            --rss-phases \
+            --env READING_MCP_TOOLS=both \
+            --out "profile-${{ github.ref_name }}/deep-next.json"
+      - name: Show profile
+        if: always()
+        run: cat "profile-${{ github.ref_name }}/deep-next.json" || true
+      - name: Upload profile data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2c4-profile-${{ github.ref_name }}
+          path: profile-${{ github.ref_name }}/

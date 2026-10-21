@@ -283,9 +283,11 @@ def measure_tools_list(binary: str, state_root: str, toolset: str, seconds: floa
     state = probe.fresh_directory(os.path.join(state_root, f"tools-list-{toolset}"))
     server = None
     try:
+        environment = probe.server_environment(state_root, state)
+        environment["READING_MCP_TOOLS"] = toolset
         server = probe.Server(
             binary,
-            probe.server_environment(state_root, state),
+            environment,
             os.path.join(state, "server.log"),
             request_timeout=max(30.0, seconds),
             cwd=state_root,
@@ -314,7 +316,8 @@ def run_toolset(
     result = {"book": book, "toolset": toolset, "tasks": [], "error": None}
     server = None
     try:
-        environment = probe.server_environment(state, state)
+        books = os.path.dirname(os.path.abspath(path))
+        environment = probe.server_environment(books, state)
         environment["READING_MCP_TOOLS"] = toolset
         server = probe.Server(
             binary,

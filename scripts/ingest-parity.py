@@ -7,7 +7,9 @@ database into one text file per side:
 
 - `documents`: `id`, `content_hash` and `document_json`, compared as parsed objects after the
   section text of a row that keeps it in `section_text_v1` or `section_text_v2` (its
-  `content_store` key) is put back in depth-first section order from that document's chunks;
+  `content_store` key) is put back in depth-first section order from that document's chunks, and
+  after the metadata entries of a row that keeps its heavy ones in `document_meta_v1` (its
+  `metadata_store` key) are merged back into its `metadata` object;
 - layouts joined to `text_unit_documents_v2` and ordered by document then `section_key`:
   `section_id`, `char_len`, `paragraph_coverage_json` and the whole-section layout hex. The v3
   `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
@@ -258,19 +260,31 @@ def run_open(binary: str, source: str, state_dir: str, timeout: float, log_path:
     return drop_wall_clock(payload)
 
 
-def rebuild_document_json(document_json: str, texts: dict[int, str]) -> str:
-    """One `documents` row as a parsed object, with the section text it keeps elsewhere put back.
+def rebuild_document_json(
+    document_json: str, texts: dict[int, str], metadata: dict[str, str] | None = None
+) -> str:
+    """One `documents` row as a parsed object, with what it keeps elsewhere put back.
 
     A row whose `content_store` is `section_text_v1` holds an empty `content` for every section: the
     text lives in `section_text_v1`. Filling it back in depth-first section order — the order
     `section_key` numbers the sections in — and dropping the key leaves the JSON a row that keeps
     its text inline would have written, so both sides compare as the same parsed object.
+
+    A row whose `metadata_store` is `document_meta_v1` holds only its light metadata entries: the
+    heavy ones live in `document_meta_v1`, keyed by document. Merging them back into `metadata` and
+    dropping the key leaves the JSON a row that keeps all of its metadata inline would have
+    written. `sort_keys` then writes both sides in the one key order the store writes a
+    `BTreeMap` in.
     """
     stored = json.loads(document_json)
     if not isinstance(stored, dict):
         return json.dumps(stored, ensure_ascii=False, sort_keys=True)
     if stored.pop("content_store", None) in SECTION_TEXT_STORES:
         fill_section_text(stored.get("root_sections") or [], texts, itertools.count())
+    if stored.pop("metadata_store", None) == "document_meta_v1":
+        merged = dict(stored.get("metadata") or {})
+        merged.update(metadata or {})
+        stored["metadata"] = merged
     return json.dumps(stored, ensure_ascii=False, sort_keys=True)
 
 
@@ -612,12 +626,20 @@ def dump_state(database: str) -> dict:
         ):
             texts_by_document[document_id].setdefault(section_key, "")
             texts_by_document[document_id][section_key] += text
+        metadata_by_document: dict[str, dict[str, str]] = defaultdict(dict)
+        if table_exists(connection, "document_meta_v1"):
+            for document_id, key, value in connection.execute(
+                "SELECT document_id, key, value FROM document_meta_v1 ORDER BY document_id, key"
+            ):
+                metadata_by_document[document_id][key] = value
     finally:
         connection.close()
 
     for document_id, content_hash, document_json in documents:
         rebuilt = rebuild_document_json(
-            document_json, texts_by_document.get(document_id, {})
+            document_json,
+            texts_by_document.get(document_id, {}),
+            metadata_by_document.get(document_id, {}),
         )
         blocks["documents"].append(f"{document_id}\t{content_hash}\t{rebuilt}")
 

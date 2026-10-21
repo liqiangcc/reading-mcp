@@ -295,6 +295,41 @@ pub trait DocumentRepository: Send + Sync {
             (document, hash)
         }))
     }
+
+    /// The document with no section text and only its light metadata entries, plus its normalized
+    /// document hash: what a reader that needs the section tree and nothing else pays for a read.
+    /// The default loads the full document, which is correct but not light.
+    async fn get_light_with_hash(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        self.get_with_hash(id).await
+    }
+
+    /// One metadata entry of the document. The default loads the whole document.
+    async fn load_metadata(
+        &self,
+        id: &DocumentId,
+        key: &str,
+    ) -> Result<Option<String>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .and_then(|(document, _)| document.metadata.get(key).cloned()))
+    }
+
+    /// The stored text of exactly one section, not its subtree. The default loads the whole
+    /// document and reads that section's text from it.
+    async fn load_section_text(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<String>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .and_then(|(document, _)| document.find_section(section_id).map(|s| s.content.clone())))
+    }
 }
 
 /// The persisted paragraph and sentence units of one section, in source order, with their coverage records.

@@ -350,6 +350,12 @@ impl SqliteDocumentRepository {
                     source TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
                     document_json TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS document_meta_v1 (
+                    document_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    UNIQUE(document_id, key)
                  );",
             )
             .map_err(repository_error)?;
@@ -397,12 +403,19 @@ impl DocumentRepository for SqliteDocumentRepository {
                 } else {
                     None
                 };
-                let json = serde_json::to_string(&StoredDocument::with_content_store(
+                let (light_metadata, heavy_metadata) = split_metadata(&document.metadata);
+                let metadata_store = (!heavy_metadata.is_empty()).then_some(DOCUMENT_META_STORE);
+                let json = serde_json::to_string(&StoredDocument::with_stores(
                     &document,
                     content_store,
+                    light_metadata,
+                    metadata_store,
                 ))
                 .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
-                connection
+                // The `documents` row and its `document_meta_v1` rows are replaced in one
+                // transaction, so a document never keeps metadata rows of another version.
+                let transaction = connection.transaction().map_err(repository_error)?;
+                transaction
                     .execute(
                         "INSERT INTO documents(id, source, content_hash, document_json, normalized_document_hash)
                          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -420,6 +433,25 @@ impl DocumentRepository for SqliteDocumentRepository {
                         ],
                     )
                     .map_err(repository_error)?;
+                transaction
+                    .execute(
+                        "DELETE FROM document_meta_v1 WHERE document_id = ?1",
+                        params![document.id.0],
+                    )
+                    .map_err(repository_error)?;
+                if !heavy_metadata.is_empty() {
+                    let mut statement = transaction
+                        .prepare_cached(
+                            "INSERT INTO document_meta_v1(document_id, key, value) VALUES (?1, ?2, ?3)",
+                        )
+                        .map_err(repository_error)?;
+                    for (key, value) in &heavy_metadata {
+                        statement
+                            .execute(params![document.id.0, key, value])
+                            .map_err(repository_error)?;
+                    }
+                }
+                transaction.commit().map_err(repository_error)?;
                 let mut cache = cache.lock().map_err(|_| {
                     ApplicationError::RepositoryFailed("document cache lock poisoned".into())
                 })?;
@@ -463,66 +495,11 @@ impl DocumentRepository for SqliteDocumentRepository {
                 } else {
                     None
                 };
-                let row_started = Instant::now();
-                let row = connection
-                    .query_row(
-                        "SELECT document_json, normalized_document_hash FROM documents WHERE id = ?1",
-                        params![&id.0],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, Option<String>>(1)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(repository_error)?;
-                let row_read_ms = row_started.elapsed().as_secs_f64() * 1000.0;
-                let Some((json, stored_hash)) = row else {
+                let Some((document, normalized_document_hash)) =
+                    load_document_row(connection, &id, decode_timing)?
+                else {
                     return Ok(None);
                 };
-                let json_bytes = json.len();
-                let parse_started = Instant::now();
-                let stored = serde_json::from_str::<StoredDocument>(&json)
-                    .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
-                let parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
-                let load_started = Instant::now();
-                let document = stored.into_document(connection, stored_hash.as_deref())?;
-                let section_text_load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
-                let validate_started = Instant::now();
-                document
-                    .validate_ocr_publication()
-                    .map_err(ApplicationError::RepositoryFailed)?;
-                let validate_ms = validate_started.elapsed().as_secs_f64() * 1000.0;
-                let document = Arc::new(document);
-                let hash_started = Instant::now();
-                let (normalized_document_hash, hash_ms) = match stored_hash {
-                    Some(hash) => (NormalizedDocumentHash(hash), None),
-                    None => {
-                        let hash = document.normalized_document_hash();
-                        connection
-                            .execute(
-                                "UPDATE documents SET normalized_document_hash = ?1 WHERE id = ?2",
-                                params![&hash.0, &id.0],
-                            )
-                            .map_err(repository_error)?;
-                        let hash_ms = hash_started.elapsed().as_secs_f64() * 1000.0;
-                        (hash, Some(hash_ms))
-                    }
-                };
-                if decode_timing {
-                    emit_document_decode_miss(
-                        &document,
-                        DocumentDecodePhases {
-                            json_bytes,
-                            row_read_ms,
-                            parse_ms,
-                            section_text_load_ms,
-                            validate_ms,
-                            hash_ms,
-                        },
-                    );
-                }
                 if let Some(cache) = cache.as_mut() {
                     cache.insert(
                         id.clone(),
@@ -536,11 +513,336 @@ impl DocumentRepository for SqliteDocumentRepository {
         )
         .await
     }
+
+    /// One row read, no section text, no `document_meta_v1` read and no cache: a `Document` that
+    /// carries only the light metadata entries and empty section `content`. A row written before
+    /// `document_meta_v1` existed keeps every entry inline, so its light metadata is that map split
+    /// the same way a save splits it; a row without a stored normalized hash, or a row with OCR
+    /// metadata, takes the full path instead, so every field of its result matches
+    /// `get_with_hash`.
+    async fn get_light_with_hash(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        let id = id.clone();
+        let decode_timing = self.decode_timing;
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let row = connection
+                    .query_row(
+                        "SELECT document_json, normalized_document_hash FROM documents WHERE id = ?1",
+                        params![&id.0],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .optional()
+                    .map_err(repository_error)?;
+                let Some((json, stored_hash)) = row else {
+                    return Ok(None);
+                };
+                let stored = serde_json::from_str::<StoredDocument>(&json)
+                    .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+                // A row without a stored normalized hash would have to be hashed over the section
+                // text, so it takes the full path, which computes and stores the hash.
+                let Some(stored_hash) = stored_hash else {
+                    return load_document_row(connection, &id, decode_timing);
+                };
+                // `validate_ocr_publication` reads the OCR metadata, which may be heavy and so
+                // live in `document_meta_v1` rather than in the light map. A document with any OCR
+                // metadata entry therefore takes the full path, so that its validation outcome is
+                // the one `get_with_hash` reports. Without OCR metadata there is nothing to
+                // validate and the light path skips the call.
+                if has_ocr_metadata(connection, &id, &stored.metadata)? {
+                    return load_document_row(connection, &id, decode_timing);
+                }
+                let document = stored.into_document_light()?;
+                Ok(Some((Arc::new(document), NormalizedDocumentHash(stored_hash))))
+            },
+        )
+        .await
+    }
+
+    async fn load_metadata(
+        &self,
+        id: &DocumentId,
+        key: &str,
+    ) -> Result<Option<String>, ApplicationError> {
+        let id = id.clone();
+        let key = key.to_owned();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| load_stored_metadata(connection, &id, &key),
+        )
+        .await
+    }
+
+    async fn load_section_text(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<String>, ApplicationError> {
+        let id = id.clone();
+        let section_id = section_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| load_one_section_text(connection, &id, &section_id),
+        )
+        .await
+    }
+}
+
+/// One `documents` row decoded in full: the row read, the parse, the section text, the OCR
+/// validation and the normalized hash, which is computed and stored when the row has none.
+/// `get_with_hash` calls it after its cache lookup, and `get_light_with_hash` calls it for the rows
+/// that cannot be read light.
+fn load_document_row(
+    connection: &Connection,
+    id: &DocumentId,
+    decode_timing: bool,
+) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+    let row_started = Instant::now();
+    let row = connection
+        .query_row(
+            "SELECT document_json, normalized_document_hash FROM documents WHERE id = ?1",
+            params![&id.0],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let row_read_ms = row_started.elapsed().as_secs_f64() * 1000.0;
+    let Some((json, stored_hash)) = row else {
+        return Ok(None);
+    };
+    let json_bytes = json.len();
+    let parse_started = Instant::now();
+    let stored = serde_json::from_str::<StoredDocument>(&json)
+        .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+    let parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
+    let load_started = Instant::now();
+    let document = stored.into_document(connection, stored_hash.as_deref())?;
+    let section_text_load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+    let validate_started = Instant::now();
+    document
+        .validate_ocr_publication()
+        .map_err(ApplicationError::RepositoryFailed)?;
+    let validate_ms = validate_started.elapsed().as_secs_f64() * 1000.0;
+    let document = Arc::new(document);
+    let hash_started = Instant::now();
+    let (normalized_document_hash, hash_ms) = match stored_hash {
+        Some(hash) => (NormalizedDocumentHash(hash), None),
+        None => {
+            let hash = document.normalized_document_hash();
+            connection
+                .execute(
+                    "UPDATE documents SET normalized_document_hash = ?1 WHERE id = ?2",
+                    params![&hash.0, &id.0],
+                )
+                .map_err(repository_error)?;
+            let hash_ms = hash_started.elapsed().as_secs_f64() * 1000.0;
+            (hash, Some(hash_ms))
+        }
+    };
+    if decode_timing {
+        emit_document_decode_miss(
+            &document,
+            DocumentDecodePhases {
+                json_bytes,
+                row_read_ms,
+                parse_ms,
+                section_text_load_ms,
+                validate_ms,
+                hash_ms,
+            },
+        );
+    }
+    Ok(Some((document, normalized_document_hash)))
+}
+
+/// Whether `document_id` has any OCR metadata entry, in the light map `metadata` or in
+/// `document_meta_v1`. Every OCR key starts with `ocr_`.
+fn has_ocr_metadata(
+    connection: &Connection,
+    document_id: &DocumentId,
+    metadata: &BTreeMap<String, String>,
+) -> Result<bool, ApplicationError> {
+    if metadata.keys().any(|key| key.starts_with("ocr_")) {
+        return Ok(true);
+    }
+    connection
+        .query_row(
+            "SELECT 1 FROM document_meta_v1
+              WHERE document_id = ?1 AND substr(key, 1, 4) = 'ocr_'
+              LIMIT 1",
+            params![&document_id.0],
+            |_row| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(repository_error)
+}
+
+/// One metadata entry of `document_id`: the light map first, then `document_meta_v1`.
+fn load_stored_metadata(
+    connection: &Connection,
+    document_id: &DocumentId,
+    key: &str,
+) -> Result<Option<String>, ApplicationError> {
+    let row = connection
+        .query_row(
+            "SELECT document_json FROM documents WHERE id = ?1",
+            params![&document_id.0],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some(json) = row else {
+        return Ok(None);
+    };
+    let stored = serde_json::from_str::<StoredDocument>(&json)
+        .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+    match stored.metadata_store.as_deref() {
+        None => Ok(stored.metadata.get(key).cloned()),
+        Some(store) if store == DOCUMENT_META_STORE => {
+            if let Some(value) = stored.metadata.get(key) {
+                return Ok(Some(value.clone()));
+            }
+            connection
+                .query_row(
+                    "SELECT value FROM document_meta_v1 WHERE document_id = ?1 AND key = ?2",
+                    params![&document_id.0, key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(repository_error)
+        }
+        Some(store) => Err(unknown_metadata_store(store)),
+    }
+}
+
+/// The text of exactly one section, not its subtree, read from `section_text_v2` with the same
+/// staleness checks as the whole-document load.
+fn load_one_section_text(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+) -> Result<Option<String>, ApplicationError> {
+    let stored_hash = connection
+        .query_row(
+            "SELECT normalized_document_hash FROM documents WHERE id = ?1",
+            params![&document_id.0],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some(stored_hash) = stored_hash else {
+        return Ok(None);
+    };
+    let meta = connection
+        .query_row(
+            "SELECT doc_key, normalized_document_hash, segmentation_version
+               FROM text_unit_documents_v2
+              WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some((doc_key, text_hash, segmentation_version)) = meta else {
+        return Err(stale_section_text(
+            document_id,
+            "its section text is not stored",
+        ));
+    };
+    if stored_hash.is_some_and(|stored_hash| stored_hash != text_hash) {
+        return Err(stale_section_text(
+            document_id,
+            "its section text belongs to another version of the document",
+        ));
+    }
+    if segmentation_version != TEXT_SEGMENTATION_VERSION {
+        return Err(stale_section_text(
+            document_id,
+            "its section text is not stored for the current segmentation version",
+        ));
+    }
+    let section_key = match stored_section_key(connection, document_id, section_id)
+        .map_err(|error| stale_section_text(document_id, &error.to_string()))?
+    {
+        Some(section_key) => section_key,
+        None => return Ok(None),
+    };
+    let char_len: i64 = connection
+        .query_row(
+            "SELECT char_len FROM section_layout_v2 WHERE doc_key = ?1 AND section_key = ?2",
+            params![doc_key, section_key],
+            |row| row.get(0),
+        )
+        .map_err(|error| stale_section_text(document_id, &error.to_string()))?;
+    let char_len = i64_to_usize(char_len, "char_len")
+        .map_err(|error| stale_section_text(document_id, &error.to_string()))?;
+    if char_len == 0 {
+        return Ok(Some(String::new()));
+    }
+    let text = load_section_text_unchecked(connection, doc_key, section_key)
+        .map_err(|error| stale_section_text(document_id, &error.to_string()))?;
+    let text_chars = text.chars().count();
+    if text_chars != char_len {
+        return Err(stale_section_text(
+            document_id,
+            &format!("section {section_key} text has {text_chars} chars, expected {char_len}"),
+        ));
+    }
+    Ok(Some(text))
 }
 
 /// The `content_store` value of a `document_json` row that keeps no section text inline: every
 /// section's text is in `section_text_v2` for the same document version.
 const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v2";
+
+/// The `metadata_store` value of a `document_json` row that keeps its heavy metadata entries in
+/// `document_meta_v1`. A row without the key keeps every entry inline, which is what every row
+/// written before this change and a row whose entries are all light write.
+const DOCUMENT_META_STORE: &str = "document_meta_v1";
+
+/// A metadata value longer than this many bytes goes to `document_meta_v1` instead of
+/// `document_json`. The large maps of a book (`normalized_block_map`, `epub_structure_map`,
+/// `original_source_binding_map`) are megabytes; the small ones that a reader looks at per call
+/// (`content_encoding`, `parser`, page counts) are well under a kilobyte.
+const METADATA_HEAVY_BYTES: usize = 1024;
+
+/// The error an unknown `metadata_store` value is: the row needs an explicit source reopen, like
+/// every other stale row.
+fn unknown_metadata_store(store: &str) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "persisted document keeps its metadata in unknown store {store}; explicit source reopen required"
+    ))
+}
+
+/// Splits a document's metadata into the entries that stay inline in `document_json` and the heavy
+/// ones that `document_meta_v1` holds.
+fn split_metadata(
+    metadata: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, Vec<(String, String)>) {
+    let mut light = BTreeMap::new();
+    let mut heavy = Vec::new();
+    for (key, value) in metadata {
+        if value.len() > METADATA_HEAVY_BYTES {
+            heavy.push((key.clone(), value.clone()));
+        } else {
+            light.insert(key.clone(), value.clone());
+        }
+    }
+    (light, heavy)
+}
 
 /// Whether `document`'s section text is stored in `section_text_v2` for exactly this document
 /// version, so that `document_json` may leave it out: the unit row names this document and hash for
@@ -5057,6 +5359,10 @@ struct StoredDocument {
     /// what an old row and a repository used on its own write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content_store: Option<String>,
+    /// Where the heavy metadata entries live. Absent when every entry is inline, which is what an
+    /// old row and a document whose metadata is all light write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata_store: Option<String>,
     id: String,
     source: String,
     title: String,
@@ -5069,18 +5375,26 @@ struct StoredDocument {
 impl StoredDocument {
     /// `content_store` names where the section text is kept. With `Some`, every section's `content`
     /// is written empty and the text is read back from that store on load; with `None` the text is
-    /// inline, byte for byte as before.
-    fn with_content_store(document: &Document, content_store: Option<&str>) -> Self {
+    /// inline, byte for byte as before. `metadata` is the light half of the document's metadata;
+    /// `metadata_store` names where the heavy half is kept, and is `None` when there is no heavy
+    /// entry.
+    fn with_stores(
+        document: &Document,
+        content_store: Option<&str>,
+        metadata: BTreeMap<String, String>,
+        metadata_store: Option<&str>,
+    ) -> Self {
         let omit_content = content_store.is_some();
         Self {
             normalization_version: Some(NORMALIZATION_VERSION.into()),
             content_store: content_store.map(str::to_owned),
+            metadata_store: metadata_store.map(str::to_owned),
             id: document.id.0.clone(),
             source: document.source.0.clone(),
             title: document.title.clone(),
             media_type: document.media_type.0.clone(),
             content_hash: document.content_hash.0.clone(),
-            metadata: document.metadata.clone(),
+            metadata,
             root_sections: document
                 .root_sections
                 .iter()
@@ -5108,19 +5422,31 @@ impl StoredDocument {
             )));
         }
         let content_store = self.content_store;
+        let metadata_store = self.metadata_store;
+        let mut metadata = self.metadata;
         let mut document = Document {
             id: DocumentId(self.id),
             source: DocumentSource(self.source),
             title: self.title,
             media_type: MediaType(self.media_type),
             content_hash: ContentHash(self.content_hash),
-            metadata: self.metadata,
+            metadata: BTreeMap::new(),
             root_sections: self
                 .root_sections
                 .into_iter()
                 .map(StoredSection::into_section)
                 .collect(),
         };
+        // The decoded document carries every metadata entry, inline and heavy, exactly as a row that
+        // kept all of them inline did before the split.
+        match metadata_store.as_deref() {
+            None => {}
+            Some(store) if store == DOCUMENT_META_STORE => {
+                load_document_metadata(connection, &document.id, &mut metadata)?;
+            }
+            Some(store) => return Err(unknown_metadata_store(store)),
+        }
+        document.metadata = metadata;
         match content_store.as_deref() {
             None => {}
             Some(store) if store == SECTION_TEXT_CONTENT_STORE => {
@@ -5133,6 +5459,90 @@ impl StoredDocument {
             }
         }
         Ok(document)
+    }
+
+    /// The light decode: the same checks as [`Self::into_document`], but no section text and no
+    /// `document_meta_v1` read, so the result costs one `documents` row. The caller has already
+    /// established that this row has a stored normalized hash and no OCR metadata.
+    fn into_document_light(self) -> Result<Document, ApplicationError> {
+        let persisted_version = self.normalization_version.ok_or_else(|| {
+            ApplicationError::StaleDocument(format!(
+                "persisted document has no normalization version; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
+            ))
+        })?;
+        if persisted_version != NORMALIZATION_VERSION {
+            return Err(ApplicationError::StaleDocument(format!(
+                "persisted document normalization version {persisted_version} is stale; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
+            )));
+        }
+        // A row with a `metadata_store` holds only its light entries inline. A row without one
+        // holds every entry inline, which is what every row written before the split and every
+        // document whose entries are all light write: its light form is that map split the way a
+        // save splits it, so the light read stays one row read for those documents too.
+        let metadata = match self.metadata_store.as_deref() {
+            Some(store) if store == DOCUMENT_META_STORE => self.metadata,
+            None => split_metadata(&self.metadata).0,
+            Some(store) => return Err(unknown_metadata_store(store)),
+        };
+        match self.content_store.as_deref() {
+            None => {}
+            Some(store) if store == SECTION_TEXT_CONTENT_STORE => {}
+            Some(store) => {
+                return Err(ApplicationError::StaleDocument(format!(
+                    "persisted document keeps its section text in unknown store {store}; explicit source reopen required"
+                )));
+            }
+        }
+        let keep_inline_text = self.content_store.is_none();
+        let mut root_sections: Vec<Section> = self
+            .root_sections
+            .into_iter()
+            .map(StoredSection::into_section)
+            .collect();
+        if keep_inline_text {
+            // A row that keeps its text inline would otherwise hand the light read the whole
+            // section text: drop it here, so a light document never carries text.
+            clear_section_text(&mut root_sections);
+        }
+        Ok(Document {
+            id: DocumentId(self.id),
+            source: DocumentSource(self.source),
+            title: self.title,
+            media_type: MediaType(self.media_type),
+            content_hash: ContentHash(self.content_hash),
+            metadata,
+            root_sections,
+        })
+    }
+}
+
+/// Fills `metadata` with every heavy entry of `document_id` from `document_meta_v1`, so the decoded
+/// document carries the metadata a row that kept all of it inline carried.
+fn load_document_metadata(
+    connection: &Connection,
+    document_id: &DocumentId,
+    metadata: &mut BTreeMap<String, String>,
+) -> Result<(), ApplicationError> {
+    let mut statement = connection
+        .prepare_cached("SELECT key, value FROM document_meta_v1 WHERE document_id = ?1")
+        .map_err(repository_error)?;
+    let rows = statement
+        .query_map(params![&document_id.0], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(repository_error)?;
+    for row in rows {
+        let (key, value) = row.map_err(repository_error)?;
+        metadata.insert(key, value);
+    }
+    Ok(())
+}
+
+/// Empties every section's `content`, in place.
+fn clear_section_text(sections: &mut [Section]) {
+    for section in sections.iter_mut() {
+        section.content.clear();
+        clear_section_text(&mut section.children);
     }
 }
 

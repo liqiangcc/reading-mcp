@@ -418,10 +418,13 @@ def ratio(v2_tokens: float, v1_tokens: float) -> float | None:
 def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[str], dict]:
     lines: list[str] = []
     summary: dict = {"ratios": {}, "checks": []}
+    # Rows are per (book, tool set); a criterion compares the two tool sets of one book.
+    books: dict[str, dict[str, dict[str, TaskResult]]] = {}
     for row in rows:
-        by_task: dict[str, dict[str, TaskResult]] = {}
+        by_task = books.setdefault(row["book"], {})
         for task in row["tasks"]:
             by_task.setdefault(task.task, {})[task.toolset] = task
+    for book, by_task in books.items():
         for name in ("T1", "T2"):
             pair = by_task.get(name) or {}
             left = pair.get(V1)
@@ -432,11 +435,11 @@ def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[s
             v2_total = right.total_tokens(tools_tokens.get(V2, 0.0))
             percent = ratio(v2_total, v1_total)
             ok = percent is not None and percent <= 20.0
-            summary["ratios"][f"{row['book']}-{name}"] = percent
+            summary["ratios"][f"{book}-{name}"] = percent
             lines.append(
                 "{} {book} {task} total tokens: v2 {v2} vs v1 {v1} = {pct}% (limit 20%)".format(
                     "PASS" if ok else "FAIL",
-                    book=row["book"],
+                    book=book,
                     task=name,
                     v2=fmt(v2_total, 0),
                     v1=fmt(v1_total, 0),
@@ -448,7 +451,7 @@ def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[s
             lines.append(
                 "{} {book} {task} calls: v2 {v2} vs v1 {v1}".format(
                     "PASS" if ok else "FAIL",
-                    book=row["book"],
+                    book=book,
                     task=name,
                     v2=right.calls,
                     v1=left.calls,
@@ -460,7 +463,7 @@ def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[s
             lines.append(
                 "{} {book} {task} v2 extra tokens per sentence: {extra} (limit 30)".format(
                     "PASS" if ok else "FAIL",
-                    book=row["book"],
+                    book=book,
                     task=name,
                     extra=fmt(extra),
                 )

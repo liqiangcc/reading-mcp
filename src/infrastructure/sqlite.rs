@@ -3187,13 +3187,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         else {
                             return Ok(None);
                         };
-                        let paragraph = &chunk.layout.paragraphs[slot];
-                        (
-                            chunk,
-                            UnitRef::Paragraph(slot),
-                            paragraph.start,
-                            paragraph.end,
-                        )
+                        let start = chunk.layout.paragraphs[slot].start;
+                        let end = chunk.layout.paragraphs[slot].end;
+                        (chunk, UnitRef::Paragraph(slot), start, end)
                     }
                     EffectiveTextUnitKind::Sentence => {
                         let Some(sentence_index) = sentence_index else {
@@ -3220,8 +3216,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         }) else {
                             return Ok(None);
                         };
-                        let sentence = &chunk.layout.sentences[slot];
-                        (chunk, UnitRef::Sentence(slot), sentence.start, sentence.end)
+                        let start = chunk.layout.sentences[slot].start;
+                        let end = chunk.layout.sentences[slot].end;
+                        (chunk, UnitRef::Sentence(slot), start, end)
                     }
                 };
 
@@ -3951,7 +3948,12 @@ fn collect_chunk_stream_items(
     let mut chunk_no = chunk.chunk_no;
     loop {
         if kind == RequestedTextUnitKind::Paragraph && chunk.is_mid_paragraph() {
-            match read_section_chunk(connection, meta.doc_key, header.section_key, chunk_no + 1)? {
+            match load_section_chunk_at_no(
+                connection,
+                meta.doc_key,
+                header.section_key,
+                chunk_no + 1,
+            )? {
                 Some(next) => {
                     chunk = next;
                     chunk_no += 1;

@@ -61,10 +61,10 @@ jobs:
               continue
             fi
             echo "=== $f"
-            heaptrack_print --file "$f" --print-peaks=1 --peak-limit=30 --sub-peak-limit=8 \
+            heaptrack_print --file "$f" --print-peaks=1 --peak-limit=30 --sub-peak-limit=20 \
               --print-allocators=0 --print-temporary=0 --print-leaks=0 --print-histogram=0 \
               > "$f.peaks.txt"
-            head -250 "$f.peaks.txt"
+            head -400 "$f.peaks.txt"
             echo "--- tail of $f.peaks.txt"
             tail -30 "$f.peaks.txt"
           done

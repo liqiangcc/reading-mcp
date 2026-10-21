@@ -363,7 +363,7 @@ async fn stored() -> Stored {
 
 impl Stored {
     fn units(&self) -> Arc<dyn TextUnitIndex> {
-        let units: Arc<dyn TextUnitIndex> = Arc::clone(&self.index);
+        let units: Arc<dyn TextUnitIndex> = self.index.clone();
         units
     }
 }

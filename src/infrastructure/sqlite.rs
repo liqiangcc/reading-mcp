@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -13,6 +14,7 @@ use super::lexical::{
     LexicalQuery, ParagraphPrefilters, candidate_kind_order, lowercase_fast,
     score_lowered_with_phrase,
 };
+use super::observability::{DocumentDecodePhases, emit_document_decode_miss};
 use super::section_layout::{
     CHUNK_CHARS, LAYOUT_CHUNK_BYTES, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
 };
@@ -41,6 +43,10 @@ use crate::domain::{
 
 /// How many decoded documents `SqliteDocumentRepository` keeps in memory.
 const DOCUMENT_CACHE_CAPACITY: usize = 8;
+
+/// The environment variable that overrides [`DOCUMENT_CACHE_CAPACITY`]. 0 disables the cache, which
+/// exists only so that a benchmark can measure a per-call read without it.
+const DOCUMENT_CACHE_CAPACITY_ENV: &str = "READING_MCP_DOCUMENT_CACHE_CAPACITY";
 
 /// Most recently used decoded documents, front first. `data_version` is `PRAGMA data_version` at the time the
 /// entries were loaded: SQLite changes it when another connection commits, so a new value means they may be stale.
@@ -74,11 +80,12 @@ impl DocumentCache {
         id: DocumentId,
         document: Arc<Document>,
         normalized_document_hash: NormalizedDocumentHash,
+        capacity: usize,
     ) {
         self.remove(&id);
         self.entries
             .push_front((id, document, normalized_document_hash));
-        self.entries.truncate(DOCUMENT_CACHE_CAPACITY);
+        self.entries.truncate(capacity);
     }
 
     fn remove(&mut self, id: &DocumentId) {
@@ -314,10 +321,26 @@ pub struct SqliteDocumentRepository {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
     cache: Arc<Mutex<DocumentCache>>,
+    /// How many decoded documents the cache keeps; 0 never caches (benchmark only).
+    cache_capacity: usize,
+    /// Whether a cache miss reports its decode phases; only when the cache is off and telemetry is on.
+    decode_timing: bool,
 }
 
 impl SqliteDocumentRepository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
+        let capacity = document_cache_capacity()?;
+        Self::open_with_cache_capacity(path, capacity)
+    }
+
+    /// Opens the repository with an explicit decoded-document cache capacity: 0 never caches, any
+    /// other value keeps at most that many documents. The environment override of [`Self::open`] is
+    /// read once here, so a test can ask for 0 without touching the process environment.
+    #[doc(hidden)]
+    pub fn open_with_cache_capacity(
+        path: impl AsRef<Path>,
+        cache_capacity: usize,
+    ) -> Result<Self, ApplicationError> {
         let path = path.as_ref().to_path_buf();
         let connection = open_connection(&path, ApplicationError::RepositoryFailed)?;
         connection
@@ -335,6 +358,8 @@ impl SqliteDocumentRepository {
             path,
             connection: Arc::new(Mutex::new(connection)),
             cache: Arc::new(Mutex::new(DocumentCache::default())),
+            cache_capacity,
+            decode_timing: cache_capacity == 0 && telemetry_enabled(),
         })
     }
 
@@ -415,6 +440,8 @@ impl DocumentRepository for SqliteDocumentRepository {
     ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
         let id = id.clone();
         let cache = Arc::clone(&self.cache);
+        let capacity = self.cache_capacity;
+        let decode_timing = self.decode_timing;
         run_sqlite(
             &self.connection,
             ApplicationError::RepositoryFailed,
@@ -422,13 +449,21 @@ impl DocumentRepository for SqliteDocumentRepository {
                 let data_version: i64 = connection
                     .query_row("PRAGMA data_version", [], |row| row.get(0))
                     .map_err(repository_error)?;
-                let mut cache = cache.lock().map_err(|_| {
-                    ApplicationError::RepositoryFailed("document cache lock poisoned".into())
-                })?;
-                cache.sync_version(data_version);
-                if let Some(cached) = cache.get(&id) {
-                    return Ok(Some(cached));
-                }
+                // Capacity 0 never consults and never fills the cache, so the mutex is not taken and
+                // every call decodes. It exists only to measure a per-call read without the cache.
+                let mut cache = if capacity > 0 {
+                    let mut cache = cache.lock().map_err(|_| {
+                        ApplicationError::RepositoryFailed("document cache lock poisoned".into())
+                    })?;
+                    cache.sync_version(data_version);
+                    if let Some(cached) = cache.get(&id) {
+                        return Ok(Some(cached));
+                    }
+                    Some(cache)
+                } else {
+                    None
+                };
+                let row_started = Instant::now();
                 let row = connection
                     .query_row(
                         "SELECT document_json, normalized_document_hash FROM documents WHERE id = ?1",
@@ -442,18 +477,27 @@ impl DocumentRepository for SqliteDocumentRepository {
                     )
                     .optional()
                     .map_err(repository_error)?;
+                let row_read_ms = row_started.elapsed().as_secs_f64() * 1000.0;
                 let Some((json, stored_hash)) = row else {
                     return Ok(None);
                 };
+                let json_bytes = json.len();
+                let parse_started = Instant::now();
                 let stored = serde_json::from_str::<StoredDocument>(&json)
                     .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+                let parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
+                let load_started = Instant::now();
                 let document = stored.into_document(connection, stored_hash.as_deref())?;
+                let section_text_load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+                let validate_started = Instant::now();
                 document
                     .validate_ocr_publication()
                     .map_err(ApplicationError::RepositoryFailed)?;
+                let validate_ms = validate_started.elapsed().as_secs_f64() * 1000.0;
                 let document = Arc::new(document);
-                let normalized_document_hash = match stored_hash {
-                    Some(hash) => NormalizedDocumentHash(hash),
+                let hash_started = Instant::now();
+                let (normalized_document_hash, hash_ms) = match stored_hash {
+                    Some(hash) => (NormalizedDocumentHash(hash), None),
                     None => {
                         let hash = document.normalized_document_hash();
                         connection
@@ -462,14 +506,31 @@ impl DocumentRepository for SqliteDocumentRepository {
                                 params![&hash.0, &id.0],
                             )
                             .map_err(repository_error)?;
-                        hash
+                        let hash_ms = hash_started.elapsed().as_secs_f64() * 1000.0;
+                        (hash, Some(hash_ms))
                     }
                 };
-                cache.insert(
-                    id.clone(),
-                    Arc::clone(&document),
-                    normalized_document_hash.clone(),
-                );
+                if decode_timing {
+                    emit_document_decode_miss(
+                        &document,
+                        DocumentDecodePhases {
+                            json_bytes,
+                            row_read_ms,
+                            parse_ms,
+                            section_text_load_ms,
+                            validate_ms,
+                            hash_ms,
+                        },
+                    );
+                }
+                if let Some(cache) = cache.as_mut() {
+                    cache.insert(
+                        id.clone(),
+                        Arc::clone(&document),
+                        normalized_document_hash.clone(),
+                        capacity,
+                    );
+                }
                 Ok(Some((document, normalized_document_hash)))
             },
         )
@@ -5441,9 +5502,118 @@ fn stored_section_id_at_key(
         .map_err(text_unit_index_error)
 }
 
+/// The decoded-document cache capacity the environment asks for: `READING_MCP_DOCUMENT_CACHE_CAPACITY`
+/// when it is set, [`DOCUMENT_CACHE_CAPACITY`] otherwise. 0 never caches. A value that is not a
+/// non-negative integer is a startup error, not a silent fallback: the knob exists to measure, and a
+/// typo would otherwise report cached numbers as uncached ones.
+fn document_cache_capacity() -> Result<usize, ApplicationError> {
+    match std::env::var(DOCUMENT_CACHE_CAPACITY_ENV) {
+        Ok(value) => parse_document_cache_capacity(Some(&value)),
+        Err(_) => Ok(DOCUMENT_CACHE_CAPACITY),
+    }
+}
+
+/// [`document_cache_capacity`] without the environment, so a test can check the parsing directly.
+fn parse_document_cache_capacity(raw: Option<&str>) -> Result<usize, ApplicationError> {
+    let Some(raw) = raw else {
+        return Ok(DOCUMENT_CACHE_CAPACITY);
+    };
+    raw.trim().parse::<usize>().map_err(|_| {
+        ApplicationError::RepositoryFailed(format!(
+            "{DOCUMENT_CACHE_CAPACITY_ENV} must be a non-negative integer, got {raw:?}"
+        ))
+    })
+}
+
+/// Whether the process emits telemetry events, from `READING_MCP_TELEMETRY`. Only the decode-phase
+/// event of a cache-miss load looks at this itself; every other event is emitted by the observed
+/// wrappers, which the runtime installs only when telemetry is on.
+fn telemetry_enabled() -> bool {
+    match std::env::var("READING_MCP_TELEMETRY") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small text document saved into `repository`, ready to get; returns its id.
+    async fn saved_text_document(repository: &SqliteDocumentRepository) -> DocumentId {
+        use crate::application::ports::{Parser, RetrievedResource};
+
+        let text = "皇帝在朝堂上讨论虚拟内存机制与页表映射。\n\n群臣议事。\n";
+        let document = crate::parsing::TextParser
+            .parse(RetrievedResource {
+                source: DocumentSource("memory:document-cache.txt".into()),
+                final_source: DocumentSource("memory:document-cache.txt".into()),
+                media_type: MediaType("text/plain".into()),
+                bytes: text.as_bytes().to_vec(),
+                etag: None,
+                last_modified: None,
+                metadata: Default::default(),
+            })
+            .await
+            .expect("parse text");
+        let id = document.id.clone();
+        repository.save(document).await.expect("save");
+        id
+    }
+
+    #[test]
+    fn the_cache_capacity_comes_from_the_environment_or_the_default() {
+        assert_eq!(
+            parse_document_cache_capacity(None).expect("default"),
+            DOCUMENT_CACHE_CAPACITY
+        );
+        assert_eq!(parse_document_cache_capacity(Some("0")).expect("zero"), 0);
+        assert_eq!(
+            parse_document_cache_capacity(Some(" 3 ")).expect("three"),
+            3
+        );
+        assert!(parse_document_cache_capacity(Some("eight")).is_err());
+        assert!(parse_document_cache_capacity(Some("-1")).is_err());
+    }
+
+    /// Capacity 0 decodes on every call: nothing is left in the cache and the two results are two
+    /// distinct documents.
+    #[tokio::test]
+    async fn a_zero_capacity_cache_never_keeps_a_document() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("cache-zero.sqlite");
+        let repository =
+            SqliteDocumentRepository::open_with_cache_capacity(&path, 0).expect("repository");
+        let id = saved_text_document(&repository).await;
+        let first = repository.get(&id).await.expect("get").expect("document");
+        let second = repository.get(&id).await.expect("get").expect("document");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "capacity 0 must decode on every call"
+        );
+        assert_eq!(
+            repository.cache.lock().expect("cache").entries.len(),
+            0,
+            "capacity 0 leaves the cache empty"
+        );
+    }
+
+    /// Any other capacity keeps the decoded document, so the next call is the same allocation.
+    #[tokio::test]
+    async fn a_positive_capacity_keeps_the_decoded_document() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("cache-one.sqlite");
+        let repository =
+            SqliteDocumentRepository::open_with_cache_capacity(&path, 1).expect("repository");
+        let id = saved_text_document(&repository).await;
+        let first = repository.get(&id).await.expect("get").expect("document");
+        let second = repository.get(&id).await.expect("get").expect("document");
+        assert!(Arc::ptr_eq(&first, &second), "a warm hit reuses the Arc");
+        assert_eq!(repository.cache.lock().expect("cache").entries.len(), 1);
+    }
 
     /// The fast unit scan — cache, threads and pruning — must return exactly the units of the plain
     /// one, as whole vectors.

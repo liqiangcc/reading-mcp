@@ -647,6 +647,55 @@ fn error_class(error: &ApplicationError) -> &'static str {
     }
 }
 
+/// The phases of one cache-miss decode of `document_json`, measured inside
+/// `SqliteDocumentRepository::get_with_hash`. Milliseconds are floating point: a phase of a fast
+/// document is well below 1 ms and must not round to zero.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DocumentDecodePhases {
+    /// The length of the `document_json` string, i.e. the bytes the row carries.
+    pub json_bytes: usize,
+    /// The `SELECT document_json, normalized_document_hash` row read.
+    pub row_read_ms: f64,
+    /// `serde_json::from_str::<StoredDocument>`.
+    pub parse_ms: f64,
+    /// `StoredDocument::into_document`, which for a chunked document loads every section's text.
+    pub section_text_load_ms: f64,
+    /// `Document::validate_ocr_publication`.
+    pub validate_ms: f64,
+    /// `Document::normalized_document_hash`, only when the stored hash column was empty.
+    pub hash_ms: Option<f64>,
+}
+
+/// Emits the phase breakdown of one cache-miss load as a `repository_get` event, plus the byte size
+/// of every `metadata` entry of the decoded document. `READING_MCP_DOCUMENT_CACHE_CAPACITY=0` is the
+/// only way to reach this, so a default runtime never emits it.
+#[doc(hidden)]
+pub fn emit_document_decode_miss(document: &Document, phases: DocumentDecodePhases) {
+    let mut metadata_key_bytes = document
+        .metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), key.len() + value.len()))
+        .collect::<Vec<_>>();
+    metadata_key_bytes.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+    emit(json!({
+        "event": "repository_get",
+        "stage": "decode",
+        "document_id": document.id.0,
+        "json_bytes": phases.json_bytes,
+        "row_read_ms": phases.row_read_ms,
+        "parse_ms": phases.parse_ms,
+        "section_text_load_ms": phases.section_text_load_ms,
+        "validate_ms": phases.validate_ms,
+        "hash_ms": phases.hash_ms,
+        "sections": document.section_count(),
+        "metadata_key_bytes": metadata_key_bytes
+            .into_iter()
+            .map(|(key, bytes)| json!({ "key": key, "bytes": bytes }))
+            .collect::<Vec<_>>(),
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

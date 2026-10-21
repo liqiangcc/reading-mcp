@@ -43,6 +43,9 @@ jobs:
       - name: Scan search phases (real books)
         if: always()
         run: READING_MCP_SEARCH_PROFILE_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test search_scan_profile -- --ignored --nocapture
+      - name: Scan search parity (real books)
+        if: always()
+        run: READING_MCP_SEARCH_PROFILE_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test search_scan_parity_books -- --ignored --nocapture
       - name: Profile book scenarios
         run: |
           BOOKS="$RUNNER_TEMP/books"
@@ -56,7 +59,7 @@ jobs:
             fi
           done
           args=(--binary target/release/reading-mcp --states dir --sizes-mb 4
-            --cjk-sizes-mb 1,4 --markdown-sections 2000 --reopen --telemetry --disk
+            --cjk-sizes-mb 1,4 --markdown-sections 2000 --reopen --telemetry --rss-phases --disk
             --parse-timeout-seconds 900 --run-timeout-seconds 900 --out book/runs.json
             --probe-query "en-novel=Pierre" --probe-query "zh-classic=寶玉"
             --probe-query "zh-large=皇帝")

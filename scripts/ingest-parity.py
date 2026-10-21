@@ -5,7 +5,9 @@ For every input and every binary the probe starts one server over stdio on a fre
 directory, calls `open_document`, saves the tool payload, stops the server, and dumps the state
 database into one text file per side:
 
-- `documents`: `id`, `content_hash` and `document_json`;
+- `documents`: `id`, `content_hash` and `document_json`, compared as parsed objects after the
+  section text of a row that keeps it in `section_text_v1` (its `content_store` key) is put back
+  in depth-first section order from that document's chunks;
 - `section_layout_v1` joined to `text_unit_documents_v2` and ordered by document then
   `section_key`: `section_id`, `char_len`, `paragraph_coverage_json` and `hex(layout)`;
 - `section_text_v1`: one sha256 per section over its chunks in order, plus `char_len`.
@@ -23,6 +25,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import itertools
 import json
 import os
 import queue
@@ -58,6 +61,17 @@ OPEN_MESSAGE = {
 STATE_DATABASE = "reading-mcp.sqlite"
 
 DUMP_BLOCKS = ("documents", "layouts", "text")
+
+# The `documents` block is not a byte comparison: it compares the parsed objects after the rebuild,
+# so the column says so.
+BLOCK_COLUMNS = {
+    "documents": "documents (rebuilt)",
+    "layouts": "layouts",
+    "text": "text",
+}
+
+# The `content_store` value of a row that keeps no section text inline.
+SECTION_TEXT_STORE = "section_text_v1"
 
 # Wall-clock fields that must never take part in a parity comparison.
 WALL_CLOCK_KEYS = {
@@ -238,6 +252,29 @@ def run_open(binary: str, source: str, state_dir: str, timeout: float, log_path:
     return drop_wall_clock(payload)
 
 
+def rebuild_document_json(document_json: str, texts: dict[int, str]) -> str:
+    """One `documents` row as a parsed object, with the section text it keeps elsewhere put back.
+
+    A row whose `content_store` is `section_text_v1` holds an empty `content` for every section: the
+    text lives in `section_text_v1`. Filling it back in depth-first section order — the order
+    `section_key` numbers the sections in — and dropping the key leaves the JSON a row that keeps
+    its text inline would have written, so both sides compare as the same parsed object.
+    """
+    stored = json.loads(document_json)
+    if not isinstance(stored, dict):
+        return json.dumps(stored, ensure_ascii=False, sort_keys=True)
+    if stored.pop("content_store", None) == SECTION_TEXT_STORE:
+        fill_section_text(stored.get("root_sections") or [], texts, itertools.count())
+    return json.dumps(stored, ensure_ascii=False, sort_keys=True)
+
+
+def fill_section_text(sections: list, texts: dict[int, str], keys) -> None:
+    """Assigns the stored texts in depth-first order, one text per section."""
+    for section in sections:
+        section["content"] = texts.get(next(keys), "")
+        fill_section_text(section.get("children") or [], texts, keys)
+
+
 def dump_state(database: str) -> dict:
     """The three comparable blocks of one state database, as text."""
     blocks = {name: [] for name in DUMP_BLOCKS}
@@ -247,10 +284,11 @@ def dump_state(database: str) -> dict:
 
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
-        for document_id, content_hash, document_json in connection.execute(
-            "SELECT id, content_hash, document_json FROM documents ORDER BY id"
-        ):
-            blocks["documents"].append(f"{document_id}\t{content_hash}\t{document_json}")
+        documents = list(
+            connection.execute(
+                "SELECT id, content_hash, document_json FROM documents ORDER BY id"
+            )
+        )
 
         for row in connection.execute(
             """
@@ -284,6 +322,15 @@ def dump_state(database: str) -> dict:
     finally:
         connection.close()
 
+    for document_id, content_hash, document_json in documents:
+        texts = {
+            section_key: "".join(chunks)
+            for (document, section_key), chunks in sections.items()
+            if document == document_id
+        }
+        rebuilt = rebuild_document_json(document_json, texts)
+        blocks["documents"].append(f"{document_id}\t{content_hash}\t{rebuilt}")
+
     return {name: "\n".join(lines) + "\n" for name, lines in blocks.items()}
 
 
@@ -315,7 +362,8 @@ def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeou
 
 def compare(label: str, left: dict, right: dict, out_dir: str) -> dict:
     """Compares one input's A and B facts, writes diffs for differences, and returns the columns."""
-    columns = {"payload": "same", "documents": "same", "layouts": "same", "text": "same"}
+    columns = {column: "same" for column in BLOCK_COLUMNS.values()}
+    columns = {"payload": "same", **columns}
     diffs = []
 
     left_payload = payload_text(left["payload"])
@@ -325,9 +373,10 @@ def compare(label: str, left: dict, right: dict, out_dir: str) -> dict:
         diffs.append(difflib_text(label, "open payload", left_payload, right_payload))
 
     for block in DUMP_BLOCKS:
+        column = BLOCK_COLUMNS[block]
         if left["dump"][block] != right["dump"][block]:
-            columns[block] = "DIFF"
-            diffs.append(difflib_text(label, block, left["dump"][block], right["dump"][block]))
+            columns[column] = "DIFF"
+            diffs.append(difflib_text(label, column, left["dump"][block], right["dump"][block]))
 
     if diffs:
         with open(
@@ -393,7 +442,7 @@ def main() -> int:
             (
                 label,
                 columns["payload"],
-                columns["documents"],
+                columns["documents (rebuilt)"],
                 columns["layouts"],
                 columns["text"],
                 result,
@@ -402,7 +451,7 @@ def main() -> int:
         print(f"{label}: {result}", flush=True)
 
     print()
-    print("| Input | open payload | documents | layouts | text | result |")
+    print("| Input | open payload | documents (rebuilt) | layouts | text | result |")
     print("| --- | --- | --- | --- | --- | --- |")
     for row in rows:
         print("| " + " | ".join(row) + " |")

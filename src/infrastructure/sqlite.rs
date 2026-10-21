@@ -371,6 +371,230 @@ impl SectionLayoutCache {
     }
 }
 
+/// How many MiB of section text the scan text cache keeps by default.
+const DEFAULT_SCAN_TEXT_CACHE_MIB: usize = 48;
+
+/// The cap of the scan text cache in bytes, from `READING_MCP_SEARCH_CACHE_MIB`. 0 disables the
+/// cache, and a value that is not a number falls back to the default.
+fn scan_text_cache_bytes() -> usize {
+    let mib = match std::env::var("READING_MCP_SEARCH_CACHE_MIB") {
+        Ok(value) => value.trim().parse().unwrap_or(DEFAULT_SCAN_TEXT_CACHE_MIB),
+        Err(_) => DEFAULT_SCAN_TEXT_CACHE_MIB,
+    };
+    mib.saturating_mul(1024 * 1024)
+}
+
+/// The fewest normalized chars of section text a scan splits across threads: 1 MiB. UTF-8 bytes are
+/// never fewer than chars, so a document below this is below 1 MiB of text as well.
+const MIN_PARALLEL_TEXT_CHARS: usize = 1024 * 1024;
+
+/// The most threads a scan uses, whatever the host reports.
+const MAX_SCAN_THREADS: usize = 4;
+
+/// The thread count a scan asks for: `READING_MCP_SEARCH_THREADS`, `min(available_parallelism, 4)` by
+/// default. 1 is serial, and a value that is not a number falls back to the default.
+fn scan_thread_count() -> usize {
+    static HOST: OnceLock<usize> = OnceLock::new();
+    let host = *HOST.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(1, MAX_SCAN_THREADS)
+    });
+    match std::env::var("READING_MCP_SEARCH_THREADS") {
+        Ok(value) => value.trim().parse().unwrap_or(host),
+        Err(_) => host,
+    }
+    .clamp(1, MAX_SCAN_THREADS)
+}
+
+/// One section's text as a scan reads it, with the lowercase form every pass over it needs.
+struct ScanSectionText {
+    text: Arc<str>,
+    lowered: LoweredSectionText,
+}
+
+enum LoweredSectionText {
+    /// `lowercase_fast` borrowed the text: it lowercases to itself, so every slice of it does too.
+    Borrowed,
+    /// The lowercase copy, kept because lowercasing changes the text.
+    Owned(Arc<str>),
+}
+
+impl ScanSectionText {
+    fn new(text: String) -> Self {
+        let lowered = match lowercase_fast(&text) {
+            Cow::Borrowed(_) => LoweredSectionText::Borrowed,
+            Cow::Owned(lowered) => LoweredSectionText::Owned(Arc::from(lowered)),
+        };
+        Self {
+            text: Arc::from(text),
+            lowered,
+        }
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Whether the whole section lowercases to itself, so every slice of it does too.
+    fn lowered_is_borrowed(&self) -> bool {
+        matches!(self.lowered, LoweredSectionText::Borrowed)
+    }
+
+    fn lowered(&self) -> &str {
+        match &self.lowered {
+            LoweredSectionText::Borrowed => self.text.as_ref(),
+            LoweredSectionText::Owned(lowered) => lowered.as_ref(),
+        }
+    }
+
+    /// The bytes this entry holds: the text plus the owned lowercase copy.
+    fn bytes(&self) -> usize {
+        self.text.len()
+            + match &self.lowered {
+                LoweredSectionText::Borrowed => 0,
+                LoweredSectionText::Owned(lowered) => lowered.len(),
+            }
+    }
+}
+
+/// The section texts cached for one document, and whether the document outgrew the cap.
+#[derive(Default)]
+struct ScanTextSections {
+    texts: HashMap<i64, Arc<ScanSectionText>>,
+    bytes: usize,
+    /// The document's text outgrew the cap, so nothing is cached for it any more.
+    over_cap: bool,
+}
+
+/// The section texts of the most recently scanned document. The store is keyed by the stored document
+/// meta and checked against it on every scan, so a replaced segmentation, a re-store or a removal
+/// leaves it unused; `write_document_sections` drops it as well.
+struct ScanTextStore {
+    doc_key: i64,
+    normalized_document_hash: NormalizedDocumentHash,
+    cap: usize,
+    sections: Mutex<ScanTextSections>,
+}
+
+impl ScanTextStore {
+    fn new(meta: &StoredUnitDocument, cap: usize) -> Self {
+        Self {
+            doc_key: meta.doc_key,
+            normalized_document_hash: meta.normalized_document_hash.clone(),
+            cap,
+            sections: Mutex::new(ScanTextSections::default()),
+        }
+    }
+
+    /// Whether this store holds `meta`'s document: the same stored row and the same normalized text.
+    fn matches(&self, meta: &StoredUnitDocument) -> bool {
+        self.doc_key == meta.doc_key
+            && self.normalized_document_hash == meta.normalized_document_hash
+    }
+
+    fn get(&self, section_key: i64) -> Option<Arc<ScanSectionText>> {
+        let sections = self.sections.lock().ok()?;
+        sections.texts.get(&section_key).map(Arc::clone)
+    }
+
+    /// Caches one section's text. The section that takes the document over the cap drops everything
+    /// cached for it: a document over the cap is not cached at all.
+    fn insert(&self, section_key: i64, text: Arc<ScanSectionText>) {
+        let Ok(mut sections) = self.sections.lock() else {
+            return;
+        };
+        if sections.over_cap {
+            return;
+        }
+        sections.bytes += text.bytes();
+        if sections.bytes > self.cap {
+            *sections = ScanTextSections {
+                over_cap: true,
+                ..Default::default()
+            };
+            return;
+        }
+        sections.texts.insert(section_key, text);
+    }
+
+    /// Whether the document's text outgrew the cap, so it is scanned one section at a time.
+    fn over_cap(&self) -> bool {
+        self.sections
+            .lock()
+            .map(|sections| sections.over_cap)
+            .unwrap_or(true)
+    }
+}
+
+/// The scan text store of `meta`'s document: the cached one when it holds that very document, else a
+/// new one that replaces it. `None` when the cache is off or its cap is zero.
+fn scan_text_store(
+    cache: &Mutex<Option<Arc<ScanTextStore>>>,
+    meta: &StoredUnitDocument,
+    options: ScanOptions,
+) -> Option<Arc<ScanTextStore>> {
+    if !options.cache {
+        return None;
+    }
+    let cap = scan_text_cache_bytes();
+    if cap == 0 {
+        return None;
+    }
+    let mut cached = cache.lock().ok()?;
+    if let Some(store) = cached.as_ref()
+        && store.matches(meta)
+    {
+        return Some(Arc::clone(store));
+    }
+    let store = Arc::new(ScanTextStore::new(meta, cap));
+    *cached = Some(Arc::clone(&store));
+    Some(store)
+}
+
+/// How a lexical scan may use the per-document scan text cache, threads and score pruning.
+///
+/// The plain options — no cache, one thread, no pruning — are exactly the scan of R2c step 3, and
+/// exist so that tests can prove the fast scan equal to it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Whether the per-document scan text cache may be used.
+    pub cache: bool,
+    /// The most threads a scan may use; 1 is serial.
+    pub threads: usize,
+    /// Whether units whose score bound cannot reach the current threshold are skipped.
+    pub prune: bool,
+}
+
+impl ScanOptions {
+    /// The scan production uses: the cache and the pruning always, and the thread count the
+    /// environment asks for.
+    pub fn production() -> Self {
+        Self {
+            cache: true,
+            threads: scan_thread_count(),
+            prune: true,
+        }
+    }
+
+    /// The scan of R2c step 3: no cache, one thread, no pruning.
+    pub fn plain() -> Self {
+        Self {
+            cache: false,
+            threads: 1,
+            prune: false,
+        }
+    }
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
 pub struct SqliteDocumentRepository {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
@@ -415,13 +639,29 @@ impl DocumentRepository for SqliteDocumentRepository {
             .validate_ocr_publication()
             .map_err(ApplicationError::RepositoryFailed)?;
         let normalized_document_hash = document.normalized_document_hash();
-        let json = serde_json::to_string(&StoredDocument::from_document(&document))
-            .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
         let cache = Arc::clone(&self.cache);
         run_sqlite(
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
+                // The section text stays out of `document_json` only when the very text of this
+                // document version is already stored: a repository used on its own, which never
+                // stored it, keeps the text inline exactly as before. The decision and the insert
+                // share this connection, so no other write of this process can land between them.
+                let content_store = if section_text_is_stored(
+                    connection,
+                    &document,
+                    &normalized_document_hash,
+                )? {
+                    Some(SECTION_TEXT_CONTENT_STORE)
+                } else {
+                    None
+                };
+                let json = serde_json::to_string(&StoredDocument::with_content_store(
+                    &document,
+                    content_store,
+                ))
+                .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
                 connection
                     .execute(
                         "INSERT INTO documents(id, source, content_hash, document_json, normalized_document_hash)
@@ -492,7 +732,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                 };
                 let stored = serde_json::from_str::<StoredDocument>(&json)
                     .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
-                let document = stored.into_document()?;
+                let document = stored.into_document(connection, stored_hash.as_deref())?;
                 document
                     .validate_ocr_publication()
                     .map_err(ApplicationError::RepositoryFailed)?;
@@ -520,6 +760,88 @@ impl DocumentRepository for SqliteDocumentRepository {
         )
         .await
     }
+}
+
+/// The `content_store` value of a `document_json` row that keeps no section text inline: every
+/// section's text is in `section_text_v1` for the same document version.
+const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v1";
+
+/// Whether `document`'s section text is stored in `section_text_v1` for exactly this document
+/// version, so that `document_json` may leave it out: the unit row names this document and hash for
+/// the current `TEXT_SEGMENTATION_VERSION`, and `section_layout_v1` holds exactly one row per
+/// section, in depth-first document order, whose `char_len` is that section's char count.
+fn section_text_is_stored(
+    connection: &Connection,
+    document: &Document,
+    normalized_document_hash: &NormalizedDocumentHash,
+) -> Result<bool, ApplicationError> {
+    if !has_table(connection, "text_unit_documents_v2")?
+        || !has_table(connection, "section_layout_v1")?
+    {
+        return Ok(false);
+    }
+    let stored = connection
+        .query_row(
+            "SELECT doc_key, normalized_document_hash, segmentation_version
+               FROM text_unit_documents_v2
+              WHERE document_id = ?1",
+            params![&document.id.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some((doc_key, stored_hash, segmentation_version)) = stored else {
+        return Ok(false);
+    };
+    if stored_hash != normalized_document_hash.as_ref()
+        || segmentation_version != TEXT_SEGMENTATION_VERSION
+    {
+        return Ok(false);
+    }
+    let mut ordered_sections = Vec::new();
+    collect_sections(&document.root_sections, &mut ordered_sections);
+    let char_lens = section_char_lens(connection, doc_key)?;
+    if char_lens.len() != ordered_sections.len() {
+        return Ok(false);
+    }
+    for (section, char_len) in ordered_sections.iter().zip(char_lens) {
+        if usize::try_from(char_len).ok() != Some(section.normalized_text_len()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether this database has `table`. A repository opened on its own never creates the text-unit
+/// tables, so their absence means the section text is not stored.
+fn has_table(connection: &Connection, table: &str) -> Result<bool, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|found| found.is_some())
+        .map_err(repository_error)
+}
+
+/// The `char_len` of one document's `section_layout_v1` rows, in `section_key` order.
+fn section_char_lens(connection: &Connection, doc_key: i64) -> Result<Vec<i64>, ApplicationError> {
+    let mut statement = connection
+        .prepare("SELECT char_len FROM section_layout_v1 WHERE doc_key = ?1 ORDER BY section_key")
+        .map_err(repository_error)?;
+    let rows = statement
+        .query_map(params![doc_key], |row| row.get::<_, i64>(0))
+        .map_err(repository_error)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(repository_error)
 }
 
 fn ensure_normalized_document_hash_column(connection: &Connection) -> Result<(), ApplicationError> {
@@ -654,6 +976,8 @@ pub struct SqliteTextUnitIndex {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
     cache: Arc<Mutex<SectionLayoutCache>>,
+    /// The section texts the last scanned document was scanned from. One document at a time.
+    scan_text: Arc<Mutex<Option<Arc<ScanTextStore>>>>,
 }
 
 impl SqliteTextUnitIndex {
@@ -745,6 +1069,7 @@ impl SqliteTextUnitIndex {
             path,
             connection: Arc::new(Mutex::new(connection)),
             cache: Arc::new(Mutex::new(SectionLayoutCache::default())),
+            scan_text: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -773,6 +1098,14 @@ impl SqliteTextUnitIndex {
             },
         )
         .await
+    }
+
+    /// Forgets the cached scan text: the document it belongs to was re-stored, so its stored text may
+    /// have changed. Only one document is cached, so dropping it always suffices.
+    fn drop_scan_text(&self) {
+        if let Ok(mut cached) = self.scan_text.lock() {
+            *cached = None;
+        }
     }
 
     /// The stored `section_layout_v1` rows of `document_id`, in `section_key` order, as
@@ -814,6 +1147,8 @@ impl SqliteTextUnitIndex {
     ///
     /// The scan reads the stored section text and the stored unit boundaries directly. It never uses
     /// the layout cache, so it cannot evict the layouts the reader has cached.
+    /// The scan's cache, thread count and pruning are the caller's: production passes
+    /// [`ScanOptions::production`], and the differential tests pass the plain scan of R2c step 3.
     pub(crate) async fn scan_lexical(
         &self,
         document_id: &DocumentId,
@@ -821,9 +1156,11 @@ impl SqliteTextUnitIndex {
         query: Arc<LexicalQuery>,
         mode: MatchMode,
         limit: usize,
+        options: ScanOptions,
     ) -> Result<Option<(Vec<SectionId>, Vec<ScannedUnitHit>)>, ApplicationError> {
         let document_id = document_id.clone();
         let expected_hash = expected_hash.clone();
+        let cache = Arc::clone(&self.scan_text);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -837,8 +1174,17 @@ impl SqliteTextUnitIndex {
                     return Ok(None);
                 }
 
+                let store = scan_text_store(&cache, &meta, options);
+                let pass = ScanPass {
+                    query: &query,
+                    mode,
+                    limit,
+                    store: store.as_ref(),
+                    prune: options.prune,
+                    collect_timings: false,
+                };
                 let (section_ids, hits, _timings) =
-                    scan_stored_sections(connection, &meta, &query, mode, limit, false)?;
+                    scan_stored_sections(connection, &meta, &pass, options)?;
                 Ok(Some((section_ids, hits)))
             },
         )
@@ -862,6 +1208,7 @@ impl SqliteTextUnitIndex {
         };
         let lexical = Arc::new(lexical);
         let document_id = document_id.clone();
+        let cache = Arc::clone(&self.scan_text);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -872,14 +1219,18 @@ impl SqliteTextUnitIndex {
                 if meta.segmentation_version != TEXT_SEGMENTATION_VERSION {
                     return Ok(None);
                 }
-                let (_section_ids, _hits, timings) = scan_stored_sections(
-                    connection,
-                    &meta,
-                    &lexical,
-                    MatchMode::Strict,
+                let options = ScanOptions::production();
+                let store = scan_text_store(&cache, &meta, options);
+                let pass = ScanPass {
+                    query: &lexical,
+                    mode: MatchMode::Strict,
                     limit,
-                    true,
-                )?;
+                    store: store.as_ref(),
+                    prune: options.prune,
+                    collect_timings: true,
+                };
+                let (_section_ids, _hits, timings) =
+                    scan_stored_sections(connection, &meta, &pass, options)?;
                 Ok(Some(timings))
             },
         )
@@ -939,6 +1290,21 @@ impl ScanTimings {
         };
         *slot += elapsed;
     }
+
+    /// Adds another thread's timings: the phases and the counts of a pass over several threads add up.
+    fn merge(&mut self, other: ScanTimings) {
+        self.read_text += other.read_text;
+        self.section_prefilter += other.section_prefilter;
+        self.layout_decode += other.layout_decode;
+        self.paragraphs += other.paragraphs;
+        self.sentences += other.sentences;
+        self.sort += other.sort;
+        self.sections_scanned += other.sections_scanned;
+        self.sections_passed_prefilter += other.sections_passed_prefilter;
+        self.paragraphs_evaluated += other.paragraphs_evaluated;
+        self.sentences_evaluated += other.sentences_evaluated;
+        self.hits_pushed += other.hits_pushed;
+    }
 }
 
 /// Accumulates the phase durations of a scan pass when enabled. Disabled, `begin` stores nothing and
@@ -987,6 +1353,11 @@ impl ScanTimer {
         }
     }
 
+    /// Adds the timings of another thread of the same pass.
+    fn merge(&mut self, other: ScanTimings) {
+        self.timings.merge(other);
+    }
+
     fn tally(&mut self, tally: impl FnOnce(&mut ScanTimings)) {
         if self.enabled {
             tally(&mut self.timings);
@@ -998,66 +1369,273 @@ impl ScanTimer {
     }
 }
 
-/// One pass over the stored section text: the paragraphs and sentences of `meta`'s document that
-/// `mode` accepts, best `limit` first, and the section ids they index.
-fn scan_stored_sections(
+/// The text of one section: from the scan text store when it holds it, else from SQLite, in which
+/// case it is stored for the next pass. The store is never locked while the caller uses the text.
+fn scan_section_text(
     connection: &Connection,
-    meta: &StoredUnitDocument,
-    query: &LexicalQuery,
+    store: Option<&Arc<ScanTextStore>>,
+    doc_key: i64,
+    section_key: i64,
+) -> Result<Arc<ScanSectionText>, ApplicationError> {
+    if let Some(store) = store
+        && let Some(text) = store.get(section_key)
+    {
+        return Ok(text);
+    }
+    let text = Arc::new(ScanSectionText::new(load_section_text_unchecked(
+        connection,
+        doc_key,
+        section_key,
+    )?));
+    if let Some(store) = store {
+        store.insert(section_key, Arc::clone(&text));
+    }
+    Ok(text)
+}
+
+/// The query, the limits and the text source one scan pass runs under.
+struct ScanPass<'a> {
+    query: &'a LexicalQuery,
     mode: MatchMode,
     limit: usize,
+    store: Option<&'a Arc<ScanTextStore>>,
+    /// Whether units whose score bound cannot reach the thread's threshold may be skipped.
+    prune: bool,
     collect_timings: bool,
-) -> Result<(Vec<SectionId>, Vec<ScannedUnitHit>, ScanTimings), ApplicationError> {
-    let mut timer = ScanTimer::new(collect_timings);
-    let sections = stored_sections(connection, meta.doc_key)?;
-    let mut layout_statement = connection
-        .prepare_cached(
-            "SELECT layout FROM section_layout_v1
-             WHERE doc_key = ?1 AND section_key = ?2",
-        )
-        .map_err(text_unit_index_error)?;
-    let mut section_ids: Vec<SectionId> = Vec::new();
-    let mut hits: Vec<ScannedUnitHit> = Vec::new();
-    let flush_at = limit.saturating_mul(4).saturating_add(64);
+}
 
-    for (section_key, section_id, char_len) in sections {
-        if char_len == 0 {
-            continue;
+impl ScanPass<'_> {
+    /// Whether the whole-section prefilter accepts a section whose lowered text is `lowered`.
+    fn section_passes_prefilter(&self, lowered: &str) -> bool {
+        match self.mode {
+            MatchMode::Strict => self.query.may_contain_all(lowered),
+            MatchMode::Relaxed => self.query.may_contain_any(lowered),
         }
-        timer.tally(|timings| timings.sections_scanned += 1);
-        timer.begin();
-        let text = load_section_text_unchecked(connection, meta.doc_key, section_key)?;
-        timer.end(ScanPhase::ReadText);
-        let index = NormalizedTextIndex::new(&text);
-        if index.char_len() != char_len {
+    }
+}
+
+/// One section a planned pass visits, with its index in the returned section id list.
+struct PlannedSection {
+    /// The index of the section in the section id list the scan returns.
+    section: usize,
+    section_key: i64,
+    char_len: usize,
+    /// The most any unit in the section can score; infinite when the section was not planned, so it is
+    /// never pruned.
+    bound: f32,
+}
+
+/// The bound of the best score any unit in a section can reach, or `None` when the whole-section
+/// prefilter rejects the section.
+fn section_bound(pass: &ScanPass<'_>, lowered: &str) -> Option<f32> {
+    let query = pass.query;
+    match pass.mode {
+        MatchMode::Strict => {
+            if !query.may_contain_all(lowered) {
+                return None;
+            }
+            Some(query.container_bound(lowered, query.token_count()))
+        }
+        MatchMode::Relaxed => {
+            let tokens = query.contained_token_count(lowered);
+            if tokens == 0 {
+                return None;
+            }
+            Some(query.container_bound(lowered, tokens))
+        }
+    }
+}
+
+/// How many threads a pass over `sections` uses: only a document of at least 1 MiB of text, only when
+/// the pass has a text store to read the sections from, and never more threads than sections.
+fn scan_threads(
+    sections: &[(i64, SectionId, usize)],
+    store: Option<&Arc<ScanTextStore>>,
+    options: ScanOptions,
+) -> usize {
+    if options.threads <= 1 || sections.len() < 2 {
+        return 1;
+    }
+    let Some(store) = store else {
+        return 1;
+    };
+    if store.over_cap() {
+        return 1;
+    }
+    let chars: usize = sections.iter().map(|(_, _, char_len)| char_len).sum();
+    if chars < MIN_PARALLEL_TEXT_CHARS {
+        return 1;
+    }
+    options.threads.min(MAX_SCAN_THREADS).min(sections.len())
+}
+
+/// What each worker of [`parallel_map`] produced: its own state, and its results by item index.
+type WorkerResults<S, R> = Vec<(S, Vec<(usize, R)>)>;
+
+/// The sections a pass will visit, with the section ids they index.
+type PlannedSections = (Vec<SectionId>, Vec<PlannedSection>);
+
+/// Runs `work` on up to `threads` threads over `count` items, while this thread feeds them in item
+/// order: SQLite reads stay on this thread and the workers only compute. Thread `t` takes the items
+/// `t, t + threads, ...`, so each thread visits a subsequence of the caller's order, keeps its own
+/// state and shares no lock. `Ok(None)` from `produce` stops the pass early.
+fn parallel_map<S, T, R>(
+    threads: usize,
+    count: usize,
+    init: impl Fn() -> S + Sync,
+    mut produce: impl FnMut(usize) -> Result<Option<T>, ApplicationError>,
+    work: impl Fn(&mut S, usize, T) -> R + Sync,
+) -> Result<WorkerResults<S, R>, ApplicationError>
+where
+    S: Send,
+    T: Send,
+    R: Send,
+{
+    std::thread::scope(|scope| {
+        let mut senders = Vec::with_capacity(threads);
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let (sender, receiver) = std::sync::mpsc::sync_channel::<(usize, T)>(1);
+            senders.push(sender);
+            let init = &init;
+            let work = &work;
+            handles.push(scope.spawn(move || {
+                let mut state = init();
+                let mut results = Vec::new();
+                for (index, item) in receiver {
+                    results.push((index, work(&mut state, index, item)));
+                }
+                (state, results)
+            }));
+        }
+        let mut produced = Ok(());
+        for index in 0..count {
+            match produce(index) {
+                Ok(Some(item)) => {
+                    if senders[index % threads].send((index, item)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    produced = Err(error);
+                    break;
+                }
+            }
+        }
+        drop(senders);
+        let mut collected = Vec::with_capacity(threads);
+        for handle in handles {
+            collected.push(handle.join().expect("a scan worker must not panic"));
+        }
+        produced.map(|()| collected)
+    })
+}
+
+/// The text of one section from the store only: the parallel workers never read SQLite, so a section
+/// the plan did not store cannot be scanned there.
+fn stored_section_text(
+    store: &Arc<ScanTextStore>,
+    section_key: i64,
+) -> Result<Arc<ScanSectionText>, ApplicationError> {
+    store.get(section_key).ok_or_else(|| {
+        ApplicationError::TextUnitIndexFailed(format!(
+            "section {section_key} is missing from the scan text store"
+        ))
+    })
+}
+
+/// The scan of one section list by one thread: the hits it keeps and its timings. Each thread of a
+/// parallel pass owns one, so no hit vector is shared.
+struct SectionScanner<'a> {
+    pass: &'a ScanPass<'a>,
+    /// How many hits this thread keeps before it sorts and truncates them to `limit`.
+    flush_at: usize,
+    hits: Vec<ScannedUnitHit>,
+    /// The `limit`-th best score this thread holds, once it holds `limit` hits: units that cannot
+    /// reach it are skipped, and only those scoring strictly below it.
+    threshold: Option<f32>,
+    timer: ScanTimer,
+}
+
+impl<'a> SectionScanner<'a> {
+    fn new(pass: &'a ScanPass<'a>) -> Self {
+        Self {
+            pass,
+            flush_at: pass.limit.saturating_mul(4).saturating_add(64),
+            hits: Vec::new(),
+            threshold: None,
+            timer: ScanTimer::new(pass.collect_timings),
+        }
+    }
+
+    /// The score a unit must reach to be worth scoring, when this thread already holds enough hits.
+    fn prune_below(&self) -> Option<f32> {
+        if self.pass.prune {
+            self.threshold
+        } else {
+            None
+        }
+    }
+
+    /// Whether a unit whose bound is `bound` cannot reach this thread's threshold and may be skipped.
+    fn skips(&self, bound: f32) -> bool {
+        self.prune_below()
+            .is_some_and(|threshold| bound < threshold)
+    }
+
+    /// The most a unit inside this paragraph can score, given the prefilter passed on it.
+    fn paragraph_bound(&self, lowered: &str) -> f32 {
+        let query = self.pass.query;
+        let tokens = match self.pass.mode {
+            // The prefilter on this very paragraph proved that every query token is in it.
+            MatchMode::Strict => query.token_count(),
+            MatchMode::Relaxed => query.contained_token_count(lowered),
+        };
+        query.container_bound(lowered, tokens)
+    }
+
+    /// Decodes one section's stored layout and scans it.
+    fn scan_section_blob(
+        &mut self,
+        section: &PlannedSection,
+        blob: &[u8],
+        text: &ScanSectionText,
+        section_ids: &[SectionId],
+    ) -> Result<(), ApplicationError> {
+        self.timer.begin();
+        let layout = SectionLayout::decode(blob)?;
+        self.timer.end(ScanPhase::LayoutDecode);
+        self.scan_section(section, text, &layout, section_ids)
+    }
+
+    /// Scans one section's paragraphs and sentences. `section` is its index in the section id list.
+    fn scan_section(
+        &mut self,
+        section: &PlannedSection,
+        text: &ScanSectionText,
+        layout: &SectionLayout,
+        section_ids: &[SectionId],
+    ) -> Result<(), ApplicationError> {
+        let query = self.pass.query;
+        let mode = self.pass.mode;
+        let index = NormalizedTextIndex::new(text.text());
+        if index.char_len() != section.char_len {
             return Err(ApplicationError::TextUnitIndexFailed(format!(
-                "section {section_key} text has {} chars, expected {char_len}",
-                index.char_len()
+                "section {} text has {} chars, expected {}",
+                section.section_key,
+                index.char_len(),
+                section.char_len
             )));
         }
-        timer.begin();
-        let section_lowered = lowercase_fast(&text);
+        // No unit inside a section can score above its bound, and a unit scoring below this thread's
+        // threshold cannot reach the final `limit` either. Only a bound strictly below it may skip.
+        if self.skips(section.bound) {
+            return Ok(());
+        }
         // A borrowed whole-section lowercase means every char of the section lowercases to itself, so
         // every slice of it does too and the per-slice lowercasing can be skipped.
-        let borrowed = matches!(section_lowered, Cow::Borrowed(_));
-        let worth_scanning = match mode {
-            MatchMode::Strict => query.may_contain_all(&section_lowered),
-            MatchMode::Relaxed => query.may_contain_any(&section_lowered),
-        };
-        timer.end(ScanPhase::SectionPrefilter);
-        if !worth_scanning {
-            continue;
-        }
-        timer.tally(|timings| timings.sections_passed_prefilter += 1);
-
-        timer.begin();
-        let layout_blob: Vec<u8> = layout_statement
-            .query_row(params![meta.doc_key, section_key], |row| row.get(0))
-            .map_err(text_unit_index_error)?;
-        let layout = SectionLayout::decode(&layout_blob)?;
-        timer.end(ScanPhase::LayoutDecode);
-        let section = section_ids.len();
-        section_ids.push(section_id);
+        let borrowed = text.lowered_is_borrowed();
         let mut prefilters = ParagraphPrefilters::new(ParagraphPrefilters::ranges_increase(
             layout
                 .paragraphs
@@ -1065,9 +1643,10 @@ fn scan_stored_sections(
                 .map(|paragraph| (paragraph.start, paragraph.end)),
         ));
 
-        timer.begin();
+        self.timer.begin();
         for paragraph in &layout.paragraphs {
-            timer.tally(|timings| timings.paragraphs_evaluated += 1);
+            self.timer
+                .tally(|timings| timings.paragraphs_evaluated += 1);
             let slice =
                 slice_section_text_str(&index, paragraph.start, paragraph.end, "paragraph")?;
             let lowered = slice_lowered(slice, borrowed);
@@ -1075,8 +1654,14 @@ fn scan_stored_sections(
                 MatchMode::Strict => query.may_contain_all(&lowered),
                 MatchMode::Relaxed => query.may_contain_any(&lowered),
             };
-            prefilters.insert(paragraph.start, paragraph.end, prefilter);
-            if !prefilter {
+            // The paragraph's own bound covers its sentences too, so a pruned paragraph records a
+            // failing prefilter and its sentences are skipped with it.
+            let pruned = prefilter
+                && self
+                    .prune_below()
+                    .is_some_and(|threshold| self.paragraph_bound(&lowered) < threshold);
+            prefilters.insert(paragraph.start, paragraph.end, prefilter && !pruned);
+            if !prefilter || pruned {
                 continue;
             }
             let score = match mode {
@@ -1091,29 +1676,22 @@ fn scan_stored_sections(
             let Some(score) = score else {
                 continue;
             };
-            timer.tally(|timings| timings.hits_pushed += 1);
-            hits.push(ScannedUnitHit {
-                section,
+            self.timer.tally(|timings| timings.hits_pushed += 1);
+            self.hits.push(ScannedUnitHit {
+                section: section.section,
                 kind: SearchHitKind::Paragraph,
                 paragraph_index: paragraph.paragraph_index,
                 sentence_index: None,
                 start: paragraph.start,
                 score,
             });
-            if hits.len() >= flush_at {
-                timer.end(ScanPhase::Paragraphs);
-                let sort_start = timer.now();
-                sort_scanned_hits(&mut hits, &section_ids);
-                timer.add_since(ScanPhase::Sort, sort_start);
-                hits.truncate(limit);
-                timer.begin();
-            }
+            self.flush_if_needed(ScanPhase::Paragraphs, section_ids);
         }
-        timer.end(ScanPhase::Paragraphs);
+        self.timer.end(ScanPhase::Paragraphs);
 
-        timer.begin();
+        self.timer.begin();
         for sentence in &layout.sentences {
-            timer.tally(|timings| timings.sentences_evaluated += 1);
+            self.timer.tally(|timings| timings.sentences_evaluated += 1);
             let prefilter = match prefilters.get(sentence.parent_start, sentence.parent_end) {
                 Some(prefilter) => prefilter,
                 None => {
@@ -1141,31 +1719,334 @@ fn scan_stored_sections(
             else {
                 continue;
             };
-            timer.tally(|timings| timings.hits_pushed += 1);
-            hits.push(ScannedUnitHit {
-                section,
+            self.timer.tally(|timings| timings.hits_pushed += 1);
+            self.hits.push(ScannedUnitHit {
+                section: section.section,
                 kind: SearchHitKind::Sentence,
                 paragraph_index: sentence.paragraph_index,
                 sentence_index: Some(sentence.sentence_index),
                 start: sentence.start,
                 score,
             });
-            if hits.len() >= flush_at {
-                timer.end(ScanPhase::Sentences);
-                let sort_start = timer.now();
-                sort_scanned_hits(&mut hits, &section_ids);
-                timer.add_since(ScanPhase::Sort, sort_start);
-                hits.truncate(limit);
-                timer.begin();
-            }
+            self.flush_if_needed(ScanPhase::Sentences, section_ids);
         }
-        timer.end(ScanPhase::Sentences);
+        self.timer.end(ScanPhase::Sentences);
+        Ok(())
     }
 
+    /// Sorts and truncates this thread's hits once it holds too many.
+    fn flush_if_needed(&mut self, phase: ScanPhase, section_ids: &[SectionId]) {
+        if self.hits.len() < self.flush_at {
+            return;
+        }
+        self.timer.end(phase);
+        let sort_start = self.timer.now();
+        sort_scanned_hits(&mut self.hits, section_ids);
+        self.timer.add_since(ScanPhase::Sort, sort_start);
+        self.hits.truncate(self.pass.limit);
+        self.update_threshold();
+        self.timer.begin();
+    }
+
+    /// Raises the score a unit must reach once this thread holds `limit` hits: the `limit`-th best of
+    /// them, which is at most the final `limit`-th best of the whole scan.
+    fn update_threshold(&mut self) {
+        self.threshold = if self.hits.len() >= self.pass.limit {
+            self.hits.last().map(|hit| hit.score)
+        } else {
+            None
+        };
+    }
+
+    /// The hits of this thread, best first and at most `limit` of them.
+    fn finish(mut self, section_ids: &[SectionId]) -> (Vec<ScannedUnitHit>, ScanTimings) {
+        let sort_start = self.timer.now();
+        sort_scanned_hits(&mut self.hits, section_ids);
+        self.timer.add_since(ScanPhase::Sort, sort_start);
+        self.hits.truncate(self.pass.limit);
+        (self.hits, self.timer.finish())
+    }
+}
+
+/// One pass over the stored section text: the paragraphs and sentences of `meta`'s document that
+/// `mode` accepts, best `limit` first, and the section ids they index.
+fn scan_stored_sections(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    pass: &ScanPass<'_>,
+    options: ScanOptions,
+) -> Result<(Vec<SectionId>, Vec<ScannedUnitHit>, ScanTimings), ApplicationError> {
+    let sections: Vec<(i64, SectionId, usize)> = stored_sections(connection, meta.doc_key)?
+        .into_iter()
+        .filter(|(_, _, char_len)| *char_len > 0)
+        .collect();
+    let threads = scan_threads(&sections, pass.store, options);
+    // The plain scan of R2c step 3: no cache, one thread and no pruning, section by section in one
+    // pass. Every other configuration plans the sections first, which the store makes cheap.
+    if threads <= 1 && pass.store.is_none() && !options.prune {
+        return scan_sections_interleaved(connection, meta, &sections, pass);
+    }
+    let mut timer = ScanTimer::new(pass.collect_timings);
+    let planned = plan_sections(connection, meta, &sections, pass, threads, &mut timer)?;
+    let Some((section_ids, planned)) = planned else {
+        // The document outgrew the cache cap while it was planned, so nothing is cached for it and it
+        // is scanned one section at a time as before.
+        return scan_sections_interleaved(connection, meta, &sections, pass);
+    };
+    let scanned = if threads <= 1 {
+        scan_planned_serial(connection, meta, &planned, &section_ids, pass)
+    } else {
+        scan_planned_parallel(connection, meta, &planned, &section_ids, pass, threads)
+    };
+    let (hits, scan_timings) = match scanned? {
+        Some(scanned) => scanned,
+        // The store lost a section the plan filled, which cannot happen while it holds the document;
+        // scanning it one section at a time is still correct.
+        None => return scan_sections_interleaved(connection, meta, &sections, pass),
+    };
+    timer.merge(scan_timings);
+    Ok((section_ids, hits, timer.finish()))
+}
+
+/// The sections a pass will visit, in the order a thread visits them, plus the section ids they index
+/// in section order. `Ok(None)` when the document outgrew the cache cap while it was planned.
+fn plan_sections(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    sections: &[(i64, SectionId, usize)],
+    pass: &ScanPass<'_>,
+    threads: usize,
+    timer: &mut ScanTimer,
+) -> Result<Option<PlannedSections>, ApplicationError> {
+    let bounds: Vec<Option<f32>> = if threads <= 1 {
+        let mut bounds = Vec::with_capacity(sections.len());
+        for (section_key, _, _) in sections {
+            timer.tally(|timings| timings.sections_scanned += 1);
+            timer.begin();
+            let text = scan_section_text(connection, pass.store, meta.doc_key, *section_key)?;
+            timer.end(ScanPhase::ReadText);
+            timer.begin();
+            bounds.push(section_bound(pass, text.lowered()));
+            timer.end(ScanPhase::SectionPrefilter);
+        }
+        bounds
+    } else {
+        let collect_timings = timer.enabled;
+        let mut bounds: Vec<Option<f32>> = vec![None; sections.len()];
+        let workers = parallel_map(
+            threads,
+            sections.len(),
+            || ScanTimer::new(collect_timings),
+            |index| {
+                timer.tally(|timings| timings.sections_scanned += 1);
+                timer.begin();
+                let text =
+                    scan_section_text(connection, pass.store, meta.doc_key, sections[index].0);
+                timer.end(ScanPhase::ReadText);
+                if pass.store.is_some_and(|store| store.over_cap()) {
+                    return Ok(None);
+                }
+                text.map(Some)
+            },
+            |worker: &mut ScanTimer, _index, text: Arc<ScanSectionText>| {
+                worker.begin();
+                let bound = section_bound(pass, text.lowered());
+                worker.end(ScanPhase::SectionPrefilter);
+                bound
+            },
+        )?;
+        for (worker, results) in workers {
+            for (index, bound) in results {
+                bounds[index] = bound;
+            }
+            timer.merge(worker.finish());
+        }
+        if pass.store.is_some_and(|store| store.over_cap()) {
+            return Ok(None);
+        }
+        bounds
+    };
+
+    let mut section_ids = Vec::new();
+    let mut planned = Vec::new();
+    for ((section_key, section_id, char_len), bound) in sections.iter().zip(bounds) {
+        let Some(bound) = bound else {
+            continue;
+        };
+        timer.tally(|timings| timings.sections_passed_prefilter += 1);
+        planned.push(PlannedSection {
+            section: section_ids.len(),
+            section_key: *section_key,
+            char_len: *char_len,
+            bound,
+        });
+        section_ids.push(section_id.clone());
+    }
+    // Visit the highest bound first, so a thread's threshold rises early. The final sort makes the
+    // visiting order irrelevant to the result.
+    planned.sort_by(|left, right| {
+        right
+            .bound
+            .total_cmp(&left.bound)
+            .then_with(|| left.section.cmp(&right.section))
+    });
+    Ok(Some((section_ids, planned)))
+}
+
+/// Scans the planned sections one at a time, in plan order.
+fn scan_planned_serial(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    planned: &[PlannedSection],
+    section_ids: &[SectionId],
+    pass: &ScanPass<'_>,
+) -> Result<Option<(Vec<ScannedUnitHit>, ScanTimings)>, ApplicationError> {
+    let mut timer = ScanTimer::new(pass.collect_timings);
+    let mut layout_statement = connection
+        .prepare_cached(
+            "SELECT layout FROM section_layout_v1
+             WHERE doc_key = ?1 AND section_key = ?2",
+        )
+        .map_err(text_unit_index_error)?;
+    let mut scanner = SectionScanner::new(pass);
+    for section in planned {
+        if scanner.skips(section.bound) {
+            continue;
+        }
+        timer.begin();
+        let text = scan_section_text(connection, pass.store, meta.doc_key, section.section_key)?;
+        timer.end(ScanPhase::ReadText);
+        timer.begin();
+        let layout_blob: Vec<u8> = layout_statement
+            .query_row(params![meta.doc_key, section.section_key], |row| row.get(0))
+            .map_err(text_unit_index_error)?;
+        let layout = SectionLayout::decode(&layout_blob)?;
+        timer.end(ScanPhase::LayoutDecode);
+        scanner.scan_section(section, &text, &layout, section_ids)?;
+    }
+    let (hits, scan_timings) = scanner.finish(section_ids);
+    timer.merge(scan_timings);
+    Ok(Some((hits, timer.finish())))
+}
+
+/// Scans the planned sections on `threads` threads: this thread reads the stored layouts and the
+/// workers decode and scan, each keeping its own hits. `Ok(None)` when the pass has no text store.
+fn scan_planned_parallel(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    planned: &[PlannedSection],
+    section_ids: &[SectionId],
+    pass: &ScanPass<'_>,
+    threads: usize,
+) -> Result<Option<(Vec<ScannedUnitHit>, ScanTimings)>, ApplicationError> {
+    let Some(store) = pass.store else {
+        return Ok(None);
+    };
+    let mut layout_statement = connection
+        .prepare_cached(
+            "SELECT layout FROM section_layout_v1
+             WHERE doc_key = ?1 AND section_key = ?2",
+        )
+        .map_err(text_unit_index_error)?;
+    let mut timer = ScanTimer::new(pass.collect_timings);
+    let workers = parallel_map(
+        threads,
+        planned.len(),
+        || SectionScanner::new(pass),
+        |index| {
+            let section = &planned[index];
+            timer.begin();
+            let layout_blob: Vec<u8> = layout_statement
+                .query_row(params![meta.doc_key, section.section_key], |row| row.get(0))
+                .map_err(text_unit_index_error)?;
+            timer.end(ScanPhase::LayoutDecode);
+            Ok(Some(layout_blob))
+        },
+        |scanner: &mut SectionScanner<'_>, index, layout_blob: Vec<u8>| {
+            let section = &planned[index];
+            match stored_section_text(store, section.section_key) {
+                Ok(text) => scanner.scan_section_blob(section, &layout_blob, &text, section_ids),
+                Err(error) => Err(error),
+            }
+        },
+    )?;
+    let mut hits: Vec<ScannedUnitHit> = Vec::new();
+    let mut merged = ScanTimings::default();
+    let mut failed = None;
+    for (scanner, results) in workers {
+        for (_, result) in results {
+            if let Err(error) = result
+                && failed.is_none()
+            {
+                failed = Some(error);
+            }
+        }
+        let (worker_hits, worker_timings) = scanner.finish(section_ids);
+        hits.extend(worker_hits);
+        merged.merge(worker_timings);
+    }
+    if let Some(error) = failed {
+        return Err(error);
+    }
     let sort_start = timer.now();
-    sort_scanned_hits(&mut hits, &section_ids);
+    sort_scanned_hits(&mut hits, section_ids);
     timer.add_since(ScanPhase::Sort, sort_start);
-    hits.truncate(limit);
+    hits.truncate(pass.limit);
+    timer.merge(merged);
+    Ok(Some((hits, timer.finish())))
+}
+
+/// Today's scan: one pass over the sections in section order, reading, filtering and scanning each in
+/// turn. It is the plain scan the fast scan must equal, and the fallback for a document over the cap.
+fn scan_sections_interleaved(
+    connection: &Connection,
+    meta: &StoredUnitDocument,
+    sections: &[(i64, SectionId, usize)],
+    pass: &ScanPass<'_>,
+) -> Result<(Vec<SectionId>, Vec<ScannedUnitHit>, ScanTimings), ApplicationError> {
+    let mut timer = ScanTimer::new(pass.collect_timings);
+    let mut layout_statement = connection
+        .prepare_cached(
+            "SELECT layout FROM section_layout_v1
+             WHERE doc_key = ?1 AND section_key = ?2",
+        )
+        .map_err(text_unit_index_error)?;
+    let mut section_ids: Vec<SectionId> = Vec::new();
+    let mut scanner = SectionScanner::new(pass);
+
+    for (section_key, section_id, char_len) in sections {
+        timer.tally(|timings| timings.sections_scanned += 1);
+        timer.begin();
+        let text = scan_section_text(connection, pass.store, meta.doc_key, *section_key)?;
+        timer.end(ScanPhase::ReadText);
+        timer.begin();
+        let worth_scanning = pass.section_passes_prefilter(text.lowered());
+        timer.end(ScanPhase::SectionPrefilter);
+        if !worth_scanning {
+            continue;
+        }
+        timer.tally(|timings| timings.sections_passed_prefilter += 1);
+
+        timer.begin();
+        let layout_blob: Vec<u8> = layout_statement
+            .query_row(params![meta.doc_key, section_key], |row| row.get(0))
+            .map_err(text_unit_index_error)?;
+        let layout = SectionLayout::decode(&layout_blob)?;
+        timer.end(ScanPhase::LayoutDecode);
+        let section = PlannedSection {
+            section: section_ids.len(),
+            section_key: *section_key,
+            char_len: *char_len,
+            // The interleaved scan never prunes: it is the plain scan and the fallback for a document
+            // over the cap, and both scan every accepted section.
+            bound: f32::INFINITY,
+        };
+        section_ids.push(section_id.clone());
+        scanner.scan_section(&section, &text, &layout, &section_ids)?;
+    }
+
+    let (hits, scan_timings) = scanner.finish(&section_ids);
+    timer.merge(scan_timings);
     Ok((section_ids, hits, timer.finish()))
 }
 
@@ -1179,6 +2060,7 @@ pub(crate) enum MatchMode {
 }
 
 /// One paragraph or sentence hit of a scan; `section` indexes the returned section id list.
+#[derive(Debug, PartialEq)]
 pub(crate) struct ScannedUnitHit {
     pub section: usize,
     pub kind: SearchHitKind,
@@ -1694,7 +2576,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 )
             },
         )
-        .await
+        .await?;
+        self.drop_scan_text();
+        Ok(())
     }
 
     async fn replace_document_segmentation(
@@ -1723,7 +2607,9 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 )
             },
         )
-        .await
+        .await?;
+        self.drop_scan_text();
+        Ok(())
     }
 
     async fn section_units(
@@ -3130,6 +4016,10 @@ fn i64_to_usize(value: i64, field: &str) -> Result<usize, ApplicationError> {
 struct StoredDocument {
     #[serde(default)]
     normalization_version: Option<String>,
+    /// Where the section text lives. Absent when every section carries its text inline, which is
+    /// what an old row and a repository used on its own write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_store: Option<String>,
     id: String,
     source: String,
     title: String,
@@ -3140,9 +4030,14 @@ struct StoredDocument {
 }
 
 impl StoredDocument {
-    fn from_document(document: &Document) -> Self {
+    /// `content_store` names where the section text is kept. With `Some`, every section's `content`
+    /// is written empty and the text is read back from that store on load; with `None` the text is
+    /// inline, byte for byte as before.
+    fn with_content_store(document: &Document, content_store: Option<&str>) -> Self {
+        let omit_content = content_store.is_some();
         Self {
             normalization_version: Some(NORMALIZATION_VERSION.into()),
+            content_store: content_store.map(str::to_owned),
             id: document.id.0.clone(),
             source: document.source.0.clone(),
             title: document.title.clone(),
@@ -3152,12 +4047,19 @@ impl StoredDocument {
             root_sections: document
                 .root_sections
                 .iter()
-                .map(StoredSection::from_section)
+                .map(|section| StoredSection::from_section(section, omit_content))
                 .collect(),
         }
     }
 
-    fn into_document(self) -> Result<Document, ApplicationError> {
+    /// Decodes the document. `connection` and `stored_hash` are read only when the row keeps its
+    /// section text in `section_text_v1`; `stored_hash` is the hash of the `documents` row, if it
+    /// has one.
+    fn into_document(
+        self,
+        connection: &Connection,
+        stored_hash: Option<&str>,
+    ) -> Result<Document, ApplicationError> {
         let persisted_version = self.normalization_version.ok_or_else(|| {
             ApplicationError::StaleDocument(format!(
                 "persisted document has no normalization version; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
@@ -3168,8 +4070,8 @@ impl StoredDocument {
                 "persisted document normalization version {persisted_version} is stale; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
             )));
         }
-
-        Ok(Document {
+        let content_store = self.content_store;
+        let mut document = Document {
             id: DocumentId(self.id),
             source: DocumentSource(self.source),
             title: self.title,
@@ -3181,7 +4083,114 @@ impl StoredDocument {
                 .into_iter()
                 .map(StoredSection::into_section)
                 .collect(),
-        })
+        };
+        match content_store.as_deref() {
+            None => {}
+            Some(store) if store == SECTION_TEXT_CONTENT_STORE => {
+                load_document_section_text(connection, &mut document, stored_hash)?;
+            }
+            Some(store) => {
+                return Err(ApplicationError::StaleDocument(format!(
+                    "persisted document keeps its section text in unknown store {store}; explicit source reopen required"
+                )));
+            }
+        }
+        Ok(document)
+    }
+}
+
+fn stale_section_text(document_id: &DocumentId, reason: &str) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "stored section text of document {} is stale: {reason}; explicit source reopen required",
+        document_id.0
+    ))
+}
+
+/// Fills every section's `content` from `section_text_v1`, in depth-first section order, which is
+/// the order `write_document_sections` assigns `section_key` in.
+fn load_document_section_text(
+    connection: &Connection,
+    document: &mut Document,
+    stored_hash: Option<&str>,
+) -> Result<(), ApplicationError> {
+    let document_id = document.id.clone();
+    if !has_table(connection, "text_unit_documents_v2")
+        .map_err(|error| stale_section_text(&document_id, &error.to_string()))?
+    {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text is not stored",
+        ));
+    }
+    let stored = connection
+        .query_row(
+            "SELECT doc_key, normalized_document_hash
+               FROM text_unit_documents_v2
+              WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some((doc_key, text_hash)) = stored else {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text is not stored",
+        ));
+    };
+    if stored_hash.is_some_and(|stored_hash| stored_hash != text_hash) {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text belongs to another version of the document",
+        ));
+    }
+    let char_lens = section_char_lens(connection, doc_key)
+        .map_err(|error| stale_section_text(&document_id, &error.to_string()))?;
+    let section_count = document.section_count();
+    if char_lens.len() != section_count {
+        return Err(stale_section_text(
+            &document_id,
+            &format!(
+                "its section layout has {} rows for {section_count} sections",
+                char_lens.len()
+            ),
+        ));
+    }
+
+    let mut texts = Vec::with_capacity(char_lens.len());
+    for (index, char_len) in char_lens.into_iter().enumerate() {
+        let section_key = i64::try_from(index).map_err(|_| {
+            stale_section_text(&document_id, "its section count exceeds the stored range")
+        })?;
+        let char_len = i64_to_usize(char_len, "char_len")
+            .map_err(|error| stale_section_text(&document_id, &error.to_string()))?;
+        let text = load_section_text_unchecked(connection, doc_key, section_key)
+            .map_err(|error| stale_section_text(&document_id, &error.to_string()))?;
+        let text_chars = text.chars().count();
+        if text_chars != char_len {
+            return Err(stale_section_text(
+                &document_id,
+                &format!("section {section_key} text has {text_chars} chars, expected {char_len}"),
+            ));
+        }
+        texts.push(text);
+    }
+    let mut texts = texts.into_iter();
+    fill_section_text(&mut document.root_sections, &mut texts);
+    if texts.next().is_some() {
+        return Err(stale_section_text(
+            &document_id,
+            "its section text has more sections than the document",
+        ));
+    }
+    Ok(())
+}
+
+/// Assigns the stored texts to the sections in depth-first order, one text per section.
+fn fill_section_text(sections: &mut [Section], texts: &mut std::vec::IntoIter<String>) {
+    for section in sections.iter_mut() {
+        section.content = texts.next().unwrap_or_default();
+        fill_section_text(&mut section.children, texts);
     }
 }
 
@@ -3197,18 +4206,24 @@ struct StoredSection {
 }
 
 impl StoredSection {
-    fn from_section(section: &Section) -> Self {
+    /// `omit_content` writes an empty `content` instead of a copy of the section's text, for rows
+    /// whose text is stored in `section_text_v1`.
+    fn from_section(section: &Section, omit_content: bool) -> Self {
         Self {
             id: section.id.0.clone(),
             parent_id: section.parent_id.as_ref().map(|value| value.0.clone()),
             title: section.title.clone(),
             level: section.level,
-            content: section.content.clone(),
+            content: if omit_content {
+                String::new()
+            } else {
+                section.content.clone()
+            },
             location: StoredLocation::from_location(&section.location),
             children: section
                 .children
                 .iter()
-                .map(StoredSection::from_section)
+                .map(|child| StoredSection::from_section(child, omit_content))
                 .collect(),
         }
     }
@@ -3490,6 +4505,85 @@ mod tests {
                         entry.sentence_slot(paragraph_index, sentence_index),
                         expected,
                         "sentence slot disagreement for {paragraph_index}.{sentence_index}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fast unit scan — cache, threads and pruning — must return exactly the units of the plain
+    /// one, as whole vectors.
+    #[tokio::test]
+    async fn the_fast_unit_scan_matches_the_plain_one() {
+        use crate::application::ports::{Parser, RetrievedResource};
+
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("scan.sqlite");
+        let repository = SqliteDocumentRepository::open(&path).expect("repository");
+        let text = "皇帝在朝堂上讨论虚拟内存机制与页表映射。\n\n\
+                    群臣议事，節度使入朝。Memory layout of the tables.\n\n\
+                    ΟΔΟΣ.ΟΔΟΣ closes the paragraph.\n\n\
+                    皇帝又论页表与地址空间。\n";
+        let document = crate::parsing::TextParser
+            .parse(RetrievedResource {
+                source: DocumentSource("memory:unit-scan.txt".into()),
+                final_source: DocumentSource("memory:unit-scan.txt".into()),
+                media_type: MediaType("text/plain".into()),
+                bytes: text.as_bytes().to_vec(),
+                etag: None,
+                last_modified: None,
+                metadata: Default::default(),
+            })
+            .await
+            .expect("parse text");
+        repository.save(document.clone()).await.expect("save");
+        let units = SqliteTextUnitIndex::open(&path).expect("units");
+        let document = Arc::new(document);
+        units
+            .replace_document_segmentation(&document, Arc::new(document.segmentation()))
+            .await
+            .expect("store segmentation");
+        let hash = document.normalized_document_hash();
+
+        for query in ["皇帝", "memory", "οδος", "皇帝 内存", "的"] {
+            let lexical = Arc::new(LexicalQuery::new(query).expect("query tokens"));
+            for mode in [MatchMode::Strict, MatchMode::Relaxed] {
+                for limit in [1, 3, 10] {
+                    let plain = units
+                        .scan_lexical(
+                            &document.id,
+                            &hash,
+                            Arc::clone(&lexical),
+                            mode,
+                            limit,
+                            ScanOptions::plain(),
+                        )
+                        .await
+                        .expect("plain scan")
+                        .expect("stored units");
+                    let fast = units
+                        .scan_lexical(
+                            &document.id,
+                            &hash,
+                            Arc::clone(&lexical),
+                            mode,
+                            limit,
+                            ScanOptions {
+                                cache: true,
+                                threads: 4,
+                                prune: true,
+                            },
+                        )
+                        .await
+                        .expect("fast scan")
+                        .expect("stored units");
+                    assert_eq!(
+                        fast.0, plain.0,
+                        "section ids for {query:?} {mode:?} limit {limit}"
+                    );
+                    assert_eq!(
+                        fast.1, plain.1,
+                        "units for {query:?} {mode:?} limit {limit}"
                     );
                 }
             }

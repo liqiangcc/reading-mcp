@@ -7,7 +7,9 @@ use super::lexical::{
     LEXICAL_SEARCH_INDEX_VERSION, LexicalQuery, MAX_SNIPPET_CHARS, compare_hits, lowercase_fast,
     match_snippet, score_lowered, text_unit_location,
 };
-use super::sqlite::{MatchMode, ScannedUnitHit, SqliteDocumentRepository, SqliteTextUnitIndex};
+use super::sqlite::{
+    MatchMode, ScanOptions, ScannedUnitHit, SqliteDocumentRepository, SqliteTextUnitIndex,
+};
 use crate::application::get_text_units::EffectiveTextUnitKind;
 use crate::application::ports::{
     ApplicationError, DocumentRepository, LEXICAL_TOKENIZER_VERSION, LexicalSearchHit,
@@ -56,6 +58,7 @@ impl SqliteSearchIndex {
     }
 
     /// One strict or relaxed pass: the section title hits and the paragraph and sentence hits.
+    #[allow(clippy::too_many_arguments)]
     async fn scan_pass(
         &self,
         document: &Document,
@@ -64,6 +67,7 @@ impl SqliteSearchIndex {
         query: &Arc<LexicalQuery>,
         mode: MatchMode,
         limit: usize,
+        options: ScanOptions,
     ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
         let mut hits = Vec::new();
         for section in &document.root_sections {
@@ -86,6 +90,7 @@ impl SqliteSearchIndex {
                 Arc::clone(query),
                 mode,
                 limit,
+                options,
             )
             .await?
         else {
@@ -308,6 +313,23 @@ impl SearchIndex for SqliteSearchIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        self.search_lexical_with_options(document_id, query, limit, ScanOptions::production())
+            .await
+    }
+}
+
+impl SqliteSearchIndex {
+    /// [`SearchIndex::search_lexical`] with the scan's cache, thread count and pruning spelled out.
+    /// The plain options — no cache, one thread, no pruning — are the scan of R2c step 3, so tests
+    /// can prove the fast scan equal to it.
+    #[doc(hidden)]
+    pub async fn search_lexical_with_options(
+        &self,
+        document_id: &DocumentId,
+        query: &str,
+        limit: usize,
+        options: ScanOptions,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
         if query.trim().is_empty() {
             return Err(ApplicationError::InvalidRequest(
                 "search query must not be empty".into(),
@@ -338,6 +360,7 @@ impl SearchIndex for SqliteSearchIndex {
                 &lexical,
                 MatchMode::Strict,
                 limit,
+                options,
             )
             .await?;
         // Strict all-token matching is authoritative. Only a zero-hit multi-token query falls back to
@@ -351,6 +374,7 @@ impl SearchIndex for SqliteSearchIndex {
                     &lexical,
                     MatchMode::Relaxed,
                     limit,
+                    options,
                 )
                 .await?;
         }

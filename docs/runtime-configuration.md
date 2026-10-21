@@ -208,6 +208,15 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 | `READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES` | 16777216 | 单页 PDF 解压 stream 最大字节数 |
 | `READING_MCP_SOURCE_VIEW_TIMEOUT_SECS` | 10 | 单页渲染超时 |
 | `READING_MCP_PARSE_TIMEOUT_SECS` | 30 | Parser cooperative timeout |
+| `READING_MCP_SEARCH_CACHE_MIB` | 48 | 搜索扫描保留的单个文档 section 文本缓存上限（MiB），0 关闭缓存 |
+| `READING_MCP_SEARCH_THREADS` | `min(available_parallelism, 4)` | 单个文档搜索扫描的线程数，1 表示串行 |
+
+`READING_MCP_SEARCH_CACHE_MIB` 只限制 lexical 搜索扫描的文本缓存：缓存只保留最近一次搜索的那个文档，
+按 stored document 的 `doc_key` 与 normalized hash 校验，重新 ingest、替换 segmentation 或删除文档都会失效。
+超过上限的文档不缓存，按每次读取一个 section 的方式扫描，结果不变；打开文档不预热该缓存。
+
+`READING_MCP_SEARCH_THREADS` 只影响文本不少于 1 MiB 且已缓存的文档：SQLite 读取始终留在连接的线程上，
+worker 线程只做 section 预筛与段落/句子打分，各自保留自己的命中再合并，结果与串行扫描逐条相同。
 
 说明：Parser 隔离分三层，职责互不替代：
 

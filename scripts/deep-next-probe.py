@@ -719,6 +719,12 @@ def probe(args: argparse.Namespace) -> int:
                 timed_arguments = {
                     "document_id": document_id,
                     "target_locator": locator,
+                    "relation": {
+                        "type": "neighbor",
+                        "unit": args.kind,
+                        "before": 2,
+                        "after": 2,
+                    },
                     "before": 2,
                     "after": 2,
                 }

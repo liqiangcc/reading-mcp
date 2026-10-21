@@ -391,7 +391,7 @@ async fn reading_order(
         Some(sections) => sections?,
         // A repository that cannot say: compute it from the document it keeps.
         None => {
-            let document = repository
+            let (document, _) = repository
                 .get_with_hash(document_id)
                 .await?
                 .ok_or_else(ReadingError::not_opened)?;

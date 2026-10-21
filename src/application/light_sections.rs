@@ -10,6 +10,7 @@
 //! rendering code and produce the same bytes.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::reading_support::SectionContents;
@@ -19,7 +20,7 @@ use crate::domain::{Document, DocumentId, Section, SectionId};
 pub(crate) struct SectionTexts<'a> {
     document: &'a Document,
     /// `None` when `document` carries its own section text.
-    repository: Option<&'a dyn DocumentRepository>,
+    repository: Option<Arc<dyn DocumentRepository>>,
     texts: HashMap<SectionId, String>,
     char_lens: HashMap<SectionId, usize>,
 }
@@ -38,7 +39,7 @@ impl<'a> SectionTexts<'a> {
     /// Section text from `repository`, one section per call.
     pub(crate) fn from_repository(
         document: &'a Document,
-        repository: &'a dyn DocumentRepository,
+        repository: Arc<dyn DocumentRepository>,
     ) -> Self {
         Self {
             document,

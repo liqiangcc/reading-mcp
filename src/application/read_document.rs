@@ -224,7 +224,7 @@ impl ReadDocumentUseCase {
 
     fn section_texts<'a>(&self, document: &'a Arc<Document>) -> SectionTexts<'a> {
         match self.text_unit_index {
-            Some(_) => SectionTexts::from_repository(document, self.repository.as_ref()),
+            Some(_) => SectionTexts::from_repository(document, Arc::clone(&self.repository)),
             None => SectionTexts::from_document(document),
         }
     }

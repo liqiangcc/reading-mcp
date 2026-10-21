@@ -260,7 +260,7 @@ impl GetTextUnitsUseCase {
             };
             (claims.origin_anchor_index, locator)
         } else if let Some(anchor_locator) = anchor_locator.as_ref() {
-            let mut texts = SectionTexts::from_repository(&document, self.repository.as_ref());
+            let mut texts = SectionTexts::from_repository(&document, Arc::clone(&self.repository));
             let (index, locator) = self
                 .resolve_anchor_index(
                     &document,

@@ -1,6 +1,12 @@
 name: Stress profile
+run-name: Stress profile${{ inputs.malloc_arena_max && format(' (MALLOC_ARENA_MAX={0})', inputs.malloc_arena_max) || '' }}
 on:
   workflow_dispatch:
+    inputs:
+      malloc_arena_max:
+        type: string
+        default: ''
+        description: Set MALLOC_ARENA_MAX for every server process; empty keeps glibc's default
   push:
     branches: ['bench/s-**']
 jobs:
@@ -85,14 +91,19 @@ jobs:
           name: stress-inputs
           path: ${{ runner.temp }}/stress
       - name: Big opens, memory caps, concurrency and deep paging
+        env:
+          ARENA: ${{ inputs.malloc_arena_max }}
         run: |
           chmod +x "$RUNNER_TEMP/bin/reading-mcp"
           S="$RUNNER_TEMP/stress"
+          extra=()
+          [ -n "$ARENA" ] && extra=(--env "MALLOC_ARENA_MAX=$ARENA")
           python3 scripts/stress-probe.py --mode probe \
             --binary "$RUNNER_TEMP/bin/reading-mcp" \
             --state-root "$RUNNER_TEMP/state-probe" \
             --out "$RUNNER_TEMP/probe.json" \
             --caps --deadline-minutes 140 \
+            "${extra[@]}" \
             --input "en-novel=$S/en-novel.epub" \
             --input "zh-classic=$S/zh-classic.epub" \
             --input "zh-large=$S/song-shi.epub" \
@@ -142,9 +153,13 @@ jobs:
           name: stress-inputs
           path: ${{ runner.temp }}/stress
       - name: Read the book sentence by sentence (shard)
+        env:
+          ARENA: ${{ inputs.malloc_arena_max }}
         run: |
           chmod +x "$RUNNER_TEMP/bin/reading-mcp"
           mkdir -p "$RUNNER_TEMP/shards"
+          extra=()
+          [ -n "$ARENA" ] && extra=(--env "MALLOC_ARENA_MAX=$ARENA")
           python3 scripts/stress-probe.py --mode read \
             --binary "$RUNNER_TEMP/bin/reading-mcp" \
             --state-root "$RUNNER_TEMP/state-read" \
@@ -152,6 +167,7 @@ jobs:
             --source "$RUNNER_TEMP/stress/${{ matrix.file }}" \
             --shard "${{ matrix.shard }}" --shards "${{ matrix.shards }}" \
             --deadline-minutes 300 \
+            "${extra[@]}" \
             --out "$RUNNER_TEMP/shards/shard-${{ matrix.label }}-${{ matrix.shard }}.json"
       - name: Upload shard
         if: always()

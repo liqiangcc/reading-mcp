@@ -226,7 +226,7 @@ impl TextUnitIndex for KeyedTextUnitIndex {
         &self,
         doc_key: i64,
     ) -> Result<Option<DocumentId>, ApplicationError> {
-        if doc_key != 0 {
+        if doc_key != 1 {
             return Ok(None);
         }
         Ok(self.sections.read().expect("lock").keys().next().cloned())
@@ -645,7 +645,8 @@ async fn get_text_units_reads_the_light_document_even_for_a_section_anchor() {
         .expect_err("a section anchor is not part of a text-unit stream");
     assert_eq!(actual, expected);
 
-    // A paragraph anchor is the supported shape, and it must be identical too.
+    // A paragraph anchor is the supported shape for the paragraph stream, and it must be identical
+    // too.
     let paragraph = document
         .paragraph_text_units()
         .units
@@ -655,14 +656,14 @@ async fn get_text_units_reads_the_light_document_even_for_a_section_anchor() {
     let paragraph_locator = TextLocator::for_paragraph(document, topic_a, &paragraph);
     let expected = full
         .execute_from_anchor(
-            command(document, RequestedTextUnitKind::Sentence),
+            command(document, RequestedTextUnitKind::Paragraph),
             paragraph_locator.clone(),
         )
         .await
         .expect("full anchored read");
     let actual = light
         .execute_from_anchor(
-            command(document, RequestedTextUnitKind::Sentence),
+            command(document, RequestedTextUnitKind::Paragraph),
             paragraph_locator,
         )
         .await

@@ -1,0 +1,174 @@
+name: Doc read profile
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/r1c3a-**']
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the release binary
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Download the books
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p "$BOOKS"
+          download() {
+            local url="$1" out="$2"
+            if curl -fsSL --retry 3 -o "$out" "$url"; then
+              echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+            else
+              echo "::warning::failed to download $url"
+              rm -f "$out"
+            fi
+            return 0
+          }
+          # 宋史 is Gutenberg 24183, the book the book profile calls zh-large.
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$BOOKS/song-shi.epub"
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" "$BOOKS/en-novel.epub"
+      - name: Generate cjk-64mib
+        run: |
+          mkdir -p "$RUNNER_TEMP/inputs"
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("memory_profile", "scripts/memory-profile.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.write_cjk_document(
+              os.path.join(os.environ["RUNNER_TEMP"], "inputs", "cjk-64mib.txt"),
+              64 * 1024 * 1024,
+          )
+          PY
+      - name: Measure every read tool with the cache on and off
+        run: |
+          set -uo pipefail
+          BOOKS="$RUNNER_TEMP/books"
+          GEN="$RUNNER_TEMP/inputs"
+          mkdir -p measure
+          run() { # label doc capacity
+            local label="$1" doc="$2" capacity="$3"
+            if [ ! -f "$doc" ]; then
+              echo "::warning::missing input for $label: $doc"
+              return 0
+            fi
+            python3 scripts/doc-read-probe.py \
+              --binary target/release/reading-mcp \
+              --document "$doc" \
+              --label "$label" \
+              --cache-capacity "$capacity" \
+              --calls 200 \
+              --start-fraction 0.5 \
+              --io-bytes \
+              --env READING_MCP_TOOLS=both \
+              --out "measure/$label-cache$capacity.json" \
+              || echo "::warning::probe failed: $label cache=$capacity"
+          }
+          for capacity in 8 0; do
+            run song-shi "$BOOKS/song-shi.epub" "$capacity"
+            run cjk-64mib "$GEN/cjk-64mib.txt" "$capacity"
+            run en-novel "$BOOKS/en-novel.epub" "$capacity"
+          done
+      - name: Summarize
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          def fmt(value):
+              if value is None:
+                  return ""
+              if isinstance(value, float):
+                  return f"{value:.3f}"
+              return str(value)
+
+          rows = [
+              "| input | cache | tool | calls | mean ms | median ms | p95 ms | rchar/call | read_bytes/call |",
+              "|---|---|---|---|---|---|---|---|---|",
+          ]
+          cold = [
+              "| input | call ms | json bytes | row ms | parse ms | section text ms | validate ms | hash ms | sections | peak RSS MiB |",
+              "|---|---|---|---|---|---|---|---|---|---|",
+          ]
+          meta = [
+              "| input | metadata key | bytes |",
+              "|---|---|---|",
+          ]
+          notes = []
+          for path in sorted(glob.glob("measure/*.json")):
+              with open(path, encoding="utf-8") as handle:
+                  data = json.load(handle)
+              label = data.get("label", os.path.basename(path))
+              capacity = data.get("cache_capacity")
+              for shape, summary in (data.get("shapes") or {}).items():
+                  rows.append(
+                      "| {label} | {cache} | {shape} | {calls} | {mean} | {median} | {p95} | {rchar} | {read_bytes} |".format(
+                          label=label,
+                          cache=capacity,
+                          shape=shape,
+                          calls=fmt(summary.get("calls")),
+                          mean=fmt(summary.get("mean_ms")),
+                          median=fmt(summary.get("median_ms")),
+                          p95=fmt(summary.get("p95_ms")),
+                          rchar=fmt(summary.get("io_rchar_mean")),
+                          read_bytes=fmt(summary.get("io_read_bytes_mean")),
+                      )
+                  )
+              for item in data.get("skipped") or []:
+                  notes.append(f"- {label} cache={capacity}: skipped {item.get('shape')} ({item.get('reason')})")
+              payload = data.get("cold")
+              if isinstance(payload, dict) and payload.get("json_bytes"):
+                  cold.append(
+                      "| {label} | {call} | {bytes} | {row} | {parse} | {text} | {validate} | {hash} | {sections} | {rss} |".format(
+                          label=label,
+                          call=fmt(payload.get("call_ms")),
+                          bytes=fmt(payload.get("json_bytes")),
+                          row=fmt(payload.get("row_read_ms")),
+                          parse=fmt(payload.get("parse_ms")),
+                          text=fmt(payload.get("section_text_load_ms")),
+                          validate=fmt(payload.get("validate_ms")),
+                          hash=fmt(payload.get("hash_ms")),
+                          sections=fmt(payload.get("sections")),
+                          rss=fmt(None if payload.get("peak_rss_kib") is None else round(payload["peak_rss_kib"] / 1024.0, 1)),
+                      )
+                  )
+                  for entry in payload.get("metadata_key_bytes") or []:
+                      meta.append(
+                          "| {label} | {key} | {bytes} |".format(
+                              label=label,
+                              key=entry.get("key"),
+                              bytes=fmt(entry.get("bytes")),
+                          )
+                      )
+          report = "\n\n".join(
+              ["## Per-call reads", "\n".join(rows), "## One cold get_with_hash (cache off)", "\n".join(cold),
+               "## document_json metadata keys (cache off)", "\n".join(meta)]
+          )
+          if notes:
+              report += "\n\n## Skipped\n" + "\n".join(notes)
+          report += "\n"
+          with open("measure-table.md", "w", encoding="utf-8") as handle:
+              handle.write(report)
+          print(report)
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as handle:
+                  handle.write(report)
+          PY
+      - name: Upload measurement data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1c3a-doc-read-${{ github.run_id }}
+          path: |
+            measure/
+            measure-table.md

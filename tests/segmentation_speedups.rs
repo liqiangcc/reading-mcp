@@ -61,11 +61,12 @@ fn collect_sections<'a>(sections: &'a [Section], out: &mut Vec<&'a Section>) {
 
 /// Runs every old-versus-new comparison on one parsed document.
 fn compare_document(label: &str, document: &Document, comparisons: &mut Comparisons) {
+    // A fixture without a block map is valid: both comparisons still run, with no blocks to find
+    // and with the fallback candidate list covering the whole section.
     let block_map = document
         .normalized_block_map()
-        .expect("fixture block map decodes")
-        .expect("fixture has a normalized block map");
-    let block_map = Some(&block_map);
+        .expect("fixture block map decodes");
+    let block_map = block_map.as_ref();
     let segmentation = document
         .try_segmentation()
         .expect("fixture document segments");

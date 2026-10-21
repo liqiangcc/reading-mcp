@@ -389,8 +389,26 @@ def reference_metrics(path: str) -> dict:
         "cjk_chars": total_cjk,
         "chars_per_page": round(total_chars / page_count, 1) if page_count else None,
         "page_text": pages,
-        "first_pages_text": "\n".join(first_pages),
+        "first_page_texts": first_pages,
     }
+
+
+def reference_prefix(page_texts: list[str], target_chars: int) -> tuple[str, int, int]:
+    """Leading reference pages whose characters reach `target_chars`.
+
+    A backend that reads a fixed number of sentences cannot be compared against a whole
+    document: the ratio and the n-gram containment would only measure the sentence cap.
+    The comparison window is therefore the leading pages the backend's own output volume
+    corresponds to (at most `CONTAINMENT_PAGES`).
+    """
+    used: list[str] = []
+    total = 0
+    for text in page_texts[:CONTAINMENT_PAGES]:
+        used.append(text)
+        total += len(squash(text))
+        if total >= target_chars:
+            break
+    return "\n".join(used), len(used), total
 
 
 # --------------------------------------------------------------------------------------------
@@ -488,7 +506,9 @@ def worker_direct(layout_python: str, pdf_path: str, timeout: float) -> dict:
     path = worker_source()
     with open(path, encoding="utf-8") as handle:
         source = handle.read()
-    command = [layout_python, "-I", "-B", "-X", "faulthandler", "-c", source,
+    # src/infrastructure OCR_INTERPRETER_ARGS is ["-I", "-B"]; the worker source is
+    # passed with -c exactly as layout_pdf.rs does.
+    command = [layout_python, "-I", "-B", "-c", source,
                str(WORKER_MAX_PAGES), str(WORKER_MAX_BYTES), str(WORKER_MAX_CHARS),
                "", "", path]
     with open(pdf_path, "rb") as handle:
@@ -747,7 +767,7 @@ def process_paper(probe, entry: dict, args, deadline: float) -> dict:
         record.update({"outcome": "download_failed", "error": download_status["error"]})
         return record
     reference = reference_metrics(pdf_path)
-    first_pages = reference.pop("first_pages_text")
+    first_page_texts = reference.pop("first_page_texts")
     record["pages"] = reference["pages"]
     record["reference"] = reference
     default_record, default_texts = backend_run(
@@ -755,8 +775,8 @@ def process_paper(probe, entry: dict, args, deadline: float) -> dict:
     layout_record, layout_texts = backend_run(
         probe, args.binary, pdf_path, "layout", args.layout_python, args.state_root, label,
         deadline)
-    record["default"] = decorate(default_record, default_texts, reference, first_pages)
-    record["layout"] = decorate(layout_record, layout_texts, reference, first_pages)
+    record["default"] = decorate(default_record, default_texts, reference, first_page_texts)
+    record["layout"] = decorate(layout_record, layout_texts, reference, first_page_texts)
     record["seconds"] = round(time.perf_counter() - started, 1)
 
     coverage_records: list[dict] = []
@@ -778,13 +798,18 @@ def process_paper(probe, entry: dict, args, deadline: float) -> dict:
     return record
 
 
-def decorate(backend: dict, texts: list[str], reference: dict, first_pages: str) -> dict:
+def decorate(backend: dict, texts: list[str], reference: dict,
+             first_page_texts: list[str]) -> dict:
     stats = text_stats(texts)
     result = dict(backend)
     result.update(stats)
-    result["char_ratio"] = (round(stats["chars"] / reference["chars"], 3)
-                            if reference["chars"] else None)
-    result["containment"] = gram_containment(first_pages, " ".join(texts))
+    joined = " ".join(texts)
+    prefix, pages_used, prefix_chars = reference_prefix(first_page_texts, stats["chars"])
+    result["reference_pages_used"] = pages_used
+    result["reference_chars_used"] = prefix_chars
+    result["char_ratio"] = (round(stats["chars"] / prefix_chars, 3) if prefix_chars else None)
+    result["containment"] = gram_containment(prefix, joined)
+    result["containment_first20"] = gram_containment("\n".join(first_page_texts), joined)
     return result
 
 
@@ -861,8 +886,14 @@ def evaluate(rule: dict[str, bool], label: bool) -> str:
 
 
 def aggregate_mode(args) -> int:
+    if not os.path.isdir(args.jsonl_dir):
+        print(f"::error::no shard results in {args.jsonl_dir}")
+        return 1
     records = load_records(args.jsonl_dir)
     papers = [record for record in records if record.get("kind_record") == "paper"]
+    if not papers:
+        print(f"::error::no paper records in {args.jsonl_dir}")
+        return 1
     coverages = {record["id"]: record for record in records
                  if record.get("kind_record") == "coverage"}
     papers.sort(key=lambda item: (item.get("group") or "", item.get("id") or ""))

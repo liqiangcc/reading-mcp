@@ -152,7 +152,7 @@ impl ReadReadingUseCase {
             .repository
             .get_with_hash(&document_id)
             .await?
-            .ok_or_else(|| ReadingError::not_opened())?;
+            .ok_or_else(ReadingError::not_opened)?;
         if handle_checksum(&document.id, &normalized_hash) != document_handle.checksum {
             return Err(ReadingError::stale_handle(format!(
                 "handle checksum {} does not match the current document identity",

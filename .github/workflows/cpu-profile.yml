@@ -114,11 +114,9 @@ jobs:
             # The tree above spends its 120 lines on a handful of symbols; the flat lists keep
             # the whole ranking, including the addresses perf could not symbolize.
             "$PERF" report -i "$data" --no-children --sort dso,symbol --stdio --no-call-graph \
-              --percent-limit 0.1 2>/dev/null | sed -n '/^# Overhead/,$p' \
-              > "$base.self-flat.txt" || true
+              --percent-limit 0.1 > "$base.self-flat.txt" 2>/dev/null || true
             "$PERF" report -i "$data" --children --sort dso,symbol --stdio --no-call-graph \
-              --percent-limit 0.5 2>/dev/null | sed -n '/^# Overhead/,$p' \
-              > "$base.inclusive-flat.txt" || true
+              --percent-limit 0.5 > "$base.inclusive-flat.txt" 2>/dev/null || true
             "$PERF" script -i "$data" 2>/dev/null \
               | python3 scripts/perf-collapse.py > "$base.folded" || true
             wc -l "$base".*.txt "$base.folded" || true
@@ -138,6 +136,7 @@ jobs:
               python3 scripts/cpu-profile-report.py \
                 --label "$label" --heading "$heading" \
                 --folded "perf/$label.folded" \
+                --self-flat "perf/$label.self-flat.txt" \
                 --wall-from-json "perf/open-$label.json" --row-label "$label" \
                 >> "$OUT" || echo "::warning::no wall time for $label"
             fi
@@ -149,6 +148,7 @@ jobs:
             python3 scripts/cpu-profile-report.py \
               --label cjk-64mib-next --heading "2,000 deep Next reads" \
               --folded perf/cjk-64mib-next.folded \
+              --self-flat perf/cjk-64mib-next.self-flat.txt \
               --wall-from-json perf/cjk-64mib-next.json \
               >> "$OUT"
           fi

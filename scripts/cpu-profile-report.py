@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 
@@ -30,16 +31,18 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
     (
         "EPUB/ZIP read and inflate",
         (
-            "miniz_oxide",
+            "miniz",
             "flate2",
             "inflate",
+            "zlib_rs",
             "zip::",
             "zip_",
+            "ziparchive",
             "crc32",
             "deflate",
-            "zlib_rs",
-            "reading_mcp::parsing::archive",
-            "reading_mcp::retrieval::file",
+            "read_zip",
+            "parsing::archive",
+            "retrieval::file",
         ),
     ),
     (
@@ -47,11 +50,20 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
         (
             "html5ever",
             "markup5ever",
+            "xml5ever",
             "scraper",
             "selectors",
             "tendril",
-            "xml5ever",
-            "reading_mcp::parsing::html",
+            "parsing::html",
+            "parse_html",
+            "decode_html",
+            "content_root",
+            "remove_noise",
+            "collect_content",
+            "build_html_sections",
+            "render_blocks",
+            "normalized_element_text",
+            "capture_html_metadata",
         ),
     ),
     (
@@ -60,10 +72,13 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
         "EPUB structure validation and reconciliation",
         (
             "epub_validator",
+            "validate_epub",
+            "epub_document_inner",
+            "attach_epub_validation",
             "epub_structure",
             "epub_navigation",
             "reconcil",
-            "remap_epub_section",
+            "remap_epub",
             "append_remapped_blocks",
             "roxmltree",
         ),
@@ -71,20 +86,31 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
     (
         "Text normalization and normalized block map",
         (
-            "reading_mcp::domain::normalized_text",
-            "reading_mcp::domain::normalized_block",
-            "reading_mcp::parsing::text::",
-            "reading_mcp::parsing::common",
             "normaliz",
             "unicode_normalization",
             "collapse_whitespace",
+            "parsing::text::",
+            "normalized_text",
+            "normalized_block",
         ),
     ),
     (
         "Sentence/paragraph segmentation",
         (
-            "reading_mcp::domain::segmentation",
             "segment",
+            "sentence_ranges",
+            "sentence_boundary",
+            "paragraph_ranges",
+            "paragraph_candidates",
+            "paragraph_content_class",
+            "skip_whitespace",
+            "trim_trailing_whitespace",
+            "extend_terminal_cluster",
+            "is_terminal_mark",
+            "looks_like_unreliable",
+            "missing_space_glue",
+            "bibliographic",
+            "doubled_character",
         ),
     ),
     (
@@ -105,7 +131,12 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
     ),
     (
         "document_json serialize",
-        ("serde_json",),
+        (
+            "serde_json",
+            "serde_core::ser",
+            "storeddocument",
+            "document_json",
+        ),
     ),
     (
         "SQLite writes",
@@ -116,7 +147,12 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
             "btree",
             "pager",
             "unixwrite",
-            "wal",
+            "query_row",
+            "load_text_slice",
+            "insert_section_text",
+            "section_layout",
+            "stored_document",
+            "load_stored_document",
         ),
     ),
     (
@@ -142,10 +178,34 @@ BUCKETS: list[tuple[str, tuple[str, ...]]] = [
 SQLITE_MARKERS = ("sqlite", "rusqlite", "vdbe", "unixwrite")
 
 
+def base_name(frame: str) -> str:
+    """The frame without generic arguments, so `and_then<&NormalizedBlockMap, ...>` is `and_then`.
+
+    `perf script` prints inlined frames by their DWARF name, which for a Rust generic adapter is
+    the bare function name followed by its type arguments. Matching the arguments would charge a
+    `core` adapter to whatever module happens to be its type parameter, so drop them, except in
+    `<Type as Trait>::method` names where the type is the subject of the frame.
+    """
+    if frame.startswith("<"):
+        return frame
+    out: list[str] = []
+    depth = 0
+    for character in frame:
+        if character == "<":
+            depth += 1
+            continue
+        if character == ">":
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            out.append(character)
+    return "".join(out)
+
+
 def deepest_match(frames: list[str], patterns: tuple[str, ...]) -> int | None:
     """Index of the deepest (leaf-most) frame matching any pattern, or None."""
     for index in range(len(frames) - 1, -1, -1):
-        frame = frames[index].lower()
+        frame = base_name(frames[index]).lower()
         if any(pattern in frame for pattern in patterns):
             return index
     return None
@@ -192,6 +252,26 @@ def read_folded(path: str) -> tuple[Counter, Counter]:
             stacks[stack] += weight
             leaves[stack.rsplit(";", 1)[-1]] += weight
     return stacks, leaves
+
+
+FLAT_ROW = re.compile(r"^(\d+\.\d+)%\s+(\S+)\s+\[([.k])\]\s+(.+)$")
+
+
+def read_flat_self(path: str) -> list[tuple[str, str, float]]:
+    """Rows of `perf report --no-children --sort dso,symbol --no-call-graph`: (symbol, dso, %)."""
+    rows: list[tuple[str, str, float]] = []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            match = FLAT_ROW.match(line.strip())
+            if match is None:
+                continue
+            overhead, dso, kind, symbol = match.groups()
+            # The symbol column is padded with spaces before the IPC columns.
+            symbol = re.split(r"\s{2,}", symbol)[0]
+            if kind == "k":
+                dso = "[kernel.kallsyms]"
+            rows.append((symbol.strip(), dso, float(overhead)))
+    return rows
 
 
 def wall_seconds(args: argparse.Namespace) -> float:
@@ -255,11 +335,22 @@ def render(args: argparse.Namespace) -> str:
     lines.append("")
     lines.append(f"Top {args.top} self-time symbols:")
     lines.append("")
-    lines.append("| # | Symbol | Self % | ms |")
-    lines.append("| ---: | --- | ---: | ---: |")
-    for rank, (symbol, weight) in enumerate(leaves.most_common()[: args.top], start=1):
-        share = 100.0 * weight / total
-        lines.append(f"| {rank} | `{symbol}` | {share:.2f} | {share / 100.0 * wall * 1000.0:.0f} |")
+    lines.append("| # | Symbol | Module | Self % | ms |")
+    lines.append("| ---: | --- | --- | ---: | ---: |")
+    if args.self_flat:
+        # perf report's own symbolization: one row per map symbol, which is stable across runs.
+        rows = read_flat_self(args.self_flat)
+        for rank, (symbol, dso, share) in enumerate(rows[: args.top], start=1):
+            label = symbol if not symbol.startswith("0x") else f"`{symbol}` (unresolved)"
+            lines.append(
+                f"| {rank} | {label} | {dso} | {share:.2f} | {share / 100.0 * wall * 1000.0:.0f} |"
+            )
+    else:
+        for rank, (symbol, weight) in enumerate(leaves.most_common()[: args.top], start=1):
+            share = 100.0 * weight / total
+            lines.append(
+                f"| {rank} | `{symbol}` | | {share:.2f} | {share / 100.0 * wall * 1000.0:.0f} |"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -269,6 +360,11 @@ def main() -> int:
     parser.add_argument("--label", required=True, help="input label, e.g. zh-large")
     parser.add_argument("--heading", default=None, help="what was measured, e.g. 'first open'")
     parser.add_argument("--folded", required=True, help="folded stacks from perf-collapse.py")
+    parser.add_argument(
+        "--self-flat",
+        default=None,
+        help="`perf report --no-children --sort dso,symbol --no-call-graph` output for the top list",
+    )
     parser.add_argument("--wall-seconds", type=float, default=None, help="measured wall time")
     parser.add_argument(
         "--wall-from-json",

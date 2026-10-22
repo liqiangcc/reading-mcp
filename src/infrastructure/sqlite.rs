@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -63,13 +63,6 @@ const MIN_PARALLEL_TEXT_CHARS: usize = 1024 * 1024;
 
 /// The most threads a scan uses, whatever the host reports.
 const MAX_SCAN_THREADS: usize = 4;
-
-/// How the background warm of the scan text cache paces itself: after this many sections it yields
-/// for `WARM_YIELD`, so a foreground read on a busy host sees a duty cycle instead of one solid
-/// burst. The warm has the whole time until the first search — seconds — and must not slow the reads
-/// it runs beside: on two CPUs an unpaced warm of 宋史 cost the foreground reads 10.8% of their mean.
-const WARM_YIELD_EVERY: usize = 8;
-const WARM_YIELD: Duration = Duration::from_millis(1);
 
 /// The thread count a scan asks for: `READING_MCP_SEARCH_THREADS`, `min(available_parallelism, 4)` by
 /// default. 1 is serial, and a value that is not a number falls back to the default.
@@ -429,10 +422,12 @@ fn warm_scan_text(
             .insert(*section_key, Arc::new(ScanSectionText::new(text)));
         budget = budget.saturating_sub(*bytes);
         warmed += 1;
-        // Nothing is locked here: the connection and the store are both released above.
-        if warmed % WARM_YIELD_EVERY == 0 {
-            std::thread::sleep(WARM_YIELD);
-        }
+        // The warm takes the connection lock once per section, and the scan's foreground reads take
+        // the same lock. Nothing is locked here, so yielding gives a waiting foreground read the CPU
+        // and the lock before the warm asks for it again: without it a foreground read queues behind
+        // one section read after another. Sleeping instead would only spread the collisions over more
+        // foreground calls, which measured worse.
+        std::thread::yield_now();
     }
     Ok(warmed)
 }

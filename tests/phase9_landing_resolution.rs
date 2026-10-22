@@ -84,11 +84,10 @@ fn resolver(
         endpoint,
         refused_hosts: vec!["blocked.test"],
     });
-    let http = Arc::new(HttpRetriever::new(
+    let retriever: Arc<dyn Retriever> = Arc::new(HttpRetriever::new(
         policy.clone(),
         HttpRetrieverConfig::default(),
     ));
-    let retriever: Arc<dyn Retriever> = Arc::new(http);
     (
         policy.clone(),
         LandingPageRetriever::new(retriever, policy, config),

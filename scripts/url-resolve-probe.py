@@ -448,8 +448,9 @@ def run_probe(binary: str, state_dir: str, timeout: float) -> dict:
             record["outcome"] = "failed"
             record["reason"] = f"control {control}: {reference['error']}"
             continue
+        own = samples.get(record["label"]) or {}
         record["id_equal"] = record["document_id"] == reference["document_id"]
-        record["text_equal"] = record["sample"] == reference["sample"]
+        record["text_equal"] = own.get("sample") == reference.get("sample")
 
     return {"links": records}
 

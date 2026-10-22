@@ -58,7 +58,7 @@ fn font_has_uni_differences(doc: &LopdfDocument, font: &Dictionary) -> bool {
         return false;
     }
     let subtype = font.get(b"Subtype").and_then(Object::as_name).ok();
-    if subtype != Some(b"Type1") && subtype != Some(b"TrueType") {
+    if subtype != Some(&b"Type1"[..]) && subtype != Some(&b"TrueType"[..]) {
         return false;
     }
     encoding_differences(doc, font)
@@ -170,7 +170,7 @@ fn rewrite_uni_fonts(doc: &mut LopdfDocument) {
         else {
             continue;
         };
-        font.remove(b"Encoding");
+        let _ = font.remove(b"Encoding");
         if let Some(id) = to_unicode_id {
             font.set("ToUnicode", Object::Reference(id));
         }
@@ -221,7 +221,7 @@ fn old_decoding_map(
 
     let mut temporary = font.clone();
     temporary.set("Encoding", Object::Dictionary(encoding_dictionary));
-    temporary.remove(b"ToUnicode");
+    let _ = temporary.remove(b"ToUnicode");
 
     let encoding = temporary.get_font_encoding(doc).ok()?;
     let mut map = Vec::with_capacity(256);
@@ -720,7 +720,7 @@ fn lookup_xobject<'a>(
 }
 
 fn is_form(stream: &Stream) -> bool {
-    stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form")
+    stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(&b"Form"[..])
 }
 
 fn dictionary_of<'a>(doc: &'a LopdfDocument, object: &'a Object) -> Option<&'a Dictionary> {

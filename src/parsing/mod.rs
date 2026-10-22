@@ -17,6 +17,7 @@ mod openapi;
 mod pdf;
 mod pdf_front_matter;
 mod pdf_layout;
+mod pdf_text_repair;
 mod pdf_v8;
 mod reliability;
 mod router;
@@ -42,6 +43,7 @@ pub use layout_pdf::{
 pub use limited_pdf::LimitedPdfParser;
 pub use markdown::MarkdownParser;
 pub use openapi::OpenApiParser;
+pub use pdf::PDF_TEXT_EXTRACTION_VERSION;
 pub use pdf_v8::PdfParser;
 pub use reliability::PersistedDocumentReliabilityInspector;
 pub use router::ParserRouter;

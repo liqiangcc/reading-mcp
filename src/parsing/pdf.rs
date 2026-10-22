@@ -12,6 +12,7 @@ use crate::domain::{
 use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
+pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v1";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";
@@ -26,7 +27,7 @@ const MAX_INFERRED_HEADING_WORDS: usize = 24;
 #[derive(Default)]
 pub struct PdfParser;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct PageText {
     number: u32,
     text: String,
@@ -102,7 +103,9 @@ impl PdfParser {
             ));
         }
 
-        let (pages, extraction_errors) = extract_page_texts(&pdf, &page_numbers);
+        let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
+        let (pages, extraction_errors) =
+            extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
         if pages.iter().all(|page| page.text.trim().is_empty()) {
             return Err(ApplicationError::ParseFailed(
                 "PDF contains no extractable text; scanned PDFs require OCR, which is not supported in this phase"
@@ -199,7 +202,16 @@ impl Parser for PdfParser {
     }
 }
 
+#[cfg(test)]
 fn extract_page_texts(pdf: &LopdfDocument, page_numbers: &[u32]) -> (Vec<PageText>, Vec<String>) {
+    let prepared = super::pdf_text_repair::prepare_text_extraction(pdf);
+    extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), page_numbers)
+}
+
+fn extract_page_texts_raw(
+    pdf: &LopdfDocument,
+    page_numbers: &[u32],
+) -> (Vec<PageText>, Vec<String>) {
     let mut pages = Vec::with_capacity(page_numbers.len());
     let mut errors = Vec::new();
 
@@ -762,5 +774,376 @@ fn build_section(index: usize, nodes: &[SectionNode]) -> Section {
         content: node.content.clone(),
         location: node.location.clone(),
         children,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Dictionary, ObjectId, Stream, StringFormat, dictionary};
+
+    fn page_texts(document: &LopdfDocument) -> Vec<PageText> {
+        let pages = document.get_pages().keys().copied().collect::<Vec<_>>();
+        let (texts, errors) = extract_page_texts(document, &pages);
+        assert!(
+            errors.is_empty(),
+            "unexpected extraction errors: {errors:?}"
+        );
+        texts
+    }
+
+    fn old_page_texts(document: &LopdfDocument) -> Vec<PageText> {
+        let pages = document.get_pages().keys().copied().collect::<Vec<_>>();
+        let (texts, errors) = extract_page_texts_raw(document, &pages);
+        assert!(
+            errors.is_empty(),
+            "unexpected extraction errors: {errors:?}"
+        );
+        texts
+    }
+
+    fn text_operations(font: &str, text: &str) -> Vec<Operation> {
+        vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec![font.into(), 12.into()]),
+            Operation::new("Td", vec![72.into(), 720.into()]),
+            Operation::new("Tj", vec![Object::string_literal(text)]),
+            Operation::new("ET", vec![]),
+        ]
+    }
+
+    fn byte_text_operations(font: &str, bytes: &[u8]) -> Vec<Operation> {
+        vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec![font.into(), 12.into()]),
+            Operation::new("Td", vec![72.into(), 720.into()]),
+            Operation::new(
+                "Tj",
+                vec![Object::String(bytes.to_vec(), StringFormat::Literal)],
+            ),
+            Operation::new("ET", vec![]),
+        ]
+    }
+
+    fn simple_font(document: &mut LopdfDocument) -> ObjectId {
+        document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        })
+    }
+
+    fn form(
+        document: &mut LopdfDocument,
+        resources: Dictionary,
+        matrix: Option<Vec<Object>>,
+        operations: Vec<Operation>,
+    ) -> ObjectId {
+        let mut dictionary = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            "Resources" => Object::Dictionary(resources),
+        };
+        if let Some(matrix) = matrix {
+            dictionary.set("Matrix", Object::Array(matrix));
+        }
+        document.add_object(Stream::new(
+            dictionary,
+            Content { operations }
+                .encode()
+                .expect("form content encodes"),
+        ))
+    }
+
+    fn add_page(document: &mut LopdfDocument, operations: Vec<Operation>, resources: Dictionary) {
+        let pages_id = document.new_object_id();
+        let content_id = document.add_object(Stream::new(
+            Dictionary::new(),
+            Content { operations }
+                .encode()
+                .expect("page content encodes"),
+        ));
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => Object::Dictionary(resources),
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+    }
+
+    #[test]
+    fn text_inside_a_form_xobject_is_extracted() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = simple_font(&mut document);
+        let form_id = form(
+            &mut document,
+            dictionary! { "Font" => dictionary! { "FX" => font_id } },
+            Some(vec![
+                1.into(),
+                0.into(),
+                0.into(),
+                1.into(),
+                10.into(),
+                20.into(),
+            ]),
+            text_operations("FX", "Form text"),
+        );
+        add_page(
+            &mut document,
+            vec![
+                Operation::new("q", vec![]),
+                Operation::new("Do", vec![Object::Name(b"Fm1".to_vec())]),
+                Operation::new("Q", vec![]),
+            ],
+            dictionary! { "XObject" => dictionary! { "Fm1" => form_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "Form text");
+        assert!(old_page_texts(&document)[0].text.is_empty());
+    }
+
+    #[test]
+    fn form_text_order_follows_the_content_stream() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = simple_font(&mut document);
+        let first = form(
+            &mut document,
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            None,
+            text_operations("F1", "A"),
+        );
+        let second = form(
+            &mut document,
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            None,
+            text_operations("F1", "B"),
+        );
+        add_page(
+            &mut document,
+            vec![
+                Operation::new("Do", vec![Object::Name(b"Fm1".to_vec())]),
+                Operation::new("Do", vec![Object::Name(b"Fm2".to_vec())]),
+            ],
+            dictionary! {
+                "XObject" => dictionary! { "Fm1" => first, "Fm2" => second },
+            },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "A\nB");
+    }
+
+    #[test]
+    fn nested_form_xobjects_are_extracted_once() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = simple_font(&mut document);
+        let inner = form(
+            &mut document,
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            None,
+            text_operations("F1", "Inner"),
+        );
+        let outer = form(
+            &mut document,
+            dictionary! { "XObject" => dictionary! { "Inner" => inner } },
+            None,
+            vec![Operation::new("Do", vec![Object::Name(b"Inner".to_vec())])],
+        );
+        add_page(
+            &mut document,
+            vec![Operation::new("Do", vec![Object::Name(b"Outer".to_vec())])],
+            dictionary! { "XObject" => dictionary! { "Outer" => outer } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "Inner");
+    }
+
+    #[test]
+    fn cyclic_form_xobject_terminates_and_keeps_its_text() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = simple_font(&mut document);
+        let form_id = document.new_object_id();
+        let mut operations = text_operations("F1", "Cycle");
+        operations.push(Operation::new("Do", vec![Object::Name(b"Self".to_vec())]));
+        document.set_object(
+            form_id,
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+                    "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+                },
+                Content { operations }
+                    .encode()
+                    .expect("form content encodes"),
+            ),
+        );
+        add_page(
+            &mut document,
+            vec![Operation::new("Do", vec![Object::Name(b"Self".to_vec())])],
+            dictionary! { "XObject" => dictionary! { "Self" => form_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "Cycle");
+    }
+
+    #[test]
+    fn an_image_only_xobject_leaves_the_extraction_unchanged() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let form_id = form(
+            &mut document,
+            Dictionary::new(),
+            None,
+            vec![Operation::new("q", vec![]), Operation::new("Q", vec![])],
+        );
+        add_page(
+            &mut document,
+            vec![Operation::new("Do", vec![Object::Name(b"Fm1".to_vec())])],
+            dictionary! { "XObject" => dictionary! { "Fm1" => form_id } },
+        );
+
+        assert_eq!(page_texts(&document), old_page_texts(&document));
+    }
+
+    #[test]
+    fn uni_differences_font_without_to_unicode_is_decoded() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "IMFCTT1",
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![
+                    Object::Integer(65),
+                    Object::Name(b"uni4E2D".to_vec()),
+                    Object::Name(b"uni6587".to_vec()),
+                ],
+            },
+        });
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "中文");
+    }
+
+    #[test]
+    fn uni_differences_font_with_to_unicode_keeps_it() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let to_unicode = b"/CIDInit /ProcSet findresource begin\n\
+            12 dict begin\n\
+            begincmap\n\
+            /CMapName /Adobe-Identity-UCS def\n\
+            /CMapType 2 def\n\
+            1 begincodespacerange\n\
+            <00> <FF>\n\
+            endcodespacerange\n\
+            2 beginbfchar\n\
+            <41> <4E2D>\n\
+            <42> <6587>\n\
+            endbfchar\n\
+            endcmap\n\
+            CMapName currentdict /CMap defineresource pop\n\
+            end\n\
+            end\n";
+        let to_unicode_id =
+            document.add_object(Stream::new(Dictionary::new(), to_unicode.to_vec()));
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "IMFCTT1",
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![
+                    Object::Integer(65),
+                    Object::Name(b"uni4E2D".to_vec()),
+                    Object::Name(b"uni6587".to_vec()),
+                ],
+            },
+            "ToUnicode" => to_unicode_id,
+        });
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "中文");
+    }
+
+    #[test]
+    fn adobe_glyph_names_keep_their_old_decoding() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![
+                    Object::Integer(65),
+                    Object::Name(b"A".to_vec()),
+                    Object::Name(b"B".to_vec()),
+                ],
+            },
+        });
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "AB");
+    }
+
+    #[test]
+    fn fixtures_without_the_two_features_keep_their_old_extraction() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scanned_pdf/pdf");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&directory).expect("fixture directory") {
+            let entry = entry.expect("fixture entry");
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("pdf") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let bytes = std::fs::read(&path).expect("fixture bytes");
+            let document = LopdfDocument::load_mem(&bytes).expect("fixture loads");
+            let old = old_page_texts(&document);
+            let new = page_texts(&document);
+            if name == "F04-form.pdf" {
+                // The one fixture that does carry a text Form XObject: the
+                // hidden layer is now visible, which is the intended change.
+                assert!(old.iter().all(|page| page.text.is_empty()));
+                assert!(
+                    new.iter()
+                        .any(|page| page.text.contains("The observatory opens before sunrise."))
+                );
+                continue;
+            }
+            assert_eq!(old, new, "fixture {name} changed");
+            checked += 1;
+        }
+        assert!(checked >= 14, "expected at least 14 unchanged fixtures");
     }
 }

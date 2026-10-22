@@ -89,9 +89,17 @@ rewrite, so approach B (a second text interpreter) is not needed.
 
 ### A1: text inside Form XObjects
 
-- A document is considered only if one of its `/Subtype /Form` streams contains
-  a text-showing operator (`Tj`, `TJ`, `'`, `"`), directly or through a nested
-  form.  A form is followed only when its own `/Resources` dictionary exists;
+- A document is considered only if one of its `/Subtype /Form` streams uses a
+  font that can carry CJK text: a `/Encoding` `/Differences` with a CJK
+  `uniXXXX` name, or a `/ToUnicode` CMap whose decompressed text contains a CJK
+  code point.  PDF-1c is about lost CJK text; gating on CJK fonts keeps the
+  pass off ordinary English papers, whose figure forms would otherwise add
+  text that is not in the reference window and would require parsing every
+  vector figure (measured: one 21-form English paper went from 0.67 s to
+  13.7 s open time with an ungated pass).  Nested forms are separate objects
+  and are scanned in the same loop, so a CJK form inside another form still
+  qualifies the document.
+- A form is followed only when its own `/Resources` dictionary exists;
   otherwise the `Do` is left as it was.
 - For every page with an `/XObject` in its own or an inherited `/Resources`,
   the page content is decoded with `Content::decode`.  A `Do` naming a Form
@@ -156,10 +164,11 @@ rewrite, so approach B (a second text interpreter) is not needed.
 
 ## 4. Tests
 
-`src/parsing/pdf.rs` unit tests build small lopdf documents and cover: a form
-with its own font and `/Matrix`; two forms (order follows the content stream);
-nested forms; a cyclic form; an image-only form; a `Type1` `/Differences`
-`uniXXXX` font without `/ToUnicode`; the same with `/ToUnicode`; a `Type0`
-form font with `/ToUnicode`; Adobe glyph names keeping their old decoding; and
-a regression over `tests/fixtures/scanned_pdf/pdf/F01-F14` (plus
-`F04-form.pdf`) asserting old and new page texts and chunks are identical.
+`src/parsing/pdf.rs` unit tests build small lopdf documents and cover: a CJK
+form with its own font and `/Matrix`; two CJK forms (order follows the content
+stream); nested forms; a cyclic form; an image-only form; a `Type1`
+`/Differences` `uniXXXX` font without `/ToUnicode`; the same with
+`/ToUnicode`; a `Type0` form font with `/ToUnicode`; Adobe glyph names keeping
+their old decoding; and a regression over
+`tests/fixtures/scanned_pdf/pdf/F01-F14` (plus `F04-form.pdf`) asserting old
+and new page texts and chunks are identical.

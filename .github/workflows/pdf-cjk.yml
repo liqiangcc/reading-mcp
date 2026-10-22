@@ -98,8 +98,9 @@ jobs:
       - name: Is the paper list available?
         id: corpus
         run: |
-          if [ -s "$RUNNER_TEMP/ids/pdf-cjk-ids.txt" ]; then
-            cp "$RUNNER_TEMP/ids/pdf-cjk-ids.txt" scripts/pdf-cjk-ids.txt
+          found=$(find "$RUNNER_TEMP/ids" -name pdf-cjk-ids.txt -type f 2>/dev/null | head -1)
+          if [ -n "$found" ]; then
+            cp "$found" scripts/pdf-cjk-ids.txt
           fi
           if [ -s scripts/pdf-cjk-ids.txt ]; then
             echo "present=yes" >> "$GITHUB_OUTPUT"

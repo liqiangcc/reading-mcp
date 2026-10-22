@@ -192,7 +192,9 @@ fn synthesised_entries(
         }
     }
     for (code, character) in uni_entries {
-        entries.insert(*code, character.encode_utf16().collect());
+        let mut units = [0_u16; 2];
+        let units = character.encode_utf16(&mut units);
+        entries.insert(*code, units.to_vec());
     }
     Some(entries)
 }
@@ -572,7 +574,7 @@ fn form_content(
     if data.len() > *budget {
         return None;
     }
-    let operations = Content::decode(&data).ok()?;
+    let operations = Content::decode(&data).ok()?.operations;
     *budget -= data.len();
     if let Some(id) = id {
         cache.insert(

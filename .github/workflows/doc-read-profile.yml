@@ -191,8 +191,8 @@ jobs:
           import os
 
           rows = [
-              "| input | document_json bytes | light mean ms | light median ms | light p95 ms | light rchar/call | light target | section mean ms | section median ms | section p95 ms | section rchar/call | section target |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|",
+              "| input | document_json bytes | light mean ms | light median ms | light p95 ms | light rchar/call | light target | section mean ms | section median ms | section p95 ms | section rchar/call | section target | full cold ms |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
           ]
           for path in sorted(glob.glob("light/*.log")):
               with open(path, encoding="utf-8") as handle:
@@ -201,7 +201,7 @@ jobs:
                           continue
                       fields = dict(item.split("=", 1) for item in line.split() if "=" in item)
                       rows.append(
-                          "| {label} | {json_bytes} | {lm} | {lmed} | {lp95} | {lrchar} | {ltarget} | {sm} | {smed} | {sp95} | {srchar} | {starget} |".format(
+                          "| {label} | {json_bytes} | {lm} | {lmed} | {lp95} | {lrchar} | {ltarget} | {sm} | {smed} | {sp95} | {srchar} | {starget} | {full} |".format(
                               label=fields.get("label", ""),
                               json_bytes=fields.get("document_json_bytes", ""),
                               lm=fields.get("light_mean_ms", ""),
@@ -214,6 +214,7 @@ jobs:
                               sp95=fields.get("section_p95_ms", ""),
                               srchar=fields.get("section_rchar_per_call", ""),
                               starget=fields.get("section_target", ""),
+                              full=fields.get("full_cold_ms", ""),
                           )
                   )
           report = "## Light reads (200 calls each)\n\n" + "\n".join(rows) + "\n"

@@ -8,8 +8,8 @@ database into one text file per side:
 - `documents`: `id`, `content_hash` and `document_json`, compared as parsed objects after the
   section text of a row that keeps it in `section_text_v1` or `section_text_v2` (its
   `content_store` key) is put back in depth-first section order from that document's chunks, and
-  after the metadata entries of a row that keeps its heavy ones in `document_meta_v1` (its
-  `metadata_store` key) are merged back into its `metadata` object;
+  after the metadata entries of a row that keeps its heavy ones in `document_meta_v1` or
+  `document_meta_v2` (its `metadata_store` key) are merged back into its `metadata` object;
 - layouts joined to `text_unit_documents_v2` and ordered by document then `section_key`:
   `section_id`, `char_len`, `paragraph_coverage_json` and the whole-section layout hex. The v3
   `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 
 INITIALIZE_MESSAGE = {
     "jsonrpc": "2.0",
@@ -271,8 +272,8 @@ def rebuild_document_json(
     `section_key` numbers the sections in — and dropping the key leaves the JSON a row that keeps
     its text inline would have written, so both sides compare as the same parsed object.
 
-    A row whose `metadata_store` is `document_meta_v1` holds only its light metadata entries: the
-    heavy ones live in `document_meta_v1`, keyed by document. Merging them back into `metadata` and
+    A row whose `metadata_store` is `document_meta_v1` or `document_meta_v2` holds only its light
+    metadata entries: the heavy ones live in that table, keyed by document. Merging them back into `metadata` and
     dropping the key leaves the JSON a row that keeps all of its metadata inline would have
     written. `sort_keys` then writes both sides in the one key order the store writes a
     `BTreeMap` in.
@@ -282,11 +283,26 @@ def rebuild_document_json(
         return json.dumps(stored, ensure_ascii=False, sort_keys=True)
     if stored.pop("content_store", None) in SECTION_TEXT_STORES:
         fill_section_text(stored.get("root_sections") or [], texts, itertools.count())
-    if stored.pop("metadata_store", None) == "document_meta_v1":
+    if stored.pop("metadata_store", None) in ("document_meta_v1", "document_meta_v2"):
         merged = dict(stored.get("metadata") or {})
         merged.update(metadata or {})
         stored["metadata"] = merged
     return json.dumps(stored, ensure_ascii=False, sort_keys=True)
+
+
+def decode_metadata_value(encoding: str, value) -> str:
+    """One `document_meta_v2` value as the string the save stored.
+
+    `raw` is the UTF-8 bytes themselves; `zlib` is the UTF-8 bytes compressed in zlib format
+    (RFC 1950), which `zlib.decompress` reads.
+    """
+    if encoding == "raw":
+        data = bytes(value)
+    elif encoding == "zlib":
+        data = zlib.decompress(bytes(value))
+    else:
+        raise ValueError(f"unknown document_meta_v2 encoding {encoding!r}")
+    return data.decode("utf-8")
 
 
 def fill_section_text(sections: list, texts: dict[int, str], keys) -> None:
@@ -633,6 +649,14 @@ def dump_state(database: str) -> dict:
                 "SELECT document_id, key, value FROM document_meta_v1 ORDER BY document_id, key"
             ):
                 metadata_by_document[document_id][key] = value
+        if table_exists(connection, "document_meta_v2"):
+            for document_id, key, encoding, value in connection.execute(
+                "SELECT document_id, key, encoding, value FROM document_meta_v2"
+                " ORDER BY document_id, key"
+            ):
+                metadata_by_document[document_id][key] = decode_metadata_value(
+                    encoding, value
+                )
     finally:
         connection.close()
 

@@ -7,6 +7,9 @@
 //! `load_section_text` for one mid-book section over 200 calls each, with the read-character count
 //! of the same window.
 //!
+//! It also times one cold `get_with_hash` — the rare full load, which decompresses the heavy
+//! metadata — from a freshly opened repository.
+//!
 //! The target reported as pass/fail is 3 ms for both, on all three profile inputs.
 
 use std::collections::BTreeMap;
@@ -181,6 +184,17 @@ async fn the_light_reads_cost_a_page() {
     }
     let section_rchar = rchar().saturating_sub(before) as f64 / CALLS as f64;
 
+    // The cold full load: a repository opened on the stored state, then one `get_with_hash`, which
+    // decodes every heavy metadata entry from its compressed blob.
+    let fresh = SqliteDocumentRepository::open(&database).expect("repository should reopen");
+    let started = Instant::now();
+    let loaded = fresh
+        .get_with_hash(&document_id)
+        .await
+        .expect("cold full read");
+    let full_cold_ms = millis(started.elapsed());
+    assert!(loaded.is_some(), "the document must exist");
+
     let (light_mean, light_median, light_p95) = summary(&mut light_samples);
     let (section_mean, section_median, section_p95) = summary(&mut section_samples);
     let light_pass = light_p95 <= TARGET_MS;
@@ -190,7 +204,8 @@ async fn the_light_reads_cost_a_page() {
          light_mean_ms={light_mean:.3} light_median_ms={light_median:.3} light_p95_ms={light_p95:.3} \
          light_rchar_per_call={light_rchar:.0} light_target={} \
          section_mean_ms={section_mean:.3} section_median_ms={section_median:.3} \
-         section_p95_ms={section_p95:.3} section_rchar_per_call={section_rchar:.0} section_target={}",
+         section_p95_ms={section_p95:.3} section_rchar_per_call={section_rchar:.0} section_target={} \
+         full_cold_ms={full_cold_ms:.3}",
         sections.len(),
         if light_pass { "pass" } else { "fail" },
         if section_pass { "pass" } else { "fail" },

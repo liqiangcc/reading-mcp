@@ -1,7 +1,9 @@
-//! `document_json` keeps only the light metadata entries and `document_meta_v1` the heavy ones, and
-//! the light, single-entry and single-section reads see the same document the full read does.
+//! `document_json` keeps only the light metadata entries and `document_meta_v2` the heavy ones,
+//! compressed, and the light, single-entry and single-section reads see the same document the full
+//! read does.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -148,18 +150,45 @@ fn stored_json_text(database: &Path, document_id: &DocumentId) -> String {
         .expect("stored document should exist")
 }
 
+/// Every heavy entry of `document_id` in `document_meta_v2`, decompressed, in key order.
 fn meta_rows(database: &Path, document_id: &DocumentId) -> Vec<(String, String)> {
     let connection = Connection::open(database).expect("database should open");
     let mut statement = connection
-        .prepare("SELECT key, value FROM document_meta_v1 WHERE document_id = ?1 ORDER BY key")
+        .prepare(
+            "SELECT key, encoding, value FROM document_meta_v2
+              WHERE document_id = ?1 ORDER BY key",
+        )
         .expect("statement");
     statement
         .query_map(params![&document_id.0], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .expect("rows")
-        .map(|row| row.expect("row"))
+        .map(|row| {
+            let (key, encoding, blob) = row.expect("row");
+            (key, decode_metadata_value(&encoding, &blob))
+        })
         .collect()
+}
+
+/// The string one `document_meta_v2` blob holds.
+fn decode_metadata_value(encoding: &str, blob: &[u8]) -> String {
+    let bytes = match encoding {
+        "raw" => blob.to_vec(),
+        "zlib" => {
+            let mut bytes = Vec::new();
+            flate2::read::ZlibDecoder::new(blob)
+                .read_to_end(&mut bytes)
+                .expect("zlib blob");
+            bytes
+        }
+        encoding => panic!("unknown encoding {encoding}"),
+    };
+    String::from_utf8(bytes).expect("utf-8 value")
 }
 
 fn update_json(database: &Path, document_id: &DocumentId, edit: impl FnOnce(&mut Value)) {
@@ -445,7 +474,7 @@ async fn an_unknown_metadata_store_is_stale() {
     let directory = tempdir().expect("temporary directory");
     let (database, document) = open_document(directory.path()).await;
     update_json(&database, &document.id, |stored| {
-        stored["metadata_store"] = json!("document_meta_v2");
+        stored["metadata_store"] = json!("document_meta_v3");
     });
 
     let reopened = SqliteDocumentRepository::open(&database).expect("repository should reopen");
@@ -469,7 +498,7 @@ async fn an_unknown_metadata_store_is_stale() {
             "expected StaleDocument, got {error:?}"
         );
         assert!(
-            error.to_string().contains("unknown store document_meta_v2"),
+            error.to_string().contains("unknown store document_meta_v3"),
             "stale message should name the removed store: {error}"
         );
         assert!(
@@ -502,7 +531,7 @@ async fn ocr_metadata_makes_the_light_read_take_the_full_path() {
         .expect_err("an invalid OCR publication must not load light either");
     assert_eq!(full_error.to_string(), light_error.to_string());
 
-    // The same blob stored as a heavy entry in `document_meta_v1`: the light map does not show it,
+    // The same blob stored as a heavy entry in `document_meta_v2`: the light map does not show it,
     // so the light read must look at the table to notice it.
     update_json(&database, &document.id, |stored| {
         stored["metadata"]
@@ -510,11 +539,18 @@ async fn ocr_metadata_makes_the_light_read_take_the_full_path() {
             .expect("metadata object")
             .remove("ocr_evidence_blob");
     });
+    let blob = "e".repeat(2000);
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(blob.as_bytes())
+        .expect("compress the OCR blob");
+    let compressed = encoder.finish().expect("finish the OCR blob");
     let connection = Connection::open(&database).expect("database should open");
     connection
         .execute(
-            "INSERT INTO document_meta_v1(document_id, key, value) VALUES (?1, ?2, ?3)",
-            params![&document.id.0, "ocr_evidence_blob", "e".repeat(2000)],
+            "INSERT INTO document_meta_v2(document_id, key, encoding, value)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![&document.id.0, "ocr_evidence_blob", "zlib", compressed],
         )
         .expect("heavy OCR row should insert");
     drop(connection);

@@ -178,7 +178,7 @@ impl GetDocumentStructureUseCase {
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let body_order = load_body_order(self.repository.as_ref(), &document).await?;
-        // `pdf_structure_provenance` is small, but it may still live in `document_meta_v1` for a
+        // `pdf_structure_provenance` is small, but it may still live in `document_meta_v2` for a
         // row that keeps its metadata there; `load_metadata` reads it from either place.
         let provenance = if document.media_type.is_pdf() {
             self.repository

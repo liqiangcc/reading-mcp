@@ -2450,6 +2450,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "encoding_rs",
+ "flate2",
  "image",
  "libc",
  "lopdf",

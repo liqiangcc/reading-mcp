@@ -80,25 +80,32 @@ def database_sizes(database: str) -> dict[str, int]:
         chunks = connection.execute(
             f"SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))), 0) FROM {table}"
         ).fetchone()
-        if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_meta_v1'"
-        ).fetchone():
-            meta = connection.execute(
-                "SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0)"
-                " FROM document_meta_v1"
-            ).fetchone()
-        else:
-            meta = (0, 0)
+        meta_v1 = metadata_table_facts(connection, "document_meta_v1")
+        meta_v2 = metadata_table_facts(connection, "document_meta_v2")
         return {
             "documents": int(documents[0]),
             "document_json_bytes": int(documents[1]),
             "section_text_rows": int(chunks[0]),
             "section_text_bytes": int(chunks[1]),
-            "document_meta_v1_rows": int(meta[0]),
-            "document_meta_v1_bytes": int(meta[1]),
+            "document_meta_v1_rows": meta_v1[0],
+            "document_meta_v1_bytes": meta_v1[1],
+            "document_meta_v2_rows": meta_v2[0],
+            "document_meta_v2_bytes": meta_v2[1],
         }
     finally:
         connection.close()
+
+
+def metadata_table_facts(connection, table: str) -> tuple[int, int]:
+    """The row count and UTF-8/compressed byte total of one metadata table, or zeros."""
+    if not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone():
+        return (0, 0)
+    rows, size = connection.execute(
+        f"SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0) FROM {table}"
+    ).fetchone()
+    return (int(rows), int(size))
 
 
 def sqlite_file_bytes(database: str) -> int:
@@ -194,6 +201,8 @@ def main() -> int:
             "section_text_rows={section_text_rows} section_text_bytes={section_text_bytes} "
             "document_meta_v1_rows={document_meta_v1_rows} "
             "document_meta_v1_bytes={document_meta_v1_bytes} "
+            "document_meta_v2_rows={document_meta_v2_rows} "
+            "document_meta_v2_bytes={document_meta_v2_bytes} "
             "sqlite_file_bytes={file_bytes}".format(
                 label=label,
                 size_mb=size_mb,

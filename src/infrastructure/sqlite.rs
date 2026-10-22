@@ -1,11 +1,15 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use flate2::Compression;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -289,6 +293,13 @@ impl SqliteDocumentRepository {
                     value TEXT NOT NULL,
                     UNIQUE(document_id, key)
                  );
+                 CREATE TABLE IF NOT EXISTS document_meta_v2 (
+                    document_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    encoding TEXT NOT NULL,
+                    value BLOB NOT NULL,
+                    UNIQUE(document_id, key)
+                 );
                  CREATE TABLE IF NOT EXISTS document_body_order_v1 (
                     document_id TEXT NOT NULL,
                     order_json TEXT,
@@ -351,7 +362,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                     metadata_store,
                 ))
                 .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
-                // The `documents` row and its `document_meta_v1` rows are replaced in one
+                // The `documents` row and its metadata rows are replaced in one
                 // transaction, so a document never keeps metadata rows of another version.
                 let transaction = connection.transaction().map_err(repository_error)?;
                 transaction
@@ -372,21 +383,30 @@ impl DocumentRepository for SqliteDocumentRepository {
                         ],
                     )
                     .map_err(repository_error)?;
+                // Rows of both metadata stores are deleted, so a document written by this version
+                // never keeps the rows of a version that used the other table.
                 transaction
                     .execute(
                         "DELETE FROM document_meta_v1 WHERE document_id = ?1",
                         params![document.id.0],
                     )
                     .map_err(repository_error)?;
+                transaction
+                    .execute(
+                        "DELETE FROM document_meta_v2 WHERE document_id = ?1",
+                        params![document.id.0],
+                    )
+                    .map_err(repository_error)?;
                 if !heavy_metadata.is_empty() {
                     let mut statement = transaction
                         .prepare_cached(
-                            "INSERT INTO document_meta_v1(document_id, key, value) VALUES (?1, ?2, ?3)",
+                            "INSERT INTO document_meta_v2(document_id, key, encoding, value) VALUES (?1, ?2, ?3, ?4)",
                         )
                         .map_err(repository_error)?;
                     for (key, value) in &heavy_metadata {
+                        let (encoding, blob) = encode_metadata_value(value)?;
                         statement
-                            .execute(params![document.id.0, key, value])
+                            .execute(params![document.id.0, key, encoding, blob])
                             .map_err(repository_error)?;
                     }
                 }
@@ -418,9 +438,9 @@ impl DocumentRepository for SqliteDocumentRepository {
         .await
     }
 
-    /// One row read, no section text, no `document_meta_v1` read and no cache: a `Document` that
+    /// One row read, no section text, no metadata-table read and no cache: a `Document` that
     /// carries only the light metadata entries and empty section `content`. A row written before
-    /// `document_meta_v1` existed keeps every entry inline, so its light metadata is that map split
+    /// the metadata split existed keeps every entry inline, so its light metadata is that map split
     /// the same way a save splits it; a row without a stored normalized hash, or a row with OCR
     /// metadata, takes the full path instead, so every field of its result matches
     /// `get_with_hash`.
@@ -453,7 +473,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                     return load_document_row(connection, &id, decode_timing);
                 };
                 // `validate_ocr_publication` reads the OCR metadata, which may be heavy and so
-                // live in `document_meta_v1` rather than in the light map. A document with any OCR
+                // live in a metadata table rather than in the light map. A document with any OCR
                 // metadata entry therefore takes the full path, so that its validation outcome is
                 // the one `get_with_hash` reports. Without OCR metadata there is nothing to
                 // validate and the light path skips the call.
@@ -603,8 +623,8 @@ fn load_document_row(
     Ok(Some((document, normalized_document_hash)))
 }
 
-/// Whether `document_id` has any OCR metadata entry, in the light map `metadata` or in
-/// `document_meta_v1`. Every OCR key starts with `ocr_`.
+/// Whether `document_id` has any OCR metadata entry, in the light map `metadata` or in either
+/// metadata table. Every OCR key starts with `ocr_`.
 fn has_ocr_metadata(
     connection: &Connection,
     document_id: &DocumentId,
@@ -617,7 +637,10 @@ fn has_ocr_metadata(
         .query_row(
             "SELECT 1 FROM document_meta_v1
               WHERE document_id = ?1 AND substr(key, 1, 4) = 'ocr_'
-              LIMIT 1",
+             UNION ALL
+             SELECT 1 FROM document_meta_v2
+              WHERE document_id = ?1 AND substr(key, 1, 4) = 'ocr_'
+             LIMIT 1",
             params![&document_id.0],
             |_row| Ok(()),
         )
@@ -626,7 +649,7 @@ fn has_ocr_metadata(
         .map_err(repository_error)
 }
 
-/// One metadata entry of `document_id`: the light map first, then `document_meta_v1`.
+/// One metadata entry of `document_id`: the light map first, then the store the row names.
 fn load_stored_metadata(
     connection: &Connection,
     document_id: &DocumentId,
@@ -647,21 +670,43 @@ fn load_stored_metadata(
         .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
     match stored.metadata_store.as_deref() {
         None => Ok(stored.metadata.get(key).cloned()),
-        Some(store) if store == DOCUMENT_META_STORE => {
+        Some(store) if store == DOCUMENT_META_STORE || store == DOCUMENT_META_STORE_V1 => {
             if let Some(value) = stored.metadata.get(key) {
                 return Ok(Some(value.clone()));
             }
-            connection
-                .query_row(
-                    "SELECT value FROM document_meta_v1 WHERE document_id = ?1 AND key = ?2",
-                    params![&document_id.0, key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(repository_error)
+            load_stored_metadata_entry(connection, document_id, store, key)
         }
         Some(store) => Err(unknown_metadata_store(store)),
     }
+}
+
+/// One heavy entry of `document_id` from `store`, decompressed when the row stores it compressed.
+fn load_stored_metadata_entry(
+    connection: &Connection,
+    document_id: &DocumentId,
+    store: &str,
+    key: &str,
+) -> Result<Option<String>, ApplicationError> {
+    if store == DOCUMENT_META_STORE_V1 {
+        return connection
+            .query_row(
+                "SELECT value FROM document_meta_v1 WHERE document_id = ?1 AND key = ?2",
+                params![&document_id.0, key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(repository_error);
+    }
+    let row = connection
+        .query_row(
+            "SELECT encoding, value FROM document_meta_v2 WHERE document_id = ?1 AND key = ?2",
+            params![&document_id.0, key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    row.map(|(encoding, blob)| decode_metadata_value(document_id, key, &encoding, &blob))
+        .transpose()
 }
 
 /// Where one section's text of one document lives.
@@ -896,15 +941,34 @@ fn load_body_order(
 const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v2";
 
 /// The `metadata_store` value of a `document_json` row that keeps its heavy metadata entries in
-/// `document_meta_v1`. A row without the key keeps every entry inline, which is what every row
-/// written before this change and a row whose entries are all light write.
-const DOCUMENT_META_STORE: &str = "document_meta_v1";
+/// `document_meta_v2`, compressed. A row without the key keeps every entry inline, which is what
+/// every row written before the split and a row whose entries are all light write.
+const DOCUMENT_META_STORE: &str = "document_meta_v2";
 
-/// A metadata value longer than this many bytes goes to `document_meta_v1` instead of
+/// The `metadata_store` value #205-#209 wrote: heavy entries in `document_meta_v1`, uncompressed.
+/// Rows of that shape are still read, and a save replaces them.
+const DOCUMENT_META_STORE_V1: &str = "document_meta_v1";
+
+/// The `encoding` of a `document_meta_v2` value that is the raw UTF-8 bytes of the entry.
+const DOCUMENT_META_ENCODING_RAW: &str = "raw";
+
+/// The `encoding` of a `document_meta_v2` value that is the UTF-8 bytes of the entry compressed in
+/// zlib format (RFC 1950), which `zlib.decompress` of Python reads.
+const DOCUMENT_META_ENCODING_ZLIB: &str = "zlib";
+
+/// The zlib level a heavy entry is compressed at: the fastest level whose output stays within 10%
+/// of the best level on 宋史's `normalized_block_map` (19.1 MB raw). Measured in CI; see the level
+/// table in the R1c-2 PR.
+const DOCUMENT_META_ZLIB_LEVEL: u32 = 6;
+
+/// A metadata value longer than this many bytes goes to `document_meta_v2` instead of
 /// `document_json`. The large maps of a book (`normalized_block_map`, `epub_structure_map`,
 /// `original_source_binding_map`) are megabytes; the small ones that a reader looks at per call
 /// (`content_encoding`, `parser`, page counts) are well under a kilobyte.
 const METADATA_HEAVY_BYTES: usize = 1024;
+
+/// The chunk size the metadata compressor is fed in: one stream, no whole-value copy.
+const METADATA_COMPRESS_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// The error an unknown `metadata_store` value is: the row needs an explicit source reopen, like
 /// every other stale row.
@@ -915,7 +979,7 @@ fn unknown_metadata_store(store: &str) -> ApplicationError {
 }
 
 /// Splits a document's metadata into the entries that stay inline in `document_json` and the heavy
-/// ones that `document_meta_v1` holds.
+/// ones that `document_meta_v2` holds.
 fn split_metadata(
     metadata: &BTreeMap<String, String>,
 ) -> (BTreeMap<String, String>, Vec<(String, String)>) {
@@ -929,6 +993,62 @@ fn split_metadata(
         }
     }
     (light, heavy)
+}
+
+/// The `(encoding, value)` a heavy metadata entry is stored as: the UTF-8 bytes of the entry
+/// compressed in zlib format. The encoder streams the value in [`METADATA_COMPRESS_CHUNK_BYTES`]
+/// chunks into one stream, so compressing a multi-megabyte map does not allocate a second copy of
+/// it.
+fn encode_metadata_value(value: &str) -> Result<(&'static str, Vec<u8>), ApplicationError> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(DOCUMENT_META_ZLIB_LEVEL));
+    for chunk in value.as_bytes().chunks(METADATA_COMPRESS_CHUNK_BYTES) {
+        encoder.write_all(chunk).map_err(|error| {
+            ApplicationError::RepositoryFailed(format!("metadata compression failed: {error}"))
+        })?;
+    }
+    let blob = encoder.finish().map_err(|error| {
+        ApplicationError::RepositoryFailed(format!("metadata compression failed: {error}"))
+    })?;
+    Ok((DOCUMENT_META_ENCODING_ZLIB, blob))
+}
+
+/// The exact UTF-8 string of one stored metadata value, decompressed when `encoding` says so. A
+/// blob that is not valid zlib data, or does not decode to UTF-8, is a corrupt row: an error that
+/// names it, never a panic.
+fn decode_metadata_value(
+    document_id: &DocumentId,
+    key: &str,
+    encoding: &str,
+    blob: &[u8],
+) -> Result<String, ApplicationError> {
+    let bytes = match encoding {
+        DOCUMENT_META_ENCODING_RAW => blob.to_vec(),
+        DOCUMENT_META_ENCODING_ZLIB => {
+            let mut bytes = Vec::new();
+            ZlibDecoder::new(blob)
+                .read_to_end(&mut bytes)
+                .map_err(|error| corrupt_metadata_entry(document_id, key, &error.to_string()))?;
+            bytes
+        }
+        encoding => {
+            return Err(corrupt_metadata_entry(
+                document_id,
+                key,
+                &format!("unknown encoding {encoding}"),
+            ));
+        }
+    };
+    String::from_utf8(bytes)
+        .map_err(|error| corrupt_metadata_entry(document_id, key, &error.to_string()))
+}
+
+/// The error of a metadata blob that cannot be decoded: the row needs a reopen, but the message
+/// says what is broken first.
+fn corrupt_metadata_entry(document_id: &DocumentId, key: &str, reason: &str) -> ApplicationError {
+    ApplicationError::RepositoryFailed(format!(
+        "stored metadata entry {key} of document {} cannot be decoded: {reason}",
+        document_id.0
+    ))
 }
 
 /// Whether `document`'s section text is stored in `section_text_v2` for exactly this document
@@ -5527,8 +5647,8 @@ impl StoredDocument {
         // kept all of them inline did before the split.
         match metadata_store.as_deref() {
             None => {}
-            Some(store) if store == DOCUMENT_META_STORE => {
-                load_document_metadata(connection, &document.id, &mut metadata)?;
+            Some(store) if store == DOCUMENT_META_STORE || store == DOCUMENT_META_STORE_V1 => {
+                load_document_metadata(connection, &document.id, store, &mut metadata)?;
             }
             Some(store) => return Err(unknown_metadata_store(store)),
         }
@@ -5548,7 +5668,7 @@ impl StoredDocument {
     }
 
     /// The light decode: the same checks as [`Self::into_document`], but no section text and no
-    /// `document_meta_v1` read, so the result costs one `documents` row. The caller has already
+    /// metadata-table read, so the result costs one `documents` row. The caller has already
     /// established that this row has a stored normalized hash and no OCR metadata.
     fn into_document_light(self) -> Result<Document, ApplicationError> {
         let persisted_version = self.normalization_version.ok_or_else(|| {
@@ -5566,7 +5686,9 @@ impl StoredDocument {
         // document whose entries are all light write: its light form is that map split the way a
         // save splits it, so the light read stays one row read for those documents too.
         let metadata = match self.metadata_store.as_deref() {
-            Some(store) if store == DOCUMENT_META_STORE => self.metadata,
+            Some(store) if store == DOCUMENT_META_STORE || store == DOCUMENT_META_STORE_V1 => {
+                self.metadata
+            }
             None => split_metadata(&self.metadata).0,
             Some(store) => return Err(unknown_metadata_store(store)),
         };
@@ -5602,23 +5724,45 @@ impl StoredDocument {
     }
 }
 
-/// Fills `metadata` with every heavy entry of `document_id` from `document_meta_v1`, so the decoded
-/// document carries the metadata a row that kept all of it inline carried.
+/// Fills `metadata` with every heavy entry of `document_id` from `store`, so the decoded document
+/// carries the metadata a row that kept all of it inline carried. A `document_meta_v2` entry is
+/// decompressed on demand, so the decoded strings are byte-identical to the ones that were saved.
 fn load_document_metadata(
     connection: &Connection,
     document_id: &DocumentId,
+    store: &str,
     metadata: &mut BTreeMap<String, String>,
 ) -> Result<(), ApplicationError> {
+    if store == DOCUMENT_META_STORE_V1 {
+        let mut statement = connection
+            .prepare_cached("SELECT key, value FROM document_meta_v1 WHERE document_id = ?1")
+            .map_err(repository_error)?;
+        let rows = statement
+            .query_map(params![&document_id.0], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(repository_error)?;
+        for row in rows {
+            let (key, value) = row.map_err(repository_error)?;
+            metadata.insert(key, value);
+        }
+        return Ok(());
+    }
     let mut statement = connection
-        .prepare_cached("SELECT key, value FROM document_meta_v1 WHERE document_id = ?1")
+        .prepare_cached("SELECT key, encoding, value FROM document_meta_v2 WHERE document_id = ?1")
         .map_err(repository_error)?;
     let rows = statement
         .query_map(params![&document_id.0], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .map_err(repository_error)?;
     for row in rows {
-        let (key, value) = row.map_err(repository_error)?;
+        let (key, encoding, blob) = row.map_err(repository_error)?;
+        let value = decode_metadata_value(document_id, &key, &encoding, &blob)?;
         metadata.insert(key, value);
     }
     Ok(())

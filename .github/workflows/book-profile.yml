@@ -194,13 +194,21 @@ jobs:
         run: |
           cargo build --release --locked --bin reading-mcp \
             --manifest-path base-src/Cargo.toml --target-dir base-target
-      - name: Download zh-large
+      - name: Download the books
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p "$BOOKS"
-          curl -fsSL --retry 3 -o "$BOOKS/zh-large.epub" \
-            "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"
-      - name: Generate cjk-64mib
+          for pair in \
+              "zh-large=https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" \
+              "en-novel=https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" \
+              "zh-classic=https://www.gutenberg.org/cache/epub/24264/pg24264-images.epub"; do
+            name="${pair%%=*}"
+            url="${pair#*=}"
+            curl -fsSL --retry 3 -o "$BOOKS/$name.epub" "$url" \
+              || echo "::warning::failed to download $url"
+          done
+          ls -l "$BOOKS"
+      - name: Generate cjk-64mib and md-2000
         run: |
           mkdir -p "$RUNNER_TEMP/inputs"
           python3 - <<'PY'
@@ -213,7 +221,32 @@ jobs:
               os.path.join(os.environ["RUNNER_TEMP"], "inputs", "cjk-64mib.txt"),
               64 * 1024 * 1024,
           )
+          module.write_markdown_document(
+              os.path.join(os.environ["RUNNER_TEMP"], "inputs", "md-2000.md"), 2000
+          )
           PY
+      - name: Disk, first-open seconds and peak RSS on main first, then the branch
+        run: |
+          set -uo pipefail
+          BOOKS="$RUNNER_TEMP/books"
+          GEN="$RUNNER_TEMP/inputs"
+          for side in base head; do
+            if [ "$side" = base ]; then bin=base-target/release/reading-mcp; else bin=target/release/reading-mcp; fi
+            docs=""
+            for pair in "zh-large=$BOOKS/zh-large.epub" \
+                        "en-novel=$BOOKS/en-novel.epub" \
+                        "zh-classic=$BOOKS/zh-classic.epub" \
+                        "md-2000=$GEN/md-2000.md"; do
+              [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
+            done
+            mkdir -p "disk-$side"
+            python3 scripts/memory-profile.py \
+              --binary "$bin" --states dir --disk --cjk-sizes-mb 64 \
+              --documents "$docs" \
+              --parse-timeout-seconds 900 --run-timeout-seconds 900 \
+              --out "disk-$side/runs.json" 2>&1 | tee "disk-$side.txt" \
+              || echo "::warning::disk profile failed for $side"
+          done
       - name: Measure deep reads on main first, then the branch
         run: |
           set -uo pipefail
@@ -258,10 +291,15 @@ jobs:
                 --mode read --kind sentence --policy preserve_source \
                 --start-fraction 0.5 --calls 50 --max-chars 2000
             done
+            facts_docs=(--documents "cjk-64mib=$GEN/cjk-64mib.txt" --documents "zh-large=$BOOKS/zh-large.epub")
+            for pair in "en-novel=$BOOKS/en-novel.epub" \
+                        "zh-classic=$BOOKS/zh-classic.epub" \
+                        "md-2000=$GEN/md-2000.md"; do
+              [ -f "${pair#*=}" ] && facts_docs+=(--documents "$pair")
+            done
             python3 scripts/sqlite-facts.py \
               --binary "$bin" --out-dir "$RUNNER_TEMP/facts-$side" \
-              --documents "cjk-64mib=$GEN/cjk-64mib.txt" \
-              --documents "zh-large=$BOOKS/zh-large.epub" \
+              "${facts_docs[@]}" \
               | tee "facts-$side.txt" || echo "::warning::sqlite facts failed for $side"
           done
           python3 - <<'PY'
@@ -317,6 +355,66 @@ jobs:
               with open(summary, "a", encoding="utf-8") as handle:
                   handle.write(table)
           PY
+      - name: Metadata compression level table
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import sqlite3
+          import time
+          import zlib
+
+          levels = (1, 3, 6, 9)
+          rows = [
+              "| input | raw bytes | level | compressed bytes | vs best | compress ms | decompress ms |",
+              "|---|---:|---:|---:|---:|---:|---:|",
+          ]
+          for label in ("zh-large", "en-novel"):
+              paths = sorted(
+                  glob.glob(os.path.join(os.environ["RUNNER_TEMP"], "facts-head",
+                                         f"state-{label}-*", "reading-mcp.sqlite"))
+              )
+              if not paths:
+                  rows.append(f"| {label} | missing state database | | | | | |")
+                  continue
+              connection = sqlite3.connect(paths[0])
+              try:
+                  row = connection.execute(
+                      "SELECT encoding, value FROM document_meta_v2"
+                      " WHERE key = 'normalized_block_map' LIMIT 1"
+                  ).fetchone()
+              finally:
+                  connection.close()
+              if row is None:
+                  rows.append(f"| {label} | no stored normalized_block_map | | | | | |")
+                  continue
+              encoding, blob = row
+              raw = zlib.decompress(blob) if encoding == "zlib" else bytes(blob)
+              measured = []
+              for level in levels:
+                  started = time.perf_counter()
+                  compressed = zlib.compress(raw, level)
+                  compress_ms = (time.perf_counter() - started) * 1000.0
+                  started = time.perf_counter()
+                  zlib.decompress(compressed)
+                  decompress_ms = (time.perf_counter() - started) * 1000.0
+                  measured.append((level, len(compressed), compress_ms, decompress_ms))
+              best = min(size for _, size, _, _ in measured)
+              for level, size, compress_ms, decompress_ms in measured:
+                  rows.append(
+                      f"| {label} | {len(raw)} | {level} | {size} |"
+                      f" {100.0 * (size - best) / best:.1f}% | {compress_ms:.0f} | {decompress_ms:.0f} |"
+                  )
+          table = "\n".join(rows) + "\n"
+          with open("level-table.md", "w", encoding="utf-8") as handle:
+              handle.write(table)
+          print(table)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(table)
+          PY
       - name: Upload measurement data
         if: always()
         uses: actions/upload-artifact@v4
@@ -328,3 +426,8 @@ jobs:
             measure-table.md
             facts-base.txt
             facts-head.txt
+            disk-base/
+            disk-head/
+            disk-base.txt
+            disk-head.txt
+            level-table.md

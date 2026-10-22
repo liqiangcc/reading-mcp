@@ -348,6 +348,7 @@ def facts_mode(args: argparse.Namespace) -> int:
                     record["to_unicode_bytes"] = len(stream)
             facts[entry["label"]] = {
                 "pages": document.page_count,
+                "toc_entries": len(document.get_toc()),
                 "fonts_per_page": per_page,
                 "fonts_in_resources": sum(per_page),
                 "strings_shown_per_page": shown,
@@ -528,7 +529,7 @@ def short(symbol: str, limit: int = 96) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def lopdf_table(rows: list[dict], facts: dict[str, dict]) -> str:
+def lopdf_table(rows: list[dict], facts: dict[str, dict], second_pass: set[str]) -> str:
     lines = [
         "| Input | Pages | Fonts in page `/Resources` (sum) | Strings shown per page | "
         "`pdf.rs` parses per page | `pdf_layout` second pass | `/ToUnicode` parses per page "
@@ -543,14 +544,21 @@ def lopdf_table(rows: list[dict], facts: dict[str, dict]) -> str:
         first = 2 * fact["fonts_in_resources"]
         strings = fact.get("strings_shown", 0)
         sections = row.get("sections")
-        second = isinstance(sections, int) and sections < pages
+        if row["label"] in second_pass:
+            second, label = True, "runs (in the profile)"
+        elif fact.get("toc_entries"):
+            second, label = False, "does not run (native TOC)"
+        elif isinstance(sections, int) and sections == pages:
+            second, label = False, "does not run (page fallback)"
+        else:
+            second, label = True, "runs (inferred headings, no /Outlines)"
         parses = first + (strings if second else 0)
         to_unicode = [font for font in fact["fonts"] if font["to_unicode"]]
         biggest = max((font["to_unicode_bytes"] for font in to_unicode), default=0)
         lines.append(
             f"| {row['label']} | {pages} | {fact['fonts_in_resources']} | "
-            f"{strings / pages:.1f} | {first / pages:.2f} | "
-            f"{'runs' if second else 'does not run'} | {parses / pages:.1f} | {parses} | "
+            f"{strings / pages:.1f} | {first / pages:.2f} | {label} | "
+            f"{parses / pages:.1f} | {parses} | "
             f"{biggest} | {biggest * parses / pages:.0f} |")
     lines.append("")
     lines.append("`pdf.rs parses per page` is 2 x the fonts in the page's `/Resources`: "
@@ -562,9 +570,11 @@ def lopdf_table(rows: list[dict], facts: dict[str, dict]) -> str:
                  "structure provenance is `inferred_numbered_headings` it reopens the PDF and "
                  "calls `extract_text_fragment_evidence`, whose `decode_text_object` "
                  "(`src/parsing/pdf_layout.rs:418-438`) resolves the font encoding again for "
-                 "**every string shown** - no cache. `runs` is inferred from `sections < pages` "
-                 "(only the inferred-heading provenance produces fewer sections than pages, and "
-                 "these documents have no `/Outlines`). The profile's share for "
+                 "**every string shown** - no cache. The second pass runs only on the "
+                 "`inferred_numbered_headings` provenance, so it is claimed when a document has "
+                 "no `/Outlines` (`toc_entries == 0` from PyMuPDF) and its section count differs "
+                 "from its page count, and it is corroborated by `decode_text_object` in the "
+                 "folded stacks where a profile exists. The profile's share for "
                  "`ToUnicodeCMap::parse` is in section 2. This is a model of the code, not a "
                  "counter.")
     return "\n".join(lines)
@@ -579,6 +589,13 @@ def cmap_symbol_share(label: str, folded: str) -> dict:
         if "tounicodecmap::parse" in lowered or "cmap_parser" in lowered:
             hits += weight
     return {"label": label, "share": 100.0 * hits / total, "samples": total}
+
+
+def has_symbol(folded: str, needle: str) -> bool:
+    if not os.path.exists(folded):
+        return False
+    with open(folded, encoding="utf-8", errors="replace") as handle:
+        return any(needle in line for line in handle)
 
 
 def report_mode(args: argparse.Namespace) -> int:
@@ -625,9 +642,12 @@ def report_mode(args: argparse.Namespace) -> int:
     out.append(scaling_table(rows))
     out.append("")
 
+    second_pass = {label for label in args.profile_label
+                   if has_symbol(os.path.join(args.perf_dir or "", f"{label}.folded"),
+                                 "decode_text_object")}
     out.append("## 4. Per-page cost inside lopdf")
     out.append("")
-    out.append(lopdf_table(rows, facts))
+    out.append(lopdf_table(rows, facts, second_pass))
     out.append("")
 
     out.append("## 5. Memory")

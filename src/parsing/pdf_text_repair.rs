@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId, Stream};
+use lopdf::{Dictionary, Document as LopdfDocument, Encoding, Object, ObjectId, Stream};
 
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_XOBJECT_DEPTH: usize = 8;
@@ -628,6 +628,11 @@ impl InlineContext {
             .ok()
             .and_then(|object| dictionary_of(doc, object))?;
         let value = font_dictionary.get(name).ok()?.clone();
+        let (_, font_object) = doc.dereference(&value).ok()?;
+        let font = font_object.as_dict().ok()?;
+        if !font_can_decode(doc, font) {
+            return None;
+        }
         let fresh = self.fresh_name();
         self.fonts.set(fresh.clone(), value);
         self.fresh_names.insert(key, fresh.clone());
@@ -655,6 +660,20 @@ impl InlineContext {
         if let Ok(page) = doc.get_dictionary_mut(page_id) {
             page.set("Resources", Object::Dictionary(resources));
         }
+    }
+}
+
+/// A font whose encoding lopdf can resolve without falling back to
+/// StandardEncoding for a CID font, and without the unimplemented predefined
+/// CMaps.  Inlining a form whose font would only produce a fallback encoding
+/// would turn "no text" into garbage, so such a form is left alone.
+fn font_can_decode(doc: &LopdfDocument, font: &Dictionary) -> bool {
+    let subtype = font.get(b"Subtype").and_then(Object::as_name).ok();
+    match font.get_font_encoding(doc) {
+        Ok(Encoding::UnicodeMapEncoding(_)) | Ok(Encoding::Differences(_)) => true,
+        Ok(Encoding::OneByteEncoding(_)) => subtype != Some(&b"Type0"[..]),
+        Ok(Encoding::SimpleEncoding(_)) => false,
+        Err(_) => false,
     }
 }
 

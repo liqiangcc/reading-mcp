@@ -1091,6 +1091,49 @@ mod tests {
     }
 
     #[test]
+    fn type0_form_font_with_to_unicode_is_extracted() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let to_unicode = b"/CIDInit /ProcSet findresource begin\n\
+            12 dict begin\n\
+            begincmap\n\
+            /CMapName /Adobe-Identity-UCS def\n\
+            /CMapType 2 def\n\
+            1 begincodespacerange\n\
+            <0000> <FFFF>\n\
+            endcodespacerange\n\
+            2 beginbfchar\n\
+            <0001> <4E2D>\n\
+            <0002> <6587>\n\
+            endbfchar\n\
+            endcmap\n\
+            CMapName currentdict /CMap defineresource pop\n\
+            end\n\
+            end\n";
+        let to_unicode_id =
+            document.add_object(Stream::new(Dictionary::new(), to_unicode.to_vec()));
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type0",
+            "BaseFont" => "TestCJK",
+            "Encoding" => "Identity-H",
+            "ToUnicode" => to_unicode_id,
+        });
+        let form_id = form(
+            &mut document,
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            None,
+            byte_text_operations("F1", &[0, 1, 0, 2]),
+        );
+        add_page(
+            &mut document,
+            vec![Operation::new("Do", vec![Object::Name(b"Fm1".to_vec())])],
+            dictionary! { "XObject" => dictionary! { "Fm1" => form_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "中文");
+    }
+
+    #[test]
     fn adobe_glyph_names_keep_their_old_decoding() {
         let mut document = LopdfDocument::with_version("1.5");
         let font_id = document.add_object(dictionary! {
@@ -1131,19 +1174,9 @@ mod tests {
             let document = LopdfDocument::load_mem(&bytes).expect("fixture loads");
             let old = old_page_texts(&document);
             let new = page_texts(&document);
-            if name == "F04-form.pdf" {
-                // The one fixture that does carry a text Form XObject: the
-                // hidden layer is now visible, which is the intended change.
-                assert!(old.iter().all(|page| page.text.is_empty()));
-                assert!(
-                    new.iter()
-                        .any(|page| page.text.contains("The observatory opens before sunrise."))
-                );
-                continue;
-            }
             assert_eq!(old, new, "fixture {name} changed");
             checked += 1;
         }
-        assert!(checked >= 14, "expected at least 14 unchanged fixtures");
+        assert!(checked >= 15, "expected 15 unchanged fixtures");
     }
 }

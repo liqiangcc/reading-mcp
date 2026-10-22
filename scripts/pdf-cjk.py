@@ -496,24 +496,33 @@ def cid_to_gid_map(doc, xref: int) -> str | None:
     return None
 
 
+def encoding_dict_label(dictionary: str) -> str:
+    base = re.search(r"/BaseEncoding\s*/([^\s/>]+)", dictionary)
+    if "/Differences" in dictionary:
+        return f"Differences({base.group(1) if base else 'none'})"
+    return f"dict({base.group(1) if base else 'none'})"
+
+
 def encoding_label(doc, xref: int) -> str:
     kind, value = doc.xref_get_key(xref, "Encoding")
     if kind == "name":
         return value.lstrip("/")
     if kind == "dict":
-        base = re.search(r"/BaseEncoding\s*/([^\s/>]+)", value)
-        differences = "/Differences" in value
-        if differences:
-            return f"Differences({base.group(1) if base else 'none'})"
-        return f"dict({base.group(1) if base else 'none'})"
+        return encoding_dict_label(value)
     if kind == "xref":
-        # An Encoding stream: a CMap program, so report its CMapName when it has one.
+        number = int(value.split()[0])
+        if doc.xref_is_stream(number):
+            # An embedded CMap program: report its CMapName when it has one.
+            try:
+                stream = doc.xref_stream(number).decode("latin-1")
+            except Exception:  # noqa: BLE001
+                return "CMap-stream"
+            name = re.search(r"/CMapName\s*/([^\s/>]+)", stream)
+            return f"CMap-stream:{name.group(1)}" if name else "CMap-stream"
         try:
-            stream = doc.xref_stream(int(value.split()[0])).decode("latin-1")
+            return encoding_dict_label(doc.xref_object(number))
         except Exception:  # noqa: BLE001
-            return "stream"
-        name = re.search(r"/CMapName\s*/([^\s/>]+)", stream)
-        return f"CMap:{name.group(1)}" if name else "stream"
+            return "indirect"
     return "none"
 
 
@@ -1093,8 +1102,8 @@ def aggregate_mode(args) -> int:
     measured = [paper for paper in papers if paper.get("reference")]
 
     per_paper = ["| Paper | Group | Pages | Producer | Ref CJK | Default CJK | Default units | "
-                 "CJK recovered | Loss | Layout | Layout CJK |",
-                 "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                 "CJK recovered | Loss | Unattributed CJK | Layout | Layout CJK |",
+                 "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for paper in papers:
         reference = paper.get("reference") or {}
         default = paper.get("default") or {}
@@ -1107,7 +1116,7 @@ def aggregate_mode(args) -> int:
             f"| {paper['id']} | {paper.get('group')} | {paper.get('pages')} | "
             f"{(paper.get('producer_family') or '-')} | {reference.get('cjk_chars', '-')} | "
             f"{default.get('cjk_chars', '-')} | {default.get('units_kept', '-')} | "
-            f"{found}/{chars} | {loss} | "
+            f"{found}/{chars} | {loss} | {fmt((paper.get('unattributed') or {}).get('chars'))} | "
             f"{layout.get('error_code') or layout.get('outcome') or '-'} | "
             f"{layout.get('cjk_chars', '-')} |")
 

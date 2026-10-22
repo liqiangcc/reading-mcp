@@ -200,6 +200,17 @@ impl ScanTextStore {
             .map(|sections| sections.over_cap)
             .unwrap_or(true)
     }
+
+    /// Records that the document's text cannot be cached at all, without reading any of it: a scan of
+    /// it then takes the one-section-at-a-time path from the start, as it does after its first pass.
+    fn mark_over_cap(&self) {
+        if let Ok(mut sections) = self.sections.lock() {
+            *sections = ScanTextSections {
+                over_cap: true,
+                ..Default::default()
+            };
+        }
+    }
 }
 
 /// The scan text store of `meta`'s document: the cached one when it holds that very document, else a
@@ -277,71 +288,127 @@ fn scan_text_store_for_warm(
     }
 }
 
-/// The warm's plan: the store to fill, the document's `doc_key` and the sections a scan would read
-/// (the stored sections with text). `None` when there is nothing to warm: the knob is off, the cache
-/// is off or its cap is 0, the document's units are not stored for this hash, or the document is
-/// already held.
-#[allow(clippy::type_complexity)]
+/// The warm's plan: the store to fill, the document's `doc_key`, the sections a scan would read with
+/// the bytes each holds, and the bytes the warm may still read. `None` when there is nothing to warm:
+/// the knob is off, the cache is off or its cap is 0, the document's units are not stored for this
+/// hash, another document holds the cache slot, or the document's text is larger than the cap.
 fn scan_warm_plan(
     connection: &Mutex<Connection>,
     cache: &Mutex<Option<Arc<ScanTextStore>>>,
     document_id: &DocumentId,
     expected_hash: &NormalizedDocumentHash,
-) -> Result<Option<(Arc<ScanTextStore>, i64, Vec<i64>)>, ApplicationError> {
+) -> Result<Option<WarmPlan>, ApplicationError> {
     if !scan_prewarm_enabled() || scan_text_cache_bytes() == 0 {
         return Ok(None);
     }
-    let connection = connection
-        .lock()
-        .map_err(|_| ApplicationError::TextUnitIndexFailed("SQLite lock poisoned".into()))?;
-    let Some(meta) = load_stored_document(&connection, document_id)? else {
-        return Ok(None);
+    let cap = scan_text_cache_bytes();
+    let lock = || {
+        connection
+            .lock()
+            .map_err(|_| ApplicationError::TextUnitIndexFailed("SQLite lock poisoned".into()))
     };
-    if meta.segmentation_version != TEXT_SEGMENTATION_VERSION
-        || meta.normalized_document_hash != *expected_hash
-    {
-        return Ok(None);
-    }
+    let (meta, sections) = {
+        let connection = lock()?;
+        let Some(meta) = load_stored_document(&connection, document_id)? else {
+            return Ok(None);
+        };
+        if meta.segmentation_version != TEXT_SEGMENTATION_VERSION
+            || meta.normalized_document_hash != *expected_hash
+        {
+            return Ok(None);
+        }
+        let sections = stored_sections(&connection, meta.doc_key)?
+            .into_iter()
+            .filter(|(_, _, char_len)| *char_len > 0)
+            .map(|(section_key, _, char_len)| (section_key, char_len))
+            .collect::<Vec<_>>();
+        (meta, sections)
+    };
     // The store a scan would fill when the cache is free or already holds this document; another
     // document's cached text is left alone.
     let Some(store) = scan_text_store_for_warm(cache, &meta) else {
         return Ok(None);
     };
-    let sections = stored_sections(&connection, meta.doc_key)?
-        .into_iter()
-        .filter(|(_, _, char_len)| *char_len > 0)
-        .map(|(section_key, _, _)| section_key)
-        .collect();
-    Ok(Some((store, meta.doc_key, sections)))
+    let chars: usize = sections.iter().map(|(_, char_len)| *char_len).sum();
+    // A UTF-8 char is at most four bytes, so a document of at most `cap / 4` chars certainly fits in
+    // `cap` bytes and the warm needs no byte sizes at all.
+    if chars <= cap / 4 {
+        return Ok(Some(WarmPlan {
+            store,
+            doc_key: meta.doc_key,
+            sections,
+            budget: usize::MAX,
+        }));
+    }
+    // The document may or may not fit. Measure the stored text bytes of one section at a time, each
+    // under its own short connection lock, and give up as soon as the total is over the cap: a
+    // document over the cap is then marked over the cap without its text ever being read into
+    // memory, which is the state its first scan would end in anyway.
+    let mut measured = Vec::with_capacity(sections.len());
+    let mut total = 0usize;
+    for (section_key, _) in &sections {
+        let bytes = {
+            let connection = lock()?;
+            stored_section_text_bytes(&connection, meta.doc_key, *section_key)?
+        };
+        total += bytes;
+        if total > cap {
+            store.mark_over_cap();
+            return Ok(None);
+        }
+        measured.push((*section_key, bytes));
+    }
+    Ok(Some(WarmPlan {
+        store,
+        doc_key: meta.doc_key,
+        sections: measured,
+        budget: cap,
+    }))
 }
 
-/// Fills `store` with the text of `sections`, one section at a time, in the order a scan reads them
-/// and with the loader a scan uses, so the entries are exactly what a first scan would store.
+/// What one warm will do: the store to fill, the document, the sections to read with the bytes each
+/// holds, and how many bytes of section text it may still read.
+struct WarmPlan {
+    store: Arc<ScanTextStore>,
+    doc_key: i64,
+    /// `(section_key, bytes)` in section order. The sections whose text a scan would read.
+    sections: Vec<(i64, usize)>,
+    /// The bytes the warm may read in total: `usize::MAX` when the document certainly fits.
+    budget: usize,
+}
+
+/// Fills `plan.store` with the text of its sections, one section at a time, in the order a scan reads
+/// them and with the loader a scan uses, so the entries are exactly what a first scan would store.
 ///
-/// Stops at once when the document outgrew the cap (`over_cap`), when the cache no longer holds
-/// `store` (the document was replaced, or another document took the slot), and after `steps`
-/// sections. The connection lock is held for one section's read only and dropped before the text is
-/// lowered and inserted, so foreground reads interleave with the warm.
+/// Stops at once when the document outgrew the cap (`over_cap`), when the cache no longer holds the
+/// store (the document was replaced, or another document took the slot), when the next section does
+/// not fit the remaining byte budget, and after `steps` sections. The connection lock is held for one
+/// section's read only and dropped before the text is lowered and inserted, so foreground reads
+/// interleave with the warm.
 fn warm_scan_text(
     connection: &Mutex<Connection>,
     cache: &Mutex<Option<Arc<ScanTextStore>>>,
-    store: &Arc<ScanTextStore>,
-    doc_key: i64,
-    sections: &[i64],
+    plan: &WarmPlan,
     steps: usize,
 ) -> Result<usize, ApplicationError> {
     let mut warmed = 0;
-    for section_key in sections.iter().take(steps) {
-        if store.over_cap() || !scan_text_cache_holds(cache, store) {
+    let mut budget = plan.budget;
+    for (section_key, bytes) in plan.sections.iter().take(steps) {
+        if plan.store.over_cap() || !scan_text_cache_holds(cache, &plan.store) {
+            break;
+        }
+        if *bytes > budget {
             break;
         }
         let text = {
             let connection = connection.lock().map_err(|_| {
                 ApplicationError::TextUnitIndexFailed("SQLite lock poisoned".into())
             })?;
-            load_section_text_unchecked(&connection, doc_key, *section_key)?
+            load_section_text_unchecked(&connection, plan.doc_key, *section_key)?
         };
-        store.insert(*section_key, Arc::new(ScanSectionText::new(text)));
+        plan.store
+            .insert(*section_key, Arc::new(ScanSectionText::new(text)));
+        budget = budget.saturating_sub(*bytes);
         warmed += 1;
     }
     Ok(warmed)
@@ -354,12 +421,29 @@ fn warm_scan_document(
     document_id: &DocumentId,
     expected_hash: &NormalizedDocumentHash,
 ) -> Result<usize, ApplicationError> {
-    let Some((store, doc_key, sections)) =
-        scan_warm_plan(connection, cache, document_id, expected_hash)?
-    else {
+    let Some(plan) = scan_warm_plan(connection, cache, document_id, expected_hash)? else {
         return Ok(0);
     };
-    warm_scan_text(connection, cache, &store, doc_key, &sections, usize::MAX)
+    warm_scan_text(connection, cache, &plan, usize::MAX)
+}
+
+/// The stored text bytes of one section of `doc_key`: what a warm would read for it. `length(CAST(
+/// text AS BLOB))` is the UTF-8 byte length of one stored chunk, so the sum is the section's size.
+fn stored_section_text_bytes(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+) -> Result<usize, ApplicationError> {
+    let bytes: i64 = connection
+        .query_row(
+            "SELECT COALESCE(SUM(length(CAST(text AS BLOB))), 0)
+             FROM section_text_v2
+             WHERE doc_key = ?1 AND section_key = ?2",
+            params![doc_key, section_key],
+            |row| row.get(0),
+        )
+        .map_err(text_unit_index_error)?;
+    i64_to_usize(bytes, "section text bytes")
 }
 
 /// How a lexical scan may use the per-document scan text cache, threads and score pruning.
@@ -1632,7 +1716,7 @@ impl SqliteTextUnitIndex {
         expected_hash: &NormalizedDocumentHash,
         steps: usize,
     ) -> Result<usize, ApplicationError> {
-        let Some((store, doc_key, sections)) = scan_warm_plan(
+        let Some(plan) = scan_warm_plan(
             &self.connection,
             &self.scan_text,
             document_id,
@@ -1641,14 +1725,7 @@ impl SqliteTextUnitIndex {
         else {
             return Ok(0);
         };
-        warm_scan_text(
-            &self.connection,
-            &self.scan_text,
-            &store,
-            doc_key,
-            &sections,
-            steps,
-        )
+        warm_scan_text(&self.connection, &self.scan_text, &plan, steps)
     }
 
     /// The normalized hash this document's units are stored for, if they are stored for the current

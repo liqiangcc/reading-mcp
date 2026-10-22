@@ -38,7 +38,8 @@ async fn a_document_over_the_cap_is_not_warmed_and_still_answers_the_plain_scan(
     repository.save(document.clone()).await.expect("save");
     index.index(&document).await.expect("index");
 
-    // The warm stops as soon as the document outgrows the cap, and holds nothing.
+    // The warm reads the stored byte size of the text once, sees that it is over the cap and
+    // marks the store over the cap without reading any text into it.
     index
         .prewarm_blocking(
             &document.id,

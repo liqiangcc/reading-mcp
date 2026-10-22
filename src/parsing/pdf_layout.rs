@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lopdf::content::Content;
@@ -76,17 +77,19 @@ impl<'a> FontEncodingMemo<'a> {
         max_decompressed_bytes: usize,
     ) -> Option<&Encoding<'a>> {
         let key = font as *const Dictionary as usize;
-        if self.resolved.get(&key).is_none() {
-            #[cfg(test)]
-            {
-                self.resolutions += 1;
+        match self.resolved.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut().as_ref(),
+            Entry::Vacant(entry) => {
+                #[cfg(test)]
+                {
+                    self.resolutions += 1;
+                }
+                let resolved = font
+                    .get_font_encoding_with_limit(pdf, max_decompressed_bytes)
+                    .ok();
+                entry.insert(resolved).as_ref()
             }
-            let resolved = font
-                .get_font_encoding_with_limit(pdf, max_decompressed_bytes)
-                .ok();
-            self.resolved.insert(key, resolved);
         }
-        self.resolved.get(&key).and_then(Option::as_ref)
     }
 
     #[cfg(test)]
@@ -507,7 +510,7 @@ fn decode_text_object<'a>(
     let bytes = object.as_str().ok()?;
     if let Some(font_resource) = font_resource
         && let Some(font) = fonts.get(font_resource)
-        && let Some(encoding) = memo.resolve(pdf, *font, max_decompressed_bytes)
+        && let Some(encoding) = memo.resolve(pdf, font, max_decompressed_bytes)
         && let Ok(text) = LopdfDocument::decode_text(encoding, bytes)
     {
         return Some(text);

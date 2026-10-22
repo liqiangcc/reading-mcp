@@ -262,6 +262,12 @@ impl SearchIndex for ObservedSearchIndex {
         self.inner.index_version()
     }
 
+    /// Forwarded, not defaulted: a no-op here would silently disable the warm in the runtime, as a
+    /// no-op `get_with_hash` did for `ObservedDocumentRepository` before #207.
+    fn prewarm(&self, document_id: &DocumentId, normalized_document_hash: &NormalizedDocumentHash) {
+        self.inner.prewarm(document_id, normalized_document_hash);
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let started = Instant::now();
         let result = self.inner.index(document).await;
@@ -761,6 +767,19 @@ pub fn emit_document_decode_miss(document: &Document, phases: DocumentDecodePhas
             .into_iter()
             .map(|(key, bytes)| json!({ "key": key, "bytes": bytes }))
             .collect::<Vec<_>>(),
+    }));
+}
+
+/// Emits one `scan_prewarm` event: how many section texts the background warm of the scan text cache
+/// stored and how long it took. Only a runtime with `READING_MCP_TELEMETRY` on emits it.
+#[doc(hidden)]
+pub fn emit_scan_prewarm(document_id: &DocumentId, sections: usize, duration_ms: u64, ok: bool) {
+    emit(json!({
+        "event": "scan_prewarm",
+        "document_id": document_id.0,
+        "sections": sections,
+        "duration_ms": duration_ms,
+        "success": ok,
     }));
 }
 

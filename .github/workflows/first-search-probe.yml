@@ -1,0 +1,198 @@
+name: First search profile
+
+# `workflow_dispatch` only fires for a workflow that already exists on the default branch, so a
+# `first-search-*` push is how this gate runs on the branch that introduces it.
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Fresh servers per input and shape
+        required: false
+        default: '10'
+  push:
+    branches: ['first-search-*']
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the release binary
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Download the books
+        run: |
+          BOOKS="$RUNNER_TEMP/books"
+          mkdir -p "$BOOKS"
+          download() {
+            local url="$1" out="$2"
+            if curl -fsSL --retry 3 -o "$out" "$url"; then
+              echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+            else
+              echo "::warning::failed to download $url"
+              rm -f "$out"
+            fi
+            return 0
+          }
+          # 宋史 is Gutenberg 24183, the book the book profile calls zh-large.
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$BOOKS/song-shi.epub"
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" "$BOOKS/en-novel.epub"
+          download "https://www.gutenberg.org/cache/epub/24264/pg24264-images.epub" "$BOOKS/zh-classic.epub"
+      - name: Generate cjk-64mib
+        run: |
+          mkdir -p "$RUNNER_TEMP/inputs"
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("memory_profile", "scripts/memory-profile.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          module.write_cjk_document(
+              os.path.join(os.environ["RUNNER_TEMP"], "inputs", "cjk-64mib.txt"),
+              64 * 1024 * 1024,
+          )
+          PY
+      - name: Measure the first search, open and memory with prewarm on and off
+        run: |
+          set -uo pipefail
+          BOOKS="$RUNNER_TEMP/books"
+          GEN="$RUNNER_TEMP/inputs"
+          REPEATS="${{ inputs.repeats || '10' }}"
+          mkdir -p measure
+          run() { # label document query side shape repeats calls
+            local label="$1" doc="$2" query="$3" side="$4" shape="$5" repeats="$6" calls="$7"
+            if [ ! -f "$doc" ]; then
+              echo "::warning::missing input for $label: $doc"
+              return 0
+            fi
+            local prewarm=1
+            [ "$side" = "prewarm-off" ] && prewarm=0
+            python3 scripts/first-search-probe.py \
+              --binary target/release/reading-mcp \
+              --document "$doc" \
+              --label "$label" \
+              --side "$side" \
+              --query "$query" \
+              --shape "$shape" \
+              --repeats "$repeats" \
+              --calls "$calls" \
+              --env READING_MCP_SCAN_PREWARM="$prewarm" \
+              --out "measure/$label-$side-$shape.json" \
+              || echo "::warning::probe failed: $label $side $shape"
+          }
+          for pair in "song-shi=$BOOKS/song-shi.epub:皇帝" \
+                      "en-novel=$BOOKS/en-novel.epub:Pierre" \
+                      "zh-classic=$BOOKS/zh-classic.epub:寶玉" \
+                      "cjk-64mib=$GEN/cjk-64mib.txt:皇帝"; do
+            label="${pair%%=*}"
+            rest="${pair#*=}"
+            doc="${rest%%:*}"
+            query="${rest##*:}"
+            for side in prewarm-on prewarm-off; do
+              run "$label" "$doc" "$query" "$side" first-search "$REPEATS" 200
+              run "$label" "$doc" "$query" "$side" immediate-search 5 200
+              run "$label" "$doc" "$query" "$side" foreground-reads 3 200
+            done
+          done
+      - name: Summarize
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          def fmt(value):
+              if value is None:
+                  return ""
+              if isinstance(value, float):
+                  return f"{value:.3f}"
+              return str(value)
+
+          rows = [
+              "| input | side | shape | repeats | search median ms | search p95 ms | search max ms "
+              "| v2 search median ms | hits | open median s | reopen median s | peak RSS KiB "
+              "| warm median ms | warm sections |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+          ]
+          reads = [
+              "| input | side | calls | read mean ms | read median ms | read p95 ms | read max ms |",
+              "|---|---|---|---|---|---|---|",
+          ]
+          notes = []
+          for path in sorted(glob.glob("measure/*.json")):
+              with open(path, encoding="utf-8") as handle:
+                  data = json.load(handle)
+              search = data.get("search_ms") or {}
+              v2 = data.get("v2_search_ms") or {}
+              open_s = data.get("open_seconds") or {}
+              reopen_s = data.get("reopen_seconds") or {}
+              peak = data.get("peak_rss_kib") or {}
+              warm = data.get("warm_ms") or {}
+              rows.append(
+                  "| {label} | {side} | {shape} | {repeats} | {med} | {p95} | {max} | {v2} | {hits} "
+                  "| {open} | {reopen} | {peak} | {warm} | {sections} |".format(
+                      label=data.get("label", os.path.basename(path)),
+                      side=data.get("side", ""),
+                      shape=data.get("shape", ""),
+                      repeats=fmt(data.get("repeats")),
+                      med=fmt(search.get("median")),
+                      p95=fmt(search.get("p95")),
+                      max=fmt(search.get("max")),
+                      v2=fmt(v2.get("median")),
+                      hits=",".join(str(value) for value in data.get("hits") or []),
+                      open=fmt(open_s.get("median")),
+                      reopen=fmt(reopen_s.get("median")),
+                      peak=fmt(peak.get("max")),
+                      warm=fmt(warm.get("median")),
+                      sections=",".join(str(value) for value in data.get("warm_sections") or []),
+                  )
+              )
+              read = data.get("read_ms") or {}
+              if read:
+                  reads.append(
+                      "| {label} | {side} | {calls} | {mean} | {med} | {p95} | {max} |".format(
+                          label=data.get("label", ""),
+                          side=data.get("side", ""),
+                          calls=fmt(read.get("calls")),
+                          mean=fmt(read.get("mean")),
+                          med=fmt(read.get("median")),
+                          p95=fmt(read.get("p95")),
+                          max=fmt(read.get("max")),
+                      )
+                  )
+              for item in data.get("skipped") or []:
+                  notes.append(
+                      f"- {data.get('label')} {data.get('side')} {data.get('shape')}: {item}"
+                  )
+          report = "\n\n".join(
+              [
+                  "## First search after open",
+                  "\n".join(rows),
+                  "## Foreground get_text_units during the warm",
+                  "\n".join(reads),
+              ]
+          )
+          if notes:
+              report += "\n\n## Skipped\n" + "\n".join(sorted(set(notes)))
+          report += "\n"
+          with open("measure-table.md", "w", encoding="utf-8") as handle:
+              handle.write(report)
+          print(report)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(report)
+          PY
+      - name: Upload measurement data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-search-${{ github.run_id }}
+          path: |
+            measure/
+            measure-table.md

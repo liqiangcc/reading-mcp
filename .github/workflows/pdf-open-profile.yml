@@ -1,0 +1,324 @@
+name: PDF open time and CMap
+run-name: PDF open time and CMap (PDF-2a)
+on:
+  workflow_dispatch:
+  push:
+    branches: ['bench/pdf2a-**']
+
+env:
+  # Same build shape as cpu-profile.yml (R5a): symbols for perf, frame pointers for stacks.
+  CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+  RUSTFLAGS: -C force-frame-pointers=yes
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target-pdf2a
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pdf2a
+      - name: Build release binary with line tables and frame pointers
+        run: cargo build --release --locked --bin reading-mcp 2>&1 | tail -5
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf2a-bin
+          path: ${{ github.workspace }}/target-pdf2a/release/reading-mcp
+
+  inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2 2>&1 | tail -3
+      - name: Download public-domain sources
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p "$IN"
+          download() {
+            if curl -fsSL --retry 3 -o "$2" "$1"; then
+              echo "$2: $(stat -c%s "$2") bytes"
+            else
+              echo "::warning::failed to download $1"
+              rm -f "$2"
+            fi
+            return 0
+          }
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600.txt" "$IN/war-and-peace.txt"
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$IN/song-shi.epub"
+      - name: Download the two lossy papers and three control papers (CC-BY, from pdf-cjk-ids.txt)
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          for id in 2610.18269 2604.00909 2502.19428 2501.08197 2410.10278; do
+            if curl -fsSL --retry 3 -o "$IN/$id.pdf" "https://arxiv.org/pdf/$id"; then
+              echo "$id: $(stat -c%s "$IN/$id.pdf") bytes $(sha256sum "$IN/$id.pdf" | cut -c1-16)"
+            else
+              echo "::error::failed to download $id"
+            fi
+          done
+          # The two lossy papers are pinned in scripts/pdf-cjk-ids.txt: verify the bytes.
+          pinned=$(python3 -c 'import json; [print(e["id"], e["sha256"]) for e in (json.loads(l) for l in open("scripts/pdf-cjk-ids.txt", encoding="utf-8") if l.strip().startswith("{"))]')
+          for id in 2610.18269 2604.00909; do
+            want=$(echo "$pinned" | awk -v id="$id" '$1 == id { print $2 }')
+            got=$(sha256sum "$IN/$id.pdf" | cut -d" " -f1)
+            if [ -z "$want" ] || [ "$want" != "$got" ]; then
+              echo "::error::$id is not the pinned PDF (want $want, got $got)"
+              exit 1
+            fi
+            echo "$id: sha256 matches scripts/pdf-cjk-ids.txt"
+          done
+      - name: Generate the long texts at 100/300/600 pages and the 12-page two-column paper
+        run: |
+          set -o pipefail
+          export IN="$RUNNER_TEMP/inputs"
+          python3 -c 'import importlib.util, os; spec = importlib.util.spec_from_file_location("gen", "scripts/pdf-gen-inputs.py"); gen = importlib.util.module_from_spec(spec); spec.loader.exec_module(gen); target = os.environ["IN"]; war = gen.read_plain_text(os.path.join(target, "war-and-peace.txt")); song = gen.extract_epub_text(os.path.join(target, "song-shi.epub")); assert war is not None, "war-and-peace.txt missing: the EN inputs would not be reproducible"; assert song is not None, "song-shi.epub missing: the CJK inputs would not be reproducible"; gen.build_paper(target, "paper-2col-cjk", cjk=True, font_path=gen.CJK_FONT, pages=gen.PAPER_PAGES); [gen.build_long_text(target, "text-long-en-%d" % p, war, cjk=False, font_path="helv", pages=p) for p in (100, 300, 600)]; [gen.build_long_text(target, "text-long-cjk-%d" % p, song, cjk=True, font_path=gen.CJK_FONT, pages=p) for p in (100, 300, 600)]; print("generated 6 long texts and paper-2col-cjk", flush=True)' 2>&1 | tail -5
+          ls -l "$IN"/*.pdf | tail -12
+      - name: Upload inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf2a-inputs
+          path: ${{ runner.temp }}/inputs
+          retention-days: 7
+
+  profile:
+    needs: [build, inputs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2 2>&1 | tail -3
+      - name: Install perf
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common || true
+          sudo apt-get install -y "linux-tools-$(uname -r)" \
+            || sudo apt-get install -y linux-tools-generic \
+            || true
+          sudo sysctl kernel.perf_event_paranoid=-1 || true
+          sudo sysctl kernel.kptr_restrict=0 || true
+          PERF=$(command -v perf || true)
+          if [ -z "$PERF" ] || ! "$PERF" --version >/dev/null 2>&1; then
+            PERF=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null | tail -1)
+          fi
+          if [ -z "$PERF" ] || ! "$PERF" --version; then
+            echo "::error::no working perf binary found"
+            exit 1
+          fi
+          echo "PERF=$PERF" >> "$GITHUB_ENV"
+          sysctl kernel.perf_event_paranoid kernel.kptr_restrict || true
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf2a-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf2a-inputs
+          path: ${{ runner.temp }}/inputs
+      - name: Open every input under telemetry (perf on the two 300-page cases)
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          BIN="$RUNNER_TEMP/bin/reading-mcp"
+          chmod +x "$BIN"
+          mkdir -p "$RUNNER_TEMP/perf"
+          python3 scripts/pdf-open-profile.py --mode run \
+            --binary "$BIN" \
+            --out "$RUNNER_TEMP/perf/runs.json" \
+            --out-dir "$RUNNER_TEMP/perf" \
+            --state-dir "$RUNNER_TEMP/state" \
+            --timeout 1800 \
+            --perf "$PERF" \
+            --perf-label text-long-cjk-300 --perf-label text-long-en-300 \
+            --input "text-long-cjk-100=$IN/text-long-cjk-100.pdf" \
+            --input "text-long-cjk-300=$IN/text-long-cjk-300.pdf" \
+            --input "text-long-cjk-600=$IN/text-long-cjk-600.pdf" \
+            --input "text-long-en-100=$IN/text-long-en-100.pdf" \
+            --input "text-long-en-300=$IN/text-long-en-300.pdf" \
+            --input "text-long-en-600=$IN/text-long-en-600.pdf" \
+            --input "paper-2610.18269=$IN/2610.18269.pdf" \
+            --input "paper-2604.00909=$IN/2604.00909.pdf" 2>&1 | tail -30
+          ls -l "$RUNNER_TEMP/perf" | tail -20
+      - name: Fold the two CPU profiles
+        if: always()
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP/perf"
+          for label in text-long-cjk-300 text-long-en-300; do
+            if [ -f "$label.perf.data" ]; then
+              "$PERF" report -i "$label.perf.data" --no-children --sort dso,symbol --stdio \
+                --no-call-graph --percent-limit 0.1 > "$label.self-flat.txt" 2>/dev/null || true
+              "$PERF" script -i "$label.perf.data" 2>/dev/null \
+                | python3 "$GITHUB_WORKSPACE/scripts/perf-collapse.py" > "$label.folded" || true
+              echo "=== $label: $(wc -l < "$label.folded") stacks, top 5:"
+              head -5 "$label.folded" | cut -c1-160 || true
+            fi
+          done
+          for data in *.perf.data; do gzip -9 "$data"; done
+          ls -l | tail -20
+      - name: Document-side facts (pages, fonts per page, /ToUnicode sizes)
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          python3 scripts/pdf-open-profile.py --mode facts \
+            --out "$RUNNER_TEMP/perf/facts.json" \
+            --input "text-long-cjk-100=$IN/text-long-cjk-100.pdf" \
+            --input "text-long-cjk-300=$IN/text-long-cjk-300.pdf" \
+            --input "text-long-cjk-600=$IN/text-long-cjk-600.pdf" \
+            --input "text-long-en-100=$IN/text-long-en-100.pdf" \
+            --input "text-long-en-300=$IN/text-long-en-300.pdf" \
+            --input "text-long-en-600=$IN/text-long-en-600.pdf" \
+            --input "paper-2610.18269=$IN/2610.18269.pdf" \
+            --input "paper-2604.00909=$IN/2604.00909.pdf" 2>&1 | tail -12
+      - name: Build the open-time tables
+        run: |
+          set -o pipefail
+          python3 scripts/pdf-open-profile.py --mode report \
+            --runs "$RUNNER_TEMP/perf/runs.json" \
+            --facts "$RUNNER_TEMP/perf/facts.json" \
+            --perf-dir "$RUNNER_TEMP/perf" \
+            --profile-label text-long-cjk-300 --profile-label text-long-en-300 \
+            --out "$RUNNER_TEMP/perf/open-profile.md" 2>&1 | tail -150
+          {
+            echo "## Open-time profile"
+            echo
+            cat "$RUNNER_TEMP/perf/open-profile.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf2a-profile
+          path: ${{ runner.temp }}/perf/
+          if-no-files-found: warn
+          retention-days: 14
+
+  cmap:
+    needs: [build, inputs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2 2>&1 | tail -3
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf2a-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf2a-inputs
+          path: ${{ runner.temp }}/inputs
+      - name: Locate the lopdf 0.44 source the model is quoted from
+        run: |
+          set -o pipefail
+          cargo fetch --locked 2>&1 | tail -2 || true
+          LOPDF=$(ls -d ~/.cargo/registry/src/*/lopdf-0.44.0 2>/dev/null | tail -1)
+          echo "LOPDF=$LOPDF"
+          if [ -n "$LOPDF" ]; then
+            grep -n "fn get_to_unicode_encoding" "$LOPDF/src/object.rs" || true
+            grep -n "fn hex_u16\|fn target_string\|fn cmap_stream" "$LOPDF/src/parser/cmap_parser.rs" || true
+            grep -n "UnicodeMapEncoding" "$LOPDF/src/encodings/mod.rs" | head -2 || true
+            grep -n "fn from_sections\|fn get(" "$LOPDF/src/encodings/cmap.rs" || true
+          fi
+      - name: Minimal repro of the lopdf CMap rejection (self-test of the model)
+        run: |
+          set -o pipefail
+          mkdir -p cmap
+          python3 scripts/pdf-cmap-probe.py --binary /bin/true --state-dir "$RUNNER_TEMP/state" \
+            --out "$RUNNER_TEMP/unused.json" \
+            --selftest-out cmap/minimal-repro.json 2>&1 | tail -12
+      - name: Probe the /ToUnicode CMaps of the lossy and control fonts
+        run: |
+          set -o pipefail
+          IN="$RUNNER_TEMP/inputs"
+          BIN="$RUNNER_TEMP/bin/reading-mcp"
+          chmod +x "$BIN"
+          mkdir -p cmap
+          python3 scripts/pdf-cmap-probe.py --binary "$BIN" \
+            --paper "2610.18269=$IN/2610.18269.pdf" \
+            --paper "2604.00909=$IN/2604.00909.pdf" \
+            --generated "paper-2col-cjk=$IN/paper-2col-cjk.pdf" \
+            --generated "text-long-cjk-100=$IN/text-long-cjk-100.pdf" \
+            --control "2502.19428=$IN/2502.19428.pdf" \
+            --control "2501.08197=$IN/2501.08197.pdf" \
+            --control "2410.10278=$IN/2410.10278.pdf" \
+            --state-dir "$RUNNER_TEMP/state" \
+            --dump-dir cmap \
+            --out cmap/cmap-probe.json \
+            --md cmap/cmap-probe.md 2>&1 | tail -40
+          {
+            echo "## CMap probe"
+            echo
+            cat cmap/cmap-probe.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -l cmap | tail -20
+      - name: Upload the probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf2a-cmap
+          path: cmap/
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    needs: [profile, cmap]
+    if: always() && needs.profile.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pdf2a-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/all
+      - name: Collect the tables
+        run: |
+          set -o pipefail
+          OUT="$RUNNER_TEMP/pdf2a.md"
+          : > "$OUT"
+          for file in "$RUNNER_TEMP"/all/open-profile.md "$RUNNER_TEMP"/all/cmap-probe.md; do
+            if [ -f "$file" ]; then
+              echo "<!-- $file -->" >> "$OUT"
+              cat "$file" >> "$OUT"
+              echo >> "$OUT"
+            fi
+          done
+          echo "### Files"
+          find "$RUNNER_TEMP/all" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tail -20
+          echo
+          echo "### Minimal repro verdicts"
+          cat "$RUNNER_TEMP"/all/minimal-repro.json | head -40 || true
+          cat "$OUT" >> "$GITHUB_STEP_SUMMARY"
+          cp "$OUT" "$RUNNER_TEMP"/all/pdf2a.md
+      - name: Upload the collected tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf2a-tables
+          path: ${{ runner.temp }}/all/
+          if-no-files-found: warn
+          retention-days: 14

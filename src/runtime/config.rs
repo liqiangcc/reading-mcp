@@ -44,6 +44,8 @@ pub struct RuntimeConfig {
     /// `None` means "temporary state directory removed on shutdown", not in-memory state.
     pub state_dir: Option<PathBuf>,
     pub allow_http: bool,
+    /// `READING_MCP_RESOLVE_LANDING_PAGES`: resolve a paper landing page to its PDF (PDF-3).
+    pub resolve_landing_pages: bool,
     pub telemetry: bool,
     pub tools: ToolSet,
     pub resource_budget: ResourceBudget,
@@ -70,6 +72,7 @@ impl Default for RuntimeConfig {
             local_roots: vec![],
             state_dir: default_state_dir(),
             allow_http: false,
+            resolve_landing_pages: true,
             telemetry: true,
             tools: ToolSet::default(),
             resource_budget,
@@ -148,6 +151,10 @@ impl RuntimeConfig {
         }
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;
+        config.resolve_landing_pages = env_bool(
+            "READING_MCP_RESOLVE_LANDING_PAGES",
+            config.resolve_landing_pages,
+        )?;
         config.telemetry = env_bool("READING_MCP_TELEMETRY", config.telemetry)?;
         if let Ok(value) = std::env::var("READING_MCP_TOOLS")
             && !value.trim().is_empty()

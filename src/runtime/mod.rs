@@ -35,8 +35,8 @@ use crate::parsing::{
     PersistedDocumentReliabilityInspector,
 };
 use crate::retrieval::{
-    EnvironmentCredentialProvider, HttpRetriever, LimitedFileRetriever, RetrieverRouter,
-    RevalidatingHttpRetriever, SourcePolicyRouter,
+    EnvironmentCredentialProvider, HttpRetriever, LandingPageConfig, LandingPageRetriever,
+    LimitedFileRetriever, RetrieverRouter, RevalidatingHttpRetriever, SourcePolicyRouter,
 };
 use crate::security::{HttpAccessPolicy, PublicHttpAccessPolicy};
 
@@ -91,6 +91,7 @@ pub fn build_server(
         components
     };
 
+    let landing_policy: Arc<dyn HttpAccessPolicy> = retriever_http_policy.clone();
     let http = Arc::new(HttpRetriever::with_credentials(
         retriever_http_policy,
         config.http.clone(),
@@ -98,6 +99,17 @@ pub fn build_server(
     ));
     let http: Arc<dyn Retriever> =
         Arc::new(RevalidatingHttpRetriever::new(http, components.raw_cache));
+    // The resolver sits above the revalidating retriever: the pure URL rules pick the PDF URL
+    // before any fetch, so a reopen of a landing-page link revalidates the cached PDF exactly like
+    // a direct PDF link, and a resolved target is fetched through the same cache and policy.
+    let http: Arc<dyn Retriever> = Arc::new(LandingPageRetriever::new(
+        http,
+        landing_policy,
+        LandingPageConfig {
+            enabled: config.resolve_landing_pages,
+            allow_http: config.allow_http,
+        },
+    ));
     let file: Arc<dyn Retriever> = Arc::new(LimitedFileRetriever::new(
         config.resource_budget.max_document_bytes,
     ));

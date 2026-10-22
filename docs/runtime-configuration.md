@@ -189,6 +189,23 @@ READING_MCP_HTTP_TIMEOUT_SECS
 READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 ```
 
+## 论文落地页解析（`READING_MCP_RESOLVE_LANDING_PAGES`，PDF-3）
+
+默认开启。打开论文的落地页链接（`arxiv.org/abs/...`、`doi.org/...`、OpenReview forum、
+ACL Anthology 页面等）时，`open` / `open_document` 读取论文 PDF 而不是摘要页：
+
+```text
+READING_MCP_RESOLVE_LANDING_PAGES=1     默认，开启解析
+READING_MCP_RESOLVE_LANDING_PAGES=off   关闭；行为与未引入解析时逐字节一致
+```
+
+取值与其他 `READING_MCP_*` 布尔开关一致（`1/true/yes/on`、`0/false/no/off`），其他取值是启动错误。
+
+解析只有一层深度，且解析出的 URL 与用户直接输入的 URL 走完全相同的检查：只接受 https
+（`READING_MCP_ALLOW_HTTP` 打开时普通 HTTP 落地页同样可解析，且不允许改变 scheme）、
+`HttpAccessPolicy`/SSRF 防护（拒绝私有/回环/链路本地地址、拒绝 URL 内嵌凭据）、同一 redirect
+上限、同一大小上限与超时、不带 cookie。解析目标必须返回 `application/pdf`，否则回退到落地页。
+
 ## Resource Budget
 
 默认值：

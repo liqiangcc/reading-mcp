@@ -172,3 +172,69 @@ stream); nested forms; a cyclic form; an image-only form; a `Type1`
 their old decoding; and a regression over
 `tests/fixtures/scanned_pdf/pdf/F01-F14` (plus `F04-form.pdf`) asserting old
 and new page texts and chunks are identical.
+
+## 5. Results (run on the final head)
+
+### PDF-1c CJK corpus (25 papers, `pdf-cjk.yml`)
+
+- 2 of 25 papers lose more than 5% of their reference CJK characters, down
+  from 9.  Seven of the nine were at 100% before.
+- XObject text: 7,735 reference CJK characters, 7,600 recovered, **1.7% loss**
+  (before: 99.3%).
+- `Type1|Differences(none)|...|page` (the `uniXXXX` group): 1,962 reference
+  characters, 1,962 recovered, **0.0% loss** (before: 100.0%).
+- Page-stream text: 26,159 reference characters, 26,130 recovered, 0.1% loss
+  (before: 8.0%).
+- The 16 papers that were already at 0% stay at 0%; no paper's loss increased.
+
+The nine papers that were over 5% before:
+
+| Paper | Before | After |
+| --- | --- | --- |
+| 2404.12618 | 31.2% | 0.0% |
+| 2410.13854 | 100.0% | 0.0% |
+| 2505.17816 | 100.0% | 0.0% |
+| 2511.15059 | 100.0% | 0.0% |
+| 2608.04397 | 13.0% | 0.0% |
+| 2610.18269 | 100.0% | 27.0% |
+| 2510.22276 | 100.0% | 0.0% |
+| 2604.00909 | 100.0% | 16.8% |
+| 2610.09321 | 100.0% | 0.0% |
+
+Still lossy, and why:
+
+- **2610.18269 (27.0%)**: the page-stream `Type0/CIDFontType0|Identity-H`
+  font with **no `/ToUnicode`** (76 characters) is out of scope and still
+  falls back to StandardEncoding. The `Type0/CIDFontType0|Identity-H|tounicode`
+  XObject group also keeps 22.8% loss; its `/ToUnicode` CMap is one lopdf
+  0.44 cannot fully parse, so `font_can_decode` leaves those forms alone
+  instead of inlining Latin fallback garbage.
+- **2604.00909 (16.8%)**: `Type0/CIDFontType2|Identity-H|tounicode` XObject
+  fonts (153/130, 94/79, 194/145); the same CMap-parse limitation. The page
+  `uniXXXX` fonts in this paper are fully recovered.
+
+### PDF-1a corpus (30 ordinary papers, `pdf-corpus.yml`)
+
+- No paper lost sentences, characters or 5-gram containment.  The only two
+  papers whose text changed are 2610.17703 (A2 `uniXXXX` page fonts:
+  1,003 -> 1,086 sentences, containment 0.710 -> 0.739) and 2610.18269 (A1
+  XObject text: 63 -> 117 sentences, containment 0.884 -> 0.996); both
+  improved.
+- Default open time: median 0.085 s (PDF-1a 0.075-0.08 s), worst 0.29 s
+  (PDF-1a 0.25 s).  Papers whose output is byte-identical also moved by the
+  same amount (e.g. 2610.28567 0.25 -> 0.29 s), so the difference is
+  run-to-run variation; the only code-path changes are the two CJK papers
+  above (0.11 -> 0.14 s and 0.05 -> 0.07 s).
+- `ingest-parity.yml`: all 23 inputs, every column `same`.
+- `book-profile.yml`: reported separately in the PR.
+
+### Duplicate text from XObjects
+
+Measured on the 50 unique papers (25 CJK + 30 PDF-1a, five overlap) by
+reading the whole document through the old and the new binary and comparing
+sentence items per page: **1,076 new sentence items** (380,636 characters),
+of which **5 items (50 characters) are exact duplicates** of a sentence
+already on the same page (0.46% of new items, 0.013% of new characters).  The
+duplicates are in 2610.17703.  This is a text-unit measurement; the internal
+`PageText.chunks` are not exposed by the MCP tools, so the count is an upper
+bound on duplicate chunks (a chunk is larger than a sentence).

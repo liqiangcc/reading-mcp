@@ -122,7 +122,6 @@ squash = CORPUS.squash
 license_marker = CORPUS.license_marker
 write_json = CORPUS.write_json
 append_jsonl = CORPUS.append_jsonl
-load_records = CORPUS.load_records
 fmt = CORPUS.fmt
 gram_containment = CORPUS.gram_containment
 
@@ -1030,6 +1029,25 @@ def run_shard(args) -> int:
 # Aggregate
 # --------------------------------------------------------------------------------------------
 
+def load_records_recursive(jsonl_dir: str) -> list[dict]:
+    """Every `*.jsonl` under the directory, at any depth (artifacts keep their subdirectories)."""
+    records: list[dict] = []
+    for root, _dirs, names in os.walk(jsonl_dir):
+        for name in sorted(names):
+            if not name.endswith(".jsonl"):
+                continue
+            with open(os.path.join(root, name), encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    return records
+
+
 def group_rows(papers: list[dict]) -> list[dict]:
     groups: dict[str, dict] = {}
     for paper in papers:
@@ -1066,7 +1084,7 @@ def aggregate_mode(args) -> int:
     if not os.path.isdir(args.jsonl_dir):
         print(f"::error::no shard results in {args.jsonl_dir}")
         return 1
-    records = load_records(args.jsonl_dir)
+    records = load_records_recursive(args.jsonl_dir)
     papers = [record for record in records if record.get("kind_record") == "paper"]
     if not papers:
         print(f"::error::no paper records in {args.jsonl_dir}")
@@ -1201,7 +1219,7 @@ def repro_mode(args) -> int:
         print("::error::no worst group in the summary")
         return 1
     key = worst["group"]
-    records = load_records(args.jsonl_dir)
+    records = load_records_recursive(args.jsonl_dir)
     target = None
     for record in records:
         if record.get("kind_record") != "paper":

@@ -102,13 +102,12 @@ fn unicode_from_glyph_name(name: &[u8]) -> Option<char> {
             return None;
         }
         hex
-    } else if let Some(hex) = name.strip_prefix(b"u") {
+    } else {
+        let hex = name.strip_prefix(b"u")?;
         if !(4..=6).contains(&hex.len()) {
             return None;
         }
         hex
-    } else {
-        return None;
     };
     if !hex.iter().all(u8::is_ascii_hexdigit) {
         return None;
@@ -550,7 +549,7 @@ struct CachedForm {
 }
 
 fn form_content(
-    doc: &LopdfDocument,
+    _doc: &LopdfDocument,
     id: Option<ObjectId>,
     stream: &Stream,
     cache: &mut HashMap<ObjectId, Option<CachedForm>>,

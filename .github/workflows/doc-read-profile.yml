@@ -1,6 +1,11 @@
 name: Doc read profile
 on:
   workflow_dispatch:
+    inputs:
+      base:
+        description: Base git ref whose binary is compared against the head
+        required: false
+        default: main
   push:
     branches: ['bench/r1c3a-**']
 jobs:
@@ -9,13 +14,21 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+      - name: Check out the base tree
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ inputs.base || 'main' }}"
+          git worktree add base-src FETCH_HEAD
       - name: Install Rust 1.99.1
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
-      - name: Build the release binary
+      - name: Build the head binary
         run: cargo build --release --locked --bin reading-mcp
+      - name: Build the base binary
+        run: |
+          cargo build --release --locked --bin reading-mcp \
+            --manifest-path base-src/Cargo.toml --target-dir base-target
       - name: Download the books
         run: |
           BOOKS="$RUNNER_TEMP/books"
@@ -47,34 +60,37 @@ jobs:
               64 * 1024 * 1024,
           )
           PY
-      - name: Measure every read tool with the cache on and off
+      - name: Measure every read tool on both binaries
         run: |
           set -uo pipefail
           BOOKS="$RUNNER_TEMP/books"
           GEN="$RUNNER_TEMP/inputs"
           mkdir -p measure
-          run() { # label doc capacity
-            local label="$1" doc="$2" capacity="$3"
+          run() { # label doc side binary
+            local label="$1" doc="$2" side="$3" binary="$4"
             if [ ! -f "$doc" ]; then
               echo "::warning::missing input for $label: $doc"
               return 0
             fi
             python3 scripts/doc-read-probe.py \
-              --binary target/release/reading-mcp \
+              --binary "$binary" \
               --document "$doc" \
               --label "$label" \
-              --cache-capacity "$capacity" \
+              --side "$side" \
               --calls 200 \
               --start-fraction 0.5 \
               --io-bytes \
               --env READING_MCP_TOOLS=both \
-              --out "measure/$label-cache$capacity.json" \
-              || echo "::warning::probe failed: $label cache=$capacity"
+              --out "measure/$label-$side.json" \
+              || echo "::warning::probe failed: $label $side"
           }
-          for capacity in 8 0; do
-            run song-shi "$BOOKS/song-shi.epub" "$capacity"
-            run cjk-64mib "$GEN/cjk-64mib.txt" "$capacity"
-            run en-novel "$BOOKS/en-novel.epub" "$capacity"
+          for pair in "song-shi=$BOOKS/song-shi.epub" \
+                      "cjk-64mib=$GEN/cjk-64mib.txt" \
+                      "en-novel=$BOOKS/en-novel.epub"; do
+            label="${pair%%=*}"
+            doc="${pair#*=}"
+            run "$label" "$doc" main base-target/release/reading-mcp
+            run "$label" "$doc" branch target/release/reading-mcp
           done
       - name: Summarize
         if: always()
@@ -92,28 +108,24 @@ jobs:
               return str(value)
 
           rows = [
-              "| input | cache | tool | calls | mean ms | median ms | p95 ms | rchar/call | read_bytes/call |",
+              "| input | side | tool | calls | mean ms | median ms | p95 ms | rchar/call | read_bytes/call |",
               "|---|---|---|---|---|---|---|---|---|",
           ]
-          cold = [
-              "| input | call ms | json bytes | row ms | parse ms | section text ms | validate ms | hash ms | sections | peak RSS MiB |",
-              "|---|---|---|---|---|---|---|---|---|---|",
-          ]
-          meta = [
-              "| input | metadata key | bytes |",
-              "|---|---|---|",
+          memory = [
+              "| input | side | open s | RSS after open KiB | RSS after calls KiB | peak RSS KiB |",
+              "|---|---|---|---|---|---|",
           ]
           notes = []
           for path in sorted(glob.glob("measure/*.json")):
               with open(path, encoding="utf-8") as handle:
                   data = json.load(handle)
               label = data.get("label", os.path.basename(path))
-              capacity = data.get("cache_capacity")
+              side = data.get("side", "")
               for shape, summary in (data.get("shapes") or {}).items():
                   rows.append(
-                      "| {label} | {cache} | {shape} | {calls} | {mean} | {median} | {p95} | {rchar} | {read_bytes} |".format(
+                      "| {label} | {side} | {shape} | {calls} | {mean} | {median} | {p95} | {rchar} | {read_bytes} |".format(
                           label=label,
-                          cache=capacity,
+                          side=side,
                           shape=shape,
                           calls=fmt(summary.get("calls")),
                           mean=fmt(summary.get("mean_ms")),
@@ -124,34 +136,19 @@ jobs:
                       )
                   )
               for item in data.get("skipped") or []:
-                  notes.append(f"- {label} cache={capacity}: skipped {item.get('shape')} ({item.get('reason')})")
-              payload = data.get("cold")
-              if isinstance(payload, dict) and payload.get("json_bytes"):
-                  cold.append(
-                      "| {label} | {call} | {bytes} | {row} | {parse} | {text} | {validate} | {hash} | {sections} | {rss} |".format(
-                          label=label,
-                          call=fmt(payload.get("call_ms")),
-                          bytes=fmt(payload.get("json_bytes")),
-                          row=fmt(payload.get("row_read_ms")),
-                          parse=fmt(payload.get("parse_ms")),
-                          text=fmt(payload.get("section_text_load_ms")),
-                          validate=fmt(payload.get("validate_ms")),
-                          hash=fmt(payload.get("hash_ms")),
-                          sections=fmt(payload.get("sections")),
-                          rss=fmt(None if payload.get("peak_rss_kib") is None else round(payload["peak_rss_kib"] / 1024.0, 1)),
-                      )
+                  notes.append(f"- {label} {side}: skipped {item.get('shape')} ({item.get('reason')})")
+              memory.append(
+                  "| {label} | {side} | {open} | {after_open} | {after_calls} | {peak} |".format(
+                      label=label,
+                      side=side,
+                      open=fmt(data.get("open_seconds")),
+                      after_open=fmt(data.get("rss_after_open_kib")),
+                      after_calls=fmt(data.get("rss_after_calls_kib")),
+                      peak=fmt(data.get("peak_rss_kib")),
                   )
-                  for entry in payload.get("metadata_key_bytes") or []:
-                      meta.append(
-                          "| {label} | {key} | {bytes} |".format(
-                              label=label,
-                              key=entry.get("key"),
-                              bytes=fmt(entry.get("bytes")),
-                          )
-                      )
+              )
           report = "\n\n".join(
-              ["## Per-call reads", "\n".join(rows), "## One cold get_with_hash (cache off)", "\n".join(cold),
-               "## document_json metadata keys (cache off)", "\n".join(meta)]
+              ["## Per-call reads", "\n".join(rows), "## Memory", "\n".join(memory)]
           )
           if notes:
               report += "\n\n## Skipped\n" + "\n".join(notes)
@@ -164,7 +161,7 @@ jobs:
               with open(summary_path, "a", encoding="utf-8") as handle:
                   handle.write(report)
           PY
-      - name: Cache-free light reads (200 calls each)
+      - name: Light reads (200 calls each)
         if: always()
         run: |
           set -uo pipefail
@@ -186,7 +183,7 @@ jobs:
           run song-shi "$BOOKS/song-shi.epub"
           run cjk-64mib "$GEN/cjk-64mib.txt"
           run en-novel "$BOOKS/en-novel.epub"
-      - name: Summarize the cache-free light reads
+      - name: Summarize the light reads
         if: always()
         run: |
           python3 - <<'PY'
@@ -219,7 +216,7 @@ jobs:
                               starget=fields.get("section_target", ""),
                           )
                   )
-          report = "## Cache-free light reads (cache off, 200 calls each)\n\n" + "\n".join(rows) + "\n"
+          report = "## Light reads (200 calls each)\n\n" + "\n".join(rows) + "\n"
           with open("light-table.md", "w", encoding="utf-8") as handle:
               handle.write(report)
           print(report)

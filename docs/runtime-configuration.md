@@ -213,7 +213,6 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 | `READING_MCP_PARSE_TIMEOUT_SECS` | 30 | Parser cooperative timeout |
 | `READING_MCP_SEARCH_CACHE_MIB` | 48 | 搜索扫描保留的单个文档 section 文本缓存上限（MiB），0 关闭缓存 |
 | `READING_MCP_SEARCH_THREADS` | `min(available_parallelism, 4)` | 单个文档搜索扫描的线程数，1 表示串行 |
-| `READING_MCP_DOCUMENT_CACHE_CAPACITY` | 8 | `SqliteDocumentRepository` 保留的已解码 Document 个数，0 表示从不缓存（仅供测量） |
 
 `READING_MCP_SEARCH_CACHE_MIB` 只限制 lexical 搜索扫描的文本缓存：缓存只保留最近一次搜索的那个文档，
 按 stored document 的 `doc_key` 与 normalized hash 校验，重新 ingest、替换 segmentation 或删除文档都会失效。
@@ -222,12 +221,10 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 `READING_MCP_SEARCH_THREADS` 只影响文本不少于 1 MiB 且已缓存的文档：SQLite 读取始终留在连接的线程上，
 worker 线程只做 section 预筛与段落/句子打分，各自保留自己的命中再合并，结果与串行扫描逐条相同。
 
-`READING_MCP_DOCUMENT_CACHE_CAPACITY` 在 `SqliteDocumentRepository` 构造时读取一次，只影响读取路径上的
-已解码 Document 缓存：默认 8，与之前的行为完全相同；`0` 表示每次读取都重新读 `document_json`、重建 section 文本并校验，
-因此每次 tool 调用都付一次冷读成本。它只为测量而存在（bench 分支用它对比缓存开/关），不是生产配置；
-非整数值是启动错误而不是静默回退。缓存容量为 0 且 `READING_MCP_TELEMETRY` 打开时，每次 miss 额外向 stderr
-输出一条 `repository_get`（`stage: decode`）事件，带 `json_bytes`、`row_read_ms`、`parse_ms`、
-`section_text_load_ms`、`validate_ms`、`hash_ms` 以及每个 `metadata` key 的字节数。
+`READING_MCP_TELEMETRY` 打开时，每次完整解码 `document_json`（`get_with_hash`，或 light 读取无法走轻量路径时）
+额外向 stderr 输出一条 `repository_get`（`stage: decode`）事件，带 `json_bytes`、`row_read_ms`、`parse_ms`、
+`section_text_load_ms`、`validate_ms`、`hash_ms` 以及每个 `metadata` key 的字节数。读取路径上没有进程内的
+已解码 Document 缓存：每次读取都从 SQLite 行重建所需的数据。
 
 说明：Parser 隔离分三层，职责互不替代：
 

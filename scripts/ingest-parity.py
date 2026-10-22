@@ -745,6 +745,56 @@ def run_v1_reads(call, source: str, records: list[dict]) -> None:
     if not isinstance(section, str):
         return
 
+    # A one-node first page forces a structure cursor; its continuation must resume identically.
+    first_page = call(
+        "get_document_structure",
+        {"document_id": document_id, "max_depth": 1, "max_nodes": 1},
+    )
+    records.append({"step": "v1 get_document_structure first page", "payload": first_page})
+    structure_cursor = first_page.get("next_cursor") if isinstance(first_page, dict) else None
+    if isinstance(structure_cursor, str):
+        records.append(
+            {
+                "step": "v1 get_document_structure continue",
+                "payload": call(
+                    "get_document_structure",
+                    {"document_id": document_id, "cursor": structure_cursor, "max_nodes": 1},
+                ),
+            }
+        )
+
+    # A named-section request, when the input has a titled section. A page-only PDF answers
+    # `Unavailable`; that is a result too, and both binaries must agree on it.
+    named_title = None
+    structure_sections = structure.get("sections") if isinstance(structure, dict) else None
+    if isinstance(structure_sections, list):
+        for node in structure_sections:
+            if (
+                isinstance(node, dict)
+                and isinstance(node.get("title"), str)
+                and node["title"].strip()
+            ):
+                named_title = node["title"].strip()
+                break
+    if named_title is not None:
+        records.append(
+            {
+                "step": "v1 get_document_structure named section",
+                "payload": call(
+                    "get_document_structure",
+                    {
+                        "document_id": document_id,
+                        "named_section_query": named_title,
+                        "expected_content_hash": opened.get("content_hash"),
+                        "expected_normalized_document_hash": opened.get(
+                            "normalized_document_hash"
+                        ),
+                        "max_depth": 1,
+                    },
+                ),
+            }
+        )
+
     first_locators: dict[str, dict] = {}
     first_texts: dict[str, str] = {}
     section_locator: dict | None = None
@@ -951,6 +1001,28 @@ def run_v1_reads(call, source: str, records: list[dict]) -> None:
             ),
         }
     )
+
+    # `source_view` only renders a PDF. A precise Paragraph locator maps to a page; a Section
+    # locator is the fallback when the input has no paragraph units. A refusal is also a result:
+    # both binaries must refuse identically.
+    media_type = opened.get("media_type") if isinstance(opened, dict) else None
+    if (
+        isinstance(media_type, str)
+        and media_type.lower() == "application/pdf"
+        and isinstance(paragraph_locator or section_locator, dict)
+    ):
+        records.append(
+            {
+                "step": "v1 get_source_view",
+                "payload": call(
+                    "get_source_view",
+                    {
+                        "document_id": document_id,
+                        "target_locator": paragraph_locator or section_locator,
+                    },
+                ),
+            }
+        )
 
     run_light_reader_shapes(
         call,

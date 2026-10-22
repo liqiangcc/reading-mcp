@@ -735,9 +735,9 @@ pub struct DocumentDecodePhases {
     pub hash_ms: Option<f64>,
 }
 
-/// Emits the phase breakdown of one cache-miss load as a `repository_get` event, plus the byte size
-/// of every `metadata` entry of the decoded document. `READING_MCP_DOCUMENT_CACHE_CAPACITY=0` is the
-/// only way to reach this, so a default runtime never emits it.
+/// Emits the phase breakdown of one full document load as a `repository_get` event, plus the byte
+/// size of every `metadata` entry of the decoded document. Only a runtime with `READING_MCP_TELEMETRY`
+/// on emits it.
 #[doc(hidden)]
 pub fn emit_document_decode_miss(document: &Document, phases: DocumentDecodePhases) {
     let mut metadata_key_bytes = document

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::application::body_order::{BODY_ORDER_VERSION, section_body_order};
+use crate::application::body_order::BODY_ORDER_VERSION;
 use crate::application::ports::{ApplicationError, DocumentRepository};
 use crate::application::structure_cursor::{
     STRUCTURE_TRAVERSAL_VERSION, StructureCursorClaims, decode_structure_cursor,
@@ -17,6 +17,9 @@ pub const DEFAULT_STRUCTURE_MAX_NODES: usize = 1_000;
 pub const MAX_STRUCTURE_RESPONSE_NODES: usize = 1_000;
 pub const NAMED_SECTION_RESOLUTION_VERSION: &str = "named-section-resolution/v1";
 pub const NAMED_SECTION_BOUNDARY_VERSION: &str = "named-section-boundary/v1";
+
+/// The metadata key that marks a PDF whose canonical structure is page-only.
+const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GetDocumentStructureCommand {
@@ -171,11 +174,26 @@ impl GetDocumentStructureUseCase {
     ) -> Result<ResolveNamedSectionResult, ApplicationError> {
         let (document, normalized_hash) = self
             .repository
-            .get_with_hash(&command.document_id)
+            .get_light_with_hash(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
-        let body_order = section_body_order(&document)?;
-        let resolution = resolve_named_section(&document, &body_order, &command, &normalized_hash)?;
+        let body_order = load_body_order(self.repository.as_ref(), &document).await?;
+        // `pdf_structure_provenance` is small, but it may still live in `document_meta_v1` for a
+        // row that keeps its metadata there; `load_metadata` reads it from either place.
+        let provenance = if document.media_type.is_pdf() {
+            self.repository
+                .load_metadata(&command.document_id, PDF_STRUCTURE_PROVENANCE_METADATA_KEY)
+                .await?
+        } else {
+            None
+        };
+        let resolution = resolve_named_section(
+            &document,
+            &body_order,
+            &command,
+            &normalized_hash,
+            provenance.as_deref(),
+        )?;
         Ok(ResolveNamedSectionResult {
             document_id: document.id.clone(),
             content_hash: document.content_hash.clone(),
@@ -201,10 +219,10 @@ impl GetDocumentStructureUseCase {
 
         let (document, normalized_hash) = self
             .repository
-            .get_with_hash(&command.document_id)
+            .get_light_with_hash(&command.document_id)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
-        let body_order = section_body_order(&document)?;
+        let body_order = load_body_order(self.repository.as_ref(), &document).await?;
 
         if let Some(claims) = &cursor_claims {
             if claims.content_hash != document.content_hash.0 {
@@ -289,11 +307,32 @@ impl GetDocumentStructureUseCase {
     }
 }
 
+/// The document's canonical body order as a section-id -> position map, from the repository's
+/// stored order when it keeps one and from the document otherwise.
+async fn load_body_order(
+    repository: &dyn DocumentRepository,
+    document: &Document,
+) -> Result<HashMap<SectionId, usize>, ApplicationError> {
+    let ordered = match repository.body_order(&document.id).await? {
+        Some(ordered) => ordered?,
+        // A repository that keeps no stored order: compute it from the document it returned. The
+        // default trait implementation already does this, so this is only for a store that cannot
+        // say and still hands out a document carrying its own metadata.
+        None => crate::application::body_order_ids(document)?,
+    };
+    Ok(ordered
+        .into_iter()
+        .enumerate()
+        .map(|(order, id)| (id, order))
+        .collect())
+}
+
 fn resolve_named_section(
     document: &Document,
     body_order: &HashMap<SectionId, usize>,
     command: &ResolveNamedSectionCommand,
     normalized_hash: &NormalizedDocumentHash,
+    pdf_structure_provenance: Option<&str>,
 ) -> Result<NamedSectionResolution, ApplicationError> {
     let query = command.query.trim();
     if query.is_empty() {
@@ -323,7 +362,7 @@ fn resolve_named_section(
         )));
     }
 
-    if is_page_only_pdf_fallback(document) {
+    if is_page_only_pdf_fallback(document, pdf_structure_provenance) {
         return Ok(NamedSectionResolution {
             version: NAMED_SECTION_RESOLUTION_VERSION.into(),
             status: NamedSectionResolutionStatus::Unavailable,
@@ -501,12 +540,8 @@ fn all_section_refs(document: &Document) -> Vec<&Section> {
     output
 }
 
-fn is_page_only_pdf_fallback(document: &Document) -> bool {
-    document.media_type.is_pdf()
-        && document
-            .metadata
-            .get("pdf_structure_provenance")
-            .is_some_and(|value| value == "page_fallback")
+fn is_page_only_pdf_fallback(document: &Document, pdf_structure_provenance: Option<&str>) -> bool {
+    document.media_type.is_pdf() && pdf_structure_provenance == Some("page_fallback")
 }
 
 fn candidate_metadata(

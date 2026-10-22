@@ -155,7 +155,18 @@ impl OutlineReadingUseCase {
                 .to_string(),
                 title: section.title.clone(),
                 level: section.level,
-                chars: section.content.chars().count(),
+                // The stored length of the section's normalized text, which is exactly what
+                // `section.content.chars().count()` counted on the full document.
+                chars: self
+                    .repository
+                    .load_section_char_len(&resolved.document.id, &section.id)
+                    .await?
+                    .ok_or_else(|| {
+                        ReadingError::stale_handle(format!(
+                            "section {} has no stored text",
+                            section.id.0
+                        ))
+                    })?,
             });
         }
         let next = (end < scope.len()).then(|| format!("o:{}.{}~{}", resolved.handle, end, check));

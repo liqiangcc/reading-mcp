@@ -333,6 +333,28 @@ impl SearchIndex for ObservedSearchIndex {
         );
         result
     }
+
+    async fn search_lexical_in(
+        &self,
+        document: &Document,
+        normalized_document_hash: &NormalizedDocumentHash,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .search_lexical_in(document, normalized_document_hash, query, limit)
+            .await;
+        emit_search_event(
+            started,
+            query,
+            limit,
+            result.as_ref().map(Vec::len).unwrap_or_default(),
+            result.is_ok(),
+        );
+        result
+    }
 }
 
 pub struct ObservedDocumentRepository {
@@ -398,6 +420,52 @@ impl DocumentRepository for ObservedDocumentRepository {
             "success": result.is_ok()
         }));
         result
+    }
+
+    async fn get_light_with_hash(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.get_light_with_hash(id).await;
+        emit(json!({
+            "event": "repository_get",
+            "duration_ms": started.elapsed().as_millis(),
+            "hit": result.as_ref().is_ok_and(|value| value.is_some()),
+            "success": result.is_ok()
+        }));
+        result
+    }
+
+    async fn load_metadata(
+        &self,
+        id: &DocumentId,
+        key: &str,
+    ) -> Result<Option<String>, ApplicationError> {
+        self.inner.load_metadata(id, key).await
+    }
+
+    async fn load_section_text(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<String>, ApplicationError> {
+        self.inner.load_section_text(id, section_id).await
+    }
+
+    async fn load_section_char_len(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<usize>, ApplicationError> {
+        self.inner.load_section_char_len(id, section_id).await
+    }
+
+    async fn body_order(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
+        self.inner.body_order(id).await
     }
 }
 

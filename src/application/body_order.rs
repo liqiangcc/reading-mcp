@@ -12,6 +12,16 @@ const EPUB_STRUCTURE_MAP_METADATA_KEY: &str = "epub_structure_map";
 pub(crate) fn section_body_order(
     document: &Document,
 ) -> Result<HashMap<SectionId, usize>, ApplicationError> {
+    Ok(body_order_ids(document)?
+        .into_iter()
+        .enumerate()
+        .map(|(order, id)| (id, order))
+        .collect())
+}
+
+/// The section ids of `document` in canonical body order, or the exact error `section_body_order`
+/// reports for it. This is the form a store keeps: the order of the ids is the whole result.
+pub fn body_order_ids(document: &Document) -> Result<Vec<SectionId>, ApplicationError> {
     let ordered_ids = if is_epub(&document.media_type) {
         epub_body_order(document)?
     } else {
@@ -30,11 +40,7 @@ pub(crate) fn section_body_order(
         ));
     }
 
-    Ok(ordered_ids
-        .into_iter()
-        .enumerate()
-        .map(|(order, id)| (id, order))
-        .collect())
+    Ok(ordered_ids)
 }
 
 fn is_epub(media_type: &MediaType) -> bool {

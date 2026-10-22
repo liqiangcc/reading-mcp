@@ -747,6 +747,7 @@ def run_v1_reads(call, source: str, records: list[dict]) -> None:
 
     first_locators: dict[str, dict] = {}
     first_texts: dict[str, str] = {}
+    section_locator: dict | None = None
     for kind in ("paragraph", "sentence"):
         for policy in ("preserve_source", "eligible_only"):
             label = f"{kind}/{policy}"
@@ -762,6 +763,10 @@ def run_v1_reads(call, source: str, records: list[dict]) -> None:
 
             start = text_units(direction="forward", max_items=1)
             records.append({"step": f"v1 {label} forward start", "payload": start})
+            if isinstance(start, dict) and isinstance(
+                start.get("target_section_locator"), dict
+            ):
+                section_locator = start["target_section_locator"]
             items = start.get("items") if isinstance(start, dict) else None
             if isinstance(items, list) and items and isinstance(items[0], dict):
                 locator = items[0].get("locator")
@@ -946,6 +951,180 @@ def run_v1_reads(call, source: str, records: list[dict]) -> None:
             ),
         }
     )
+
+    run_light_reader_shapes(
+        call,
+        document_id,
+        structure,
+        section,
+        section_locator,
+        paragraph_locator,
+        records,
+    )
+
+
+def run_light_reader_shapes(
+    call,
+    document_id: str,
+    structure: dict,
+    section: str,
+    section_locator: dict | None,
+    paragraph_locator: dict | None,
+    records: list[dict],
+) -> None:
+    """The shapes R1c-3c adds risk for: every text use the light readers serve per section.
+
+    A section neighbour renders `before + after + 1` sections, a section container one section, and
+    a structural relation none; a root section's tree read renders its whole subtree; a section-kind
+    anchor asks for that section's length and then refuses the anchor. Every payload is kept so two
+    binaries are compared byte for byte on all of them.
+    """
+    records.append(
+        {
+            "step": "v1 get_context section neighbour 2/2",
+            "payload": call(
+                "get_context",
+                {
+                    "document_id": document_id,
+                    "section_id": section,
+                    "relation": {
+                        "type": "neighbor",
+                        "unit": "section",
+                        "before": 2,
+                        "after": 2,
+                    },
+                },
+            ),
+        }
+    )
+    records.append(
+        {
+            "step": "v1 get_context structured section container",
+            "payload": call(
+                "get_context",
+                {
+                    "document_id": document_id,
+                    "section_id": section,
+                    "relation": {"type": "container", "kind": "section"},
+                },
+            ),
+        }
+    )
+    for kind in ("children", "ancestors"):
+        records.append(
+            {
+                "step": f"v1 get_context structural {kind}",
+                "payload": call(
+                    "get_context",
+                    {
+                        "document_id": document_id,
+                        "section_id": section,
+                        "relation": {"type": "structural", "kind": kind},
+                    },
+                ),
+            }
+        )
+
+    if isinstance(section_locator, dict):
+        # A section-kind anchor is not part of any text-unit stream; the answer is an error, and it
+        # must be the same error on both binaries.
+        records.append(
+            {
+                "step": "v1 get_text_units section anchor",
+                "payload": call(
+                    "get_text_units",
+                    {
+                        "document_id": document_id,
+                        "section_id": section,
+                        "requested_kind": "sentence",
+                        "anchor_locator": section_locator,
+                        "max_items": 1,
+                    },
+                ),
+            }
+        )
+
+    # The whole subtree of a top-level section, with a budget small enough to need a cursor.
+    sections = structure.get("sections") if isinstance(structure, dict) else None
+    root = None
+    if isinstance(sections, list):
+        for node in sections:
+            if (
+                isinstance(node, dict)
+                and node.get("parent_id") is None
+                and isinstance(node.get("section_id"), str)
+            ):
+                root = node["section_id"]
+                break
+    if isinstance(root, str):
+        tree = call(
+            "read_document",
+            {"document_id": document_id, "section_id": root, "max_chars": 200},
+        )
+        records.append({"step": "v1 read_document root 200", "payload": tree})
+        cursor = tree.get("next_cursor") if isinstance(tree, dict) else None
+        if isinstance(cursor, str):
+            records.append(
+                {
+                    "step": "v1 read_document root continue",
+                    "payload": call(
+                        "read_document",
+                        {
+                            "document_id": document_id,
+                            "section_id": root,
+                            "cursor": cursor,
+                            "max_chars": 200,
+                        },
+                    ),
+                }
+            )
+
+    if isinstance(paragraph_locator, dict):
+        exact = call(
+            "read_document",
+            {
+                "document_id": document_id,
+                "target_locator": paragraph_locator,
+                "max_chars": 120,
+            },
+        )
+        records.append({"step": "v1 read_document exact 120", "payload": exact})
+        cursor = exact.get("next_cursor") if isinstance(exact, dict) else None
+        if isinstance(cursor, str):
+            records.append(
+                {
+                    "step": "v1 read_document exact continue",
+                    "payload": call(
+                        "read_document",
+                        {
+                            "document_id": document_id,
+                            "target_locator": paragraph_locator,
+                            "cursor": cursor,
+                            "max_chars": 120,
+                        },
+                    ),
+                }
+            )
+
+    # A query built from the section title, so the scan can produce a section-kind hit. If the
+    # input's titles do not allow one, the payload says so and both binaries must say it alike.
+    title = None
+    if isinstance(sections, list):
+        for node in sections:
+            if isinstance(node, dict) and node.get("section_id") == section:
+                title = node.get("title")
+                break
+    query = title.strip()[:24] if isinstance(title, str) and title.strip() else None
+    if query is not None:
+        records.append(
+            {
+                "step": "v1 search_document section title",
+                "payload": call(
+                    "search_document",
+                    {"document_id": document_id, "query": query, "limit": 5},
+                ),
+            }
+        )
 
 
 def run_read_probe(

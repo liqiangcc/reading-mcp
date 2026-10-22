@@ -316,6 +316,23 @@ impl SearchIndex for SqliteSearchIndex {
         self.search_lexical_with_options(document_id, query, limit, ScanOptions::production())
             .await
     }
+
+    async fn search_lexical_in(
+        &self,
+        document: &Document,
+        normalized_document_hash: &NormalizedDocumentHash,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        self.search_lexical_in_with_options(
+            document,
+            normalized_document_hash,
+            query,
+            limit,
+            ScanOptions::production(),
+        )
+        .await
+    }
 }
 
 impl SqliteSearchIndex {
@@ -338,24 +355,52 @@ impl SqliteSearchIndex {
         if limit == 0 {
             return Ok(vec![]);
         }
+        // A caller that has no document in hand (a standalone index, a test) loads it here, light:
+        // the scan reads section ids and titles and takes the text from `section_text_v2`.
+        let Some((document, normalized_document_hash)) =
+            self.repository.get_light_with_hash(document_id).await?
+        else {
+            return Err(ApplicationError::DocumentNotFound);
+        };
+        self.search_lexical_in_with_options(
+            &document,
+            &normalized_document_hash,
+            query,
+            limit,
+            options,
+        )
+        .await
+    }
+
+    /// The scan over `document`, which the caller already loaded. This is the same scan as
+    /// [`Self::search_lexical_with_options`] without the document load.
+    pub async fn search_lexical_in_with_options(
+        &self,
+        document: &Document,
+        normalized_document_hash: &NormalizedDocumentHash,
+        query: &str,
+        limit: usize,
+        options: ScanOptions,
+    ) -> Result<Vec<LexicalSearchHit>, ApplicationError> {
+        if query.trim().is_empty() {
+            return Err(ApplicationError::InvalidRequest(
+                "search query must not be empty".into(),
+            ));
+        }
+        if limit == 0 {
+            return Ok(vec![]);
+        }
         let Some(lexical) = LexicalQuery::new(query) else {
             return Err(ApplicationError::InvalidRequest(
                 "search query must contain searchable terms".into(),
             ));
         };
         let lexical = Arc::new(lexical);
-        // The repository caches the decoded document, and the caller has just loaded it, so this is a
-        // cache hit in the runtime.
-        let Some((document, normalized_document_hash)) =
-            self.repository.get_with_hash(document_id).await?
-        else {
-            return Err(ApplicationError::DocumentNotFound);
-        };
 
         let mut hits = self
             .scan_pass(
-                &document,
-                &normalized_document_hash,
+                document,
+                normalized_document_hash,
                 query,
                 &lexical,
                 MatchMode::Strict,
@@ -368,8 +413,8 @@ impl SqliteSearchIndex {
         if hits.is_empty() && lexical.token_count() > 1 {
             hits = self
                 .scan_pass(
-                    &document,
-                    &normalized_document_hash,
+                    document,
+                    normalized_document_hash,
                     query,
                     &lexical,
                     MatchMode::Relaxed,

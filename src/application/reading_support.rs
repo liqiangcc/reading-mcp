@@ -1,4 +1,6 @@
-use crate::domain::Section;
+use std::collections::HashMap;
+
+use crate::domain::{Section, SectionId};
 
 const DEFAULT_CONTENT_RESPONSE_CHARS: usize = 32_000;
 const MAX_CONTENT_RESPONSE_CHARS: usize = 64_000;
@@ -16,22 +18,41 @@ pub(crate) struct RenderedStreamSlice {
     pub complete: bool,
 }
 
-pub(crate) fn render_section_tree(section: &Section) -> String {
+/// Where a renderer reads a section's text: from the section itself (a full document) or from the
+/// sections one reader call loaded on demand (a light document).
+pub(crate) enum SectionContents<'a> {
+    Inline,
+    Loaded(&'a HashMap<SectionId, String>),
+}
+
+impl SectionContents<'_> {
+    pub(crate) fn of<'s>(&'s self, section: &'s Section) -> &'s str {
+        match self {
+            Self::Inline => &section.content,
+            Self::Loaded(texts) => texts
+                .get(&section.id)
+                .map(String::as_str)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+pub(crate) fn render_section_tree(section: &Section, contents: &SectionContents<'_>) -> String {
     let mut output = String::new();
-    render_tree_into(section, &mut output);
+    render_tree_into(section, contents, &mut output);
     output.trim().to_string()
 }
 
-pub(crate) fn render_section_shallow(section: &Section) -> String {
+pub(crate) fn render_section_shallow(section: &Section, content: &str) -> String {
     let mut output = String::new();
     let heading_level = usize::from(section.level.clamp(1, 6));
     output.push_str(&"#".repeat(heading_level));
     output.push(' ');
     output.push_str(&section.title);
 
-    if !section.content.trim().is_empty() {
+    if !content.trim().is_empty() {
         output.push_str("\n\n");
-        output.push_str(section.content.trim());
+        output.push_str(content.trim());
     }
 
     output
@@ -80,13 +101,13 @@ pub(crate) fn truncate_chars(
     (slice.content, !slice.complete)
 }
 
-fn render_tree_into(section: &Section, output: &mut String) {
-    output.push_str(&render_section_shallow(section));
+fn render_tree_into(section: &Section, contents: &SectionContents<'_>, output: &mut String) {
+    output.push_str(&render_section_shallow(section, contents.of(section)));
     output.push('\n');
 
     for child in &section.children {
         output.push('\n');
-        render_tree_into(child, output);
+        render_tree_into(child, contents, output);
     }
 }
 

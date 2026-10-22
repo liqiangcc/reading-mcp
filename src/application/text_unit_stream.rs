@@ -20,7 +20,7 @@ pub const TEXT_UNIT_STREAM_VERSION: &str = "text-unit-stream/v1";
 
 /// Version of the whole stored TextUnit index (documents, sections, items, coverage, streams, summaries).
 /// Bump it when the store layout or its meaning changes so documents are re-ingested on reopen.
-pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v5";
+pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v6";
 
 /// A borrowed unit of a section stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

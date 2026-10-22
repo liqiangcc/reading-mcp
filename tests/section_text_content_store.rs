@@ -1,4 +1,4 @@
-//! `document_json` keeps no section text when `section_text_v2` already stores it for the same
+//! `document_json` keeps no section text when `section_text_v3` already stores it for the same
 //! document version, and reads it back on load.
 
 use std::collections::BTreeMap;
@@ -204,7 +204,7 @@ async fn runtime_open_stores_no_section_text_and_a_new_repository_reads_it_back(
     let stored = stored_json(&database, &document.id);
     assert_eq!(
         stored["content_store"],
-        Value::String("section_text_v2".into())
+        Value::String("section_text_v3".into())
     );
     assert_eq!(
         assert_empty_contents(&stored["root_sections"]),
@@ -287,7 +287,7 @@ async fn a_missing_section_text_chunk_makes_the_row_stale() {
     let connection = Connection::open(&database).expect("database should open");
     let removed = connection
         .execute(
-            "DELETE FROM section_text_v2 WHERE doc_key = ?1 AND section_key = 1",
+            "DELETE FROM section_text_v3 WHERE doc_key = ?1 AND section_key = 1",
             params![doc_key],
         )
         .expect("chunk should delete");
@@ -400,7 +400,7 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
                 PRIMARY KEY (doc_key, section_key, chunk_no)
              ) WITHOUT ROWID;
              INSERT INTO section_text_v1
-                SELECT doc_key, section_key, chunk_no, text FROM section_text_v2;
+                SELECT doc_key, section_key, chunk_no, data FROM section_text_v3;
              CREATE TABLE section_layout_v1 (
                 doc_key INTEGER NOT NULL,
                 section_key INTEGER NOT NULL,
@@ -413,7 +413,7 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
              INSERT INTO section_layout_v1
                 SELECT doc_key, section_key, section_id, char_len, paragraph_coverage_json, x'00'
                   FROM section_layout_v2;
-             DROP TABLE section_text_v2;
+             DROP TABLE section_text_v3;
              DROP TABLE section_layout_chunk_v2;
              DROP TABLE section_layout_v2;",
         )
@@ -452,7 +452,7 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
     let stored = stored_json(&database, &document.id);
     assert_eq!(
         stored["content_store"],
-        Value::String("section_text_v2".into())
+        Value::String("section_text_v3".into())
     );
     assert_eq!(
         assert_empty_contents(&stored["root_sections"]),

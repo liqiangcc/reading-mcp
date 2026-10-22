@@ -445,8 +445,10 @@ fn warm_scan_document(
     warm_scan_text(connection, cache, &plan, usize::MAX)
 }
 
-/// The stored text bytes of one section of `doc_key`: what a warm would read for it. `length(CAST(
-/// text AS BLOB))` is the UTF-8 byte length of one stored chunk, so the sum is the section's size.
+/// The stored text bytes of one section of `doc_key`: what a warm would read for it, which is the
+/// text the scan cache will hold. A raw chunk is its own length; a zlib chunk is estimated at
+/// [`SECTION_TEXT_ZLIB_EXPANSION_ESTIMATE`] times its stored length, because decompressing it here
+/// would read the text the plan exists to avoid reading.
 fn stored_section_text_bytes(
     connection: &Connection,
     doc_key: i64,
@@ -454,10 +456,17 @@ fn stored_section_text_bytes(
 ) -> Result<usize, ApplicationError> {
     let bytes: i64 = connection
         .query_row(
-            "SELECT COALESCE(SUM(length(CAST(text AS BLOB))), 0)
-             FROM section_text_v2
+            "SELECT COALESCE(SUM(CASE WHEN encoding = ?3
+                                      THEN length(data) * ?4
+                                      ELSE length(data) END), 0)
+             FROM section_text_v3
              WHERE doc_key = ?1 AND section_key = ?2",
-            params![doc_key, section_key],
+            params![
+                doc_key,
+                section_key,
+                SECTION_TEXT_ENCODING_ZLIB,
+                i64::try_from(SECTION_TEXT_ZLIB_EXPANSION_ESTIMATE).unwrap_or(i64::MAX),
+            ],
             |row| row.get(0),
         )
         .map_err(text_unit_index_error)?;
@@ -955,7 +964,7 @@ enum SectionTextPlace {
     /// text of a section comes from the full document, exactly as the default trait implementation
     /// reads it.
     Inline,
-    /// The text is in `section_text_v2` under these keys, and its length is `char_len`.
+    /// The text is in `section_text_v3` under these keys, and its length is `char_len`.
     Stored {
         doc_key: i64,
         section_key: i64,
@@ -1034,7 +1043,7 @@ fn section_text_place(
     })
 }
 
-/// The text of one section of a document whose text is not in `section_text_v2`: the inline
+/// The text of one section of a document whose text is not in `section_text_v3`: the inline
 /// `document_json` row, decoded in full. Only a row written before the text-unit store held the
 /// document takes this path.
 fn load_inline_section_text(
@@ -1046,7 +1055,7 @@ fn load_inline_section_text(
         .and_then(|(document, _)| document.find_section(section_id).map(|s| s.content.clone())))
 }
 
-/// The text of exactly one section, not its subtree, read from `section_text_v2` with the same
+/// The text of exactly one section, not its subtree, read from `section_text_v3` with the same
 /// staleness checks as the whole-document load.
 fn load_one_section_text(
     connection: &Connection,
@@ -1175,8 +1184,29 @@ fn load_body_order(
 }
 
 /// The `content_store` value of a `document_json` row that keeps no section text inline: every
-/// section's text is in `section_text_v2` for the same document version.
-const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v2";
+/// section's text is in `section_text_v3` for the same document version.
+const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v3";
+
+/// The `encoding` of a `section_text_v3` chunk that is the raw UTF-8 bytes of the chunk.
+const SECTION_TEXT_ENCODING_RAW: i64 = 0;
+
+/// The `encoding` of a `section_text_v3` chunk that is the UTF-8 bytes of the chunk compressed in
+/// zlib format (RFC 1950), which `zlib.decompress` of Python reads.
+const SECTION_TEXT_ENCODING_ZLIB: i64 = 1;
+
+/// The zlib level a section text chunk is compressed at: the fastest level whose output stays within
+/// 15% of the best level on 宋史 and en-novel. Measured in CI; see the level table in the DISK-1 PR.
+const SECTION_TEXT_ZLIB_LEVEL: u32 = 6;
+
+/// A chunk is stored raw unless zlib makes it at least this many percent smaller, so text that does
+/// not compress never grows on disk.
+const SECTION_TEXT_MIN_SAVING_PERCENT: usize = 5;
+
+/// How much larger a compressed chunk is assumed to be once decompressed, for the scan warm's byte
+/// budget: a zlib chunk of natural-language text holds about three times its stored size. The budget
+/// only decides whether a warm starts, and the scan text store enforces the exact cap on every
+/// insert, so an estimate is enough here and no chunk is decompressed just to be measured.
+const SECTION_TEXT_ZLIB_EXPANSION_ESTIMATE: usize = 3;
 
 /// The `metadata_store` value of a `document_json` row that keeps its heavy metadata entries in
 /// `document_meta_v2`, compressed. A row without the key keeps every entry inline, which is what
@@ -1289,7 +1319,56 @@ fn corrupt_metadata_entry(document_id: &DocumentId, key: &str, reason: &str) -> 
     ))
 }
 
-/// Whether `document`'s section text is stored in `section_text_v2` for exactly this document
+/// The `(encoding, data)` a section text chunk is stored as: the UTF-8 bytes of the chunk compressed
+/// in zlib format, or the raw bytes when compression does not make the chunk at least
+/// [`SECTION_TEXT_MIN_SAVING_PERCENT`] smaller. One chunk is compressed at a time, so a document's
+/// text is never copied in full.
+fn encode_text_chunk(text: &str) -> Result<(i64, Vec<u8>), ApplicationError> {
+    let raw = text.as_bytes();
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(SECTION_TEXT_ZLIB_LEVEL));
+    encoder
+        .write_all(raw)
+        .map_err(|error| text_chunk_error(&format!("compression failed: {error}")))?;
+    let blob = encoder
+        .finish()
+        .map_err(|error| text_chunk_error(&format!("compression failed: {error}")))?;
+    if blob.len() * 100 <= raw.len() * (100 - SECTION_TEXT_MIN_SAVING_PERCENT) {
+        Ok((SECTION_TEXT_ENCODING_ZLIB, blob))
+    } else {
+        Ok((SECTION_TEXT_ENCODING_RAW, raw.to_vec()))
+    }
+}
+
+/// The exact UTF-8 string of one stored section text chunk, decompressed when `encoding` says so. A
+/// blob that is not valid zlib data, or does not decode to UTF-8, is a corrupt row: an error that
+/// names it, never a panic.
+fn decode_text_chunk(encoding: i64, data: &[u8]) -> Result<String, ApplicationError> {
+    let bytes = match encoding {
+        SECTION_TEXT_ENCODING_RAW => Cow::Borrowed(data),
+        SECTION_TEXT_ENCODING_ZLIB => {
+            let mut bytes = Vec::new();
+            ZlibDecoder::new(data)
+                .read_to_end(&mut bytes)
+                .map_err(|error| text_chunk_error(&format!("decompression failed: {error}")))?;
+            Cow::Owned(bytes)
+        }
+        encoding => {
+            return Err(text_chunk_error(&format!("unknown encoding {encoding}")));
+        }
+    };
+    String::from_utf8(bytes.into_owned())
+        .map_err(|error| text_chunk_error(&format!("not UTF-8: {error}")))
+}
+
+/// The error of a section text chunk that cannot be encoded or decoded. It carries no document or
+/// section id: the caller adds the context its own error style names.
+fn text_chunk_error(reason: &str) -> ApplicationError {
+    ApplicationError::RepositoryFailed(format!(
+        "stored section text chunk cannot be read: {reason}"
+    ))
+}
+
+/// Whether `document`'s section text is stored in `section_text_v3` for exactly this document
 /// version, so that `document_json` may leave it out: the unit row names this document and hash for
 /// the current `TEXT_SEGMENTATION_VERSION`, and `section_layout_v2` holds exactly one row per
 /// section, in depth-first document order, whose `char_len` is that section's char count.
@@ -1568,10 +1647,13 @@ impl SqliteTextUnitIndex {
         // both into rowid tables: chunked layout rows and chunked text rows. Dropping is
         // idempotent, so an old database opens, keeps its `documents` rows, and re-ingests its
         // documents on their next open.
+        // The text moved to `section_text_v3` (compressed chunks, DISK-1), so the uncompressed v4
+        // text table is dropped too: a row that still names it reads as stale and re-ingests.
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS section_layout_v1;
                  DROP TABLE IF EXISTS section_text_v1;
+                 DROP TABLE IF EXISTS section_text_v2;
                  CREATE TABLE IF NOT EXISTS text_unit_documents_v2 (
                     doc_key INTEGER PRIMARY KEY,
                     document_id TEXT NOT NULL UNIQUE,
@@ -1579,11 +1661,12 @@ impl SqliteTextUnitIndex {
                     normalized_document_hash TEXT NOT NULL,
                     segmentation_version TEXT NOT NULL
                  );
-                 CREATE TABLE IF NOT EXISTS section_text_v2 (
+                 CREATE TABLE IF NOT EXISTS section_text_v3 (
                     doc_key INTEGER NOT NULL,
                     section_key INTEGER NOT NULL,
                     chunk_no INTEGER NOT NULL,
-                    text TEXT NOT NULL,
+                    encoding INTEGER NOT NULL,
+                    data BLOB NOT NULL,
                     UNIQUE(doc_key, section_key, chunk_no)
                  );
                  CREATE TABLE IF NOT EXISTS section_layout_v2 (
@@ -3513,7 +3596,7 @@ fn plan_chunk_starts(
     Ok((paragraph_summary, sentence_summary, None))
 }
 
-/// Writes one document's `section_text_v2` chunks, `section_layout_v2` headers and
+/// Writes one document's `section_text_v3` chunks, `section_layout_v2` headers and
 /// `section_layout_chunk_v2` rows in a transaction.
 fn write_document_sections(
     connection: &mut Connection,
@@ -3553,7 +3636,7 @@ fn write_document_sections(
 
     transaction
         .execute(
-            "DELETE FROM section_text_v2 WHERE doc_key = ?1",
+            "DELETE FROM section_text_v3 WHERE doc_key = ?1",
             params![doc_key],
         )
         .map_err(text_unit_index_error)?;
@@ -3587,8 +3670,8 @@ fn write_document_sections(
     {
         let mut chunk_statement = transaction
             .prepare(
-                "INSERT INTO section_text_v2(doc_key, section_key, chunk_no, text)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO section_text_v3(doc_key, section_key, chunk_no, encoding, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .map_err(text_unit_index_error)?;
         let mut header_statement = transaction
@@ -5072,26 +5155,35 @@ fn load_section_text_unchecked(
 ) -> Result<String, ApplicationError> {
     let mut statement = connection
         .prepare_cached(
-            "SELECT chunk_no, text
-             FROM section_text_v2
+            "SELECT chunk_no, encoding, data
+             FROM section_text_v3
              WHERE doc_key = ?1 AND section_key = ?2
              ORDER BY chunk_no ASC",
         )
         .map_err(text_unit_index_error)?;
     let rows = statement
         .query_map(params![doc_key, section_key], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .map_err(text_unit_index_error)?;
     let mut text = String::new();
     for (expected_chunk, row) in rows.enumerate() {
-        let (chunk_no, chunk) = row.map_err(text_unit_index_error)?;
+        let (chunk_no, encoding, data) = row.map_err(text_unit_index_error)?;
         let chunk_no = i64_to_usize(chunk_no, "chunk_no")?;
         if chunk_no != expected_chunk {
             return Err(ApplicationError::TextUnitIndexFailed(format!(
                 "section {section_key} is missing text chunk {expected_chunk}"
             )));
         }
+        let chunk = decode_text_chunk(encoding, &data).map_err(|error| {
+            ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} text chunk {chunk_no}: {error}"
+            ))
+        })?;
         text.push_str(&chunk);
     }
     Ok(text)
@@ -5111,8 +5203,8 @@ fn load_text_slice(
     let last_chunk = (end - 1) / CHUNK_CHARS;
     let mut statement = connection
         .prepare(
-            "SELECT chunk_no, text
-             FROM section_text_v2
+            "SELECT chunk_no, encoding, data
+             FROM section_text_v3
              WHERE doc_key = ?1 AND section_key = ?2
                AND chunk_no BETWEEN ?3 AND ?4
              ORDER BY chunk_no ASC",
@@ -5126,13 +5218,19 @@ fn load_text_slice(
                 usize_to_i64(first_chunk)?,
                 usize_to_i64(last_chunk)?
             ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
         )
         .map_err(text_unit_index_error)?;
 
     let mut text = String::new();
     for (offset, row) in rows.enumerate() {
-        let (chunk_no, chunk) = row.map_err(text_unit_index_error)?;
+        let (chunk_no, encoding, data) = row.map_err(text_unit_index_error)?;
         let chunk_no = i64_to_usize(chunk_no, "chunk_no")?;
         let expected_chunk = first_chunk + offset;
         if chunk_no != expected_chunk {
@@ -5140,6 +5238,11 @@ fn load_text_slice(
                 "section {section_key} is missing text chunk {expected_chunk}"
             )));
         }
+        let chunk = decode_text_chunk(encoding, &data).map_err(|error| {
+            ApplicationError::TextUnitIndexFailed(format!(
+                "section {section_key} text chunk {chunk_no}: {error}"
+            ))
+        })?;
         let chunk_base = chunk_no.checked_mul(CHUNK_CHARS).ok_or_else(|| {
             ApplicationError::TextUnitIndexFailed("text chunk offset overflow".into())
         })?;
@@ -5366,6 +5469,8 @@ fn collect_sections<'a>(sections: &'a [Section], out: &mut Vec<&'a Section>) {
     }
 }
 
+/// Writes one section's text as `section_text_v3` chunks of at most [`CHUNK_CHARS`] chars each,
+/// compressing one chunk at a time so a document's text is never copied in full.
 fn insert_section_text(
     statement: &mut rusqlite::Statement<'_>,
     doc_key: i64,
@@ -5377,9 +5482,13 @@ fn insert_section_text(
     let mut chars = 0usize;
     for (index, _) in text.char_indices() {
         if chars == CHUNK_CHARS {
-            statement
-                .execute(params![doc_key, section_key, chunk_no, &text[start..index]])
-                .map_err(text_unit_index_error)?;
+            insert_text_chunk(
+                statement,
+                doc_key,
+                section_key,
+                chunk_no,
+                &text[start..index],
+            )?;
             chunk_no += 1;
             start = index;
             chars = 0;
@@ -5387,10 +5496,22 @@ fn insert_section_text(
         chars += 1;
     }
     if start < text.len() {
-        statement
-            .execute(params![doc_key, section_key, chunk_no, &text[start..]])
-            .map_err(text_unit_index_error)?;
+        insert_text_chunk(statement, doc_key, section_key, chunk_no, &text[start..])?;
     }
+    Ok(())
+}
+
+fn insert_text_chunk(
+    statement: &mut rusqlite::Statement<'_>,
+    doc_key: i64,
+    section_key: i64,
+    chunk_no: i64,
+    text: &str,
+) -> Result<(), ApplicationError> {
+    let (encoding, data) = encode_text_chunk(text)?;
+    statement
+        .execute(params![doc_key, section_key, chunk_no, encoding, data])
+        .map_err(text_unit_index_error)?;
     Ok(())
 }
 
@@ -5945,7 +6066,7 @@ impl StoredDocument {
     }
 
     /// Decodes the document. `connection` and `stored_hash` are read only when the row keeps its
-    /// section text in `section_text_v2`; `stored_hash` is the hash of the `documents` row, if it
+    /// section text in `section_text_v3`; `stored_hash` is the hash of the `documents` row, if it
     /// has one.
     fn into_document(
         self,
@@ -6118,7 +6239,7 @@ fn stale_section_text(document_id: &DocumentId, reason: &str) -> ApplicationErro
     ))
 }
 
-/// Fills every section's `content` from `section_text_v2`, in depth-first section order, which is
+/// Fills every section's `content` from `section_text_v3`, in depth-first section order, which is
 /// the order `write_document_sections` assigns `section_key` in.
 fn load_document_section_text(
     connection: &Connection,
@@ -6219,7 +6340,7 @@ struct StoredSection {
 
 impl StoredSection {
     /// `omit_content` writes an empty `content` instead of a copy of the section's text, for rows
-    /// whose text is stored in `section_text_v2`.
+    /// whose text is stored in `section_text_v3`.
     fn from_section(section: &Section, omit_content: bool) -> Self {
         Self {
             id: section.id.0.clone(),

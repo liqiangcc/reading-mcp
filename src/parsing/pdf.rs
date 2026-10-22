@@ -826,11 +826,19 @@ mod tests {
         ]
     }
 
-    fn simple_font(document: &mut LopdfDocument) -> ObjectId {
+    fn cjk_font(document: &mut LopdfDocument) -> ObjectId {
         document.add_object(dictionary! {
             "Type" => "Font",
             "Subtype" => "Type1",
-            "BaseFont" => "Helvetica",
+            "BaseFont" => "IMFCTT1",
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![
+                    Object::Integer(65),
+                    Object::Name(b"uni4E2D".to_vec()),
+                    Object::Name(b"uni6587".to_vec()),
+                ],
+            },
         })
     }
 
@@ -890,7 +898,7 @@ mod tests {
     #[test]
     fn text_inside_a_form_xobject_is_extracted() {
         let mut document = LopdfDocument::with_version("1.5");
-        let font_id = simple_font(&mut document);
+        let font_id = cjk_font(&mut document);
         let form_id = form(
             &mut document,
             dictionary! { "Font" => dictionary! { "FX" => font_id } },
@@ -902,7 +910,7 @@ mod tests {
                 10.into(),
                 20.into(),
             ]),
-            text_operations("FX", "Form text"),
+            byte_text_operations("FX", &[65]),
         );
         add_page(
             &mut document,
@@ -914,25 +922,25 @@ mod tests {
             dictionary! { "XObject" => dictionary! { "Fm1" => form_id } },
         );
 
-        assert_eq!(page_texts(&document)[0].text, "Form text");
+        assert_eq!(page_texts(&document)[0].text, "中");
         assert!(old_page_texts(&document)[0].text.is_empty());
     }
 
     #[test]
     fn form_text_order_follows_the_content_stream() {
         let mut document = LopdfDocument::with_version("1.5");
-        let font_id = simple_font(&mut document);
+        let font_id = cjk_font(&mut document);
         let first = form(
             &mut document,
             dictionary! { "Font" => dictionary! { "F1" => font_id } },
             None,
-            text_operations("F1", "A"),
+            byte_text_operations("F1", &[65]),
         );
         let second = form(
             &mut document,
             dictionary! { "Font" => dictionary! { "F1" => font_id } },
             None,
-            text_operations("F1", "B"),
+            byte_text_operations("F1", &[66]),
         );
         add_page(
             &mut document,
@@ -945,18 +953,18 @@ mod tests {
             },
         );
 
-        assert_eq!(page_texts(&document)[0].text, "A\nB");
+        assert_eq!(page_texts(&document)[0].text, "中\n文");
     }
 
     #[test]
     fn nested_form_xobjects_are_extracted_once() {
         let mut document = LopdfDocument::with_version("1.5");
-        let font_id = simple_font(&mut document);
+        let font_id = cjk_font(&mut document);
         let inner = form(
             &mut document,
             dictionary! { "Font" => dictionary! { "F1" => font_id } },
             None,
-            text_operations("F1", "Inner"),
+            byte_text_operations("F1", &[65]),
         );
         let outer = form(
             &mut document,
@@ -970,15 +978,15 @@ mod tests {
             dictionary! { "XObject" => dictionary! { "Outer" => outer } },
         );
 
-        assert_eq!(page_texts(&document)[0].text, "Inner");
+        assert_eq!(page_texts(&document)[0].text, "中");
     }
 
     #[test]
     fn cyclic_form_xobject_terminates_and_keeps_its_text() {
         let mut document = LopdfDocument::with_version("1.5");
-        let font_id = simple_font(&mut document);
+        let font_id = cjk_font(&mut document);
         let form_id = document.new_object_id();
-        let mut operations = text_operations("F1", "Cycle");
+        let mut operations = byte_text_operations("F1", &[65]);
         operations.push(Operation::new("Do", vec![Object::Name(b"Self".to_vec())]));
         document.set_object(
             form_id,
@@ -1000,7 +1008,7 @@ mod tests {
             dictionary! { "XObject" => dictionary! { "Self" => form_id } },
         );
 
-        assert_eq!(page_texts(&document)[0].text, "Cycle");
+        assert_eq!(page_texts(&document)[0].text, "中");
     }
 
     #[test]

@@ -33,7 +33,7 @@ pub(super) fn prepare_text_extraction(pdf: &LopdfDocument) -> Option<LopdfDocume
     let has_text_form = pdf.objects.values().any(|object| {
         object
             .as_stream()
-            .is_ok_and(|stream| form_stream_has_text(pdf, stream))
+            .is_ok_and(|stream| form_stream_has_cjk(pdf, stream))
     });
     if !has_uni_font && !has_text_form {
         return None;
@@ -299,7 +299,12 @@ fn build_to_unicode_cmap(entries: &BTreeMap<u8, Vec<u16>>) -> Vec<u8> {
 // A1: text drawn inside Form XObjects
 // ---------------------------------------------------------------------------
 
-fn form_stream_has_text(doc: &LopdfDocument, stream: &Stream) -> bool {
+/// A document is only repaired for Form XObjects when at least one form uses a
+/// font that can actually carry CJK text.  This is the product goal (PDF-1c is
+/// about lost CJK text), and it keeps the pre-pass off ordinary English
+/// papers, whose figure forms would otherwise add text that is not in the
+/// reference and would cost a full parse of every vector figure.
+fn form_stream_has_cjk(doc: &LopdfDocument, stream: &Stream) -> bool {
     if !is_form(stream) {
         return false;
     }
@@ -311,59 +316,78 @@ fn form_stream_has_text(doc: &LopdfDocument, stream: &Stream) -> bool {
     let Some(resources) = resources else {
         return false;
     };
-    let mut active = HashSet::new();
-    form_content_has_text(doc, resources, stream, 0, &mut active)
+    resources_have_cjk_font(doc, resources)
 }
 
-fn form_content_has_text(
-    doc: &LopdfDocument,
-    resources: &Dictionary,
-    stream: &Stream,
-    depth: usize,
-    active: &mut HashSet<ObjectId>,
-) -> bool {
-    if depth > MAX_XOBJECT_DEPTH {
+fn resources_have_cjk_font(doc: &LopdfDocument, resources: &Dictionary) -> bool {
+    let Some(fonts) = resources
+        .get(b"Font")
+        .ok()
+        .and_then(|object| dictionary_of(doc, object))
+    else {
         return false;
+    };
+    fonts.iter().any(|(_, value)| {
+        doc.dereference(value)
+            .ok()
+            .and_then(|(_, object)| object.as_dict().ok())
+            .is_some_and(|font| font_has_cjk_hint(doc, font))
+    })
+}
+
+fn font_has_cjk_hint(doc: &LopdfDocument, font: &Dictionary) -> bool {
+    if let Some(differences) = encoding_differences(doc, font)
+        && uni_differences(differences)
+            .is_some_and(|entries| entries.iter().any(|(_, character)| is_cjk(*character)))
+    {
+        return true;
     }
-    let Ok(data) = stream.decompressed_content_with_limit(MAX_PAGE_DECOMPRESSED_BYTES) else {
+    let Some(to_unicode) = font
+        .get_deref(b"ToUnicode", doc)
+        .ok()
+        .and_then(Object::as_stream)
+        .ok()
+    else {
         return false;
     };
-    let Ok(content) = Content::decode(&data) else {
-        return false;
-    };
-    for operation in &content.operations {
-        match operation.operator.as_str() {
-            "Tj" | "TJ" | "'" | "\"" => return true,
-            "Do" => {
-                let Some(name) = operation.operands.first().and_then(|o| o.as_name().ok()) else {
-                    continue;
-                };
-                let Some((id, nested)) = lookup_xobject(doc, resources, name) else {
-                    continue;
-                };
-                let Some(id) = id else {
-                    continue;
-                };
-                if !active.insert(id) {
-                    continue;
-                }
-                let nested_resources = nested
-                    .dict
-                    .get(b"Resources")
-                    .ok()
-                    .and_then(|object| dictionary_of(doc, object));
-                let found = nested_resources.is_some_and(|resources| {
-                    form_content_has_text(doc, resources, nested, depth + 1, active)
-                });
-                active.remove(&id);
-                if found {
-                    return true;
-                }
-            }
-            _ => {}
+    to_unicode
+        .decompressed_content_with_limit(2 * 1024 * 1024)
+        .is_ok_and(|data| cmap_bytes_have_cjk(&data))
+}
+
+fn cmap_bytes_have_cjk(data: &[u8]) -> bool {
+    let mut index = 0;
+    while index < data.len() {
+        if data[index] != b'<' {
+            index += 1;
+            continue;
         }
+        let Some(end) = data[index + 1..].iter().position(|byte| *byte == b'>') else {
+            break;
+        };
+        let end = index + 1 + end;
+        let hex = &data[index + 1..end];
+        if (4..=6).contains(&hex.len())
+            && hex.iter().all(u8::is_ascii_hexdigit)
+            && let Ok(text) = std::str::from_utf8(hex)
+            && let Ok(value) = u32::from_str_radix(text, 16)
+            && char::from_u32(value).is_some_and(is_cjk)
+        {
+            return true;
+        }
+        index = end + 1;
     }
     false
+}
+
+fn is_cjk(character: char) -> bool {
+    let code = character as u32;
+    (0x3400..=0x4DBF).contains(&code)
+        || (0x4E00..=0x9FFF).contains(&code)
+        || (0xF900..=0xFAFF).contains(&code)
+        || (0x3040..=0x30FF).contains(&code)
+        || (0x31F0..=0x31FF).contains(&code)
+        || (0xAC00..=0xD7AF).contains(&code)
 }
 
 fn inline_page_text_xobjects(doc: &mut LopdfDocument) {

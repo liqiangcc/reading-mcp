@@ -345,14 +345,13 @@ fn font_has_cjk_hint(doc: &LopdfDocument, font: &Dictionary) -> bool {
     let Some(to_unicode) = font
         .get_deref(b"ToUnicode", doc)
         .ok()
-        .and_then(Object::as_stream)
-        .ok()
+        .and_then(|object| object.as_stream().ok())
     else {
         return false;
     };
     to_unicode
         .decompressed_content_with_limit(2 * 1024 * 1024)
-        .is_ok_and(|data| cmap_bytes_have_cjk(&data))
+        .is_ok_and(|data| cmap_bytes_have_cjk(data.as_slice()))
 }
 
 fn cmap_bytes_have_cjk(data: &[u8]) -> bool {

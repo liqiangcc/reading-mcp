@@ -21,7 +21,9 @@ are CI artifacts.
   (`pdf-cjk.yml`, commit `a63cdb1`): release binary built from that commit, 5 shards x 5
   papers, aggregate. `READING_MCP_TOOLS=v1`, OCR off, layout backend from
   `scripts/pdf-layout/setup-pdf-layout.sh` (pymupdf/pymupdf4llm/pymupdf-layout 1.28.2).
-  No paper failed to download and none was skipped by the shard deadline.
+  No paper failed to download and none was skipped by the shard deadline. A second run of the
+  same tree on this PR (run [39711460970](https://github.com/liqiangcc/reading-mcp/actions/runs/39711460970))
+  produced identical tables, so every number below is reproducible.
 - **Reference text**: PyMuPDF `page.get_text()` for every page, independent of both backends.
 - **Default and layout text**: `open_document`, `get_document_structure`, then `get_text_units`
   (`requested_kind=sentence`, 256 items per call, cursor to the end) for the **whole document**,

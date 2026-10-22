@@ -131,7 +131,12 @@ impl CachingParser {
                 self.pdf_namespace
                     .as_ref()
                     .map(|ns| format!("{NORMALIZATION_VERSION}:{ns}"))
-                    .unwrap_or_else(|| NORMALIZATION_VERSION.into())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{NORMALIZATION_VERSION}:{}",
+                            crate::parsing::PDF_TEXT_EXTRACTION_VERSION
+                        )
+                    })
             } else {
                 NORMALIZATION_VERSION.into()
             },

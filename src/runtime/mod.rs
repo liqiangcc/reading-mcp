@@ -172,12 +172,13 @@ pub fn build_server(
         .unwrap_or_else(|| "ocr-disabled/v1".into());
     // Everything that changes what the parser publishes for the same bytes; keys the stored open results.
     let ingest_fingerprint = format!(
-        "{fingerprint}|pdf-layout={}",
+        "{fingerprint}|pdf-layout={}|pdf-text={}",
         if config.pdf_layout_python.is_some() {
             crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE
         } else {
             "off"
-        }
+        },
+        crate::parsing::PDF_TEXT_EXTRACTION_VERSION,
     );
     let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache)
         .with_ocr_fingerprint(fingerprint)

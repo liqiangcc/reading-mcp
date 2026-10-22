@@ -324,15 +324,15 @@ fn scan_warm_plan(
             .collect::<Vec<_>>();
         (meta, sections)
     };
-    // The store a scan would fill when the cache is free or already holds this document; another
-    // document's cached text is left alone.
-    let Some(store) = scan_text_store_for_warm(cache, &meta) else {
-        return Ok(None);
-    };
     let chars: usize = sections.iter().map(|(_, char_len)| *char_len).sum();
     // A UTF-8 char is at most four bytes, so a document of at most `cap / 4` chars certainly fits in
     // `cap` bytes and the warm needs no byte sizes at all.
     if chars <= cap / 4 {
+        // The store a scan would fill when the cache is free or already holds this document; another
+        // document's cached text is left alone.
+        let Some(store) = scan_text_store_for_warm(cache, &meta) else {
+            return Ok(None);
+        };
         return Ok(Some(WarmPlan {
             store,
             doc_key: meta.doc_key,
@@ -359,11 +359,17 @@ fn scan_warm_plan(
         };
         total += bytes;
         if total > cap {
+            let Some(store) = scan_text_store_for_warm(cache, &meta) else {
+                return Ok(None);
+            };
             store.mark_over_cap();
             return Ok(None);
         }
         measured.push((*section_key, bytes));
     }
+    let Some(store) = scan_text_store_for_warm(cache, &meta) else {
+        return Ok(None);
+    };
     Ok(Some(WarmPlan {
         store,
         doc_key: meta.doc_key,

@@ -1,15 +1,18 @@
 name: OCR offline Python dependency component
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'scripts/ocr/layout_model_probe.py'
       - 'scripts/ocr/package_python_dependencies.py'
       - 'scripts/ocr/package_engine_dependencies.py'
+      - 'scripts/ocr/download_retry.py'
       - 'scripts/ocr/verify_engine_component.py'
       - 'scripts/ocr/offline_runtime_smoke.py'
       - 'scripts/ocr/runtime_archive.py'
       - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
+      - 'tests/ocr/test_download_retry.py'
       - 'tests/ocr_private_runtime.rs'
       - 'tests/support/ocr_private_mcp.rs'
       - 'tests/ocr/test_runtime_inventory.py'
@@ -28,11 +31,13 @@ on:
       - 'scripts/ocr/layout_model_probe.py'
       - 'scripts/ocr/package_python_dependencies.py'
       - 'scripts/ocr/package_engine_dependencies.py'
+      - 'scripts/ocr/download_retry.py'
       - 'scripts/ocr/verify_engine_component.py'
       - 'scripts/ocr/offline_runtime_smoke.py'
       - 'scripts/ocr/runtime_archive.py'
       - 'tests/ocr/test_runtime_archive.py'
       - 'tests/ocr/test_engine_component.py'
+      - 'tests/ocr/test_download_retry.py'
       - 'tests/ocr_private_runtime.rs'
       - 'tests/support/ocr_private_mcp.rs'
       - 'tests/ocr/test_runtime_inventory.py'
@@ -51,7 +56,9 @@ permissions:
 jobs:
   offline-private-runtime:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Three slow apt attempts (3 x 600 s) plus three slow wheel attempts can
+    # exceed the previous 15 min without anything hanging.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -207,11 +214,12 @@ jobs:
           retention-days: 14
   offline-engine:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Three slow apt attempts (3 x 600 s) can exceed the previous 15 min.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: Archive corruption and path validation tests
-        run: python3 -m unittest tests/ocr/test_engine_component.py
+        run: python3 -m unittest tests/ocr/test_engine_component.py tests/ocr/test_download_retry.py
       - name: Resolve complete Debian closure without installed-package shortcuts
         run: |
           sudo apt-get update -qq
@@ -250,7 +258,8 @@ jobs:
           retention-days: 14
   offline-python:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Three slow wheel attempts (3 x 600 s) can exceed the previous 15 min.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - id: python

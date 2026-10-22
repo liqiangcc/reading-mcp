@@ -294,6 +294,23 @@ def run_mode(args: argparse.Namespace) -> int:
 # facts: page count, fonts per page resources, /ToUnicode sizes (PyMuPDF)
 # ---------------------------------------------------------------------------------------------
 
+SHOW_TOKEN = re.compile(
+    rb"/[^\s/<>\[\](){}]+\s+[-\d.]+\s+Tf|\[(.*?)\]\s*TJ|"
+    rb"(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>)\s*(?:Tj|'|\")", re.S)
+STRING_TOKEN = re.compile(rb"<[0-9A-Fa-f\s]*>|\((?:\\.|[^\\()])*\)", re.S)
+
+
+def shown_strings(data: bytes) -> int:
+    """How many strings a content stream shows (one `decode_text_object` call each)."""
+    total = 0
+    for match in SHOW_TOKEN.finditer(data):
+        if match.group(1) is not None:
+            total += len(STRING_TOKEN.findall(match.group(1)))
+        else:
+            total += 1
+    return total
+
+
 def facts_mode(args: argparse.Namespace) -> int:
     import pymupdf
 
@@ -302,8 +319,16 @@ def facts_mode(args: argparse.Namespace) -> int:
         document = pymupdf.open(entry["path"])
         try:
             per_page = []
+            shown = []
             fonts: dict[int, dict] = {}
             for page in document:
+                count = 0
+                for content in page.get_contents():
+                    try:
+                        count += shown_strings(document.xref_stream(content))
+                    except Exception:  # noqa: BLE001 - an unreadable stream shows no text
+                        continue
+                shown.append(count)
                 names = {}
                 for item in page.get_fonts(full=True):
                     xref, _ext, kind, basefont, resource, encoding = item[:6]
@@ -325,13 +350,16 @@ def facts_mode(args: argparse.Namespace) -> int:
                 "pages": document.page_count,
                 "fonts_per_page": per_page,
                 "fonts_in_resources": sum(per_page),
+                "strings_shown_per_page": shown,
+                "strings_shown": sum(shown),
                 "fonts": sorted(fonts.values(), key=lambda item: -item["to_unicode_bytes"]),
             }
         finally:
             document.close()
-        print(f"| {entry['label']} | {facts[entry['label']]['pages']} pages | "
-              f"{facts[entry['label']]['fonts_in_resources']} font entries | "
-              f"{len(facts[entry['label']]['fonts'])} distinct fonts |", flush=True)
+        fact = facts[entry["label"]]
+        print(f"| {entry['label']} | {fact['pages']} pages | {fact['fonts_in_resources']} font "
+              f"entries | {len(fact['fonts'])} distinct fonts | "
+              f"{fact['strings_shown']} strings shown |", flush=True)
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(facts, handle, indent=1, sort_keys=True)
     return 0
@@ -502,31 +530,43 @@ def short(symbol: str, limit: int = 96) -> str:
 
 def lopdf_table(rows: list[dict], facts: dict[str, dict]) -> str:
     lines = [
-        "| Input | Pages | Fonts in page `/Resources` (sum) | Extractor calls per page | "
-        "`/ToUnicode` parses per page (model) | Total `/ToUnicode` parses | "
-        "`/ToUnicode` bytes (CJK font) | CMap bytes parsed per page |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Input | Pages | Fonts in page `/Resources` (sum) | Strings shown per page | "
+        "`pdf.rs` parses per page | `pdf_layout` second pass | `/ToUnicode` parses per page "
+        "(model) | Total parses | `/ToUnicode` bytes (biggest) | CMap bytes parsed per page |",
+        "| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         fact = facts.get(row["label"])
         if not fact:
             continue
         pages = fact["pages"] or 1
-        per_page = fact["fonts_in_resources"] / pages
-        parses = fact["fonts_in_resources"] * 2
+        first = 2 * fact["fonts_in_resources"]
+        strings = fact.get("strings_shown", 0)
+        sections = row.get("sections")
+        second = isinstance(sections, int) and sections < pages
+        parses = first + (strings if second else 0)
         to_unicode = [font for font in fact["fonts"] if font["to_unicode"]]
         biggest = max((font["to_unicode_bytes"] for font in to_unicode), default=0)
         lines.append(
-            f"| {row['label']} | {pages} | {fact['fonts_in_resources']} | 2 | "
-            f"{parses / pages:.2f} | {parses} | {biggest} | {biggest * parses / pages:.0f} |")
+            f"| {row['label']} | {pages} | {fact['fonts_in_resources']} | "
+            f"{strings / pages:.1f} | {first / pages:.2f} | "
+            f"{'runs' if second else 'does not run'} | {parses / pages:.1f} | {parses} | "
+            f"{biggest} | {biggest * parses / pages:.0f} |")
     lines.append("")
-    lines.append("`Extractor calls per page` is 2: `extract_page_texts_raw` "
-                 "(`src/parsing/pdf.rs:211-244`) calls `extract_text_chunks_with_limit` and "
-                 "`extract_text_with_limit`, and each resolves every font in the page's "
-                 "resource dictionary (`lopdf-0.44.0/src/parser_aux.rs:115-130`). "
-                 "`/ToUnicode` parses per page` is that product; it is a model of the code, not "
-                 "a counter, and the profile's share for `ToUnicodeCMap::parse` is printed next "
-                 "to it in section 2.")
+    lines.append("`pdf.rs parses per page` is 2 x the fonts in the page's `/Resources`: "
+                 "`extract_page_texts_raw` (`src/parsing/pdf.rs:211-244`) calls "
+                 "`extract_text_chunks_with_limit` and `extract_text_with_limit`, and each "
+                 "resolves every font in the page's resource dictionary "
+                 "(`lopdf-0.44.0/src/parser_aux.rs:115-130`). The `pdf_layout` pass is "
+                 "`pdf_v8::PdfParser::parse_sync` (`src/parsing/pdf_v8.rs:29-51`): when the "
+                 "structure provenance is `inferred_numbered_headings` it reopens the PDF and "
+                 "calls `extract_text_fragment_evidence`, whose `decode_text_object` "
+                 "(`src/parsing/pdf_layout.rs:418-438`) resolves the font encoding again for "
+                 "**every string shown** - no cache. `runs` is inferred from `sections < pages` "
+                 "(only the inferred-heading provenance produces fewer sections than pages, and "
+                 "these documents have no `/Outlines`). The profile's share for "
+                 "`ToUnicodeCMap::parse` is in section 2. This is a model of the code, not a "
+                 "counter.")
     return "\n".join(lines)
 
 

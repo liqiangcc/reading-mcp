@@ -792,18 +792,18 @@ def used_codes(doc, widths: dict[int, int]) -> dict[int, Counter]:
     return codes
 
 
+STRING_TOKEN = re.compile(rb"<([0-9A-Fa-f\s]*)>|\((?:\\.|[^\\()])*\)", re.S)
+
+
 def strings_of(match) -> list[bytes]:
-    """The byte strings a `Tj`/`TJ`/`'` operation shows, as raw bytes."""
+    """The byte strings a `Tj`/`TJ`/`'` operation shows, as raw bytes (hex and literal)."""
+    body = match.group(2) if match.group(2) is not None else match.group(3)
     out = []
-    if match.group(2) is not None:
-        for item in HEX_IN.findall(match.group(2)):
-            out.append(hex_bytes(item))
-        return out
-    token = match.group(3)
-    if token.startswith(b"<"):
-        out.append(hex_bytes(token[1:-1]))
-    else:
-        out.append(token[1:-1])
+    for token in STRING_TOKEN.finditer(body):
+        if token.group(1) is not None:
+            out.append(hex_bytes(token.group(1)))
+        else:
+            out.append(token.group(0)[1:-1])
     return out
 
 
@@ -991,6 +991,133 @@ def analyse_font(doc, font: dict, loss: dict, codes: Counter) -> dict:
     return record
 
 
+def cjk_targets(document, font: dict) -> int:
+    """How many destination code points of this font's /ToUnicode are CJK."""
+    kind, value = document.xref_get_key(font["xref"], "ToUnicode")
+    if kind != "xref":
+        return 0
+    data = document.xref_stream(int(value.split()[0]))
+    total = 0
+    for units in intended_map(data).values():
+        text = "".join(chr(unit) for unit in units if not 0xD800 <= unit <= 0xDFFF)
+        total += sum(1 for character in text if CJK.is_cjk(character))
+    return total
+
+
+def resolve_attribution(document, inventory: list[dict], font: dict) -> tuple[dict, str | None]:
+    """`rawdict` reports a BaseFont without its subset prefix, so two xrefs can share a name.
+
+    `scripts/pdf-cjk.py` gives such a run to the lowest xref.  When that xref's CMap carries no
+    CJK at all and a sibling with the same stripped BaseFont does, the CJK runs are the
+    sibling's: return it, with the reason.
+    """
+    if cjk_targets(document, font):
+        return font, None
+    names = set(CJK.span_names(font["basefont"]))
+    pages = set(font["pages"])
+    best = None
+    for other in inventory:
+        if other["xref"] == font["xref"]:
+            continue
+        if not (set(CJK.span_names(other["basefont"])) & names):
+            continue
+        if not pages & set(other["pages"]):
+            continue
+        count = cjk_targets(document, other)
+        if count and (best is None or count > best[0]):
+            best = (count, other)
+    if best is None:
+        return font, None
+    return best[1], (f"rawdict reports the BaseFont without the subset prefix; the CJK runs "
+                     f"attributed to xref {font['xref']} belong to xref {best[1]['xref']} "
+                     f"({best[0]} CJK targets in its /ToUnicode, 0 in the other)")
+
+
+def model_for(document, font: dict):
+    """The lopdf model of this font's /ToUnicode: a ToUnicodeMap, or None."""
+    kind, value = document.xref_get_key(font["xref"], "ToUnicode")
+    if kind != "xref":
+        return None
+    sections, _error, _stopped = lopdf_parse(document.xref_stream(int(value.split()[0])))
+    if sections is None:
+        return None
+    cmap, _build_error = lopdf_build(sections)
+    return cmap
+
+
+def decoded_cjk(document, font: dict, codes: Counter) -> Counter:
+    """The CJK characters lopdf's model would emit for this font's used codes."""
+    cmap = model_for(document, font)
+    if cmap is None:
+        return Counter()
+    kind, value = document.xref_get_key(font["xref"], "ToUnicode")
+    width = 2 if font["type"] == "Type0" else 1
+    if kind == "xref":
+        widths = features(document.xref_stream(int(value.split()[0])))["codespace_widths"]
+        if len(widths) == 1:
+            width = widths[0]
+    out: Counter = Counter()
+    for code, count in codes.items():
+        units = cmap.get(code, width) or [ToUnicodeMap.REPLACEMENT]
+        for _ in range(count):
+            for unit in units:
+                if 0xD800 <= unit <= 0xDFFF:
+                    continue
+                character = chr(unit)
+                if CJK.is_cjk(character):
+                    out[character] += 1
+    return out
+
+
+def owned_cjk(document, font: dict) -> Counter:
+    """The CJK characters PyMuPDF's `rawdict` attributes to this font's spans."""
+    names = set(CJK.span_names(font["basefont"]))
+    pages = set(font["pages"])
+    owned: Counter = Counter()
+    for page in document:
+        if page.number + 1 not in pages:
+            continue
+        for block in page.get_text("rawdict").get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    if span.get("font") not in names:
+                        continue
+                    owned.update(character["c"] for character in span.get("chars", [])
+                                 if CJK.is_cjk(character["c"]))
+    return owned
+
+
+def claim_order(document, inventory: list[dict], codes: dict) -> list[dict]:
+    """How much of a CMap-less font's "recovered" text was produced by another font.
+
+    `scripts/pdf-cjk.py` claims a returned character for the lowest font xref that owns it.  A
+    font whose `/ToUnicode` is missing cannot produce CJK at all (StandardEncoding), so every
+    CJK character it is credited with was produced by another font - and is deducted from that
+    font's own recovery.
+    """
+    produced: Counter = Counter()
+    for font in inventory:
+        produced.update(decoded_cjk(document, font, codes.get(font["xref"], Counter())))
+    rows = []
+    for font in inventory:
+        if font["to_unicode"]:
+            continue
+        owned = owned_cjk(document, font)
+        if not owned:
+            continue
+        borrowed = sum(min(count, produced.get(character, 0))
+                       for character, count in owned.items())
+        rows.append({
+            "xref": font["xref"],
+            "basefont": font["basefont"],
+            "pages": len(font["pages"]),
+            "owned_cjk": sum(owned.values()),
+            "credited_to_this_font_from_other_fonts": borrowed,
+            "share": round(borrowed / sum(owned.values()), 4),
+        })
+    return rows
+
+
 def pick_fonts(kind: str, fonts: list[dict], stats: dict) -> list[dict]:
     buckets = {}
     for (xref, location), entry in stats.items():
@@ -1018,7 +1145,14 @@ def pick_fonts(kind: str, fonts: list[dict], stats: dict) -> list[dict]:
             continue
         seen.add(font["xref"])
         out.append((dict(font, location=location), entry))
-    return out
+    if out or kind != "generated":
+        return out
+    # A generated input can defeat the rawdict attribution completely (the BaseFont PyMuPDF
+    # reports is not the one the font dictionary carries), so fall back to the font itself:
+    # the Type0 fonts with a /ToUnicode, biggest CMap first.
+    empty = {"chars": 0, "chars_found": 0}
+    ranked = sorted(fonts, key=lambda font: -font.get("to_unicode_bytes", 0))
+    return [(dict(font), empty) for font in ranked if font.get("to_unicode_bytes")][:2]
 
 
 def probe_document(label: str, path: str, kind: str, args, probe, report: dict) -> None:
@@ -1037,8 +1171,10 @@ def probe_document(label: str, path: str, kind: str, args, probe, report: dict) 
         for font in inventory:
             kind_, value_ = document.xref_get_key(font["xref"], "ToUnicode")
             width = 2 if font["type"] == "Type0" else 1
+            font["to_unicode_bytes"] = 0
             if kind_ == "xref":
                 stream = document.xref_stream(int(value_.split()[0]))
+                font["to_unicode_bytes"] = len(stream)
                 widths_in_cmap = features(stream)["codespace_widths"]
                 if len(widths_in_cmap) == 1:
                     width = widths_in_cmap[0]
@@ -1050,9 +1186,11 @@ def probe_document(label: str, path: str, kind: str, args, probe, report: dict) 
             limit = min(limit, 1)
         entries = []
         for font, loss in fonts[:limit]:
+            font, attribution = resolve_attribution(document, inventory, font)
             entry = analyse_font(document, font, loss, codes.get(font["xref"], Counter()))
             entry["paper"] = label
             entry["kind"] = kind
+            entry["attribution_note"] = attribution
             entries.append(entry)
             if entry.get("dump"):
                 os.makedirs(args.dump_dir, exist_ok=True)
@@ -1066,6 +1204,7 @@ def probe_document(label: str, path: str, kind: str, args, probe, report: dict) 
             entry.pop("_lopdf_cmap", None)
         report["documents"].append({
             "label": label, "kind": kind, "path": os.path.basename(path),
+            "claim_order": claim_order(document, inventory, codes),
             "pages": document.page_count, "backend": {
                 key: record.get(key) for key in
                 ("outcome", "error_code", "open_s", "sections", "units_read", "cjk_chars",
@@ -1174,9 +1313,10 @@ def render(report: dict) -> str:
         lines.append("| Font | Group | Location | Owned/recovered CJK | Loss | /ToUnicode xref "
                      "| bytes | bfchar/bfrange sections | array-form bfrange | dest shapes "
                      "| codespace | line endings | odd-nibble destinations | lopdf parse "
-                     "| lopdf resolves used codes |")
+                     "| lopdf resolves used codes | codes used (instances) | instances of an "
+                     "unmapped code |")
         lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | "
-                     "--- | ---: | --- | ---: |")
+                     "--- | ---: | --- | ---: | ---: | ---: |")
         for font in document["fonts"]:
             cmap = font.get("cmap") or {}
             shapes = (f"{cmap.get('dest_single_unit', 0)}u/"
@@ -1185,6 +1325,8 @@ def render(report: dict) -> str:
             loss = "-" if font["loss"] is None else f"{100 * font['loss']:.1f}%"
             resolved = ("-" if font["lopdf_resolved_of_used"] is None
                         else f"{100 * font['lopdf_resolved_of_used']:.1f}%")
+            unmapped = ("-" if font.get("unmapped_instance_share") is None
+                        else f"{100 * font['unmapped_instance_share']:.1f}%")
             group = font["group"].replace("|", "\\|")
             lines.append(
                 f"| {font['basefont']} ({font['xref']}) | `{group}` | "
@@ -1195,13 +1337,25 @@ def render(report: dict) -> str:
                 f"{cmap.get('codespace_widths', '-')} | "
                 f"{cmap.get('line_endings', {}).get('style', '-')} | "
                 f"{cmap.get('dest_odd_nibbles', '-')} | {font.get('lopdf_parse')} | "
-                f"{resolved} |")
+                f"{resolved} | {font.get('used_codes', 0)} ({font.get('used_code_instances', 0)}) | "
+                f"{unmapped} |")
         lines.append("")
         for font in document["fonts"]:
             if font.get("lopdf_parse") == "error":
                 lines.append(f"- **{font['basefont']}**: lopdf stops at byte "
                              f"{font['lopdf_stopped_at']} of {font['cmap']['bytes']}: "
                              f"`{font['lopdf_error']}`")
+            if font.get("attribution_note"):
+                lines.append(f"- **{font['basefont']}**: {font['attribution_note']}")
+            if font.get("absent_codes"):
+                lines.append(f"- **{font['basefont']}**: used codes the CMap does not map: "
+                             + ", ".join(f"`<{code}>`" for code in font["absent_codes"]))
+        for row in document.get("claim_order") or []:
+            lines.append(f"- claim order: font xref {row['xref']} ({row['basefont']}) has no "
+                         f"`/ToUnicode` and owns {row['owned_cjk']} CJK characters on "
+                         f"{row['pages']} pages; "
+                         f"{row['credited_to_this_font_from_other_fonts']} of them "
+                         f"({100 * row['share']:.1f}%) are characters another font returned.")
         lines.append("")
     return "\n".join(lines)
 

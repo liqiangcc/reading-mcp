@@ -139,17 +139,17 @@ class Sampler(threading.Thread):
         self.started = started
         self.interval = interval
         self.samples: list[list[float]] = []
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             rss, hwm = read_status(self.pid)
             if rss is not None:
                 self.samples.append([round(time.monotonic() - self.started, 4), rss, hwm])
-            self._stop.wait(self.interval)
+            self._stop_event.wait(self.interval)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
 
 class EventCollector(threading.Thread):
@@ -682,7 +682,9 @@ BUCKET_ORDER = (
     "sqlite_record_copy",
     "sqlite_page_cache",
     "sqlite_save_shared",
+    "metadata_clone",
     "metadata_compress",
+    "text_unit_sets",
     "sqlite_write_document_sections",
     "sqlite_other",
     "search",
@@ -692,15 +694,22 @@ BUCKET_ORDER = (
 
 WRITE_FUNCTIONS = (
     "write_document_sections",
-    "replace_document_sets",
-    "replace_document_segmentation",
     "insert_section_text",
-    "build_section_layout",
-    "build_segmentation_section_layout",
     "store_section_text",
     "store_body_order",
+)
+
+TEXT_UNIT_FUNCTIONS = (
+    "replace_document_sets",
+    "replace_document_segmentation",
+    "build_section_layout",
+    "build_segmentation_section_layout",
+    "build_section_descriptors",
     "write_text_unit",
     "insert_text_unit",
+    "walk_section_stream",
+    "store_section_stream",
+    "section_stream_summary",
 )
 
 
@@ -723,8 +732,12 @@ def bucket_of(frame: Frame, stack_text: str) -> str:
             return "metadata_compress"
         if "serde_json" in low or "format_escaped_str" in low:
             return "document_json"
+        if function == "split_metadata":
+            return "metadata_clone"
         if function == "save_shared":
             return "sqlite_save_shared"
+        if function in TEXT_UNIT_FUNCTIONS:
+            return "text_unit_sets"
         if function in WRITE_FUNCTIONS:
             return "sqlite_write_document_sections"
         if any(needle in function for needle in (
@@ -748,6 +761,13 @@ def bucket_of(frame: Frame, stack_text: str) -> str:
         return "search"
     if relative.startswith("src/retrieval/"):
         return "input_bytes"
+    if relative.endswith(("text_unit_stream.rs", "text_unit_store.rs", "text_unit_cursor.rs")):
+        return "text_unit_sets"
+    if relative.endswith("domain/text_unit.rs"):
+        return "text_unit_sets"
+    if relative.endswith("application/ports.rs"):
+        # A `RetrievedResource` clone copies the input bytes; anything else here is the open result.
+        return "input_bytes" if "to_vec" in low or "clone" in low else "open_result"
     if relative.startswith("src/application/"):
         return "open_result"
     return "other"
@@ -856,14 +876,45 @@ def module_hint(frames: list[Frame]) -> str:
     return "unknown"
 
 
+def node_bucket(node: Node, stack_text: str) -> str | None:
+    """The bucket of the allocation a node's own frames name, or None when they name none.
+
+    A `serde_json` realloc of the output buffer is attributed by the *caller* that asked for the
+    JSON (the `normalized_block_map` serialization or the `document_json` serialization), not by the
+    innermost derived `Serialize` impl the stack happens to end in.
+    """
+    project_frames = [frame for frame in node.frames if is_project(frame.location)]
+    if not project_frames:
+        return None
+    low = stack_text.lower()
+    if "pcache1" in low:
+        return "sqlite_page_cache"
+    if "sqlite3_bind_text" in low:
+        return "sqlite_bind_copy"
+    if "sqlite3vdbe" in low or "sqlite3_step" in low:
+        return "sqlite_record_copy"
+    if any(needle in low for needle in ("flate2", "miniz", "zlib")):
+        return "metadata_compress"
+    if "serde_json" in low or "format_escaped_str" in low:
+        paths = [project_relative(frame.location) or "" for frame in project_frames]
+        if any(path.endswith("normalized_block.rs") for path in paths):
+            return "normalized_block_map"
+        if any(path.endswith("sqlite.rs") for path in paths):
+            return "document_json"
+    paths = [project_relative(frame.location) or "" for frame in project_frames]
+    if any(path.startswith("src/parsing/") for path in paths):
+        return "parser_document"
+    return bucket_of(project_frames[0], stack_text)
+
+
 def classify(node: Node, prefix: list[Frame]) -> dict[str, int]:
     """Attribute a consumer-tree node's cost to the buckets its own frames name."""
     frames = prefix + node.frames
     text = "\n".join(str(frame) for frame in frames)
     is_sqlite = any(needle in text for needle in ("sqlite3", "libsqlite3-sys", "rusqlite"))
-    for frame in node.frames:
-        if is_project(frame.location):
-            return {bucket_of(frame, text): node.cost}
+    bucket = node_bucket(node, text)
+    if bucket is not None:
+        return {bucket: node.cost}
     if not node.children:
         if "library/std/src/fs.rs" in text and "blocking/pool.rs" in text:
             return {"input_bytes": node.cost}
@@ -885,34 +936,45 @@ def attribute_sites(node: Node, inherited: list[Frame], sites: dict) -> int:
     """Attribute each node's cost to the nearest project frame (the allocation site)."""
     frames = inherited + node.frames
     text = "\n".join(str(frame) for frame in frames)
-    for frame in node.frames:
-        if is_project(frame.location):
-            relative = project_path(frame.location)
-            line = frame_line(frame.location)
-            function = enclosing_function(relative, line) if relative in PROJECT_FILES else "?"
-            bucket = bucket_of(frame, text)
-            if bucket == "document_json":
-                label = f"serde_json::to_string(StoredDocument) @ {relative}:{line}"
-            elif bucket == "sqlite_bind_copy":
-                label = f"sqlite3_bind_text64 @ {relative}:{line}"
-            elif bucket == "sqlite_record_copy":
-                label = f"sqlite3VdbeExec record @ {relative}:{line}"
-            elif bucket == "sqlite_page_cache":
-                label = f"pcache1 @ {relative}:{line}"
-            else:
-                label = f"{function} @ {relative}:{line}"
-            key = f"{label} [{bucket}]"
-            entry = sites.setdefault(key, {"site": label, "bytes": 0, "bucket": bucket})
-            entry["bytes"] += node.cost
-            return node.cost
+    bucket = node_bucket(node, text)
+    if bucket is not None:
+        project_frames = [frame for frame in node.frames if is_project(frame.location)]
+        nearest = project_frames[0]
+        relative = project_path(nearest.location)
+        line = frame_line(nearest.location)
+        function = enclosing_function(relative, line) if relative in PROJECT_FILES else "?"
+        if bucket == "document_json":
+            label = f"serde_json::to_string(document_json) @ {relative}:{line}"
+        elif bucket == "normalized_block_map":
+            label = f"serde_json::to_string(normalized_block_map) @ {relative}:{line}"
+        elif bucket == "sqlite_bind_copy":
+            label = f"sqlite3_bind_text64 @ {relative}:{line}"
+        elif bucket == "sqlite_record_copy":
+            label = f"sqlite3VdbeExec record @ {relative}:{line}"
+        elif bucket == "sqlite_page_cache":
+            label = f"pcache1 @ {relative}:{line}"
+        elif bucket == "metadata_compress":
+            label = f"zlib heavy metadata @ {relative}:{line}"
+        else:
+            label = f"{function} @ {relative}:{line}"
+        key = f"{label} [{bucket}]"
+        entry = sites.setdefault(key, {"site": label, "bytes": 0, "bucket": bucket})
+        entry["bytes"] += node.cost
+        return node.cost
     covered = 0
     for child in node.children:
         covered += attribute_sites(child, frames, sites)
     leftover = node.cost - covered
     if leftover > 0:
         symbol = node.frames[0].symbol.split("<>")[0][:60] if node.frames else "?"
-        key = f"[{module_hint(node.frames)}] {symbol}"
-        entry = sites.setdefault(key, {"site": key, "bytes": 0, "bucket": "library"})
+        if "library/std/src/fs.rs" in text and "blocking/pool.rs" in text:
+            label, bucket = "std::fs::read (input bytes)", "input_bytes"
+        elif any(needle in text for needle in ("sqlite3", "libsqlite3-sys")):
+            label, bucket = f"[sqlite] {symbol}", "sqlite_other"
+        else:
+            label, bucket = f"[{module_hint(node.frames)}] {symbol}", "library"
+        key = f"{label} [{bucket}]"
+        entry = sites.setdefault(key, {"site": label, "bytes": 0, "bucket": bucket})
         entry["bytes"] += leftover
     return node.cost
 
@@ -1087,6 +1149,30 @@ def timeline_table(runs: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def headline_table(runs: list[dict], heaps: list[dict]) -> str:
+    """One row per input: sampled RSS peak, the phase it happens in, and the top heap buckets."""
+    by_label: dict[str, dict] = {}
+    for heap in heaps:
+        if heap.get("variant", "default") == "default":
+            by_label[heap["label"]] = heap
+    lines = [
+        "| Input | Source MiB | Sections | Peak RSS MiB | Peak phase | Heap peak MiB | "
+        "Top 3 heap consumers |",
+        "| --- | ---: | ---: | ---: | --- | ---: | --- |",
+    ]
+    for run in runs:
+        heap = by_label.get(run["label"], {})
+        buckets = heap.get("buckets", {})
+        top = sorted(buckets.items(), key=lambda item: item[1], reverse=True)[:3]
+        top_text = "; ".join(f"{name} {mib(cost)}" for name, cost in top) or "-"
+        lines.append(
+            f"| {run['label']} | {mib((run.get('source_bytes') or 0))} | "
+            f"{run.get('section_count')} | {rss_mib(run.get('peak_rss_kib'))} | "
+            f"{run.get('peak_phase')} | {mib(heap.get('heap_peak_bytes'))} | {top_text} |"
+        )
+    return "\n".join(lines)
+
+
 def bucket_table(heaps: list[dict], variant: str) -> str:
     labels = {
         "input_bytes": "input bytes (`retrieval/file.rs`)",
@@ -1101,7 +1187,9 @@ def bucket_table(heaps: list[dict], variant: str) -> str:
         "sqlite_record_copy": "SQLite record copy (`sqlite3VdbeExec`)",
         "sqlite_page_cache": "SQLite page cache (`pcache1`)",
         "sqlite_save_shared": "SQLite inside `save_shared` (other)",
+        "metadata_clone": "heavy metadata clone (`split_metadata`)",
         "metadata_compress": "heavy metadata compression (`flate2`)",
+        "text_unit_sets": "text unit sets and section descriptors",
         "sqlite_write_document_sections": "SQLite inside `write_document_sections`",
         "sqlite_other": "SQLite other",
         "search": "search index / scan cache",
@@ -1193,8 +1281,10 @@ def itemisation_table(heap: dict, facts: dict | None, label: str, bound_mib: flo
     add("SQLite record copy", "sqlite_record_copy", "transient in save_shared")
     add("SQLite page cache", "sqlite_page_cache", "transient")
     add("SQLite other inside `save_shared`", "sqlite_save_shared", "transient")
+    add("heavy metadata clone", "metadata_clone", "transient in save_shared")
     add("heavy metadata compression", "metadata_compress", "transient in save_shared")
-    add("SQLite section/unit writes", "sqlite_write_document_sections", "transient")
+    add("text unit sets and section descriptors", "text_unit_sets", "transient")
+    add("SQLite section text writes", "sqlite_write_document_sections", "transient")
     add("SQLite other", "sqlite_other", "transient")
     add("search index / scan cache", "search", "transient")
     add("open result and application", "open_result", "transient")
@@ -1249,6 +1339,10 @@ def build_report(directory: str, out_path: str) -> str:
         heap_by_label.setdefault(heap["label"], {}).setdefault(heap.get("variant", "default"), heap)
 
     sections: list[str] = ["# Open peak memory, measured now (MEM-2a)", ""]
+    sections.append("## 0. Headline per input")
+    sections.append("")
+    sections.append(headline_table(runs, heaps))
+    sections.append("")
     sections.append("## 1. RSS timeline of one open (20 ms samples, aligned with telemetry)")
     sections.append("")
     sections.append(timeline_table(runs))

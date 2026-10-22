@@ -213,10 +213,19 @@ READING_MCP_HTTP_CONNECT_TIMEOUT_SECS
 | `READING_MCP_PARSE_TIMEOUT_SECS` | 30 | Parser cooperative timeout |
 | `READING_MCP_SEARCH_CACHE_MIB` | 48 | 搜索扫描保留的单个文档 section 文本缓存上限（MiB），0 关闭缓存 |
 | `READING_MCP_SEARCH_THREADS` | `min(available_parallelism, 4)` | 单个文档搜索扫描的线程数，1 表示串行 |
+| `READING_MCP_SCAN_PREWARM` | `1` | 打开文档后在后台预热上述 section 文本缓存；`0`/`off` 关闭 |
 
 `READING_MCP_SEARCH_CACHE_MIB` 只限制 lexical 搜索扫描的文本缓存：缓存只保留最近一次搜索的那个文档，
 按 stored document 的 `doc_key` 与 normalized hash 校验，重新 ingest、替换 segmentation 或删除文档都会失效。
-超过上限的文档不缓存，按每次读取一个 section 的方式扫描，结果不变；打开文档不预热该缓存。
+超过上限的文档不缓存，按每次读取一个 section 的方式扫描，结果不变。
+
+`READING_MCP_SCAN_PREWARM` 打开时（默认），`open_document` / v2 `open` 在返回结果之后于后台按 section 逐个
+读取该文档的文本并填入上述缓存，所以 `open` 之后紧接着的第一次 `search_document` 不再付逐 section 读文本的代价。
+预热在 `open` 的结果产生之后才开始，不阻塞也不改变任何工具输出：结果与预热关闭时逐字节相同。它每次只持连接锁读一个
+section，读到即释放，前台读取可与之交错；文档超过缓存上限、缓存关闭、缓存槽被其他文档占用时立即停止。
+预热不抢占其他文档已缓存的文本：缓存槽为空或已是该文档时才填充，其余情况交由第一次搜索按原有方式替换。
+`0`/`false`/`no`/`off` 关闭预热，其他取值在启动时报错。`READING_MCP_TELEMETRY` 打开时，每次预热向 stderr
+输出一条 `scan_prewarm` 事件，带 `sections`、`duration_ms` 与 `success`。
 
 `READING_MCP_SEARCH_THREADS` 只影响文本不少于 1 MiB 且已缓存的文档：SQLite 读取始终留在连接的线程上，
 worker 线程只做 section 预筛与段落/句子打分，各自保留自己的命中再合并，结果与串行扫描逐条相同。

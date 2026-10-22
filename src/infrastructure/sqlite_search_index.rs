@@ -261,6 +261,11 @@ impl SearchIndex for SqliteSearchIndex {
         LEXICAL_SEARCH_INDEX_VERSION
     }
 
+    fn prewarm(&self, document_id: &DocumentId, normalized_document_hash: &NormalizedDocumentHash) {
+        self.units
+            .prewarm_scan_text(document_id, normalized_document_hash);
+    }
+
     async fn index(&self, document: &Document) -> Result<(), ApplicationError> {
         let segmentation = Arc::new(document.try_segmentation().map_err(|error| {
             ApplicationError::IndexFailed(format!(
@@ -336,6 +341,25 @@ impl SearchIndex for SqliteSearchIndex {
 }
 
 impl SqliteSearchIndex {
+    /// Test only: the whole warm of one document, synchronously and at most `steps` sections.
+    #[doc(hidden)]
+    pub fn prewarm_blocking(
+        &self,
+        document_id: &DocumentId,
+        normalized_document_hash: &NormalizedDocumentHash,
+        steps: usize,
+    ) -> Result<usize, ApplicationError> {
+        self.units
+            .prewarm_scan_text_blocking(document_id, normalized_document_hash, steps)
+    }
+
+    /// Test only: how many section texts the scan text cache holds, and whether the document it
+    /// holds outgrew the cap. `None` when nothing is cached.
+    #[doc(hidden)]
+    pub fn scan_text_cache_state(&self) -> Option<(usize, bool)> {
+        self.units.scan_text_cache_state()
+    }
+
     /// [`SearchIndex::search_lexical`] with the scan's cache, thread count and pruning spelled out.
     /// The plain options — no cache, one thread, no pruning — are the scan of R2c step 3, so tests
     /// can prove the fast scan equal to it.

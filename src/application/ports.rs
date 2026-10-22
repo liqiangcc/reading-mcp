@@ -762,6 +762,17 @@ pub trait SearchIndex: Send + Sync {
         limit: usize,
     ) -> Result<Vec<SearchHit>, ApplicationError>;
 
+    /// Starts warming whatever this index keeps per document so the first search after an open is
+    /// fast. Synchronous and never blocking: it returns at once and does its work in the background,
+    /// and it never reports anything to the caller — a failure to warm only means the first search
+    /// pays what it pays today. The default does nothing.
+    fn prewarm(
+        &self,
+        _document_id: &DocumentId,
+        _normalized_document_hash: &NormalizedDocumentHash,
+    ) {
+    }
+
     async fn search_lexical(
         &self,
         _document_id: &DocumentId,

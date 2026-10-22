@@ -149,6 +149,9 @@ impl RuntimeConfig {
 
         config.allow_http = env_bool("READING_MCP_ALLOW_HTTP", config.allow_http)?;
         config.telemetry = env_bool("READING_MCP_TELEMETRY", config.telemetry)?;
+        // The scan text cache warm reads this knob itself, per open; validating it here makes a
+        // value that is neither a true nor a false form a startup error, like the other knobs.
+        let _ = parse_scan_prewarm(std::env::var("READING_MCP_SCAN_PREWARM").ok().as_deref())?;
         if let Ok(value) = std::env::var("READING_MCP_TOOLS")
             && !value.trim().is_empty()
         {
@@ -317,6 +320,20 @@ fn env_bool(name: &str, default: bool) -> Result<bool, String> {
     }
 }
 
+/// The `READING_MCP_SCAN_PREWARM` value: on when unset, on for `1`/`true`/`yes`/`on`, off for
+/// `0`/`false`/`no`/`off`, and a startup error for anything else. The scan text cache's warm reads
+/// the same knob at every open; this parse is what makes a bad value fail at startup.
+fn parse_scan_prewarm(value: Option<&str>) -> Result<bool, String> {
+    let Some(value) = value else {
+        return Ok(true);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err("READING_MCP_SCAN_PREWARM must be true/false".into()),
+    }
+}
+
 fn env_usize(name: &str, default: usize) -> Result<usize, String> {
     let Ok(value) = std::env::var(name) else {
         return Ok(default);
@@ -346,7 +363,7 @@ fn env_u64(name: &str, default: u64) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolSet;
+    use super::{ToolSet, parse_scan_prewarm};
 
     #[test]
     fn tool_set_parsing_accepts_only_the_documented_values() {
@@ -356,5 +373,17 @@ mod tests {
         assert_eq!(ToolSet::parse("v3"), None);
         assert_eq!(ToolSet::parse(""), None);
         assert_eq!(ToolSet::default(), ToolSet::V2);
+    }
+
+    #[test]
+    fn the_scan_prewarm_knob_defaults_on_and_accepts_only_true_and_false_forms() {
+        assert_eq!(parse_scan_prewarm(None), Ok(true));
+        assert_eq!(parse_scan_prewarm(Some("0")), Ok(false));
+        assert_eq!(parse_scan_prewarm(Some("off")), Ok(false));
+        assert_eq!(parse_scan_prewarm(Some(" OFF ")), Ok(false));
+        assert_eq!(parse_scan_prewarm(Some("1")), Ok(true));
+        assert_eq!(parse_scan_prewarm(Some("on")), Ok(true));
+        assert!(parse_scan_prewarm(Some("sometimes")).is_err());
+        assert!(parse_scan_prewarm(Some("")).is_err());
     }
 }

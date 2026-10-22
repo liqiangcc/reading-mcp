@@ -1,0 +1,73 @@
+name: URL resolve probe
+run-name: URL resolve probe (PDF-3)
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/pdf3-**']
+
+env:
+  CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target-pdf3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pdf3
+      - name: Build the release binary
+        run: cargo build --release --locked --bin reading-mcp 2>&1 | tail -5
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf3-bin
+          path: ${{ github.workspace }}/target-pdf3/release/reading-mcp
+
+  probe:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf3-bin
+          path: ${{ runner.temp }}/bin
+      - name: Open every pinned link and compare it with its direct PDF link
+        run: |
+          set -o pipefail
+          BIN="$RUNNER_TEMP/bin/reading-mcp"
+          chmod +x "$BIN"
+          mkdir -p "$RUNNER_TEMP/probe"
+          # READING_MCP_TOOLS=v1: the probe calls open_document / get_document_structure /
+          # read_document, and measures the tools/list footprint of both tool sets.
+          python3 scripts/url-resolve-probe.py \
+            --binary "$BIN" \
+            --state-dir "$RUNNER_TEMP/probe/state" \
+            --timeout 600 \
+            --out "$RUNNER_TEMP/probe/url-resolve.json" \
+            --md "$RUNNER_TEMP/probe/url-resolve.md" 2>&1 | tail -40
+          {
+            echo "## URL resolve probe (PDF-3)"
+            echo
+            cat "$RUNNER_TEMP/probe/url-resolve.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf3-probe
+          path: ${{ runner.temp }}/probe/
+          if-no-files-found: warn
+          retention-days: 14

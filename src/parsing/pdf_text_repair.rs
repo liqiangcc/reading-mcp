@@ -355,6 +355,12 @@ fn font_has_cjk_hint(doc: &LopdfDocument, font: &Dictionary) -> bool {
 }
 
 fn cmap_bytes_have_cjk(data: &[u8]) -> bool {
+    // Require a small run of CJK targets.  A single CJK-looking token can be
+    // a source code or an incidental symbol mapping in an otherwise Latin
+    // CMap; four is well below the CJK body-text CMaps of the corpus and
+    // above the incidental noise seen on ordinary English papers.
+    const MIN_CJK_TARGETS: usize = 4;
+    let mut found = 0;
     let mut index = 0;
     while index < data.len() {
         if data[index] != b'<' {
@@ -372,7 +378,10 @@ fn cmap_bytes_have_cjk(data: &[u8]) -> bool {
             && let Ok(value) = u32::from_str_radix(text, 16)
             && char::from_u32(value).is_some_and(is_cjk)
         {
-            return true;
+            found += 1;
+            if found >= MIN_CJK_TARGETS {
+                return true;
+            }
         }
         index = end + 1;
     }

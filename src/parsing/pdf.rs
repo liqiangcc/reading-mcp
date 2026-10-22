@@ -1099,9 +1099,11 @@ mod tests {
             1 begincodespacerange\n\
             <0000> <FFFF>\n\
             endcodespacerange\n\
-            2 beginbfchar\n\
+            4 beginbfchar\n\
             <0001> <4E2D>\n\
             <0002> <6587>\n\
+            <0003> <5B57>\n\
+            <0004> <7B26>\n\
             endbfchar\n\
             endcmap\n\
             CMapName currentdict /CMap defineresource pop\n\
@@ -1120,7 +1122,7 @@ mod tests {
             &mut document,
             dictionary! { "Font" => dictionary! { "F1" => font_id } },
             None,
-            byte_text_operations("F1", &[0, 1, 0, 2]),
+            byte_text_operations("F1", &[0, 1, 0, 2, 0, 3, 0, 4]),
         );
         add_page(
             &mut document,
@@ -1128,7 +1130,7 @@ mod tests {
             dictionary! { "XObject" => dictionary! { "Fm1" => form_id } },
         );
 
-        assert_eq!(page_texts(&document)[0].text, "中文");
+        assert_eq!(page_texts(&document)[0].text, "中文字符");
     }
 
     #[test]

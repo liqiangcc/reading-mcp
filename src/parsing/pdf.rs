@@ -803,16 +803,6 @@ mod tests {
         texts
     }
 
-    fn text_operations(font: &str, text: &str) -> Vec<Operation> {
-        vec![
-            Operation::new("BT", vec![]),
-            Operation::new("Tf", vec![font.into(), 12.into()]),
-            Operation::new("Td", vec![72.into(), 720.into()]),
-            Operation::new("Tj", vec![Object::string_literal(text)]),
-            Operation::new("ET", vec![]),
-        ]
-    }
-
     fn byte_text_operations(font: &str, bytes: &[u8]) -> Vec<Operation> {
         vec![
             Operation::new("BT", vec![]),

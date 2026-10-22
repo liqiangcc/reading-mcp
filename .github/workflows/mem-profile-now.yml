@@ -1,0 +1,224 @@
+name: Memory profile (open peak, now)
+run-name: Memory profile now${{ inputs.malloc_arena_max && format(' (MALLOC_ARENA_MAX={0})', inputs.malloc_arena_max) || '' }}
+on:
+  workflow_dispatch:
+    inputs:
+      malloc_arena_max:
+        type: string
+        default: ''
+        description: Extra arena run for the heap job; empty uses the fixed default + arena2 pair
+  push:
+    branches: ['bench/mem2a-**']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary with line tables
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: cargo build --release --locked --bin reading-mcp
+      - name: Upload the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem2a-bin
+          path: target/release/reading-mcp
+
+  inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf fonttools
+      - name: Download the books
+        run: |
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p "$IN"
+          download() {
+            local url="$1" out="$2"
+            if curl -fsSL --retry 3 -o "$out" "$url"; then
+              echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+            else
+              echo "::warning::failed to download $url"
+              rm -f "$out"
+            fi
+            return 0
+          }
+          download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$IN/zh-large.epub"
+          download "https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub" "$IN/en-novel.epub"
+      - name: Generate the synthetic inputs
+        run: |
+          IN="$RUNNER_TEMP/inputs"
+          args=(--out "$IN" --cjk-font tests/fixtures/scanned_pdf/fonts/NotoSansCJKsc-Regular.otf --pdf-pages 300)
+          [ -f "$IN/zh-large.epub" ] && args+=(--song-shi "$IN/zh-large.epub")
+          python3 scripts/mem-profile-now.py generate "${args[@]}" | tee "$IN/manifest.json"
+          ls -l "$IN"
+      - name: Upload the inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem2a-inputs
+          path: ${{ runner.temp }}/inputs
+          retention-days: 7
+
+  rss:
+    needs: [build, inputs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-inputs
+          path: ${{ runner.temp }}/inputs
+      - name: RSS timeline of one open per input
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          IN="$RUNNER_TEMP/inputs"
+          docs=""
+          for pair in "zh-large=$IN/zh-large.epub" "en-novel=$IN/en-novel.epub" \
+                      "cjk-64mib=$IN/cjk-64mib.txt" \
+                      "text-long-cjk-300=$IN/text-long-cjk-300.pdf" \
+                      "text-long-en-300=$IN/text-long-en-300.pdf"; do
+            [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
+          done
+          mkdir -p rss
+          python3 scripts/mem-profile-now.py profile \
+            --binary "$RUNNER_TEMP/bin/reading-mcp" --out rss --mode rss \
+            --inputs "$docs" --settle-seconds 3 --sample-interval 0.02 \
+            --timeout-seconds 900
+      - name: Upload the RSS runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem2a-rss
+          path: rss/
+
+  heap-default:
+    needs: [build, inputs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install heaptrack
+        run: sudo apt-get update && sudo apt-get install -y heaptrack
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-inputs
+          path: ${{ runner.temp }}/inputs
+      - name: heaptrack, default allocator
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          IN="$RUNNER_TEMP/inputs"
+          docs=""
+          for pair in "zh-large=$IN/zh-large.epub" "en-novel=$IN/en-novel.epub" \
+                      "cjk-64mib=$IN/cjk-64mib.txt" \
+                      "text-long-cjk-300=$IN/text-long-cjk-300.pdf" \
+                      "text-long-en-300=$IN/text-long-en-300.pdf"; do
+            [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
+          done
+          mkdir -p heap
+          python3 scripts/mem-profile-now.py profile \
+            --binary "$RUNNER_TEMP/bin/reading-mcp" --out heap --mode heap \
+            --variant default --inputs "$docs" --timeout-seconds 900
+      - name: Upload the heap runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem2a-heap-default
+          path: heap/
+
+  heap-arena:
+    needs: [build, inputs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install heaptrack
+        run: sudo apt-get update && sudo apt-get install -y heaptrack
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-bin
+          path: ${{ runner.temp }}/bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-inputs
+          path: ${{ runner.temp }}/inputs
+      - name: heaptrack, MALLOC_ARENA_MAX=2
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          IN="$RUNNER_TEMP/inputs"
+          docs=""
+          for pair in "zh-large=$IN/zh-large.epub" "en-novel=$IN/en-novel.epub" \
+                      "cjk-64mib=$IN/cjk-64mib.txt" \
+                      "text-long-cjk-300=$IN/text-long-cjk-300.pdf" \
+                      "text-long-en-300=$IN/text-long-en-300.pdf"; do
+            [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
+          done
+          mkdir -p heap
+          python3 scripts/mem-profile-now.py profile \
+            --binary "$RUNNER_TEMP/bin/reading-mcp" --out heap --mode heap \
+            --variant arena2 --malloc-arena-max 2 --inputs "$docs" --timeout-seconds 900
+      - name: Upload the heap runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem2a-heap-arena2
+          path: heap/
+
+  aggregate:
+    needs: [rss, heap-default, heap-arena]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-rss
+          path: profile
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-heap-default
+          path: profile-heap-default
+      - uses: actions/download-artifact@v4
+        with:
+          name: mem2a-heap-arena2
+          path: profile-heap-arena2
+      - name: Merge the runs
+        run: |
+          mkdir -p profile-merged
+          cp profile/*.json profile-merged/ 2>/dev/null || true
+          cp profile-heap-default/*.json profile-merged/ 2>/dev/null || true
+          cp profile-heap-arena2/*.json profile-merged/ 2>/dev/null || true
+          ls profile-merged | head -40
+      - name: Build the tables
+        run: |
+          python3 scripts/mem-profile-now.py report \
+            --dir profile-merged --out report.md > report.log
+          echo "report lines: $(wc -l < report.md)"
+          head -40 report.log
+      - name: Upload the tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem2a-report
+          path: |
+            report.md
+            report.log

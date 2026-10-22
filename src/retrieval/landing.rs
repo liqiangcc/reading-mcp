@@ -243,7 +243,12 @@ pub fn extract_citation_pdf_url(body: &[u8], base: &Url) -> Option<Url> {
         if !name.trim().eq_ignore_ascii_case("citation_pdf_url") {
             continue;
         }
-        let Ok(resolved) = base.join(content.trim()) else {
+        // An empty value resolves to the landing page itself, which is not a PDF target.
+        let value = content.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let Ok(resolved) = base.join(value) else {
             continue;
         };
         return Some(resolved);
@@ -316,16 +321,20 @@ fn parse_attributes(
             Some(&quote) if quote == b'"' || quote == b'\'' => {
                 cursor += 1;
                 let value_start = cursor;
+                let mut closed = false;
                 while let Some(&byte) = lower.get(cursor) {
                     if byte == quote {
+                        closed = true;
                         break;
                     }
                     cursor += 1;
                 }
-                let value = decode_entities(&String::from_utf8_lossy(&html[value_start..cursor]));
-                if cursor < html.len() {
-                    cursor += 1;
+                if !closed {
+                    // An unterminated value is a truncated or malformed tag: drop the attribute.
+                    return (attributes, cursor);
                 }
+                let value = decode_entities(&String::from_utf8_lossy(&html[value_start..cursor]));
+                cursor += 1;
                 value
             }
             _ => {

@@ -340,10 +340,16 @@ fn scan_warm_plan(
             budget: usize::MAX,
         }));
     }
-    // The document may or may not fit. Measure the stored text bytes of one section at a time, each
-    // under its own short connection lock, and give up as soon as the total is over the cap: a
-    // document over the cap is then marked over the cap without its text ever being read into
-    // memory, which is the state its first scan would end in anyway.
+    // A section of more than `cap / 4` chars may alone be larger than the cap, and measuring it would
+    // read that much for nothing: such a document is left alone entirely, and its first search does
+    // exactly what it does without a warm.
+    if sections.iter().any(|(_, char_len)| *char_len > cap / 4) {
+        return Ok(None);
+    }
+    // The document may or may not fit, and no section is large. Measure the stored text bytes of one
+    // section at a time, each under its own short connection lock, and give up as soon as the total
+    // is over the cap: a document over the cap is then marked over the cap without its text ever
+    // being read into memory, which is the state its first scan would end in anyway.
     let mut measured = Vec::with_capacity(sections.len());
     let mut total = 0usize;
     for (section_key, _) in &sections {

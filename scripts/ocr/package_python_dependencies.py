@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 import platform
 import re
-import subprocess
 import sys
 import urllib.request
 import zipfile
+
+from download_retry import pip_transient, run_with_retry
 
 
 MISSING_WHEEL_NOTICES = {
@@ -40,10 +41,12 @@ def main():
         expected[name] = version
     args.output.mkdir(parents=True, exist_ok=False)
     wheels = args.output / "wheels"
-    subprocess.run([sys.executable, "-m", "pip", "--isolated", "download", "--only-binary=:all:",
+    # The pinned wheel set and its hashes are verified below; only a slow index
+    # or a dropped connection is retried, so the downloaded set cannot change.
+    run_with_retry([sys.executable, "-m", "pip", "--isolated", "download", "--only-binary=:all:",
                     "--index-url", "https://pypi.org/simple",
                     "--dest", str(wheels), "--requirement", str(requirements)],
-                   check=True, timeout=240)
+                   pip_transient, text=True, capture_output=True)
     records = []
     observed = {}
     for wheel in sorted(wheels.iterdir()):

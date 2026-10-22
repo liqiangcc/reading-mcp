@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
+from download_retry import apt_transient, run_with_retry
 from verify_engine_component import apply_runtime_assembly
 
 
@@ -56,10 +57,15 @@ def main():
         command = ["apt-get", "-o", "Debug::NoLocking=1", "-o", f"Dir::State::status={status}",
                    "-o", f"Dir::Cache::archives={debs}", "--assume-yes",
                    "--no-install-recommends", "--download-only"]
+        # --print-uris performs no transfer, so it keeps the short timeout and
+        # records the same sources as before; acquire options only affect the
+        # transfer below and never which files are fetched.
         sources = run(command + ["--print-uris", "install", *roots],
                       text=True, capture_output=True).stdout
         (output / "apt-source-uris.txt").write_text(sources)
-        run(command + ["install", *roots])
+        run_with_retry(command + ["-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=60",
+                                  "install", *roots],
+                       apt_transient, text=True, capture_output=True)
     records = []
     for deb in sorted(debs.glob("*.deb")):
         fields = run(["dpkg-deb", "--show", "--showformat=${Package}\n${Version}\n${Architecture}\n", str(deb)],

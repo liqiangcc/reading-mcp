@@ -415,6 +415,79 @@ jobs:
               with open(summary, "a", encoding="utf-8") as handle:
                   handle.write(table)
           PY
+      - name: Section text compression level table
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import sqlite3
+          import time
+          import zlib
+
+          levels = (1, 3, 6, 9)
+          rows = [
+              "| input | raw bytes | chunks | level | compressed bytes | vs best | compress ms/MiB | decompress ms/chunk |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+          for label in ("zh-large", "en-novel", "zh-classic"):
+              paths = sorted(
+                  glob.glob(os.path.join(os.environ["RUNNER_TEMP"], "facts-head",
+                                         f"state-{label}-*", "reading-mcp.sqlite"))
+              )
+              if not paths:
+                  rows.append(f"| {label} | missing state database | | | | | | |")
+                  continue
+              connection = sqlite3.connect(paths[0])
+              try:
+                  stored = connection.execute(
+                      "SELECT encoding, data FROM section_text_v3"
+                      " ORDER BY doc_key, section_key, chunk_no"
+                  ).fetchall()
+              finally:
+                  connection.close()
+              if not stored:
+                  rows.append(f"| {label} | no stored section text | | | | | | |")
+                  continue
+              chunks = [
+                  zlib.decompress(bytes(data)) if encoding == 1 else bytes(data)
+                  for encoding, data in stored
+              ]
+              raw_bytes = sum(len(chunk) for chunk in chunks)
+              raw_mib = raw_bytes / (1024.0 * 1024.0)
+              measured = []
+              for level in levels:
+                  started = time.perf_counter()
+                  compressed = [zlib.compress(chunk, level) for chunk in chunks]
+                  compress_ms = (time.perf_counter() - started) * 1000.0
+                  started = time.perf_counter()
+                  for blob in compressed:
+                      zlib.decompress(blob)
+                  decompress_ms = (time.perf_counter() - started) * 1000.0
+                  measured.append(
+                      (
+                          level,
+                          sum(len(blob) for blob in compressed),
+                          compress_ms / raw_mib if raw_mib else 0.0,
+                          decompress_ms / len(chunks),
+                      )
+                  )
+              best = min(size for _, size, _, _ in measured)
+              for level, size, compress_ms, decompress_ms in measured:
+                  rows.append(
+                      f"| {label} | {raw_bytes} | {len(chunks)} | {level} | {size} |"
+                      f" {100.0 * (size - best) / best:.1f}% | {compress_ms:.0f} |"
+                      f" {decompress_ms:.4f} |"
+                  )
+          table = "\n".join(rows) + "\n"
+          with open("text-level-table.md", "w", encoding="utf-8") as handle:
+              handle.write(table)
+          print(table)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(table)
+          PY
       - name: Upload measurement data
         if: always()
         uses: actions/upload-artifact@v4
@@ -431,3 +504,4 @@ jobs:
             disk-base.txt
             disk-head.txt
             level-table.md
+            text-level-table.md

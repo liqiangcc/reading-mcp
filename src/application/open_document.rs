@@ -264,7 +264,7 @@ impl OpenDocumentUseCase {
             store.remove(&document.id).await?;
         }
         // The segmentation goes first: `save_shared` leaves the section text out of
-        // `document_json` only when `section_text_v2` already holds the text of this very document
+        // `document_json` only when `section_text_v3` already holds the text of this very document
         // version, and reads it back from there on load.
         if let Some(index) = &self.text_unit_index {
             index

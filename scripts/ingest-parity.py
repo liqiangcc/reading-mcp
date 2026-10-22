@@ -6,10 +6,11 @@ directory, calls `open_document`, saves the tool payload, stops the server, and 
 database into one text file per side:
 
 - `documents`: `id`, `content_hash` and `document_json`, compared as parsed objects after the
-  section text of a row that keeps it in `section_text_v1` or `section_text_v2` (its
-  `content_store` key) is put back in depth-first section order from that document's chunks, and
-  after the metadata entries of a row that keeps its heavy ones in `document_meta_v1` or
-  `document_meta_v2` (its `metadata_store` key) are merged back into its `metadata` object;
+  section text of a row that keeps it in `section_text_v1`, `section_text_v2` or
+  `section_text_v3` (its `content_store` key) is put back in depth-first section order from that
+  document's chunks (decompressing `section_text_v3` chunks), and after the metadata entries of a
+  row that keeps its heavy ones in `document_meta_v1` or `document_meta_v2` (its `metadata_store`
+  key) are merged back into its `metadata` object;
 - layouts joined to `text_unit_documents_v2` and ordered by document then `section_key`:
   `section_id`, `char_len`, `paragraph_coverage_json` and the whole-section layout hex. The v3
   `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
@@ -79,8 +80,8 @@ BLOCK_COLUMNS = {
 }
 
 # The `content_store` values of a row that keeps no section text inline: v3 used
-# `section_text_v1`, v4 uses `section_text_v2`.
-SECTION_TEXT_STORES = ("section_text_v1", "section_text_v2")
+# `section_text_v1`, v4 used `section_text_v2`, v5 uses `section_text_v3` (compressed chunks).
+SECTION_TEXT_STORES = ("section_text_v1", "section_text_v2", "section_text_v3")
 
 # Wall-clock fields that must never take part in a parity comparison.
 WALL_CLOCK_KEYS = {
@@ -587,21 +588,52 @@ def layout_rows(connection: sqlite3.Connection) -> list[str]:
     ]
 
 
-def text_rows(connection: sqlite3.Connection) -> list[str]:
+def section_text_chunks(connection: sqlite3.Connection) -> list[tuple[str, int, str]]:
+    """Every stored section text chunk as `(document_id, section_key, text)`, in chunk order.
+
+    `section_text_v3` keeps each chunk as its UTF-8 bytes, compressed in zlib format when
+    `encoding` is 1 (RFC 1950, which `zlib.decompress` reads) and raw when it is 0; the older
+    `section_text_v2`/`section_text_v1` kept the text itself in a `text` column.
+    """
+    if table_exists(connection, "section_text_v3"):
+        rows = connection.execute(
+            """
+            SELECT d.document_id, t.section_key, t.encoding, t.data
+              FROM section_text_v3 t
+              JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
+             ORDER BY d.document_id, t.section_key, t.chunk_no
+            """
+        )
+        chunks = []
+        for document_id, section_key, encoding, data in rows:
+            blob = bytes(data)
+            if encoding == 1:
+                blob = zlib.decompress(blob)
+            elif encoding != 0:
+                raise ValueError(f"unknown section_text_v3 encoding {encoding!r}")
+            chunks.append((document_id, section_key, blob.decode("utf-8")))
+        return chunks
     table = (
         "section_text_v2"
         if table_exists(connection, "section_text_v2")
         else "section_text_v1"
     )
+    return [
+        (document_id, section_key, text)
+        for document_id, section_key, text in connection.execute(
+            f"""
+            SELECT d.document_id, t.section_key, t.text
+              FROM {table} t
+              JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
+             ORDER BY d.document_id, t.section_key, t.chunk_no
+            """
+        )
+    ]
+
+
+def text_rows(connection: sqlite3.Connection) -> list[str]:
     sections: dict[tuple[str, int], list[str]] = {}
-    for document_id, section_key, text in connection.execute(
-        f"""
-        SELECT d.document_id, t.section_key, t.text
-          FROM {table} t
-          JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
-         ORDER BY d.document_id, t.section_key, t.chunk_no
-        """
-    ):
+    for document_id, section_key, text in section_text_chunks(connection):
         sections.setdefault((document_id, section_key), []).append(text)
     rows = []
     for (document_id, section_key), chunks in sorted(sections.items()):
@@ -628,19 +660,7 @@ def dump_state(database: str) -> dict:
         blocks["layouts"] = layout_rows(connection)
         blocks["text"] = text_rows(connection)
         texts_by_document: dict[str, dict[int, str]] = defaultdict(dict)
-        table = (
-            "section_text_v2"
-            if table_exists(connection, "section_text_v2")
-            else "section_text_v1"
-        )
-        for document_id, section_key, text in connection.execute(
-            f"""
-            SELECT d.document_id, t.section_key, t.text
-              FROM {table} t
-              JOIN text_unit_documents_v2 d ON d.doc_key = t.doc_key
-             ORDER BY d.document_id, t.section_key, t.chunk_no
-            """
-        ):
+        for document_id, section_key, text in section_text_chunks(connection):
             texts_by_document[document_id].setdefault(section_key, "")
             texts_by_document[document_id][section_key] += text
         metadata_by_document: dict[str, dict[str, str]] = defaultdict(dict)

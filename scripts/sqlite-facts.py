@@ -8,8 +8,8 @@ on a fresh state directory, and then reads the resulting database directly:
   `cache_size`, `temp_store` and `mmap_size` (the last three are the connection defaults, which is
   what the server runs with because it sets none of them);
 - the byte length of the `documents.document_json` row, the JSON that still carries the full text;
-- the total byte length of that document's section text chunks (`section_text_v2`, or the older
-  `section_text_v1`).
+- the total byte length of that document's section text chunks (`section_text_v3`, or the older
+  `section_text_v2`/`section_text_v1`), both as stored and after decompression.
 
 Standard library only. Inputs are either a synthetic CJK document of a given size, generated the
 way `scripts/memory-profile.py` generates them (`--cjk-mib`), or existing files given as
@@ -25,6 +25,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import zlib
 
 MIB = 1024 * 1024
 
@@ -61,6 +62,40 @@ def database_pragmas(database: str) -> dict[str, object]:
         connection.close()
 
 
+def section_text_table(connection) -> str | None:
+    """The section text table this database holds, newest first, or None."""
+    for table in ("section_text_v3", "section_text_v2", "section_text_v1"):
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone():
+            return table
+    return None
+
+
+def section_text_facts(connection) -> tuple[int, int, int]:
+    """The row count, the stored bytes and the UTF-8 text bytes of the section text chunks."""
+    table = section_text_table(connection)
+    if table is None:
+        return (0, 0, 0)
+    if table != "section_text_v3":
+        # v1 and v2 kept the UTF-8 text itself: stored and text bytes are the same.
+        rows, size = connection.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))), 0) FROM {table}"
+        ).fetchone()
+        return (int(rows), int(size), int(size))
+    rows = 0
+    stored = 0
+    text_bytes = 0
+    for encoding, data in connection.execute(
+        "SELECT encoding, data FROM section_text_v3 ORDER BY doc_key, section_key, chunk_no"
+    ):
+        blob = bytes(data)
+        rows += 1
+        stored += len(blob)
+        text_bytes += len(zlib.decompress(blob)) if encoding == 1 else len(blob)
+    return (rows, stored, text_bytes)
+
+
 def database_sizes(database: str) -> dict[str, int]:
     """Return the stored `document_json` and section-text byte totals of the one document."""
     connection = sqlite3.connect(database)
@@ -70,23 +105,15 @@ def database_sizes(database: str) -> dict[str, int]:
             "SELECT COUNT(*), COALESCE(SUM(length(CAST(document_json AS BLOB))), 0)"
             " FROM documents"
         ).fetchone()
-        table = (
-            "section_text_v2"
-            if connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'section_text_v2'"
-            ).fetchone()
-            else "section_text_v1"
-        )
-        chunks = connection.execute(
-            f"SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))), 0) FROM {table}"
-        ).fetchone()
+        rows, stored_bytes, text_bytes = section_text_facts(connection)
         meta_v1 = metadata_table_facts(connection, "document_meta_v1")
         meta_v2 = metadata_table_facts(connection, "document_meta_v2")
         return {
             "documents": int(documents[0]),
             "document_json_bytes": int(documents[1]),
-            "section_text_rows": int(chunks[0]),
-            "section_text_bytes": int(chunks[1]),
+            "section_text_rows": rows,
+            "section_text_stored_bytes": stored_bytes,
+            "section_text_bytes": text_bytes,
             "document_meta_v1_rows": meta_v1[0],
             "document_meta_v1_bytes": meta_v1[1],
             "document_meta_v2_rows": meta_v2[0],
@@ -198,7 +225,9 @@ def main() -> int:
         print(
             "input={label} size_mib={size_mb:g} ok=yes peak_rss_kib={peak} "
             "documents={documents} document_json_bytes={document_json_bytes} "
-            "section_text_rows={section_text_rows} section_text_bytes={section_text_bytes} "
+            "section_text_rows={section_text_rows} "
+            "section_text_stored_bytes={section_text_stored_bytes} "
+            "section_text_bytes={section_text_bytes} "
             "document_meta_v1_rows={document_meta_v1_rows} "
             "document_meta_v1_bytes={document_meta_v1_bytes} "
             "document_meta_v2_rows={document_meta_v2_rows} "

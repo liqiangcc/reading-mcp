@@ -970,7 +970,7 @@ async fn replacing_the_unit_sets_replaces_the_section_text_and_layout_rows() {
         rusqlite::Connection::open(&database).expect("database should open for row counts");
     let text_rows: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM section_text_v2
+            "SELECT COUNT(*) FROM section_text_v3
              WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
@@ -1137,7 +1137,7 @@ async fn replacing_the_unit_sets_twice_keeps_one_set_of_rows_and_the_same_doc_ke
     let database = directory.path().join("state.sqlite");
     let index = SqliteTextUnitIndex::open(&database).expect("index should open");
     let document = parse_markdown().await;
-    let tables = ["section_text_v2", "section_layout_v2"];
+    let tables = ["section_text_v3", "section_layout_v2"];
 
     store_text_units(&index, &document)
         .await

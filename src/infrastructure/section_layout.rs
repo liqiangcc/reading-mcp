@@ -7,7 +7,7 @@
 
 use crate::application::ports::ApplicationError;
 
-/// Number of Unicode scalars stored per `section_text_v2` chunk.
+/// Number of Unicode scalars stored per `section_text_v3` chunk.
 pub(crate) const CHUNK_CHARS: usize = 16_384;
 
 /// The payload budget of one `section_layout_chunk_v2` row: a chunk stops before the next paragraph

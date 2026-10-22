@@ -20,7 +20,7 @@ use crate::domain::{
 };
 
 /// Lexical search over the stored section text: no full-text index is built, the candidates are found by
-/// scanning `section_text_v2` and the unit boundaries of `section_layout_v2`.
+/// scanning `section_text_v3` and the unit boundaries of `section_layout_v2`.
 pub struct SqliteSearchIndex {
     repository: Arc<dyn DocumentRepository>,
     units: Arc<SqliteTextUnitIndex>,
@@ -380,7 +380,7 @@ impl SqliteSearchIndex {
             return Ok(vec![]);
         }
         // A caller that has no document in hand (a standalone index, a test) loads it here, light:
-        // the scan reads section ids and titles and takes the text from `section_text_v2`.
+        // the scan reads section ids and titles and takes the text from `section_text_v3`.
         let Some((document, normalized_document_hash)) =
             self.repository.get_light_with_hash(document_id).await?
         else {

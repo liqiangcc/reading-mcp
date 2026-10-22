@@ -445,8 +445,10 @@ def run_probe(binary: str, state_dir: str, timeout: float) -> dict:
             record["reason"] = "control PDF link was skipped"
             continue
         if "error" in reference:
-            record["outcome"] = "failed"
-            record["reason"] = f"control {control}: {reference['error']}"
+            # The comparison could not run: the site blocks the runner's direct PDF link (a bot
+            # challenge, for instance).  That is a skip, not a resolution failure.
+            record["outcome"] = "skipped"
+            record["reason"] = f"control PDF link unavailable: {reference['error']}"
             continue
         own = samples.get(record["label"]) or {}
         record["id_equal"] = record["document_id"] == reference["document_id"]

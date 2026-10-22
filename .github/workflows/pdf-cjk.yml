@@ -1,0 +1,206 @@
+name: PDF CJK font loss
+run-name: PDF CJK font loss (PDF-1b)
+on:
+  workflow_dispatch:
+    inputs:
+      select:
+        description: 'Rebuild scripts/pdf-cjk-ids.txt (downloads candidates to check licence, pages, CJK chars)'
+        type: boolean
+        default: false
+  push:
+    branches: ['bench/pdf1b-**']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the locked dependencies (read-only; the lopdf 0.44 source is quoted in the note)
+        run: |
+          cargo fetch --locked 2>&1 | tail -5
+          ls -d ~/.cargo/registry/src/*/lopdf-0.44.0 | tail -1
+      - name: Build release binary
+        run: cargo build --release --locked --bin reading-mcp 2>&1 | tail -20
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-cjk-bin
+          path: target/release/reading-mcp
+
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2
+      - name: Decide whether the paper list must be rebuilt
+        id: gate
+        run: |
+          if [ "${{ github.event.inputs.select }}" = "true" ] || [ ! -s scripts/pdf-cjk-ids.txt ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=no" >> "$GITHUB_OUTPUT"
+            echo "scripts/pdf-cjk-ids.txt is committed; nothing to select"
+          fi
+      - name: Select the CC-BY CJK papers from the arXiv API
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          set -o pipefail
+          python3 scripts/pdf-cjk.py --select \
+            --out scripts/pdf-cjk-ids.txt \
+            --work-dir "$RUNNER_TEMP/select" | tail -120
+      - name: Show the selected list
+        if: steps.gate.outputs.run == 'yes'
+        run: tail -28 scripts/pdf-cjk-ids.txt
+      - name: Upload the paper list
+        if: always() && steps.gate.outputs.run == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-cjk-ids
+          path: |
+            scripts/pdf-cjk-ids.txt
+            ${{ runner.temp }}/select/select/select-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  probe:
+    needs: [build, select]
+    if: always() && needs.build.result == 'success' && needs.select.result != 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    name: probe shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install probe tooling
+        run: pip install pymupdf==1.28.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf-cjk-ids
+          path: ${{ runner.temp }}/ids
+          if-no-files-found: ignore
+      - name: Is the paper list available?
+        id: corpus
+        run: |
+          if [ -s "$RUNNER_TEMP/ids/pdf-cjk-ids.txt" ]; then
+            cp "$RUNNER_TEMP/ids/pdf-cjk-ids.txt" scripts/pdf-cjk-ids.txt
+          fi
+          if [ -s scripts/pdf-cjk-ids.txt ]; then
+            echo "present=yes" >> "$GITHUB_OUTPUT"
+            echo "papers: $(grep -c '^{' scripts/pdf-cjk-ids.txt)"
+          else
+            echo "present=no" >> "$GITHUB_OUTPUT"
+            echo "scripts/pdf-cjk-ids.txt is not available yet; this push only selects it"
+          fi
+      - name: Restore pip cache for the layout environment
+        if: steps.corpus.outputs.present == 'yes'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pdf-layout-${{ hashFiles('scripts/pdf-layout/requirements.txt') }}
+      - name: Create the pinned layout environment
+        if: steps.corpus.outputs.present == 'yes'
+        env:
+          PDF_LAYOUT_VENV: ${{ github.workspace }}/.pdf-layout-venv
+          PYTHON: python3
+        run: bash scripts/pdf-layout/setup-pdf-layout.sh 2>&1 | tail -10
+      - uses: actions/download-artifact@v4
+        if: steps.corpus.outputs.present == 'yes'
+        with:
+          name: pdf-cjk-bin
+          path: ${{ runner.temp }}/bin
+      - name: Run shard ${{ matrix.shard }}
+        if: steps.corpus.outputs.present == 'yes'
+        run: |
+          set -o pipefail
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          mkdir -p "$RUNNER_TEMP/results" "$RUNNER_TEMP/work" "$RUNNER_TEMP/inventory"
+          python3 scripts/pdf-cjk.py \
+            --corpus scripts/pdf-cjk-ids.txt \
+            --shard ${{ matrix.shard }} --per-shard 5 \
+            --binary "$RUNNER_TEMP/bin/reading-mcp" \
+            --layout-python "$GITHUB_WORKSPACE/.pdf-layout-venv/bin/python" \
+            --work-dir "$RUNNER_TEMP/work" \
+            --state-root "$RUNNER_TEMP/state" \
+            --inventory-dir "$RUNNER_TEMP/inventory" \
+            --out "$RUNNER_TEMP/results/cjk-${{ matrix.shard }}.jsonl" \
+            --deadline-minutes 65 \
+            --paper-deadline-minutes 12 | tail -40
+      - name: Upload shard results
+        if: always() && steps.corpus.outputs.present == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-cjk-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/results/
+            ${{ runner.temp }}/inventory/
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    needs: [probe, build]
+    if: always() && needs.build.result == 'success' && needs.probe.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pdf-cjk-shard-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/all
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf-cjk-bin
+          path: ${{ runner.temp }}/bin
+      - name: Merge every shard into the final tables
+        run: |
+          set -o pipefail
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          mkdir -p "$RUNNER_TEMP/final"
+          python3 scripts/pdf-cjk.py --aggregate \
+            --jsonl-dir "$RUNNER_TEMP/all" \
+            --out "$RUNNER_TEMP/final/pdf-cjk-summary.json" \
+            --markdown "$RUNNER_TEMP/final/pdf-cjk.md" | tail -80
+          cat "$RUNNER_TEMP/final/pdf-cjk.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Minimal one-page repro for the worst font group
+        run: |
+          set -o pipefail
+          python3 scripts/pdf-cjk.py --repro \
+            --jsonl-dir "$RUNNER_TEMP/all" \
+            --summary "$RUNNER_TEMP/final/pdf-cjk-summary.json" \
+            --binary "$RUNNER_TEMP/bin/reading-mcp" \
+            --work-dir "$RUNNER_TEMP/repro-work" \
+            --state-root "$RUNNER_TEMP/repro-state" \
+            --out-dir "$RUNNER_TEMP/final/repro" | tail -30
+      - name: Upload final tables and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-cjk-final
+          path: |
+            ${{ runner.temp }}/final/
+            ${{ runner.temp }}/all/
+          if-no-files-found: warn
+          retention-days: 14

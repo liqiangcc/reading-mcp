@@ -36,6 +36,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -43,7 +44,7 @@ import xml.etree.ElementTree as ET
 ARXIV_API = "https://export.arxiv.org/api/query"
 ARXIV_ABS = "https://arxiv.org/abs/{id}"
 ARXIV_PDF = "https://arxiv.org/pdf/{id}"
-ARXIV_DELAY_S = 3.0
+ARXIV_DELAY_S = 4.0
 USER_AGENT = "reading-mcp-bench-pdf1b"
 CC_LICENSE_MARKERS = (
     "licenses/by/4.0",
@@ -96,7 +97,7 @@ TOPUP_QUERIES = [
     ('cat:cs.CL AND (abs:"Chinese" OR abs:"Japanese" OR abs:"Korean")', "cs.CL"),
     ('cat:cs.CV AND (abs:Chinese OR abs:Japanese OR abs:Korean)', "cs.CV"),
 ]
-MAX_CANDIDATES_PER_SLOT = 60
+MAX_CANDIDATES_PER_SLOT = 40
 # CC-BY(-SA) is what the licence check needs, and it is common on recent submissions only: the
 # arXiv default licence of older papers is the non-exclusive one, which the check rejects. The
 # date clause keeps relevance ranking while restricting candidates to the CC-friendly era.
@@ -126,13 +127,18 @@ fmt = CORPUS.fmt
 gram_containment = CORPUS.gram_containment
 
 
-def fetch(url: str, timeout: float, attempts: int = 3) -> bytes:
+def fetch(url: str, timeout: float, attempts: int = 4) -> bytes:
+    """Fetch with backoff; a 429 from the arXiv API gets a long, escalating wait."""
     last: Exception | None = None
     for attempt in range(attempts):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.read()
+        except urllib.error.HTTPError as exc:
+            last = exc
+            wait = 30 * (attempt + 1) if exc.code == 429 else 5 * (attempt + 1)
+            time.sleep(wait)
         except Exception as exc:  # noqa: BLE001 - retried below
             last = exc
             time.sleep(5 * (attempt + 1))
@@ -209,7 +215,7 @@ def abs_license(identifier: str) -> tuple[str | None, str | None]:
 
 
 class Selector:
-    def __init__(self, work_dir: str) -> None:
+    def __init__(self, work_dir: str, out: str = "") -> None:
         self.work = os.path.join(work_dir, "select")
         os.makedirs(self.work, exist_ok=True)
         self.chosen: list[dict] = []
@@ -217,6 +223,25 @@ class Selector:
         self.seen: set[str] = set()
         self.downloads = 0
         self.candidates = 0
+        self.out = out
+
+    def write(self) -> None:
+        """Write the list after every keep: a later API failure must not lose the work."""
+        if not self.out:
+            return
+        header = [
+            "# PDF-1b CJK font-loss corpus: arXiv papers with >= 200 CJK characters in the PDF "
+            "text layer, CC-BY(-SA)/CC0 only.",
+            f"# Selected {time.strftime('%Y-%m-%d')} by scripts/pdf-cjk.py --select; "
+            "one JSON object per line.",
+            "# id, title, group, category, pages, licence (abs-page link), cjk_chars, "
+            "producer/creator.",
+        ]
+        os.makedirs(os.path.dirname(os.path.abspath(self.out)) or ".", exist_ok=True)
+        with open(self.out, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(header) + "\n")
+            for entry in self.chosen:
+                handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
 
     def full(self) -> bool:
         return len(self.chosen) >= TARGET_PAPERS
@@ -288,6 +313,7 @@ class Selector:
         })
         print(f"{group} {len(self.chosen)}/{TARGET_PAPERS} {identifier} pages={facts['pages']} "
               f"cjk={facts['cjk_chars']} {title[:60]}", flush=True)
+        self.write()
         return True
 
     def slot(self, query: str, group: str, quota: int) -> None:
@@ -297,7 +323,11 @@ class Selector:
         scanned = 0
         while picked < quota and scanned < MAX_CANDIDATES_PER_SLOT and not self.full() \
                 and self.downloads_left():
-            batch = arxiv_query(query, start, 25)
+            try:
+                batch = arxiv_query(query, start, 50)
+            except Exception as exc:  # noqa: BLE001 - a rate limit ends this slot, not the run
+                print(f"::warning::query failed for {group}: {str(exc)[:200]}", flush=True)
+                break
             time.sleep(ARXIV_DELAY_S)
             if not batch:
                 break
@@ -318,7 +348,7 @@ class Selector:
 
 
 def select_mode(args) -> int:
-    selector = Selector(args.work_dir)
+    selector = Selector(args.work_dir, args.out)
     print(f"seeds: {len(SEEDS)} known CJK papers", flush=True)
     for identifier, group in SEEDS:
         if selector.full():
@@ -342,19 +372,7 @@ def select_mode(args) -> int:
             break
         selector.slot(query, group, TARGET_PAPERS - len(selector.chosen))
 
-    header = [
-        "# PDF-1b CJK font-loss corpus: 25 arXiv papers with >= 200 CJK characters in the PDF "
-        "text layer, CC-BY(-SA)/CC0 only.",
-        f"# Selected {time.strftime('%Y-%m-%d')} by scripts/pdf-cjk.py --select; "
-        "one JSON object per line.",
-        "# id, title, group, category, pages, licence (abs-page link), cjk_chars, "
-        "producer/creator.",
-    ]
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(header) + "\n")
-        for entry in selector.chosen:
-            handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    selector.write()
     reasons = collections.Counter(item["reason"].split(":")[0] for item in selector.skipped)
     print(f"wrote {len(selector.chosen)} entries to {args.out}")
     print(f"tried {selector.candidates} candidates, downloaded {selector.downloads} PDFs; "

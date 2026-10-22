@@ -98,6 +98,48 @@ jobs:
               run "$label" "$doc" "$query" "$side" foreground-reads 3 200
             done
           done
+      - name: Foreground reads on two CPUs
+        # The task's contention bar is stated for a 2-vCPU runner; the GitHub runner has 4. Pinning the
+        # probe (and the server it spawns) to two CPUs approximates it.
+        run: |
+          set -uo pipefail
+          BOOKS="$RUNNER_TEMP/books"
+          GEN="$RUNNER_TEMP/inputs"
+          REPEATS="${{ inputs.repeats || '10' }}"
+          mkdir -p measure
+          run2() { # label document query side
+            local label="$1" doc="$2" query="$3" side="$4"
+            if [ ! -f "$doc" ]; then
+              echo "::warning::missing input for $label: $doc"
+              return 0
+            fi
+            local prewarm=1
+            [ "$side" = "prewarm-off-2cpu" ] && prewarm=0
+            taskset -c 0,1 python3 scripts/first-search-probe.py \
+              --binary target/release/reading-mcp \
+              --document "$doc" \
+              --label "$label" \
+              --side "$side" \
+              --query "$query" \
+              --shape foreground-reads \
+              --repeats 3 \
+              --calls 200 \
+              --env READING_MCP_SCAN_PREWARM="$prewarm" \
+              --out "measure/$label-$side-foreground-reads.json" \
+              || echo "::warning::2-CPU probe failed: $label $side"
+          }
+          for pair in "song-shi=$BOOKS/song-shi.epub:皇帝" \
+                      "en-novel=$BOOKS/en-novel.epub:Pierre" \
+                      "zh-classic=$BOOKS/zh-classic.epub:寶玉" \
+                      "cjk-64mib=$GEN/cjk-64mib.txt:皇帝"; do
+            label="${pair%%=*}"
+            rest="${pair#*=}"
+            doc="${rest%%:*}"
+            query="${rest##*:}"
+            for side in prewarm-on-2cpu prewarm-off-2cpu; do
+              run2 "$label" "$doc" "$query" "$side"
+            done
+          done
       - name: Summarize
         if: always()
         run: |

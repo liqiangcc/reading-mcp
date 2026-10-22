@@ -1,11 +1,11 @@
-//! The cache-free cost of the two new repository calls on a real book.
+//! The per-call cost of the two light repository calls on a real book.
 //!
 //! `#[ignore]`d because it ingests a whole book: run it with
 //! `READING_MCP_LIGHT_COST_DOCUMENT=<path> cargo test --release --test document_light_cost --
 //! --ignored --nocapture`. It ingests the file into a fresh state directory the way the open use
-//! case does (section text first, then the `documents` row), opens the repository with the decoded
-//! document cache off, and times `get_light_with_hash` and `load_section_text` for one mid-book
-//! section over 200 calls each, with the read-character count of the same window.
+//! case does (section text first, then the `documents` row), and times `get_light_with_hash` and
+//! `load_section_text` for one mid-book section over 200 calls each, with the read-character count
+//! of the same window.
 //!
 //! The target reported as pass/fail is 3 ms for both, on all three profile inputs.
 
@@ -122,9 +122,7 @@ async fn the_light_reads_cost_a_page() {
         .replace_document_segmentation(&document, segmentation)
         .await
         .expect("section text should store");
-    // Capacity 0: the cache-free read this measures must not be a cache hit.
-    let repository = SqliteDocumentRepository::open_with_cache_capacity(&database, 0)
-        .expect("repository should open");
+    let repository = SqliteDocumentRepository::open(&database).expect("repository should open");
     repository
         .save_shared(Arc::clone(&document))
         .await

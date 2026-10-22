@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure what one per-call read costs with and without the decoded-document cache (R1c-3a).
+"""Measure what one per-call read costs (R1c-3a).
 
 The probe speaks newline-delimited JSON-RPC MCP over stdio against a release binary:
 
@@ -15,14 +15,11 @@ The probe speaks newline-delimited JSON-RPC MCP over stdio against a release bin
    - `get_document_structure`: the first page of the document;
    - `v2_read`: the v2 `read` follow-up after one v2 `open`, following `next`; skipped when the
      server does not expose the v2 tools (`READING_MCP_TOOLS`);
-4. with `READING_MCP_DOCUMENT_CACHE_CAPACITY=0`, additionally time one single cold `read_document`
-   call while sampling the server's RSS, and report the decode-phase event the server emits for it
-   (`json_bytes`, `row_read_ms`, `parse_ms`, `section_text_load_ms`, `validate_ms`, `hash_ms`) plus
-   the byte size of every `document_json` metadata key.
+4. sample the server's RSS in the background for the whole run and report its peak, plus the RSS
+   right after `open_document` and after the timed loops.
 
 `--io-bytes` records the `/proc/<pid>/io` `rchar`/`read_bytes` deltas around every timed call.
-`--cache-capacity` is passed to the server as `READING_MCP_DOCUMENT_CACHE_CAPACITY`; the default 8 is
-the product's own cache size and 0 disables the cache.
+`--side` names the binary in the report (`main` or `branch`); there is no document-cache dimension.
 
 Standard library only. This script never builds anything: pass an existing release binary.
 """
@@ -503,35 +500,6 @@ def run_repeated(
     return seconds, io_per_call
 
 
-def cold_load(server: Server, tool: str, arguments: dict) -> dict:
-    """One timed call with its decode-phase event, and the peak RSS while it ran."""
-    offset = server.log_offset()
-    with RssSampler(server.process.pid) as sampler:
-        start = time.monotonic()
-        server.tool(tool, arguments)
-        call_ms = (time.monotonic() - start) * 1000.0
-    events = [event for event in server.log_since(offset) if event.get("stage") == "decode"]
-    phases = events[-1] if events else {}
-    result = {
-        "call_ms": round(call_ms, 3),
-        "peak_rss_kib": sampler.peak,
-        "decode_events": len(events),
-    }
-    for key in (
-        "json_bytes",
-        "row_read_ms",
-        "parse_ms",
-        "section_text_load_ms",
-        "validate_ms",
-        "hash_ms",
-        "sections",
-    ):
-        value = phases.get(key)
-        result[key] = round(value, 3) if isinstance(value, float) else value
-    result["metadata_key_bytes"] = phases.get("metadata_key_bytes", [])
-    return result
-
-
 def probe(args: argparse.Namespace) -> int:
     document = os.path.abspath(args.document)
     if not os.path.isfile(document):
@@ -545,9 +513,6 @@ def probe(args: argparse.Namespace) -> int:
         raise ProbeError("--start-fraction must be in [0, 1)")
     if not 1 <= args.max_items <= SEEK_PAGE:
         raise ProbeError(f"--max-items must be in [1, {SEEK_PAGE}]")
-    if args.cache_capacity < 0:
-        raise ProbeError("--cache-capacity must be non-negative")
-
     scratch_root = os.path.join(os.getcwd(), ".tmp")
     os.makedirs(scratch_root, exist_ok=True)
     state_dir = tempfile.mkdtemp(prefix="doc-read-state-", dir=scratch_root)
@@ -559,7 +524,6 @@ def probe(args: argparse.Namespace) -> int:
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
     env["READING_MCP_TOOLS"] = "both"
     env["READING_MCP_TELEMETRY"] = "true"
-    env["READING_MCP_DOCUMENT_CACHE_CAPACITY"] = str(args.cache_capacity)
     for item in args.env:
         key, separator, value = item.partition("=")
         if not separator or not key:
@@ -568,16 +532,20 @@ def probe(args: argparse.Namespace) -> int:
 
     server_log = os.path.join(scratch_root, f"doc-read-server-{args.label}.log")
     server = Server([binary], env, server_log)
+    sampler = RssSampler(server.process.pid)
+    sampler.__enter__()
     shapes: dict[str, dict] = {}
     skipped: list[dict] = []
     open_seconds = None
-    cold = None
+    rss_after_open = None
+    rss_after_calls = None
     try:
         server.initialize()
         tool_names = server.tool_names()
         opened = time.monotonic()
         payload = tool_payload(server.tool("open_document", {"source": document}))
         open_seconds = time.monotonic() - opened
+        rss_after_open = proc_rss_kib(server.process.pid)
         if not isinstance(payload, dict) or not isinstance(payload.get("document_id"), str):
             raise ProbeError("open_document did not return a document_id")
         document_id = payload["document_id"]
@@ -700,18 +668,16 @@ def probe(args: argparse.Namespace) -> int:
                 }
             )
 
-        if args.cache_capacity == 0:
-            cold = cold_load(server, "read_document", read_arguments)
-            if not cold.get("json_bytes"):
-                cold["warning"] = "the server emitted no decode-phase event"
+        rss_after_calls = proc_rss_kib(server.process.pid)
     finally:
+        sampler.__exit__()
         server.close()
 
     result = {
         "label": args.label,
         "document": document,
         "binary": binary,
-        "cache_capacity": args.cache_capacity,
+        "side": args.side,
         "calls": args.calls,
         "start_fraction": args.start_fraction,
         "max_items": args.max_items,
@@ -721,10 +687,12 @@ def probe(args: argparse.Namespace) -> int:
         "total_items": total_items,
         "start_position": start_position,
         "open_seconds": None if open_seconds is None else round(open_seconds, 2),
+        "rss_after_open_kib": rss_after_open,
+        "rss_after_calls_kib": rss_after_calls,
+        "peak_rss_kib": sampler.peak,
         "io_bytes": args.io_bytes,
         "shapes": shapes,
         "skipped": skipped,
-        "cold": cold,
     }
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -737,39 +705,36 @@ def probe(args: argparse.Namespace) -> int:
         if summary is None:
             continue
         print(
-            "{label} cache={cache} {shape}: mean_ms={mean_ms} median_ms={median_ms} "
+            "{label} side={side} {shape}: mean_ms={mean_ms} median_ms={median_ms} "
             "p95_ms={p95_ms} rchar/call={io_rchar_mean} read_bytes/call={io_read_bytes_mean}".format(
                 label=args.label,
-                cache=args.cache_capacity,
+                side=args.side,
                 shape=shape,
                 **{**summary, "io_rchar_mean": summary.get("io_rchar_mean", 0)},
             ),
             flush=True,
         )
-    if cold is not None:
-        print(
-            f"{args.label} cache=0 cold read_document: json_bytes={cold.get('json_bytes')} "
-            f"row={cold.get('row_read_ms')} parse={cold.get('parse_ms')} "
-            f"text={cold.get('section_text_load_ms')} validate={cold.get('validate_ms')} "
-            f"hash={cold.get('hash_ms')} peak_rss_kib={cold.get('peak_rss_kib')}",
-            flush=True,
-        )
+    print(
+        f"{args.label} side={args.side}: open_s={open_seconds} "
+        f"rss_after_open_kib={rss_after_open} rss_after_calls_kib={rss_after_calls} "
+        f"peak_rss_kib={sampler.peak}",
+        flush=True,
+    )
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Measure per-call document reads with the decoded-document cache on and off."
+        description="Measure per-call document reads of one binary."
     )
     parser.add_argument("--binary", required=True, help="reading-mcp release binary")
     parser.add_argument("--document", required=True, help="document to open and read")
     parser.add_argument("--label", required=True, help="input label for the report")
     parser.add_argument("--calls", type=int, required=True, help="timed calls per shape")
     parser.add_argument(
-        "--cache-capacity",
-        type=int,
-        default=8,
-        help="READING_MCP_DOCUMENT_CACHE_CAPACITY for the server (8 is the product default)",
+        "--side",
+        default="branch",
+        help="binary side label for the report (main or branch)",
     )
     parser.add_argument(
         "--start-fraction",

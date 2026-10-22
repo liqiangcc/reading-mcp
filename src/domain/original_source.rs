@@ -104,10 +104,31 @@ impl Document {
         let Some(map) = self.original_source_binding_map()? else {
             return Ok(None);
         };
+        map.target_for_range(owner_section_id, range)
+    }
 
+    pub fn validate_original_source_binding_map(
+        &self,
+        map: &OriginalSourceBindingMap,
+    ) -> Result<(), OriginalSourceBindingError> {
+        // The owner's length is its text's scalar count, exactly what the range check needs.
+        map.validate_against_section_lengths(|section_id| {
+            self.find_section(section_id)
+                .map(|section| section.normalized_text_len())
+        })
+    }
+}
+
+impl OriginalSourceBindingMap {
+    /// The binding of `owner_section_id` that contains `range`, or the error a lookup reports.
+    pub fn target_for_range(
+        &self,
+        owner_section_id: &SectionId,
+        range: NormalizedTextRange,
+    ) -> Result<Option<OriginalSourceTarget>, OriginalSourceBindingError> {
         let mut containing = None;
         let mut overlap_count = 0usize;
-        for binding in map
+        for binding in self
             .bindings
             .iter()
             .filter(|binding| &binding.owner_section_id == owner_section_id)
@@ -128,25 +149,27 @@ impl Document {
         Ok(containing)
     }
 
-    pub fn validate_original_source_binding_map(
+    /// Validates the map against the scalar length of each owner section, as
+    /// [`Document::validate_original_source_binding_map`] does for a document that carries its own
+    /// section text. A reader that holds only the light document supplies the stored lengths.
+    pub fn validate_against_section_lengths(
         &self,
-        map: &OriginalSourceBindingMap,
+        length_of: impl Fn(&SectionId) -> Option<usize>,
     ) -> Result<(), OriginalSourceBindingError> {
-        if map.schema_version != ORIGINAL_SOURCE_BINDING_MODEL_VERSION {
+        if self.schema_version != ORIGINAL_SOURCE_BINDING_MODEL_VERSION {
             return Err(OriginalSourceBindingError::UnsupportedVersion(
-                map.schema_version.clone(),
+                self.schema_version.clone(),
             ));
         }
 
         let mut last_range_end = HashMap::<SectionId, usize>::new();
-        for binding in &map.bindings {
-            let owner = self
-                .find_section(&binding.owner_section_id)
-                .ok_or_else(|| {
-                    OriginalSourceBindingError::UnknownOwner(binding.owner_section_id.0.clone())
-                })?;
-            owner
-                .validate_normalized_range(binding.normalized_range)
+        for binding in &self.bindings {
+            let owner_len = length_of(&binding.owner_section_id).ok_or_else(|| {
+                OriginalSourceBindingError::UnknownOwner(binding.owner_section_id.0.clone())
+            })?;
+            binding
+                .normalized_range
+                .validate_for_text_len(owner_len)
                 .map_err(|error| OriginalSourceBindingError::InvalidRange {
                     owner_section_id: binding.owner_section_id.0.clone(),
                     message: error.to_string(),

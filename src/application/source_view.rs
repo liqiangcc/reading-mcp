@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,9 +13,10 @@ use crate::application::ports::{
     SourceViewRenderOptions, SourceViewRenderer, TextUnitIndex,
 };
 use crate::domain::{
-    DocumentId, DocumentSource, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
-    ORIGINAL_SOURCE_BINDING_MODEL_VERSION, OriginalSourceBindingError, OriginalSourceTarget,
-    Section, TextLocator,
+    Document, DocumentId, DocumentSource, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
+    ORIGINAL_SOURCE_BINDING_METADATA_KEY, ORIGINAL_SOURCE_BINDING_MODEL_VERSION,
+    OriginalSourceBindingError, OriginalSourceBindingMap, OriginalSourceTarget, Section,
+    TextLocator,
 };
 
 pub const DEFAULT_SOURCE_VIEW_DPI: u32 = 144;
@@ -131,18 +133,28 @@ impl SourceViewUseCase {
             )));
         }
 
-        let (document, normalized_document_hash) = self
-            .repository
-            .get_with_hash(&command.document_id)
-            .await?
-            .ok_or(ApplicationError::DocumentNotFound)?;
+        // The light document when a stored text-unit index serves the units — then every section
+        // length and text is asked of the repository — and the full document when the units come
+        // from `DerivedTextUnits`, which segments the document's own text.
+        let light = self.text_unit_index.is_some();
+        let loaded = match &self.text_unit_index {
+            Some(_) => {
+                self.repository
+                    .get_light_with_hash(&command.document_id)
+                    .await?
+            }
+            None => self.repository.get_with_hash(&command.document_id).await?,
+        };
+        let (document, normalized_document_hash) =
+            loaded.ok_or(ApplicationError::DocumentNotFound)?;
         let units: Arc<dyn TextUnitIndex> = match &self.text_unit_index {
             Some(index) => Arc::clone(index),
             None => Arc::new(DerivedTextUnits::new(Arc::clone(&document))),
         };
-        // `source_view` still loads the full document (R1c-3d migrates it), so its section lengths
-        // come from that document and no section text is fetched again.
-        let mut texts = SectionTexts::from_document(&document);
+        let mut texts = match &self.text_unit_index {
+            Some(_) => SectionTexts::from_repository(&document, Arc::clone(&self.repository)),
+            None => SectionTexts::from_document(&document),
+        };
         let resolved = resolve_text_locator(
             &document,
             &command.target_locator,
@@ -156,8 +168,10 @@ impl SourceViewUseCase {
             .ok_or(ApplicationError::InvalidLocator(
                 "resolved source-view section disappeared".into(),
             ))?;
+        let binding_map =
+            load_binding_map(self.repository.as_ref(), &document, light, &mut texts).await?;
         let (page_number, source_binding_version) =
-            resolve_original_page(&document, section, resolved.range)?;
+            resolve_original_page(section, resolved.range, binding_map.as_ref())?;
 
         if !document.media_type.is_pdf() {
             return Err(ApplicationError::InvalidRequest(format!(
@@ -221,17 +235,51 @@ impl SourceViewUseCase {
     }
 }
 
+/// The persisted original-source binding map, deserialized and validated exactly as the full
+/// document's `original_source_binding_map` does. A light document carries no section text, so the
+/// lengths the range check needs come from the repository, one `section_layout_v2` row per owner.
+async fn load_binding_map(
+    repository: &dyn DocumentRepository,
+    document: &Document,
+    light: bool,
+    texts: &mut SectionTexts<'_>,
+) -> Result<Option<OriginalSourceBindingMap>, ApplicationError> {
+    if !light {
+        return document
+            .original_source_binding_map()
+            .map_err(source_binding_error);
+    }
+    let Some(json) = repository
+        .load_metadata(&document.id, ORIGINAL_SOURCE_BINDING_METADATA_KEY)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let map = serde_json::from_str::<OriginalSourceBindingMap>(&json).map_err(|error| {
+        source_binding_error(OriginalSourceBindingError::InvalidJson(error.to_string()))
+    })?;
+    let mut lengths = HashMap::new();
+    for binding in &map.bindings {
+        let section_id = &binding.owner_section_id;
+        if lengths.contains_key(section_id) || document.find_section(section_id).is_none() {
+            // An owner that does not exist is reported by the validation below, with its own error.
+            continue;
+        }
+        lengths.insert(section_id.clone(), texts.char_len(section_id).await?);
+    }
+    map.validate_against_section_lengths(|section_id| lengths.get(section_id).copied())
+        .map_err(source_binding_error)?;
+    Ok(Some(map))
+}
+
 fn resolve_original_page(
-    document: &crate::domain::Document,
     section: &Section,
     range: crate::domain::NormalizedTextRange,
+    binding_map: Option<&OriginalSourceBindingMap>,
 ) -> Result<(u32, String), ApplicationError> {
-    let binding_map = document
-        .original_source_binding_map()
-        .map_err(source_binding_error)?;
-    if binding_map.is_some() {
-        return match document
-            .original_source_target_for_range(&section.id, range)
+    if let Some(binding_map) = binding_map {
+        return match binding_map
+            .target_for_range(&section.id, range)
             .map_err(source_binding_error)?
         {
             Some(OriginalSourceTarget::Page { page_number }) => {

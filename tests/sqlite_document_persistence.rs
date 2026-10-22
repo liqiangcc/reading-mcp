@@ -97,7 +97,7 @@ async fn legacy_row_without_normalization_version_fails_closed() {
 }
 
 #[tokio::test]
-async fn get_with_hash_returns_the_computed_hash_on_cache_miss_and_hit() {
+async fn get_with_hash_returns_the_computed_hash_and_decodes_each_call() {
     let directory = tempdir().expect("temporary directory should be created");
     let database = directory.path().join("state.sqlite");
     let document = fixture_document();
@@ -111,28 +111,31 @@ async fn get_with_hash_returns_the_computed_hash_on_cache_miss_and_hit() {
     let (loaded, loaded_hash) = repository
         .get_with_hash(&document.id)
         .await
-        .expect("cache miss should load")
+        .expect("first read should load")
         .expect("document should exist");
     assert_eq!(loaded_hash, expected);
     assert_eq!(*loaded, document);
     drop(repository);
 
     let reopened = SqliteDocumentRepository::open(&database).expect("repository should reopen");
-    let (loaded, loaded_hash) = reopened
+    let (again, again_hash) = reopened
         .get_with_hash(&document.id)
         .await
         .expect("fresh repository should load")
         .expect("document should exist");
-    assert_eq!(loaded_hash, expected);
-    assert_eq!(*loaded, document);
+    assert_eq!(again_hash, expected);
+    assert_eq!(*again, document);
 
-    let (cached, cached_hash) = reopened
+    // There is no document cache: a second read decodes the row again, so the two results are
+    // equal but distinct allocations.
+    let (third, third_hash) = reopened
         .get_with_hash(&document.id)
         .await
-        .expect("cache hit should load")
+        .expect("second read should load")
         .expect("document should exist");
-    assert_eq!(cached_hash, expected);
-    assert!(Arc::ptr_eq(&loaded, &cached));
+    assert_eq!(third_hash, expected);
+    assert_eq!(*third, document);
+    assert!(!Arc::ptr_eq(&again, &third));
 }
 
 #[tokio::test]

@@ -530,12 +530,11 @@ async fn ocr_metadata_makes_the_light_read_take_the_full_path() {
 }
 
 #[tokio::test]
-async fn the_light_read_never_touches_the_document_cache() {
+async fn the_light_read_carries_no_section_text_and_every_full_read_decodes() {
     let directory = tempdir().expect("temporary directory");
     let database = directory.path().join("state.sqlite");
     let document = document();
-    let repository =
-        SqliteDocumentRepository::open_with_cache_capacity(&database, 8).expect("repository");
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
     repository
         .save(document.clone())
         .await
@@ -546,6 +545,7 @@ async fn the_light_read_never_touches_the_document_cache() {
         .await
         .expect("light read")
         .expect("document should exist");
+    assert_no_content(&light);
     let (first, _) = repository
         .get_with_hash(&document.id)
         .await
@@ -553,7 +553,7 @@ async fn the_light_read_never_touches_the_document_cache() {
         .expect("document should exist");
     assert!(
         !Arc::ptr_eq(&light, &first),
-        "the light read must not put its document into the cache"
+        "the light read must not hand out the full document"
     );
     let (second, _) = repository
         .get_with_hash(&document.id)
@@ -561,31 +561,7 @@ async fn the_light_read_never_touches_the_document_cache() {
         .expect("full read")
         .expect("document should exist");
     assert!(
-        Arc::ptr_eq(&first, &second),
-        "the full read must fill the cache, so this one is a hit"
-    );
-
-    // With the cache off, the light read works and still fills nothing.
-    let uncached =
-        SqliteDocumentRepository::open_with_cache_capacity(&database, 0).expect("repository");
-    let (light, _) = uncached
-        .get_light_with_hash(&document.id)
-        .await
-        .expect("light read")
-        .expect("document should exist");
-    assert_no_content(&light);
-    let (a, _) = uncached
-        .get_with_hash(&document.id)
-        .await
-        .expect("full read")
-        .expect("document should exist");
-    let (b, _) = uncached
-        .get_with_hash(&document.id)
-        .await
-        .expect("full read")
-        .expect("document should exist");
-    assert!(
-        !Arc::ptr_eq(&a, &b),
-        "a capacity of 0 must never return a cached document"
+        !Arc::ptr_eq(&first, &second),
+        "there is no document cache, so every full read decodes the row again"
     );
 }

@@ -3,11 +3,13 @@
 Measurement and diagnosis only. **No product code changed**: the new files are
 `scripts/pdf-open-profile.py`, `scripts/pdf-cmap-probe.py` and
 `.github/workflows/pdf-open-profile.yml`. Every number below comes from run
-[39773370640](https://github.com/liqiangcc/reading-mcp/actions/runs/39773370640)
-(`pdf-open-profile.yml`, commit `b8a28e0` of `bench/pdf2a-open-time-cmap`), unless a sentence says
-otherwise. A second run of the same tree ([39771933466](https://github.com/liqiangcc/reading-mcp/actions/runs/39771933466))
-on a slower runner produced the same tables with the CJK opens 1.5x larger (49.6 s and 101.8 s
-for 300 and 600 pages), so the shape is reproducible and the absolute seconds are runner speed.
+[39775360134](https://github.com/liqiangcc/reading-mcp/actions/runs/39775360134)
+(`pdf-open-profile.yml`, commit `5ae595f` of `bench/pdf2a-open-time-cmap`; the only commits after
+it are this note and the PR body, which change no code), unless a sentence says otherwise. Two earlier runs of the same code ([39773370640](https://github.com/liqiangcc/reading-mcp/actions/runs/39773370640)
+and [39771933466](https://github.com/liqiangcc/reading-mcp/actions/runs/39771933466)) produced
+the same tables with the CJK opens smaller (32.2 s and 49.6 s for 300 pages), so the shape is
+reproducible and the absolute seconds are runner speed. This run's 53.22 s reproduces
+BENCH-D2's 53 s.
 
 ## 1. What was measured
 
@@ -38,38 +40,37 @@ for 300 and 600 pages), so the shape is reproducible and the absolute seconds ar
 
 | Input | Pages | Open s | Retrieve s | Parse s | Save doc s | Unit sets + streams s | FTS index s | Sum of phases s | Unaccounted s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| text-long-cjk-100 | 100 | 0.48 | 0.002 | 0.449 | 0.000 | 0.003 | 0.000 | 0.454 | 0.027 |
-| text-long-cjk-300 | 300 | 32.24 | 0.002 | 32.167 | 0.004 | 0.011 | 0.000 | 32.184 | 0.059 |
-| text-long-cjk-600 | 600 | 65.78 | 0.003 | 65.547 | 0.026 | 0.084 | 0.000 | 65.660 | 0.123 |
-| text-long-en-100 | 100 | 0.14 | 0.000 | 0.115 | 0.000 | 0.003 | 0.000 | 0.118 | 0.022 |
-| text-long-en-300 | 300 | 0.43 | 0.001 | 0.363 | 0.002 | 0.011 | 0.000 | 0.377 | 0.053 |
-| text-long-en-600 | 600 | 0.97 | 0.001 | 0.775 | 0.005 | 0.091 | 0.000 | 0.872 | 0.102 |
-| paper-2610.18269 | 18 | 0.07 | 0.000 | 0.064 | 0.000 | 0.000 | 0.000 | 0.064 | 0.006 |
-| paper-2604.00909 | 16 | 0.09 | 0.002 | 0.082 | 0.000 | 0.000 | 0.000 | 0.084 | 0.010 |
+| text-long-cjk-100 | 100 | 0.80 | 0.008 | 0.747 | 0.001 | 0.006 | 0.000 | 0.762 | 0.034 |
+| text-long-cjk-300 | 300 | 53.22 | 0.014 | 53.109 | 0.007 | 0.014 | 0.000 | 53.144 | 0.077 |
+| text-long-cjk-600 | 600 | 108.68 | 0.011 | 108.400 | 0.040 | 0.066 | 0.000 | 108.517 | 0.164 |
+| text-long-en-100 | 100 | 0.23 | 0.001 | 0.188 | 0.001 | 0.005 | 0.000 | 0.195 | 0.031 |
+| text-long-en-300 | 300 | 0.71 | 0.003 | 0.602 | 0.003 | 0.016 | 0.000 | 0.624 | 0.083 |
+| text-long-en-600 | 600 | 1.50 | 0.005 | 1.280 | 0.007 | 0.050 | 0.000 | 1.342 | 0.158 |
+| paper-2610.18269 | 18 | 0.11 | 0.000 | 0.100 | 0.000 | 0.001 | 0.000 | 0.101 | 0.007 |
+| paper-2604.00909 | 16 | 0.14 | 0.005 | 0.120 | 0.000 | 0.001 | 0.000 | 0.126 | 0.011 |
 
 The parse phase is 99.8% of the 300-page CJK open. Save, unit sets, streams and the search index
-are each under 30 ms: the 53 s BENCH-D2 measured is not ingestion, it is `parse`. BENCH-D2's
-runner was slower than this one — the same document is 32.24 s here and 49.6 s on the slower
-runner of the second run — so 53 s is the same phase at a different speed, not a different
-effect.
+are each under 30 ms: the 53 s BENCH-D2 measured is not ingestion, it is `parse`. The same
+document opened in 32.2 s and 49.6 s on the two earlier runs of the same code, so the absolute
+seconds are runner speed and the phase is the same.
 
 ### 2.2 The CPU profile: it is lopdf's font-encoding path, once per shown string
 
-`text-long-cjk-300` (32.24 s wall, 32,211 samples):
+`text-long-cjk-300` (53.22 s wall, 53,169 samples):
 
 | Bucket | ms | % of open | anywhere in stack (inclusive) |
 | --- | ---: | ---: | ---: |
-| lopdf: /ToUnicode CMap parse | 13502 | 41.9 | 96.2 |
-| lopdf: page content decode and text walk | 146 | 0.5 | 4.2 |
-| lopdf: document load, xref, stream decode | 8163 | 25.3 | 25.7 |
-| pdf.rs extraction loop and structure | 116 | 0.4 | 99.6 |
+| lopdf: /ToUnicode CMap parse | 27044 | 50.8 | 95.7 |
+| lopdf: page content decode and text walk | 245 | 0.5 | 3.9 |
+| lopdf: document load, xref, stream decode | 11733 | 22.0 | 22.7 |
+| pdf.rs extraction loop and structure | 168 | 0.3 | 99.6 |
 | pdf_text_repair pre-pass (PDF-1c) | 0 | 0.0 | 0.0 |
-| normalization, hashing, segmentation | 81 | 0.3 | 0.3 |
-| SQLite (save, section text, metadata) | 42 | 0.1 | 3.6 |
-| FTS index | 0 | 0.0 | 0.0 |
+| normalization, hashing, segmentation | 111 | 0.2 | 0.2 |
+| SQLite (save, section text, metadata) | 63 | 0.1 | 3.2 |
+| FTS index | 1 | 0.0 | 0.0 |
 | serde_json | 4 | 0.0 | 0.0 |
-| Allocation (malloc/free/realloc/memcpy) | 10184 | 31.6 | 31.6 |
-| Other | 4 | 0.0 | 0.0 |
+| Allocation (malloc/free/realloc/memcpy) | 13832 | 26.0 | 26.0 |
+| Other | 19 | 0.0 | 0.0 |
 
 `ms`/`% of open` are a partition (each sample is charged to the deepest frame of a bucket);
 `anywhere in stack` counts a sample once per bucket present and sums over 100%.
@@ -79,88 +80,88 @@ in its stack), with the deepest known top-level frame of those stacks:
 
 | # | Symbol | Inclusive % | ms | deepest top-level frame |
 | ---: | --- | ---: | ---: | --- |
-| 1 | `[unknown]@libc.so.6` | 100.00 | 32242 | lopdf get_font_encoding_inner |
-| 2 | `<sys::thread::unix::Thread>::new::thread_start` | 99.98 | 32235 | lopdf get_font_encoding_inner |
-| 3 | `<thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{c…` | 99.98 | 32235 | lopdf get_font_encoding_inner |
-| 4 | `sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn…` | 99.98 | 32235 | lopdf get_font_encoding_inner |
-| 5 | `<tokio::runtime::blocking::pool::Inner>::run` | 99.98 | 32235 | lopdf get_font_encoding_inner |
-| 6 | `<parsing::limited_pdf::LimitedPdfParser>::parse_sync` | 99.70 | 32146 | lopdf get_font_encoding_inner |
-| 7 | `<tokio::runtime::task::harness::Harness<tokio::runtime::blocking::task::BlockingTask<<parsing::…` | 99.70 | 32146 | lopdf get_font_encoding_inner |
-| 8 | `<tokio::runtime::task::Core<tokio::runtime::blocking::task::BlockingTask<<parsing::limited_pdf:…` | 99.70 | 32146 | lopdf get_font_encoding_inner |
-| 9 | `<parsing::pdf_v8::PdfParser>::parse_sync` | 99.57 | 32103 | lopdf get_font_encoding_inner |
-| 10 | `<object::Dictionary>::get_font_encoding_inner` | 96.23 | 31029 | lopdf get_font_encoding_inner |
-| 11 | `<object::Dictionary>::get_to_unicode_encoding` | 96.21 | 31022 | lopdf get_font_encoding_inner |
-| 12 | `parsing::pdf_layout::extract_text_fragment_evidence` | 95.24 | 30709 | lopdf get_font_encoding_inner |
-| 13 | `<string::String as iter::traits::collect::FromIterator<string::String>>::from_iter::<iter::adap…` | 94.11 | 30343 | lopdf get_font_encoding_inner |
-| 14 | `parsing::pdf_layout::decode_text_object` | 94.11 | 30343 | lopdf get_font_encoding_inner |
-| 15 | `<object::Dictionary>::get_font_encoding_with_limit` | 93.15 | 30033 | lopdf get_font_encoding_inner |
-| 16 | `<encodings::cmap::ToUnicodeCMap>::parse` | 71.13 | 22936 | lopdf get_font_encoding_inner |
-| 17 | `<nom::multi::Many1<nom::branch::Choice<(parser::cmap_parser::codespace_range_section, parser::c…` | 63.24 | 20391 | lopdf get_font_encoding_inner |
-| 18 | `<parser::cmap_parser::bf_range_section as ops::function::FnMut<(&[u8],)>>::call_mut` | 63.07 | 20337 | lopdf get_font_encoding_inner |
-| 19 | `<nom::multi::Many0<parser::cmap_parser::bf_range_line> as nom::internal::Parser<&[u8]>>::proces…` | 62.88 | 20274 | lopdf get_font_encoding_inner |
-| 20 | `<parser::cmap_parser::bf_range_line as nom::internal::Parser<&[u8]>>::process::<nom::internal::…` | 58.80 | 18960 | lopdf get_font_encoding_inner |
-| 21 | `<parser::cmap_parser::code_range_pair as ops::function::FnMut<(&[u8],)>>::call_mut` | 32.69 | 10541 | lopdf get_font_encoding_inner |
-| 22 | `<parser::cmap_parser::source_code as ops::function::FnMut<(&[u8],)>>::call_mut` | 30.89 | 9960 | lopdf get_font_encoding_inner |
-| 23 | `<object::Stream>::decode_filters` | 25.49 | 8217 | lopdf get_font_encoding_inner |
-| 24 | `<nom::multi::ManyMN<parser::hex_char> as nom::internal::Parser<&[u8]>>::process::<nom::internal…` | 25.43 | 8200 | lopdf get_font_encoding_inner |
-| 25 | `<io::util::Take<flate2::deflate::read::DeflateDecoder<&[u8]>> as io::read::Read>::read_buf` | 25.09 | 8089 | lopdf get_font_encoding_inner |
+| 1 | `[unknown]@libc.so.6` | 100.00 | 53220 | lopdf get_font_encoding_inner |
+| 2 | `<sys::thread::unix::Thread>::new::thread_start` | 99.98 | 53213 | lopdf get_font_encoding_inner |
+| 3 | `sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn…` | 99.98 | 53212 | lopdf get_font_encoding_inner |
+| 4 | `<tokio::runtime::blocking::pool::Inner>::run` | 99.98 | 53212 | lopdf get_font_encoding_inner |
+| 5 | `<thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{c…` | 99.98 | 53212 | lopdf get_font_encoding_inner |
+| 6 | `<tokio::runtime::task::Core<tokio::runtime::blocking::task::BlockingTask<<parsing::limited_pdf:…` | 99.74 | 53084 | lopdf get_font_encoding_inner |
+| 7 | `<tokio::runtime::task::harness::Harness<tokio::runtime::blocking::task::BlockingTask<<parsing::…` | 99.74 | 53084 | lopdf get_font_encoding_inner |
+| 8 | `<parsing::limited_pdf::LimitedPdfParser>::parse_sync` | 99.74 | 53084 | lopdf get_font_encoding_inner |
+| 9 | `<parsing::pdf_v8::PdfParser>::parse_sync` | 99.61 | 53016 | lopdf get_font_encoding_inner |
+| 10 | `<object::Dictionary>::get_font_encoding_inner` | 95.72 | 50944 | lopdf get_font_encoding_inner |
+| 11 | `<object::Dictionary>::get_to_unicode_encoding` | 95.69 | 50929 | lopdf get_font_encoding_inner |
+| 12 | `parsing::pdf_layout::extract_text_fragment_evidence` | 95.65 | 50908 | lopdf get_font_encoding_inner |
+| 13 | `<string::String as iter::traits::collect::FromIterator<string::String>>::from_iter::<iter::adap…` | 94.27 | 50170 | lopdf get_font_encoding_inner |
+| 14 | `parsing::pdf_layout::decode_text_object` | 94.27 | 50170 | lopdf get_font_encoding_inner |
+| 15 | `<object::Dictionary>::get_font_encoding_with_limit` | 92.92 | 49454 | lopdf get_font_encoding_inner |
+| 16 | `<encodings::cmap::ToUnicodeCMap>::parse` | 73.71 | 39228 | lopdf get_font_encoding_inner |
+| 17 | `<nom::multi::Many1<nom::branch::Choice<(parser::cmap_parser::codespace_range_section, parser::c…` | 64.69 | 34429 | lopdf get_font_encoding_inner |
+| 18 | `<parser::cmap_parser::bf_range_section as ops::function::FnMut<(&[u8],)>>::call_mut` | 64.54 | 34350 | lopdf get_font_encoding_inner |
+| 19 | `<nom::multi::Many0<parser::cmap_parser::bf_range_line> as nom::internal::Parser<&[u8]>>::proces…` | 64.32 | 34232 | lopdf get_font_encoding_inner |
+| 20 | `<parser::cmap_parser::bf_range_line as nom::internal::Parser<&[u8]>>::process::<nom::internal::…` | 60.62 | 32263 | lopdf get_font_encoding_inner |
+| 21 | `<parser::cmap_parser::code_range_pair as ops::function::FnMut<(&[u8],)>>::call_mut` | 32.92 | 17520 | lopdf get_font_encoding_inner |
+| 22 | `<parser::cmap_parser::source_code as ops::function::FnMut<(&[u8],)>>::call_mut` | 29.80 | 15861 | lopdf get_font_encoding_inner |
+| 23 | `<nom::multi::ManyMN<parser::hex_char> as nom::internal::Parser<&[u8]>>::process::<nom::internal…` | 23.66 | 12594 | lopdf get_font_encoding_inner |
+| 24 | `<object::Stream>::decode_filters` | 22.35 | 11893 | lopdf get_font_encoding_inner |
+| 25 | `<object::Stream>::get_plain_content_with_limit` | 21.98 | 11697 | lopdf get_font_encoding_inner |
 
 Top 25 self-time symbols:
 
 | # | Symbol | Self % | ms | deepest top-level frame |
 | ---: | --- | ---: | ---: | --- |
-| 1 | `zlib_rs::inflate::inflate_fast_help_avx2` | 23.31 | 7516 | lopdf get_font_encoding_inner |
-| 2 | `<nom::internal::MapRes<nom::combinator::Verify<nom::bytes::complete::take<usize, &[u8], nom::er…` | 10.64 | 3431 | lopdf get_font_encoding_inner |
-| 3 | `malloc` | 6.95 | 2241 | lopdf get_font_encoding_inner |
-| 4 | `realloc` | 6.21 | 2002 | lopdf get_font_encoding_inner |
-| 5 | `str::converts::from_utf8` | 3.53 | 1138 | lopdf get_font_encoding_inner |
-| 6 | `<nom::multi::ManyMN<parser::hex_char> as nom::internal::Parser<&[u8]>>::process::<nom::internal…` | 3.02 | 974 | lopdf get_font_encoding_inner |
-| 7 | `0x00000000000ab3ed` | 2.98 | 961 | - |
-| 8 | `<nom::multi::ManyMN<nom::sequence::Terminated<parser::cmap_parser::hex_u16, parser::cmap_parser…` | 2.85 | 919 | lopdf get_font_encoding_inner |
-| 9 | `<parser::cmap_parser::bf_range_line as nom::internal::Parser<&[u8]>>::process::<nom::internal::…` | 2.71 | 874 | lopdf get_font_encoding_inner |
-| 10 | `<parser::cmap_parser::source_code as ops::function::FnMut<(&[u8],)>>::call_mut` | 2.65 | 854 | lopdf get_font_encoding_inner |
-| 11 | `<&[u8] as nom::traits::Input>::take_from` | 2.58 | 832 | lopdf get_font_encoding_inner |
-| 12 | `parser::eol` | 2.19 | 706 | lopdf get_font_encoding_inner |
-| 13 | `<nom::multi::Many0<parser::cmap_parser::bf_range_line> as nom::internal::Parser<&[u8]>>::proces…` | 1.88 | 606 | lopdf get_font_encoding_inner |
-| 14 | `<parser::cmap_parser::hex_u16 as nom::internal::Parser<&[u8]>>::process::<nom::internal::Output…` | 1.66 | 535 | lopdf get_font_encoding_inner |
-| 15 | `cfree` | 1.57 | 506 | lopdf get_font_encoding_inner |
-| 16 | `<nom::multi::FoldMany1<nom::branch::Choice<(nom::internal::Map<nom::bytes::complete::tag<&[u8],…` | 1.45 | 468 | lopdf get_font_encoding_inner |
-| 17 | `<parser::cmap_parser::target_string as ops::function::FnMut<(&[u8],)>>::call_mut` | 0.99 | 319 | lopdf get_font_encoding_inner |
-| 18 | `<parser::cmap_parser::code_range_pair as ops::function::FnMut<(&[u8],)>>::call_mut` | 0.93 | 300 | lopdf get_font_encoding_inner |
-| 19 | `<nom::multi::FoldMany0<nom::branch::Choice<(nom::internal::Map<nom::bytes::complete::tag<&[u8],…` | 0.90 | 290 | lopdf get_font_encoding_inner |
-| 20 | `0x00000000000a9ce6` | 0.87 | 281 | - |
-| 21 | `<nom::bytes::Tag<&str, nom::error::Error<&[u8]>> as nom::internal::Parser<&[u8]>>::process::<no…` | 0.83 | 268 | lopdf get_font_encoding_inner |
-| 22 | `0x00000000000ab8e0` | 0.72 | 232 | - |
-| 23 | `<raw_vec::RawVec<u8>>::grow_one` | 0.64 | 206 | lopdf get_font_encoding_inner |
-| 24 | `zlib_rs::inflate::inflate` | 0.63 | 203 | lopdf get_font_encoding_inner |
-| 25 | `0x00000000000abf50` | 0.54 | 174 | - |
+| 1 | `zlib_rs::inflate::inflate_fast_help_avx2` | 19.90 | 10591 | lopdf get_font_encoding_inner |
+| 2 | `<nom::internal::MapRes<nom::combinator::Verify<nom::bytes::complete::take<usize, &[u8], nom::er…` | 11.86 | 6312 | lopdf get_font_encoding_inner |
+| 3 | `<&[u8] as nom::traits::Input>::take_from` | 4.09 | 2177 | lopdf get_font_encoding_inner |
+| 4 | `str::converts::from_utf8` | 3.99 | 2124 | lopdf get_font_encoding_inner |
+| 5 | `<nom::multi::ManyMN<parser::hex_char> as nom::internal::Parser<&[u8]>>::process::<nom::internal…` | 3.97 | 2113 | lopdf get_font_encoding_inner |
+| 6 | `<parser::cmap_parser::source_code as ops::function::FnMut<(&[u8],)>>::call_mut` | 3.39 | 1804 | lopdf get_font_encoding_inner |
+| 7 | `<nom::multi::ManyMN<nom::sequence::Terminated<parser::cmap_parser::hex_u16, parser::cmap_parser…` | 3.34 | 1778 | lopdf get_font_encoding_inner |
+| 8 | `<parser::cmap_parser::bf_range_line as nom::internal::Parser<&[u8]>>::process::<nom::internal::…` | 3.27 | 1740 | lopdf get_font_encoding_inner |
+| 9 | `malloc` | 3.20 | 1703 | lopdf get_font_encoding_inner |
+| 10 | `<nom::multi::FoldMany1<nom::branch::Choice<(nom::internal::Map<nom::bytes::complete::tag<&[u8],…` | 2.40 | 1277 | lopdf get_font_encoding_inner |
+| 11 | `realloc` | 2.26 | 1203 | lopdf get_font_encoding_inner |
+| 12 | `cfree` | 2.18 | 1160 | lopdf get_font_encoding_inner |
+| 13 | `parser::eol` | 2.03 | 1080 | lopdf get_font_encoding_inner |
+| 14 | `ptr::drop_glue::<cmap_section::CMapSection>` | 1.85 | 985 | lopdf get_font_encoding_inner |
+| 15 | `<nom::multi::Many0<parser::cmap_parser::bf_range_line> as nom::internal::Parser<&[u8]>>::proces…` | 1.70 | 905 | lopdf get_font_encoding_inner |
+| 16 | `0x00000000000ab8e0` | 1.64 | 873 | - |
+| 17 | `<parser::cmap_parser::hex_u16 as nom::internal::Parser<&[u8]>>::process::<nom::internal::Output…` | 1.63 | 868 | lopdf get_font_encoding_inner |
+| 18 | `0x00000000000a9be1` | 1.55 | 825 | - |
+| 19 | `<parser::cmap_parser::code_range_pair as ops::function::FnMut<(&[u8],)>>::call_mut` | 1.31 | 697 | lopdf get_font_encoding_inner |
+| 20 | `<nom::multi::FoldMany0<nom::branch::Choice<(nom::internal::Map<nom::bytes::complete::tag<&[u8],…` | 1.16 | 617 | lopdf get_font_encoding_inner |
+| 21 | `0x00000000000a9ce6` | 1.05 | 559 | - |
+| 22 | `<parser::cmap_parser::target_string as ops::function::FnMut<(&[u8],)>>::call_mut` | 1.03 | 548 | lopdf get_font_encoding_inner |
+| 23 | `<raw_vec::RawVec<u8>>::grow_one` | 0.92 | 490 | lopdf get_font_encoding_inner |
+| 24 | `<nom::bytes::Tag<&str, nom::error::Error<&[u8]>> as nom::internal::Parser<&[u8]>>::process::<no…` | 0.79 | 420 | lopdf get_font_encoding_inner |
+| 25 | `0x00000000000a9d41` | 0.62 | 330 | - |
 
-`text-long-en-300` (0.43 s, 437 samples) for contrast: the CMap parse bucket is **0.0%** of
-samples (nothing in the stack), page content decode and the text walk are 27.5% exclusive /
-61.6% inclusive, document load 27.9% / 36.4%, SQLite 9.2% / 26.3%, normalization and hashing
-12.1% / 16.7%, allocation 20.4% / 20.8%. Top self symbols: `zlib_rs::inflate::inflate` 9.84%
-(page content streams), `FoldMany0<Preceded<white_space, hex_digit>>` 4.81%,
-`MapOpt<take<usize>>` 3.89%, `zlib_rs::inflate::inftrees::inflate_table` 3.89%,
-`domain::segmentation::looks_like_unreliable_fallback_text` 3.43%,
-`sha2::sha256::x86::digest_blocks` 2.75%. The deepest top-level frames are
-`lopdf extract_text_chunks_from_page` (54.9% inclusive) and `lopdf get_page_content_with_limit`
-(25.2% inclusive). So an EN open of the same page count is a flat ~1.4 ms/page of content decode
-and hashing, and the CJK open is 107.5 ms/page of CMap work.
+`text-long-en-300` (0.71 s, 717 samples) for contrast: the CMap parse bucket is 0.1% (1 ms;
+nothing in the stack reaches the parser), page content decode and the text walk are 31.4%
+exclusive / 65.3% inclusive, document load 27.1% / 33.9%, SQLite 8.5% / 25.0%, normalization and
+hashing 11.9% / 15.3%, allocation 19.1% / 19.2%. Top self symbols:
+`zlib_rs::inflate::inflate` 9.34% (page content streams),
+`zlib_rs::inflate::inftrees::inflate_table` 6.14%,
+`FoldMany0<Preceded<white_space, hex_digit>>` 5.30%, `MapOpt<take<usize>>` 4.32%,
+`domain::segmentation::looks_like_unreliable_fallback_text` 3.21%. The deepest top-level frames
+are `lopdf extract_text_chunks_from_page` (58.3% inclusive) and
+`lopdf get_page_content_with_limit` (24.4% inclusive). So an EN open of the same page count is a
+flat ~2.4 ms/page of content decode and hashing, and the CJK open is 177.4 ms/page of CMap work.
 
 ### 2.3 Scaling
 
 | Input | Pages | Open s | s/page | vs 100 pages (per page) |
 | --- | ---: | ---: | ---: | ---: |
-| text-long-cjk-100 | 100 | 0.48 | 4.8 ms | 1.00x |
-| text-long-cjk-300 | 300 | 32.24 | 107.5 ms | 22.34x |
-| text-long-cjk-600 | 600 | 65.78 | 109.6 ms | 22.79x |
-| text-long-en-100 | 100 | 0.14 | 1.4 ms | 1.00x |
-| text-long-en-300 | 300 | 0.43 | 1.4 ms | 1.02x |
-| text-long-en-600 | 600 | 0.97 | 1.6 ms | 1.16x |
+| text-long-cjk-100 | 100 | 0.80 | 8.0 ms | 1.00x |
+| text-long-cjk-300 | 300 | 53.22 | 177.4 ms | 22.29x |
+| text-long-cjk-600 | 600 | 108.68 | 181.1 ms | 22.76x |
+| text-long-en-100 | 100 | 0.23 | 2.3 ms | 1.00x |
+| text-long-en-300 | 300 | 0.71 | 2.4 ms | 1.04x |
+| text-long-en-600 | 600 | 1.50 | 2.5 ms | 1.11x |
 
-The EN open is linear in pages (1.4-1.6 ms/page). The CJK open is **linear from 300 pages
-upwards** (107.5 -> 109.6 ms/page) but has a **cliff between 100 and 300 pages**: 4.8 ms/page
-versus 107.5 ms/page, a 22x jump, not a quadratic term. The cliff is a code path, not a size
+The EN open is linear in pages (2.3-2.5 ms/page). The CJK open is **linear from 300 pages
+upwards** (177.4 -> 181.1 ms/page) but has a **cliff between 100 and 300 pages**: 8.0 ms/page
+versus 177.4 ms/page, a 22x jump, not a quadratic term. The cliff is a code path, not a size
 effect: see 2.4.
 
 ### 2.4 Why: the CMap is re-parsed for every string shown, in a second pass
@@ -201,10 +202,10 @@ the 22x per-page cliff. The papers do not: `2610.18269` has a 16-entry TOC and `
 | paper-2604.00909 | 16 | 88 | 495.7 | 11.00 | does not run (native TOC) | 11.0 | 176 | 2050 | 22550 |
 
 This is a model of the code, not an instrumented counter; it is corroborated by the profile
-(`decode_text_object` 94.1% inclusive, `ToUnicodeCMap::parse` 71.1%, and 63.3% of all samples with
-the CMap parser on the stack) and by the arithmetic: 32.17 s of parse over 39,000 parses is
-**0.82 ms per parse** (inflate 256,880 bytes + nom-parse the first 89,608 bytes), and the
-100-page open's 0.45 s of parse is 200 parses at the same cost (0.17 s) plus the single-pass
+(`decode_text_object` 94.3% inclusive, `ToUnicodeCMap::parse` 73.7%, and 64.8% of all samples
+with the CMap parser on the stack) and by the arithmetic: 53.11 s of parse over 39,000 parses is
+**1.36 ms per parse** (inflate 256,880 bytes + nom-parse the first 89,608 bytes), and the
+100-page open's 0.75 s of parse is 200 parses at the same cost (0.27 s) plus the single-pass
 extraction walk and structure work.
 
 ### 2.5 Memory
@@ -214,17 +215,17 @@ carry after each phase (read from `/proc/self/status`).
 
 | Input | Peak RSS MiB | after retrieve | after parse | after save | after unit sets | after index | peak VmHWM MiB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| text-long-cjk-100 | 88.7 | 29.6 | 35.4 | 35.7 | 35.6 | 35.8 | 88.7 |
-| text-long-cjk-300 | 134.5 | 33.1 | 87.0 | 87.1 | 87.1 | 87.2 | 134.5 |
-| text-long-cjk-600 | 203.7 | 38.6 | 145.6 | 145.7 | 145.6 | 145.7 | 203.7 |
-| text-long-en-100 | 36.2 | 16.6 | 35.6 | 36.1 | 36.0 | 36.1 | 36.2 |
-| text-long-en-300 | 77.3 | 20.0 | 74.4 | 74.8 | 74.7 | 74.8 | 77.3 |
-| text-long-en-600 | 139.1 | 25.2 | 135.5 | 136.1 | 135.8 | 136.1 | 139.1 |
-| paper-2610.18269 | 33.2 | 15.6 | 31.8 | 32.2 | 32.2 | 32.2 | 33.2 |
-| paper-2604.00909 | 74.3 | 22.7 | 37.8 | 38.3 | 38.2 | 38.3 | 74.3 |
+| text-long-cjk-100 | 88.6 | 29.5 | 35.2 | 36.3 | 35.4 | 36.3 | 88.6 |
+| text-long-cjk-300 | 134.5 | 32.9 | 84.2 | 84.4 | 84.2 | 84.4 | 134.5 |
+| text-long-cjk-600 | 203.9 | 38.6 | 145.4 | 145.7 | 145.5 | 145.7 | 203.9 |
+| text-long-en-100 | 36.3 | 16.3 | 35.4 | 35.8 | 35.7 | 35.8 | 36.3 |
+| text-long-en-300 | 77.3 | 19.7 | 76.3 | 76.8 | 76.6 | 76.8 | 77.3 |
+| text-long-en-600 | 139.1 | 25.1 | 135.0 | 135.5 | 135.2 | 135.5 | 139.1 |
+| paper-2610.18269 | 33.1 | 15.4 | 31.5 | 31.8 | 31.8 | 31.8 | 33.1 |
+| paper-2604.00909 | 74.3 | 22.3 | 37.8 | 38.1 | 38.0 | 38.1 | 74.3 |
 
 The 300-page CJK peak is 134.5 MiB, matching BENCH-D2's 134 MiB. The peak is reached **inside
-the parse phase** (the RSS after parse is 87 MiB, and VmHWM equals the peak, so nothing later
+the parse phase** (the RSS after parse is 84.2 MiB, and VmHWM equals the peak, so nothing later
 grows); it scales with the parsed text (300 pages of garbage Latin from the failed CMap), not
 with the CMap stream.
 
@@ -373,11 +374,11 @@ differ from these in exactly one way that matters: the 5-digit destinations.
 1. **Cache the parsed font encoding per font object across pages and across the two passes**
    (in our code: a pre-pass that resolves each `/ToUnicode` once and reuses it, or a
    `HashMap<ObjectId, Encoding>` threaded through extraction). Measured basis: 39,000 parses of
-   the same CMap at 0.82 ms each are 32.1 s of the 32.24 s CJK open, and the same document at
-   100 pages (200 parses) opens in 0.48 s. Expected effect: the 300-page CJK open drops to
-   about three times the measured 100-page open (order 1-2 s instead of 32 s), because the
+   the same CMap at 1.36 ms each are 53.1 s of the 53.22 s CJK open, and the same document at
+   100 pages (200 parses) opens in 0.80 s. Expected effect: the 300-page CJK open drops to
+   about three times the measured 100-page open (order 2-3 s instead of 53 s), because the
    per-page content walk and the structure work remain; the EN open is unaffected (it has no
-   `/ToUnicode`). The second pass alone is 95.2% inclusive of the open and
+   `/ToUnicode`). The second pass alone is 95.7% inclusive of the open and
    contributes front-matter evidence for one page, so caching inside it is where the win is.
 2. **Normalise the CMap text in the PDF-1c in-memory pre-pass**
    (`src/parsing/pdf_text_repair.rs`, which already rewrites `/ToUnicode` streams) — rewrite an
@@ -387,8 +388,8 @@ differ from these in exactly one way that matters: the 5-digit destinations.
    one pass over the CMap per font (256 KB), not per page. Risk: it also changes what the
    fragment-evidence pass sees, and it is a second interpretation of a non-conformant CMap that a
    spec-strict reader would also reject.
-3. **Do nothing.** CJK opens stay at 32-50 s per 300 pages (107-165 ms/page) and
-   MuPDF-generated CJK PDFs stay unreadable in the default backend.
+3. **Do nothing.** CJK opens stay at 32-54 s per 300 pages (107-181 ms/page, runner
+   dependent) and MuPDF-generated CJK PDFs stay unreadable in the default backend.
 4. **Separately from the CMap work:** the 2604.00909 residual is a CMap coverage gap plus the
    reference text's CID-as-code-point fallback, and 2610.18269's is a font with no `/ToUnicode`
    at all plus the claim-order accounting. Neither is fixed by 1 or 2, and the PDF-1c note's
@@ -397,7 +398,8 @@ differ from these in exactly one way that matters: the 5-digit destinations.
 ## 5. What did not run
 
 Nothing in the workflow failed: build, inputs, profile, cmap and aggregate all succeeded in run
-39773370640 (9m8s) and in the two earlier runs of the same tree. Not measured, deliberately:
+[39775360134](https://github.com/liqiangcc/reading-mcp/actions/runs/39775360134) (8m24s) and in
+the two earlier runs of the same tree. Not measured, deliberately:
 
 - the layout (PyMuPDF) backend: out of scope, and the PDF-1b note already shows it refuses every
   paper that loses CJK text;

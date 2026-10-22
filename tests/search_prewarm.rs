@@ -140,7 +140,10 @@ async fn a_second_document_in_the_slot_leaves_the_old_warm_nothing_to_fill() {
 
     // A search of the second document takes the slot, as it does today.
     let second_sections = sections_with_text(&second);
-    assert!(!second_sections.is_empty());
+    assert!(
+        second_sections > 0,
+        "the second document holds sections with text"
+    );
     let second_hits = index
         .search_lexical_with_options(&second.id, "寶玉", 10, ScanOptions::production())
         .await

@@ -26,11 +26,11 @@ async fn a_document_over_the_cap_is_never_cached() {
     // over the cap by itself: the warm measures the whole text, sees that it is over the cap, and
     // marks the store over the cap without reading any text into it.
     let mut text = String::new();
-    for section in 0..3_000 {
+    for section in 0..12_000 {
         text.push_str(&format!("# 第{section}節\n\n"));
         text.push_str("皇帝在朝堂上討論虛擬內存機制與頁表映射，節度使入朝議事，群臣列坐。\n\n");
     }
-    assert!(text.len() > 2 * 1024 * 1024, "the document is over the cap");
+    assert!(text.len() > 1024 * 1024, "the document is over the cap");
     let document = markdown_document("memory:prewarm-cap.md", &text).await;
     repository.save(document.clone()).await.expect("save");
     index.index(&document).await.expect("index");

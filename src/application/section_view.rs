@@ -92,10 +92,6 @@ impl DocumentView {
         &self.header.id
     }
 
-    pub(crate) fn repository(&self) -> &Arc<dyn DocumentRepository> {
-        &self.repository
-    }
-
     /// The identity-only `Document` the locator constructors and the text loaders take. Never a
     /// tree to walk or render.
     pub(crate) fn document(&self) -> Document {

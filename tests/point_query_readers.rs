@@ -921,12 +921,12 @@ async fn v2_search_and_cite_answer_from_the_header() {
         format!("{}.p1", section),
     ] {
         let expected = full_cite
-            .execute(&[at.clone()])
+            .execute(std::slice::from_ref(&at))
             .await
             .expect("full cite")
             .items;
         let actual = row_cite
-            .execute(&[at.clone()])
+            .execute(std::slice::from_ref(&at))
             .await
             .expect("row cite")
             .items;

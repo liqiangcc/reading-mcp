@@ -115,6 +115,51 @@ pub struct ParsedCacheKey {
     pub ocr_fingerprint: String,
 }
 
+/// The evidence behind an `ocr_required` answer: the page count and how many
+/// characters the backend could extract. `None` fields mean the caller did not
+/// measure them (the layout backend's worker path), and the message then stays
+/// generic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct OcrRequiredDetail {
+    pub pages: Option<usize>,
+    pub characters: Option<usize>,
+}
+
+impl OcrRequiredDetail {
+    pub const fn measured(pages: usize, characters: usize) -> Self {
+        Self {
+            pages: Some(pages),
+            characters: Some(characters),
+        }
+    }
+
+    pub const fn unmeasured() -> Self {
+        Self {
+            pages: None,
+            characters: None,
+        }
+    }
+}
+
+impl std::fmt::Display for OcrRequiredDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.pages, self.characters) {
+            (Some(pages), Some(characters)) => write!(
+                formatter,
+                "this PDF has no text layer ({pages} page{}, {characters} character{}); it needs OCR",
+                if pages == 1 { "" } else { "s" },
+                if characters == 1 { "" } else { "s" },
+            ),
+            // The layout backend's worker path measures neither count, and its
+            // failure is a text layer it cannot read rather than a missing one,
+            // so it keeps the message it had before PDF-4a.
+            _ => formatter.write_str(
+                "source contains image-only pages requiring inspection; enable local OCR or provide a usable text layer",
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ApplicationError {
     #[error("source blocked: {0}")]
@@ -129,10 +174,8 @@ pub enum ApplicationError {
     OcrFailed,
     #[error("local OCR dependencies are unavailable or changed; operator repair is required")]
     OcrUnavailable,
-    #[error(
-        "source contains image-only pages requiring inspection; enable local OCR or provide a usable text layer"
-    )]
-    OcrRequired,
+    #[error("{0}")]
+    OcrRequired(OcrRequiredDetail),
     #[error("local OCR found no supported prose projection; inspect the original source")]
     OcrNoSupportedProjection,
     #[error("local OCR is busy; retry explicitly later")]

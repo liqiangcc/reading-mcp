@@ -57,13 +57,15 @@ jobs:
           download "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub" "$BOOKS/zh-large.epub"
       - name: Generate the fast stress inputs
         run: |
-          # Only the generator outputs that finish quickly: the 4 MiB CJK text and the 2000-section
-          # Markdown come from memory-profile.py's deterministic generators, the 1500-page text PDF
-          # from gen-stress-inputs.py. The 16/64 MiB texts, the CJK PDF and the 300-page scan are
-          # skipped: they need more than two minutes to generate and add nothing to this gate.
+          # The 4 MiB CJK text and the 2000-section Markdown come from memory-profile.py's
+          # deterministic generators, the 1500-page text PDF from gen-stress-inputs.py, and the
+          # 300-page CJK text PDF from pdf-gen-inputs.py: PDF-4a must prove that both synthetic
+          # text PDFs keep their outcome and text. The 16/64 MiB texts and the 300-page scan are
+          # still skipped: they need more than two minutes to generate and add nothing here.
           OUT="$RUNNER_TEMP/inputs"
           mkdir -p "$OUT"
           export PARITY_INPUTS="$OUT"
+          export BOOKS="$RUNNER_TEMP/books"
           python3 - <<'EOF'
           import importlib.util
           import os
@@ -77,9 +79,22 @@ jobs:
           out = os.environ["PARITY_INPUTS"]
           memory = load("memory_profile", "scripts/memory-profile.py")
           stress = load("gen_stress_inputs", "scripts/gen-stress-inputs.py")
+          gen = load("pdf_gen_inputs", "scripts/pdf-gen-inputs.py")
 
           memory.write_cjk_document(os.path.join(out, "cjk-4mib.txt"), 4 * 1024 * 1024)
           memory.write_markdown_document(os.path.join(out, "md-2000.md"), 2000)
+
+          song = gen.extract_epub_text(os.path.join(os.environ["BOOKS"], "zh-large.epub"))
+          if song is None:
+              song = gen.synthetic_cjk_text(300 * 1000)
+          gen.build_long_text(
+              out,
+              "text-long-cjk-300",
+              song,
+              cjk=True,
+              font_path=gen.CJK_FONT,
+              pages=300,
+          )
 
           war = stress.read_plain_text("")
           if not war:
@@ -107,7 +122,8 @@ jobs:
                       "zh-large=$BOOKS/zh-large.epub" \
                       "cjk-4mib=$GEN/cjk-4mib.txt" \
                       "md-2000=$GEN/md-2000.md" \
-                      "pdf-text-1500p=$GEN/pdf-text-1500p.pdf"; do
+                      "pdf-text-1500p=$GEN/pdf-text-1500p.pdf" \
+                      "text-long-cjk-300=$GEN/text-long-cjk-300.pdf"; do
             label="${pair%%=*}"
             file="${pair#*=}"
             if [ -f "$file" ]; then

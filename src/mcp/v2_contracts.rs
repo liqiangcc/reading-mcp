@@ -506,7 +506,7 @@ mod tests {
     use crate::application::cite_reading::{CiteReadingItem, CiteReadingResult};
     use crate::application::open_reading::OpenReadingResult;
     use crate::application::outline_reading::{OutlineReadingItem, OutlineReadingResult};
-    use crate::application::ports::ApplicationError;
+    use crate::application::ports::{ApplicationError, OcrRequiredDetail};
     use crate::application::read_reading::{
         ReadReadingItem, ReadReadingResult, ReadReadingSection,
     };
@@ -755,7 +755,11 @@ mod tests {
                 "blocked_source",
                 false,
             ),
-            (ApplicationError::OcrRequired, "ocr_required", false),
+            (
+                ApplicationError::OcrRequired(OcrRequiredDetail::unmeasured()),
+                "ocr_required",
+                false,
+            ),
             (
                 ApplicationError::OcrNoSupportedProjection,
                 "ocr_required",

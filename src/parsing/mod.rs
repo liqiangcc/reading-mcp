@@ -17,6 +17,7 @@ mod openapi;
 mod pdf;
 mod pdf_front_matter;
 mod pdf_layout;
+mod pdf_raster;
 mod pdf_text_repair;
 mod pdf_v8;
 mod reliability;

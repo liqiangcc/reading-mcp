@@ -579,14 +579,15 @@ impl SqliteDocumentRepository {
                     document_id TEXT NOT NULL,
                     ord INTEGER NOT NULL,
                     section_key INTEGER NOT NULL,
-                    UNIQUE(document_id, ord)
-                 );
+                    PRIMARY KEY(document_id, ord)
+                 ) WITHOUT ROWID;
                  CREATE UNIQUE INDEX IF NOT EXISTS idx_document_body_order_rows_v1_key
                     ON document_body_order_rows_v1(document_id, section_key);",
             )
             .map_err(repository_error)?;
         ensure_normalized_document_hash_column(&connection)?;
         ensure_body_order_error_column(&connection)?;
+        ensure_body_order_rows_shape(&connection)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
@@ -2449,6 +2450,43 @@ fn ensure_normalized_document_hash_column(connection: &Connection) -> Result<(),
     if !has_column {
         connection
             .execute_batch("ALTER TABLE documents ADD COLUMN normalized_document_hash TEXT")
+            .map_err(repository_error)?;
+    }
+    Ok(())
+}
+
+/// Recreates `document_body_order_rows_v1` as a `WITHOUT ROWID` table when it still has the old
+/// rowid shape.
+///
+/// The primary key `(document_id, ord)` carries `section_key`, and the `(document_id, section_key)`
+/// index carries the primary key, so `body_order_at` and `body_order_position` are both answered
+/// from an index without a table lookup. The old rowid table needed a table page per point query.
+/// Dropping it is a one-time shape migration; the store-version bump re-ingests every book into the
+/// new shape, so no row is lost.
+fn ensure_body_order_rows_shape(connection: &Connection) -> Result<(), ApplicationError> {
+    let sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+              WHERE type = 'table' AND name = 'document_body_order_rows_v1'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(repository_error)?
+        .flatten();
+    if sql.is_some_and(|sql| !sql.to_ascii_uppercase().contains("WITHOUT ROWID")) {
+        connection
+            .execute_batch(
+                "DROP TABLE document_body_order_rows_v1;
+                 CREATE TABLE document_body_order_rows_v1 (
+                    document_id TEXT NOT NULL,
+                    ord INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    PRIMARY KEY(document_id, ord)
+                 ) WITHOUT ROWID;
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_body_order_rows_v1_key
+                    ON document_body_order_rows_v1(document_id, section_key);",
+            )
             .map_err(repository_error)?;
     }
     Ok(())

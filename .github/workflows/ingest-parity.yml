@@ -88,7 +88,8 @@ jobs:
           if song is None:
               song = gen.synthetic_cjk_text(300 * 1000)
           gen.build_long_text(
-              os.path.join(out, "text-long-cjk-300.pdf"),
+              out,
+              "text-long-cjk-300",
               song,
               cjk=True,
               font_path=gen.CJK_FONT,

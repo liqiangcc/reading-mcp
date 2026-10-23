@@ -1617,12 +1617,13 @@ impl DocumentRepository for CountingRepository {
 fn wide_document(name: &str, roots: usize, per_root: usize) -> Document {
     let root_sections = (0..roots)
         .map(|root| {
+            let parent = format!("{name}-{root}");
             let children = (0..per_root)
                 .map(|child| {
+                    let child_name = format!("{parent}-{child}");
                     section(
-                        &format!("{name}-{root}-{child}"),
-                        Some(&format!("{name}-{root}")),
-                        2,
+                        &child_name,
+                        Some(parent.as_str()),
                         "Child",
                         2,
                         "Child text one. Child text two.",
@@ -1630,14 +1631,7 @@ fn wide_document(name: &str, roots: usize, per_root: usize) -> Document {
                     )
                 })
                 .collect();
-            section(
-                &format!("{name}-{root}"),
-                None,
-                "Root",
-                1,
-                "Root text one.",
-                children,
-            )
+            section(&parent, None, "Root", 1, "Root text one.", children)
         })
         .collect();
     Document {
@@ -1657,7 +1651,7 @@ async fn read_path_calls(roots: usize, per_root: usize) -> usize {
     let inner: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
     inner.save(document.clone()).await.expect("save");
     let counting = Arc::new(CountingRepository::new(Arc::clone(&inner)));
-    let counted: Arc<dyn DocumentRepository> = Arc::clone(&counting);
+    let counted: Arc<dyn DocumentRepository> = counting.clone();
     let index = Arc::new(KeyedTextUnitIndex::default());
     index.store(&document).await;
     let keyed: Arc<KeyedTextUnitIndex> = Arc::clone(&index);

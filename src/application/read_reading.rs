@@ -158,13 +158,12 @@ impl ReadReadingUseCase {
             )));
         }
 
-        // The stored body order's length, and with it the stored body-order error: a document
-        // whose order could not be computed reports the same variant and message here.
-        let order_len = self
-            .repository
-            .body_order_len(view.id())
-            .await?
-            .ok_or_else(ReadingError::not_opened)?;
+        // The body order's length. A stored body order that is readable holds every section
+        // exactly once (`body_order_ids` rejects anything else), so the header's section count is
+        // that length, and reading it is one row instead of a `COUNT(*)` over every order row.
+        // A document whose stored order could not be computed still reports that error, unchanged,
+        // from the first `body_order_at`/`body_order_window` this call makes.
+        let order_len = view.header().section_count;
         if order_len == 0 {
             return Ok(ReadReadingResult {
                 items: Vec::new(),

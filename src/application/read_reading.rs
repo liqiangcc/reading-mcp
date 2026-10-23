@@ -387,7 +387,8 @@ struct Walk<'a> {
     unit: RequestedTextUnitKind,
     len: usize,
     totals: HashMap<usize, usize>,
-    sections: HashMap<usize, (i64, SectionId)>,
+    /// The section key, id and title at one body-order position, resolved once per call.
+    sections: HashMap<usize, (i64, SectionId, String)>,
 }
 
 impl<'a> Walk<'a> {
@@ -411,6 +412,15 @@ impl<'a> Walk<'a> {
 
     /// The section key and id at one body-order position.
     async fn position_section(&mut self, index: usize) -> Result<(i64, SectionId), ReadingError> {
+        let (section_key, section_id, _) = self.position_section_row(index).await?;
+        Ok((section_key, section_id))
+    }
+
+    /// The section key, id and title at one body-order position.
+    async fn position_section_row(
+        &mut self,
+        index: usize,
+    ) -> Result<(i64, SectionId, String), ReadingError> {
         if let Some(section) = self.sections.get(&index) {
             return Ok(section.clone());
         }
@@ -426,18 +436,17 @@ impl<'a> Walk<'a> {
         };
         // The section id comes from the section row, not the text-unit index: both stores number
         // sections by the same depth-first key, and `document_sections_v1` is the smaller table.
-        let section_id = self
+        let row = self
             .repository
             .section_by_key(self.document_id, section_key)
             .await?
-            .map(|row| row.id)
             .ok_or_else(|| {
                 ReadingError::stale_handle(format!(
                     "section key {section_key} of document {} has no stored section id",
                     self.document_id.0
                 ))
             })?;
-        let section = (section_key, section_id);
+        let section = (section_key, row.id, row.title);
         self.sections.insert(index, section.clone());
         Ok(section)
     }
@@ -484,13 +493,7 @@ impl<'a> Walk<'a> {
 
     /// The section key and title of one body-order position, for a section banner.
     async fn banner(&mut self, index: usize) -> Result<(i64, String), ReadingError> {
-        let section_key = self.section_key(index).await?;
-        let title = self
-            .repository
-            .section_by_key(self.document_id, section_key)
-            .await?
-            .map(|row| row.title)
-            .unwrap_or_default();
+        let (section_key, _, title) = self.position_section_row(index).await?;
         Ok((section_key, title))
     }
 

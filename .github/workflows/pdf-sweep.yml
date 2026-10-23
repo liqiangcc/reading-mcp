@@ -1,0 +1,189 @@
+name: PDF wide sweep
+run-name: PDF wide sweep (PDF-5a)
+on:
+  workflow_dispatch:
+    inputs:
+      select:
+        description: 'Rebuild scripts/pdf-sweep-ids.txt (downloads candidates to check licence, pages and group metrics)'
+        type: boolean
+        default: false
+  push:
+    branches: ['bench/pdf5a-**']
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2
+      - name: Decide whether the corpus list must be rebuilt
+        id: gate
+        run: |
+          if [ "${{ github.event.inputs.select }}" = "true" ] || [ ! -s scripts/pdf-sweep-ids.txt ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=no" >> "$GITHUB_OUTPUT"
+            echo "scripts/pdf-sweep-ids.txt is committed; nothing to select"
+          fi
+      - name: Select the CC-BY corpus from the arXiv API
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/select"
+          python3 scripts/pdf-sweep.py --select \
+            --out scripts/pdf-sweep-ids.txt \
+            --exclude scripts/pdf-corpus-ids.txt \
+            --exclude scripts/pdf-cjk-ids.txt \
+            --work-dir "$RUNNER_TEMP/select" | tail -80
+      - name: Show the selected list
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          grep -c '^{' scripts/pdf-sweep-ids.txt
+          grep '^{' scripts/pdf-sweep-ids.txt | tail -8 | cut -c1-200
+      - name: Upload the corpus list and the selection report
+        if: always() && steps.gate.outputs.run == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-sweep-ids
+          path: |
+            scripts/pdf-sweep-ids.txt
+            ${{ runner.temp }}/select/select-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked --bin reading-mcp 2>&1 | tail -20
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-sweep-bin
+          path: target/release/reading-mcp
+
+  probe:
+    needs: [build, select]
+    if: always() && needs.build.result == 'success' && needs.select.result != 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    name: probe shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install probe tooling
+        run: pip install pymupdf==1.28.2
+      - name: Fetch the corpus list selected in this run (absent when it is committed)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: pdf-sweep-ids
+          path: ${{ runner.temp }}/ids
+          if-no-files-found: ignore
+      - name: Resolve the corpus list path
+        id: ids
+        run: |
+          if [ -s "$RUNNER_TEMP/ids/pdf-sweep-ids.txt" ]; then
+            path="$RUNNER_TEMP/ids/pdf-sweep-ids.txt"
+          else
+            path=scripts/pdf-sweep-ids.txt
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          grep -c '^{' "$path"
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf-sweep-bin
+          path: ${{ runner.temp }}/bin
+      - name: Is the 600 MB memory cap available on this runner?
+        run: |
+          if sudo systemd-run --scope --quiet -p MemoryMax=256M -p MemorySwapMax=0 \
+              -- /bin/true; then
+            echo "systemd-run MemoryMax scope: available"
+          else
+            echo "::warning::systemd-run MemoryMax scope is not available; runs would be uncapped"
+          fi
+      - name: Run the sweep shard ${{ matrix.shard }}
+        run: |
+          set -o pipefail
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          mkdir -p "$RUNNER_TEMP/results" "$RUNNER_TEMP/work"
+          python3 scripts/pdf-sweep.py \
+            --ids "${{ steps.ids.outputs.path }}" \
+            --shard ${{ matrix.shard }} --shards 8 \
+            --binary "$RUNNER_TEMP/bin/reading-mcp" \
+            --work-dir "$RUNNER_TEMP/work" \
+            --state-root "$RUNNER_TEMP/state" \
+            --out "$RUNNER_TEMP/results/sweep-${{ matrix.shard }}.jsonl" \
+            --deadline-minutes 42 \
+            --per-document-minutes 4.5 | tail -150
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-sweep-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    needs: [probe]
+    if: always() && needs.probe.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pdf-sweep-shard-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/all
+      - name: Fetch the selection report (absent when the list is committed)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: pdf-sweep-ids
+          path: ${{ runner.temp }}/ids
+          if-no-files-found: ignore
+      - name: Merge every shard into the final tables
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/final"
+          python3 scripts/pdf-sweep.py --aggregate \
+            --jsonl-dir "$RUNNER_TEMP/all" \
+            --select-report "$RUNNER_TEMP/ids/select-report.json" \
+            --out "$RUNNER_TEMP/final/pdf-sweep-summary.json" \
+            --markdown "$RUNNER_TEMP/final/pdf-sweep.md" \
+            --suspects "$RUNNER_TEMP/final/pdf-sweep-suspects.jsonl" | tail -150
+          cat "$RUNNER_TEMP/final/pdf-sweep.md" >> "$GITHUB_STEP_SUMMARY"
+          ls -l "$RUNNER_TEMP/final"
+      - name: Upload the final tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-sweep-final
+          path: |
+            ${{ runner.temp }}/final/
+            ${{ runner.temp }}/all/
+          if-no-files-found: warn
+          retention-days: 14

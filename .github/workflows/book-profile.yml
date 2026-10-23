@@ -355,6 +355,148 @@ jobs:
               with open(summary, "a", encoding="utf-8") as handle:
                   handle.write(table)
           PY
+      - name: Section rows, disk, open and RSS table (main vs branch)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          SECTION_TABLES = (
+              "document_header_v1",
+              "document_sections_v1",
+              "document_body_order_rows_v1",
+          )
+          FIELDS = re.compile(r"(\w+)=(\S+)")
+
+
+          def read_facts(side):
+              facts = {}
+              path = f"facts-{side}.txt"
+              if not os.path.isfile(path):
+                  return facts
+              with open(path, encoding="utf-8") as handle:
+                  for line in handle:
+                      fields = dict(FIELDS.findall(line))
+                      label = fields.get("input")
+                      if label is None:
+                          continue
+                      facts[label] = fields
+              return facts
+
+
+          def read_disk(side):
+              rows = {}
+              path = os.path.join(f"disk-{side}", "runs.json")
+              if not os.path.isfile(path):
+                  return rows
+              with open(path, encoding="utf-8") as handle:
+                  data = json.load(handle)
+              for row in data if isinstance(data, list) else data.get("rows", []):
+                  label = row.get("label")
+                  if label is not None:
+                      rows[label] = row
+              return rows
+
+
+          def number(value):
+              try:
+                  return float(value)
+              except (TypeError, ValueError):
+                  return None
+
+
+          facts = {side: read_facts(side) for side in ("base", "head")}
+          disk = {side: read_disk(side) for side in ("base", "head")}
+          labels = sorted(set(facts["base"]) | set(facts["head"]))
+
+          lines = [
+              "| input | side | open s | peak RSS KiB | sqlite bytes | header rows | header bytes "
+              "| section rows | section bytes | body order rows | body order bytes |",
+              "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+          for label in labels:
+              for side in ("base", "head"):
+                  fields = facts[side].get(label)
+                  if not fields:
+                      lines.append(f"| {label} | {side} | missing | | | | | | | | |")
+                      continue
+                  lines.append(
+                      "| {label} | {side} | {open_s} | {rss} | {file_bytes} | {hr} | {hb} | "
+                      "{sr} | {sb} | {br} | {bb} |".format(
+                          label=label,
+                          side=side,
+                          open_s=fields.get("open_seconds", "-"),
+                          rss=fields.get("peak_rss_kib", "-"),
+                          file_bytes=fields.get("sqlite_file_bytes", "-"),
+                          hr=fields.get("document_header_v1_rows", "-"),
+                          hb=fields.get("document_header_v1_bytes", "-"),
+                          sr=fields.get("document_sections_v1_rows", "-"),
+                          sb=fields.get("document_sections_v1_bytes", "-"),
+                          br=fields.get("document_body_order_rows_v1_rows", "-"),
+                          bb=fields.get("document_body_order_rows_v1_bytes", "-"),
+                      )
+                  )
+          table = "\n".join(lines) + "\n"
+
+          lines = [
+              "| input | sqlite bytes main | sqlite bytes branch | delta % | open s main "
+              "| open s branch | delta % | peak RSS KiB main | peak RSS KiB branch | delta % |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+          for label in labels:
+              base = facts["base"].get(label)
+              head = facts["head"].get(label)
+              if not base or not head:
+                  continue
+              def delta(base_value, head_value):
+                  base_number = number(base_value)
+                  head_number = number(head_value)
+                  if base_number in (None, 0) or head_number is None:
+                      return "-"
+                  return f"{100.0 * (head_number - base_number) / base_number:+.2f}"
+              lines.append(
+                  "| {label} | {bf} | {hf} | {df} | {bo} | {ho} | {do} | {br} | {hr} | {dr} |".format(
+                      label=label,
+                      bf=base.get("sqlite_file_bytes", "-"),
+                      hf=head.get("sqlite_file_bytes", "-"),
+                      df=delta(base.get("sqlite_file_bytes"), head.get("sqlite_file_bytes")),
+                      bo=base.get("open_seconds", "-"),
+                      ho=head.get("open_seconds", "-"),
+                      do=delta(base.get("open_seconds"), head.get("open_seconds")),
+                      br=base.get("peak_rss_kib", "-"),
+                      hr=head.get("peak_rss_kib", "-"),
+                      dr=delta(base.get("peak_rss_kib"), head.get("peak_rss_kib")),
+                  )
+              )
+          table += "\n" + "\n".join(lines) + "\n"
+
+          # The `--disk` table's own per-table page bytes, for the tables SEC-1 adds.
+          lines = [
+              "| input | table | bytes main | bytes branch | delta |",
+              "|---|---|---:|---:|---:|",
+          ]
+          for label in sorted(set(disk["base"]) | set(disk["head"])):
+              for name in SECTION_TABLES:
+                  base_tables = (disk["base"].get(label) or {}).get("disk", {}).get("tables", {})
+                  head_tables = (disk["head"].get(label) or {}).get("disk", {}).get("tables", {})
+                  base_bytes = base_tables.get(name, 0)
+                  head_bytes = head_tables.get(name, 0)
+                  lines.append(
+                      f"| {label} | {name} | {base_bytes} | {head_bytes} |"
+                      f" {head_bytes - base_bytes:+d} |"
+                  )
+          table += "\n" + "\n".join(lines) + "\n"
+
+          with open("section-rows-table.md", "w", encoding="utf-8") as handle:
+              handle.write(table)
+          print(table)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(table)
+          PY
       - name: Metadata compression level table
         if: always()
         run: |
@@ -505,3 +647,4 @@ jobs:
             disk-head.txt
             level-table.md
             text-level-table.md
+            section-rows-table.md

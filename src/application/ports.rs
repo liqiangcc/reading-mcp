@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    Document, DocumentId, DocumentSegmentation, DocumentSource, Location, MediaType,
+    ContentHash, Document, DocumentId, DocumentSegmentation, DocumentSource, Location, MediaType,
     NormalizedDocumentHash, ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet,
     SectionId, SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet,
     TEXT_SEGMENTATION_VERSION, TextLocator, TextUnit,
@@ -17,6 +17,7 @@ use super::get_text_units::{
 };
 use super::open_document::OpenDocumentResult;
 use super::reading_profile::ReliabilitySummary;
+use super::section_rows;
 use super::text_unit_stream::{SectionStreamPlan, StreamUnit, plan_section_stream};
 
 pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
@@ -273,6 +274,46 @@ pub trait OpenResultStore: Send + Sync {
     async fn remove(&self, id: &DocumentId) -> Result<(), ApplicationError>;
 }
 
+/// The fields of one stored document that a reader needs before it looks at any section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentHeader {
+    pub id: DocumentId,
+    pub source: DocumentSource,
+    pub title: String,
+    pub media_type: MediaType,
+    pub content_hash: ContentHash,
+    pub normalized_document_hash: Option<NormalizedDocumentHash>,
+    pub section_count: usize,
+    pub root_count: usize,
+}
+
+/// One section of the stored tree, without its text.
+///
+/// `section_key` is the section's index in depth-first document order, the numbering
+/// `section_layout_v2.section_key` uses, and `subtree_end_key` is the last key inside its subtree,
+/// so a subtree is the contiguous range `[section_key, subtree_end_key]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionRow {
+    pub section_key: i64,
+    pub id: SectionId,
+    /// `None` for a root section.
+    pub parent_key: Option<i64>,
+    pub level: u8,
+    pub title: String,
+    pub location: Location,
+    pub subtree_end_key: i64,
+}
+
+/// The body-order neighbourhood of one section: its position, the length of the whole order and
+/// the `(ord, section_key)` pairs around it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BodyOrderWindow {
+    pub ord: usize,
+    pub len: usize,
+    /// Ascending `ord`, always including the section itself.
+    pub window: Vec<(usize, i64)>,
+}
+
 #[async_trait]
 pub trait DocumentRepository: Send + Sync {
     async fn save(&self, document: Document) -> Result<(), ApplicationError>;
@@ -362,6 +403,134 @@ pub trait DocumentRepository: Send + Sync {
         Ok(Some(crate::application::body_order::body_order_ids(
             &document,
         )))
+    }
+
+    /// The header of one stored document. The default loads the whole document.
+    async fn document_header(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentHeader>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .map(|(document, hash)| section_rows::header_of(&document, &hash)))
+    }
+
+    /// One section of the stored tree, by id. The default loads the whole document.
+    async fn section_by_id(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .and_then(|(document, _)| section_rows::section_by_id(&document, section_id)))
+    }
+
+    /// One section of the stored tree, by its depth-first key. The default loads the whole document.
+    async fn section_by_key(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .and_then(|(document, _)| section_rows::section_by_key(&document, section_key)))
+    }
+
+    /// The sections whose keys are in `[from_key, to_key_inclusive]`, in ascending key order.
+    /// The default loads the whole document.
+    async fn sections_in_key_range(
+        &self,
+        id: &DocumentId,
+        from_key: i64,
+        to_key_inclusive: i64,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .map_or_else(Vec::new, |(document, _)| {
+                section_rows::sections_in_key_range(&document, from_key, to_key_inclusive, limit)
+            }))
+    }
+
+    /// The children of `parent_key` (the root sections when it is `None`), in ascending key order.
+    /// The default loads the whole document.
+    async fn section_children(
+        &self,
+        id: &DocumentId,
+        parent_key: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .map_or_else(Vec::new, |(document, _)| {
+                section_rows::section_children(&document, parent_key, limit)
+            }))
+    }
+
+    /// The ancestors of `section_key`, root first and excluding the section itself. The default
+    /// loads the whole document.
+    async fn section_ancestors(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .map_or_else(Vec::new, |(document, _)| {
+                section_rows::section_ancestors(&document, section_key)
+            }))
+    }
+
+    /// The body-order window around `section_key`, or `Ok(None)` when the document has no stored
+    /// body order or the section is not in it. A document whose body order could not be computed
+    /// reports the same error `body_order` reports. The default loads the whole document.
+    async fn body_order_window(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+        before: usize,
+        after: usize,
+    ) -> Result<Option<BodyOrderWindow>, ApplicationError> {
+        let Some(order) = self.body_order(id).await? else {
+            return Ok(None);
+        };
+        let order = order?;
+        Ok(self.get_with_hash(id).await?.and_then(|(document, _)| {
+            section_rows::body_order_window(&document, &order, section_key, before, after)
+        }))
+    }
+
+    /// The `section_key` at body-order position `ord`, or `Ok(None)` when the document has no
+    /// stored body order or `ord` is past its end. The default loads the whole document.
+    async fn body_order_at(
+        &self,
+        id: &DocumentId,
+        ord: usize,
+    ) -> Result<Option<i64>, ApplicationError> {
+        let Some(order) = self.body_order(id).await? else {
+            return Ok(None);
+        };
+        let order = order?;
+        Ok(self
+            .get_with_hash(id)
+            .await?
+            .and_then(|(document, _)| section_rows::body_order_at(&document, &order, ord)))
+    }
+
+    /// The number of sections in the stored body order, or `Ok(None)` when the document has none.
+    /// The default loads the whole document.
+    async fn body_order_len(&self, id: &DocumentId) -> Result<Option<usize>, ApplicationError> {
+        let Some(order) = self.body_order(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(order?.len()))
     }
 }
 

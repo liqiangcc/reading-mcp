@@ -101,7 +101,8 @@ jobs:
         id: ids
         run: |
           if [ ! -s scripts/pdf-sweep-ids.txt ]; then
-            found=$(find "$RUNNER_TEMP/ids" -name pdf-sweep-ids.txt -type f 2>/dev/null | head -1)
+            found=$(find "$RUNNER_TEMP/ids" -name pdf-sweep-ids.txt -type f 2>/dev/null \
+              | head -1 || true)
             if [ -n "$found" ]; then
               cp "$found" scripts/pdf-sweep-ids.txt
             fi
@@ -172,7 +173,8 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/final"
-          report=$(find "$RUNNER_TEMP/ids" -name select-report.json -type f 2>/dev/null | head -1)
+          report=$(find "$RUNNER_TEMP/ids" -name select-report.json -type f 2>/dev/null \
+            | head -1 || true)
           python3 scripts/pdf-sweep.py --aggregate \
             --jsonl-dir "$RUNNER_TEMP/all" \
             --select-report "$report" \

@@ -7,8 +7,15 @@ Every number below comes from GitHub Actions run
 [39892014353](https://github.com/liqiangcc/reading-mcp/actions/runs/39892014353)
 (`pdf-sweep.yml`: build once, `--select`, 8 probe shards, aggregate). The committed list is
 byte-identical to the list that run's probe shards used
-(`sha256 254624fedbdb7f7675e1e8ada8efa17f5252cdf2c474d7f286bd7f43c7b73342`, 121 entries);
-a later run on the committed list re-measures the same corpus.
+(`sha256 254624fedbdb7f7675e1e8ada8efa17f5252cdf2c474d7f286bd7f43c7b73342`, 121 entries).
+
+**Reproducibility**: the same corpus re-measured on the committed list (run
+[39897330444](https://github.com/liqiangcc/reading-mcp/actions/runs/39897330444), `select`
+skipped) reproduced the outcome table exactly (121 `ok`, 0 non-ok), the same two suspects with
+the same containment (0.244 and 0.328), and the same peak RSS to the tenth of a MiB (median
+28.1, p95 135.2, worst 284.3 MiB). Only the open times moved: median 0.06 s there vs 0.07 s
+here, worst 2.74 s there vs 1.68 s here (both the 495-page 2311.05131). The timings below are
+single-run; the memory and text numbers are reproducible.
 
 ## What was measured
 

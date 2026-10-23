@@ -5,8 +5,8 @@ use lopdf::{Document as LopdfDocument, Object, ObjectId, TocType, decode_text_st
 
 use crate::application::ports::{ApplicationError, OcrRequiredDetail, Parser, RetrievedResource};
 use crate::domain::{
-    Document, Location, NormalizedTextRange, OriginalSourceBinding, OriginalSourceBindingMap,
-    OriginalSourceTarget, Section, SectionId,
+    ContentHash, Document, Location, NormalizedTextRange, OriginalSourceBinding,
+    OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
 
 use super::blocking::run_blocking;
@@ -100,14 +100,21 @@ struct SectionNode {
 impl PdfParser {
     pub(super) fn parse_sync(
         &self,
-        resource: RetrievedResource,
+        mut resource: RetrievedResource,
     ) -> Result<Document, ApplicationError> {
-        let hash = content_hash(&resource.bytes);
-        let id = document_id(&resource.final_source, &hash);
-        let pdf = LopdfDocument::load_mem(&resource.bytes).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid PDF document: {error}"))
-        })?;
+        let (pdf, hash) = load_and_release(&mut resource)?;
+        self.build_document(&pdf, resource, hash)
+    }
 
+    /// Builds the document from an object tree that is already loaded, so a caller that needed the
+    /// tree for its own pass (the page limit, the front-matter evidence) loads the PDF once.
+    pub(super) fn build_document(
+        &self,
+        pdf: &LopdfDocument,
+        resource: RetrievedResource,
+        hash: ContentHash,
+    ) -> Result<Document, ApplicationError> {
+        let id = document_id(&resource.final_source, &hash);
         let page_ids = pdf.get_pages().into_iter().collect::<Vec<_>>();
         let page_numbers = page_ids
             .iter()
@@ -119,13 +126,23 @@ impl PdfParser {
             ));
         }
 
-        let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
-        let (pages, extraction_errors) =
-            extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
+        // The repair copy is a second full object tree, made only for the page text: it is
+        // released as soon as the pages are read instead of being carried through the section
+        // build and the save.
+        let (pages, extraction_errors) = {
+            let prepared = super::pdf_text_repair::prepare_text_extraction(pdf);
+            #[cfg(test)]
+            held_buffers::repair_copy_present(prepared.is_some());
+            let extracted = extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), &page_numbers);
+            drop(prepared);
+            #[cfg(test)]
+            held_buffers::repair_copy_present(false);
+            extracted
+        };
         // The two conditions must hold together: almost no text for the page
         // count, and pages that are actually painted by raster images. A text
         // PDF with a cover, a blank page or a figures appendix fails the second.
-        if let Some(detail) = image_only_scan_evidence(&pdf, &page_ids, &pages) {
+        if let Some(detail) = image_only_scan_evidence(pdf, &page_ids, &pages) {
             return Err(ApplicationError::OcrRequired(detail));
         }
         if pages.iter().all(|page| page.text.trim().is_empty()) {
@@ -145,7 +162,7 @@ impl PdfParser {
             );
         }
 
-        let pdf_title = pdf_title(&pdf);
+        let pdf_title = pdf_title(pdf);
         if let Some(title) = &pdf_title {
             metadata.insert("pdf_title".into(), title.clone());
         }
@@ -197,6 +214,8 @@ impl PdfParser {
 
         let fallback_title = title_from_metadata(&metadata, &resource.final_source);
         let title = pdf_title.unwrap_or(fallback_title);
+        #[cfg(test)]
+        held_buffers::document_started();
         let mut document = Document {
             id,
             source: resource.final_source,
@@ -267,6 +286,94 @@ fn extract_page_texts_raw(
 
 fn normalize_pdf_text(value: &str) -> String {
     value.trim().to_string()
+}
+
+/// Hashes the raw bytes, loads the object tree and releases the file.
+///
+/// The tree owns every decoded object, so nothing after this point reads the bytes again: they are
+/// released before the page text, the sections and the stored JSON are built beside them instead
+/// of at the end of the parse. The file is the largest single buffer a big PDF has (PDF-2c: 45.4
+/// MiB of `2401.14345`'s 284.1 MiB peak).
+pub(super) fn load_and_release(
+    resource: &mut RetrievedResource,
+) -> Result<(LopdfDocument, ContentHash), ApplicationError> {
+    #[cfg(test)]
+    held_buffers::raw_bytes_present(true);
+    let hash = content_hash(&resource.bytes);
+    let pdf = LopdfDocument::load_mem(&resource.bytes).map_err(|error| {
+        ApplicationError::ParseFailed(format!("invalid PDF document: {error}"))
+    })?;
+    #[cfg(test)]
+    held_buffers::raw_bytes_present(false);
+    drop(std::mem::take(&mut resource.bytes));
+    Ok((pdf, hash))
+}
+
+/// Test-only record of the two large buffers a parse holds before the document is built: the raw
+/// PDF bytes and the repair copy of the object tree. `parse_sync` reports what it still holds at
+/// the point the document is built, so a change that carries either one through the section build
+/// fails a test instead of silently restoring the peak. Thread-local: tests parse in parallel.
+#[cfg(test)]
+pub(super) mod held_buffers {
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct Held {
+        raw_bytes: bool,
+        raw_bytes_seen: bool,
+        repair_copy: bool,
+        repair_copy_seen: bool,
+        at_document_start: Option<(bool, bool)>,
+    }
+
+    thread_local! {
+        static HELD: RefCell<Held> = RefCell::new(Held::default());
+    }
+
+    pub(super) fn raw_bytes_present(present: bool) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            held.raw_bytes = present;
+            held.raw_bytes_seen |= present;
+        });
+    }
+
+    pub(super) fn repair_copy_present(present: bool) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            held.repair_copy = present;
+            held.repair_copy_seen |= present;
+        });
+    }
+
+    /// Snapshots what the parse still holds at the point it builds the document.
+    pub(super) fn document_started() {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            held.at_document_start = Some((held.raw_bytes, held.repair_copy));
+        });
+    }
+
+    /// Clears the record so one test's parse cannot be read as another's.
+    pub(crate) fn reset() {
+        HELD.with(|held| *held.borrow_mut() = Held::default());
+    }
+
+    /// The raw bytes were held at some point, so the accounting below is wired to this parse.
+    pub(crate) fn raw_bytes_were_held() -> bool {
+        HELD.with(|held| held.borrow().raw_bytes_seen)
+    }
+
+    /// The repair copy was made, so a test that expects it to be released is not vacuous.
+    pub(crate) fn repair_copy_was_made() -> bool {
+        HELD.with(|held| held.borrow().repair_copy_seen)
+    }
+
+    /// `(raw bytes, repair copy)` still held when the document was built; `None` when the parse
+    /// never reached that point.
+    pub(crate) fn held_at_document_start() -> Option<(bool, bool)> {
+        HELD.with(|held| held.borrow().at_document_start)
+    }
 }
 
 /// True when the document has almost no text for its page count *and* its pages
@@ -1491,6 +1598,47 @@ mod tests {
         assert_eq!(
             parsed.metadata.get("pdf_page_count").map(String::as_str),
             Some("1")
+        );
+    }
+
+    /// PDF-2c: the raw bytes and the repair copy are released as soon as the pages are read, not
+    /// at the end of the parse. A counter on the buffers the parse holds, not a timing test: the
+    /// parse records what it still held at the point it builds the document.
+    #[test]
+    fn the_parse_releases_the_raw_bytes_and_the_repair_copy_before_building_the_document() {
+        // A CJK form XObject needs the repair copy, so both buffers are real in this fixture.
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = cjk_font(&mut document);
+        let form_id = form(
+            &mut document,
+            dictionary! { "Font" => dictionary! { "FX" => font_id } },
+            None,
+            byte_text_operations("FX", &[65]),
+        );
+        add_page(
+            &mut document,
+            vec![Operation::new("Do", vec![Object::Name(b"Fm1".to_vec())])],
+            dictionary! { "XObject" => dictionary! { "Fm1" => form_id } },
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+
+        held_buffers::reset();
+        let parsed = parse_bytes(bytes).expect("the repaired form text parses");
+        assert_eq!(parsed.section_count(), 1);
+
+        assert!(
+            held_buffers::raw_bytes_were_held(),
+            "the parse must account for the raw bytes"
+        );
+        assert!(
+            held_buffers::repair_copy_was_made(),
+            "this fixture must need the repair copy, or the assertion below is vacuous"
+        );
+        assert_eq!(
+            held_buffers::held_at_document_start(),
+            Some((false, false)),
+            "neither the raw bytes nor the repair copy may still be held when the document is built"
         );
     }
 

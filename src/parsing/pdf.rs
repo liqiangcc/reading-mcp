@@ -1179,4 +1179,87 @@ mod tests {
         }
         assert!(checked >= 15, "expected 15 unchanged fixtures");
     }
+
+    fn collect_pdf_paths(directory: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_pdf_paths(&path, out);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("pdf") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn measurement_resource(path: &std::path::Path) -> RetrievedResource {
+        let source = crate::domain::DocumentSource(format!("file://{}", path.display()));
+        RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: crate::domain::MediaType("application/pdf".into()),
+            bytes: std::fs::read(path).expect("fixture bytes"),
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        }
+    }
+
+    /// PDF-4a Step 1: the outcome, text and raster coverage of every PDF fixture
+    /// and, through `PDF4A_MEASURE_DIR`, the generated parity PDFs. This is the
+    /// "today" table for the design note; it changes no behaviour.
+    #[test]
+    #[ignore = "pdf4a measurement: run explicitly with --ignored --nocapture"]
+    fn pdf4a_measurement_table() {
+        let mut paths = Vec::new();
+        collect_pdf_paths(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+            &mut paths,
+        );
+        if let Ok(extra) = std::env::var("PDF4A_MEASURE_DIR") {
+            collect_pdf_paths(std::path::Path::new(&extra), &mut paths);
+        }
+        paths.sort();
+        println!("| input | outcome | pages | chars | chars/page | sections | raster coverage |");
+        println!("|---|---|---:|---:|---:|---:|---:|");
+        for path in &paths {
+            let resource = measurement_resource(path);
+            let label = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(path)
+                .display();
+            let pdf = LopdfDocument::load_mem(&resource.bytes).expect("fixture loads");
+            let page_ids = pdf.get_pages().into_iter().collect::<Vec<_>>();
+            let page_numbers = page_ids
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>();
+            let prepared = crate::parsing::pdf_text_repair::prepare_text_extraction(&pdf);
+            let (pages, _) =
+                extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
+            let chars: usize = pages.iter().map(|page| page.text.chars().count()).sum();
+            let coverage = crate::parsing::pdf_raster::document_raster_coverage(&pdf, &page_ids);
+            let pages = page_ids.len();
+            let (outcome, sections) = match PdfParser.parse_sync(resource) {
+                Ok(document) => ("ok".to_string(), document.section_count().to_string()),
+                Err(ApplicationError::OcrRequired) => ("ocr_required".to_string(), "-".to_string()),
+                Err(ApplicationError::ParseFailed(_)) => {
+                    ("unreadable".to_string(), "-".to_string())
+                }
+                Err(error) => (format!("parse_failed: {error}"), "-".to_string()),
+            };
+            println!(
+                "| {} | {} | {} | {} | {:.1} | {} | {:.3} |",
+                label,
+                outcome,
+                pages,
+                chars,
+                chars as f64 / pages.max(1) as f64,
+                sections,
+                coverage
+            );
+        }
+    }
 }

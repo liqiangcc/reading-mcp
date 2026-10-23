@@ -1,0 +1,60 @@
+name: PDF4a measure
+run-name: PDF4a image-only measurement
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/pdf4a**']
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2
+      - name: Generate the parity text PDF
+        run: |
+          mkdir -p "$RUNNER_TEMP/inputs"
+          python3 - <<'EOF'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("gen_stress_inputs", "scripts/gen-stress-inputs.py")
+          stress = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(stress)
+          war = stress.read_plain_text("")
+          if not war:
+              war = " ".join(
+                  "Pierre and Natasha walked along the river while the winter light fell on the old house."
+                  for _ in range(60000)
+              )
+          stress.write_text_pdf(
+              os.path.join(os.environ["RUNNER_TEMP"], "inputs", "pdf-text-1500p.pdf"),
+              stress.paginate(war, 2000, 1500),
+              fontsize=11,
+              font_path=None,
+          )
+          EOF
+      - name: Measure the fixtures and the parity PDFs
+        run: |
+          set -o pipefail
+          PDF4A_MEASURE_DIR="$RUNNER_TEMP/inputs" \
+            cargo test --release --locked --lib pdf4a_measurement_table -- \
+              --ignored --nocapture | tee measure.txt
+          { echo '## PDF-4a measurement'; echo '```'; cat measure.txt; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf4a-measure
+          path: measure.txt
+          if-no-files-found: warn
+          retention-days: 14

@@ -30,11 +30,11 @@ rows = conn.execute("SELECT location_json FROM document_sections_v1")
 | --- | ---: | ---: | ---: |
 | verbatim `StoredLocation` JSON | 257,019 | 473.3 | 1.00 |
 | (a) positional JSON array, no key names | 205,434 | 378.3 | 0.80 |
-| (a) positional binary: presence byte, varint lengths | 189,671 | 349.3 | 0.74 |
-| (a) positional binary + `section_path == [title]` elision | **46,548** | **85.7** | **0.18** |
+| (a) positional binary: presence byte, varint lengths | 189,128 | 348.3 | 0.74 |
+| (a) positional binary + `section_path == [title]` elision | **46,005** | **84.7** | **0.18** |
 | (b) zlib(verbatim JSON), level 6 | 197,126 | 363.0 | 0.77 |
 | (b) zlib(positional JSON), level 6 | 160,089 | 294.8 | 0.62 |
-| (b) zlib(positional binary + elision), level 6 | 46,927 | 86.4 | 0.18 |
+| (b) zlib(positional binary + elision), level 6 | 46,384 | 85.4 | 0.18 |
 
 The elision is the decisive part: in 403 of the 543 rows `section_path` is exactly `[title]`, and
 the title of those rows is the long text the path repeats. Dropping the repeated path from the
@@ -62,23 +62,35 @@ the location column at all:
   elision — section path).
 - `title` is 223,009 B of the 621,709 B payload and 77,687 B of it is repeated across rows.
 
-So this change also:
+So this change also replaces the two indexes that repeated those long strings:
 
-- replaces the `(document_id, section_id)` index with a non-unique `(document_id, id_hash)` index
-  over a 64-bit FNV-1a hash of the section id, and verifies the full id after the lookup. The
-  bucket is one row in practice and every id is still compared exactly, so `section_by_id` stays
-  O(1) rows and answers the same value, collisions included.
-- stores `title` as a one-byte-tagged blob: `0` + UTF-8 when zlib does not make it at least 5 %
-  smaller, `1` + zlib otherwise. Decoding returns the exact title bytes.
+- `(document_id, section_id)` becomes a non-unique `(doc_hash, id_hash)` index over 64-bit FNV-1a
+  hashes of the document id and the section id. The bucket is one row in practice and the full
+  `section_id` is compared after the lookup, so `section_by_id` stays O(1) rows and answers the
+  same value, collisions included.
+- `(document_id, parent_key, section_key)` becomes `(doc_hash, parent_key, section_key)`, with the
+  full `document_id` still in the WHERE clause as the exact check.
 
-Measured on the same 宋史 state, rebuilding the section table with both changes:
+The `UNIQUE(document_id, section_key)` key index, which `section_by_key`, `sections_in_key_range`
+and `section_ancestors` use, is unchanged.
+
+Measured on the same 宋史 state, rebuilding the section table into a copy of the state database:
 
 | build | section table | id index | parent index | key autoindex | whole file |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | today | 847,872 | 315,392 | 57,344 | 57,344 | 15,060,992 |
 | compact location only | 561,152 | 315,392 | 57,344 | 57,344 | 14,774,272 |
-| compact location + id hash index | 565,248 | 61,440 | 57,344 | 57,344 | 14,516,224 |
-| + compressed title | 462,848 | 61,440 | 57,344 | 57,344 | **14,409,728** |
+| + id hash index | 565,248 | 61,440 | 57,344 | 57,344 | 14,524,416 |
+| + doc hash in both indexes (this change) | 573,440 | 20,480 | 16,384 | 57,344 | **14,438,400** |
+
+### Rejected: compressing the title
+
+Compressing each title that zlib makes 5 % smaller (raw unless it saves) brought the file to
+14,430,208 B, but it made every whole-tree read inflate 341 titles. On 宋史's doc-read profile,
+`get_document_structure` went 3.473 ms → 5.096 ms (+46.7 %) and `search_document` 9.544 ms →
+11.499 ms (+20.5 %); a higher threshold that kept the read gate (only titles ≥ 1 KiB) put the file
+back over 14,479,360 B. It is not part of the change: the hash indexes reach the disk gate with no
+per-row decode cost at all.
 
 ## The location encoding
 
@@ -105,7 +117,8 @@ exactly, including defaults and `Some(0)`.
 ## Version
 
 `TEXT_UNIT_STORE_VERSION` goes `text-unit-store/v10` → `text-unit-store/v11`: the section rows
-change shape (a new `id_hash` column, a different id index, a blob `title` and `location_json`), so
+change shape (new `id_hash` and `doc_hash` columns, different id and parent indexes, a blob
+`location_json`), so
 every book re-ingests once on its next open. `SqliteDocumentRepository::open` drops and recreates a
 `document_sections_v1` written by the previous version in the same open that carries the bump,
 following the `document_body_order_rows_v1` precedent; the header that remains makes a stale

@@ -268,6 +268,66 @@ def run_open(binary: str, source: str, state_dir: str, timeout: float, log_path:
     return drop_wall_clock(payload)
 
 
+def _location_varint(data: bytes, position: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while True:
+        if position >= len(data):
+            raise ValueError("truncated section location varint")
+        byte = data[position]
+        position += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, position
+        shift += 7
+
+
+def decode_section_location(value, title: str) -> dict:
+    """One `document_sections_v1.location_json` as the `Location` it stores.
+
+    The head stores a positional blob: one flag byte, then the present fields in a fixed order,
+    numbers as unsigned LEB128 and strings as a varint length and their UTF-8 bytes. A path that
+    is exactly `[title]` is not written and is rebuilt from the title. A row written before
+    SEC-3c stores the verbatim JSON, so both shapes decode here.
+    """
+    if isinstance(value, str):
+        return json.loads(value)
+    data = bytes(value)
+    if not data:
+        raise ValueError("empty section location")
+    flags = data[0]
+    position = 1
+
+    def varint() -> int:
+        nonlocal position
+        number, position = _location_varint(data, position)
+        return number
+
+    def string() -> str:
+        nonlocal position
+        length = varint()
+        end = position + length
+        if end > len(data):
+            raise ValueError("truncated section location string")
+        text = data[position:end].decode("utf-8")
+        position = end
+        return text
+
+    location = {}
+    location["page"] = varint() if flags & 1 else None
+    location["chapter"] = string() if flags & 2 else None
+    if flags & 128:
+        location["section_path"] = [title]
+    else:
+        location["section_path"] = [string() for _ in range(varint())]
+    location["anchor"] = string() if flags & 4 else None
+    location["paragraph"] = varint() if flags & 8 else None
+    location["char_start"] = varint() if flags & 16 else None
+    location["char_end"] = varint() if flags & 32 else None
+    location["native_location"] = string() if flags & 64 else None
+    return location
+
+
 def nested_sections(section_rows) -> list[dict]:
     """The section tree inside `document_sections_v1`, nested back into the `document_json` shape."""
     nodes: dict[str, dict] = {}
@@ -279,7 +339,7 @@ def nested_sections(section_rows) -> list[dict]:
             "title": title,
             "level": level,
             "content": "",
-            "location": json.loads(location_json),
+            "location": decode_section_location(location_json, title),
             "children": [],
         }
         nodes[section_id] = node
@@ -727,7 +787,7 @@ def stored_section_rows(connection: sqlite3.Connection, document_id: str) -> lis
             None if parent_key is None else ids.get(parent_key),
             level,
             title,
-            canonical_json(json.loads(location_json)),
+            canonical_json(decode_section_location(location_json, title)),
         )
         for section_key, section_id, parent_key, level, title, location_json in stored
     ]

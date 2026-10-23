@@ -46,7 +46,7 @@ use reading_mcp::domain::{
 };
 use reading_mcp::infrastructure::{
     InMemoryDocumentRepository, InMemorySearchIndex, InMemoryTextUnitIndex, NoopSearchIndex,
-    SqliteDocumentRepository,
+    SqliteDocumentRepository, SqliteTextUnitIndex,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -659,7 +659,7 @@ async fn v2_read_answers_from_the_rows() {
             ReadReadingCommand {
                 from: section.to_string(),
                 unit: RequestedTextUnitKind::Sentence,
-                max_chars: Some(16),
+                max_chars: Some(64),
                 direction: None,
                 back: 0,
             },
@@ -669,7 +669,7 @@ async fn v2_read_answers_from_the_rows() {
             ReadReadingCommand {
                 from: cursor.clone(),
                 unit: RequestedTextUnitKind::Sentence,
-                max_chars: Some(16),
+                max_chars: Some(64),
                 direction: None,
                 back: 0,
             },
@@ -859,7 +859,7 @@ async fn v2_outline_answers_from_the_child_rows() {
     let items = rows
         .execute(OutlineReadingCommand {
             at: handle.to_string(),
-            depth: 3,
+            depth: 4,
             limit: 100,
             cursor: None,
         })
@@ -870,7 +870,7 @@ async fn v2_outline_answers_from_the_child_rows() {
             .items
             .iter()
             .any(|item| item.title == "Topic A Grandchild"),
-        "depth 3 lists the third level"
+        "depth 4 reaches the fourth level"
     );
 }
 
@@ -1318,21 +1318,40 @@ async fn open_sqlite_repository() -> (tempfile::TempDir, SqliteDocumentRepositor
 
 #[tokio::test]
 async fn an_old_shape_document_answers_every_migrated_reader_identically() {
-    let (directory, repository) = open_sqlite_repository().await;
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("point-queries.sqlite");
     let document = document_fixture();
+    // The stored text units and the document live in the same state database, as a real store
+    // keeps them.
+    let index = SqliteTextUnitIndex::open(&database).expect("text unit index should open");
+    let segmentation = Arc::new(
+        document
+            .try_segmentation()
+            .expect("document should segment into boundaries"),
+    );
+    index
+        .replace_document_segmentation(&Arc::new(document.clone()), segmentation)
+        .await
+        .expect("section text should store");
+    let repository = SqliteDocumentRepository::open(&database).expect("repository should open");
     repository.save(document.clone()).await.expect("save");
     let stored: Arc<dyn DocumentRepository> = Arc::new(repository);
-    let index = Arc::new(KeyedTextUnitIndex::default());
-    index.store(&document).await;
-    let keyed: Arc<KeyedTextUnitIndex> = Arc::clone(&index);
-    let units: Arc<dyn TextUnitIndex> = keyed;
+    let units: Arc<dyn TextUnitIndex> = Arc::new(index);
     let handle = DocumentHandle {
-        doc_key: 1,
+        doc_key: units
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
         checksum: handle_checksum(&document.id, &document.normalized_document_hash()),
     };
     let section = SectionHandle {
         document: handle.clone(),
-        section_key: 1,
+        section_key: units
+            .section_key(&document.id, &section_id("topic-a"))
+            .await
+            .expect("section key")
+            .expect("stored section"),
     };
 
     // Every migrated reader, as one list of answers.
@@ -1422,7 +1441,6 @@ async fn an_old_shape_document_answers_every_migrated_reader_identically() {
     let before = answers(&stored, &units, &document, &handle, &section).await;
 
     // Delete the rows by hand: the document is now shaped like one stored before SEC-1.
-    let database = directory.path().join("point-queries.sqlite");
     let connection = rusqlite::Connection::open(&database).expect("database should open");
     for table in [
         "document_header_v1",

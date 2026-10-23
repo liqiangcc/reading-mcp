@@ -186,30 +186,35 @@ impl PdfParser {
                 );
                 build_toc_sections(&entries, &pages, max_page)
             }
-            None => match infer_numbered_headings(&pages) {
-                Some(headings) => {
-                    metadata.insert(
-                        PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
-                        PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS.into(),
-                    );
-                    metadata.insert(
-                        PDF_HEADING_INFERENCE_VERSION_METADATA_KEY.into(),
-                        PDF_HEADING_INFERENCE_VERSION.into(),
-                    );
-                    metadata.insert(
-                        PDF_HEADING_INFERENCE_COUNT_METADATA_KEY.into(),
-                        headings.len().to_string(),
-                    );
-                    build_inferred_heading_sections(&headings, &pages)
+            None => {
+                // One fragment list for both the heading inference and the section build. It is a
+                // copy of the page text, and building it twice held two of them at the peak.
+                let fragments = source_fragments(&pages);
+                match infer_numbered_headings(&fragments) {
+                    Some(headings) => {
+                        metadata.insert(
+                            PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                            PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS.into(),
+                        );
+                        metadata.insert(
+                            PDF_HEADING_INFERENCE_VERSION_METADATA_KEY.into(),
+                            PDF_HEADING_INFERENCE_VERSION.into(),
+                        );
+                        metadata.insert(
+                            PDF_HEADING_INFERENCE_COUNT_METADATA_KEY.into(),
+                            headings.len().to_string(),
+                        );
+                        build_inferred_heading_sections(&headings, &fragments)
+                    }
+                    None => {
+                        metadata.insert(
+                            PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                            PDF_STRUCTURE_PAGE_FALLBACK.into(),
+                        );
+                        build_page_sections(pages)
+                    }
                 }
-                None => {
-                    metadata.insert(
-                        PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
-                        PDF_STRUCTURE_PAGE_FALLBACK.into(),
-                    );
-                    build_page_sections(&pages)
-                }
-            },
+            }
         };
 
         let fallback_title = title_from_metadata(&metadata, &resource.final_source);
@@ -451,8 +456,7 @@ fn normalize_toc(entries: &[TocType], max_page: u32) -> Vec<PdfTocEntry> {
         .collect()
 }
 
-fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate>> {
-    let fragments = source_fragments(pages);
+fn infer_numbered_headings(fragments: &[PdfSourceFragment]) -> Option<Vec<PdfHeadingCandidate>> {
     let parsed = fragments
         .iter()
         .filter_map(|fragment| {
@@ -595,9 +599,8 @@ fn has_parent_heading(accepted: &[PdfHeadingCandidate], path: &[u32]) -> bool {
 
 fn build_inferred_heading_sections(
     headings: &[PdfHeadingCandidate],
-    pages: &[PageText],
+    fragments_source: &[PdfSourceFragment],
 ) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
-    let fragments_source = source_fragments(pages);
     let heading_by_fragment = headings
         .iter()
         .enumerate()
@@ -607,7 +610,7 @@ fn build_inferred_heading_sections(
     let mut fragments = vec![PageFragments::default(); headings.len()];
     let mut preamble = PageFragments::default();
     let mut current_heading = None;
-    for fragment in &fragments_source {
+    for fragment in fragments_source {
         if let Some(index) = heading_by_fragment.get(&fragment.global_fragment).copied() {
             current_heading = Some(index);
             continue;
@@ -742,10 +745,12 @@ fn pdf_page_range_location(start_page: u32, end_page: u32) -> String {
     }
 }
 
-fn build_page_sections(pages: &[PageText]) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
+/// One section per page, taking each page's text instead of copying it: the page list is dropped
+/// right after this, so a copy would be a second full copy of the document's text at the peak.
+fn build_page_sections(pages: Vec<PageText>) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
     let mut bindings = Vec::new();
     let sections = pages
-        .iter()
+        .into_iter()
         .map(|page| {
             let title = format!("Page {}", page.number);
             let id = SectionId(format!("section://page-{}", page.number));
@@ -765,7 +770,7 @@ fn build_page_sections(pages: &[PageText]) -> (Vec<Section>, Vec<OriginalSourceB
                 parent_id: None,
                 title: title.clone(),
                 level: 1,
-                content: page.text.clone(),
+                content: page.text,
                 location: Location {
                     page: Some(page.number),
                     section_path: vec![title],

@@ -1705,6 +1705,48 @@ async fn the_read_path_cost_does_not_grow_with_the_section_count() {
     );
 }
 
+/// The tenth call answers exactly what `body_order_window(…, 0, 0)` answers, without the count.
+#[tokio::test]
+async fn body_order_position_matches_the_window_position() {
+    let (directory, repository) = open_sqlite_repository().await;
+    let document = document_fixture();
+    repository.save(document.clone()).await.expect("save");
+    let stored: Arc<dyn DocumentRepository> = Arc::new(repository);
+
+    let mut sections = Vec::new();
+    collect_ids(&document.root_sections, &mut sections);
+    assert!(!sections.is_empty());
+    for section_id in &sections {
+        let row = stored
+            .section_by_id(&document.id, section_id)
+            .await
+            .expect("section row")
+            .expect("stored section");
+        let position = stored
+            .body_order_position(&document.id, row.section_key)
+            .await
+            .expect("body order position")
+            .expect("the section is in the body order");
+        let window = stored
+            .body_order_window(&document.id, row.section_key, 0, 0)
+            .await
+            .expect("body order window")
+            .expect("the section is in the body order");
+        assert_eq!(position, window.ord, "section {}", section_id.0);
+        assert_eq!(window.len, document.section_count());
+    }
+
+    // A key that is not in the body order answers `None`, not an error.
+    assert_eq!(
+        stored
+            .body_order_position(&document.id, 9_999)
+            .await
+            .expect("no error for an absent key"),
+        None
+    );
+    drop(directory);
+}
+
 #[tokio::test]
 async fn every_query_a_migrated_reader_issues_uses_an_index() {
     let document = wide_document("indexed", 200, 99);

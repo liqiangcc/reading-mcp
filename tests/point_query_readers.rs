@@ -27,8 +27,9 @@ use reading_mcp::application::open_reading::{OpenReadingCommand, OpenReadingUseC
 use reading_mcp::application::outline_reading::{OutlineReadingCommand, OutlineReadingUseCase};
 use reading_mcp::application::ports::{
     ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, Parser,
-    RetrievalOptions, RetrievedResource, Retriever, SearchIndex, SectionRow, SectionTextUnits,
-    SourcePolicy, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
+    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex, SectionRow,
+    SectionTextUnits, SourcePolicy, StoredStreamItem, TextUnitIndex, TextUnitStreamKey,
+    TextUnitStreamSummary,
 };
 use reading_mcp::application::read_document::{
     ContinueReadCommand, ReadDocumentUseCase, ReadExactTargetCommand, ReadSectionCommand,
@@ -2143,9 +2144,109 @@ async fn read_path_tally(roots: usize, per_root: usize) -> Vec<(String, usize, u
 async fn the_read_path_reads_the_same_rows_for_500_and_20000_sections() {
     let small = read_path_tally(10, 49).await; // 500 sections
     let large = read_path_tally(200, 99).await; // 20,000 sections
+    let small_rows: usize = small.iter().map(|(_, _, rows)| rows).sum();
+    let large_rows: usize = large.iter().map(|(_, _, rows)| rows).sum();
+    assert_eq!(
+        small_rows, large_rows,
+        "a read of 20,000 sections must read the same rows as a read of 500\n\
+         500 sections (call, calls, rows): {small:?}\n\
+         20,000 sections (call, calls, rows): {large:?}"
+    );
     assert_eq!(
         large, small,
         "a read of 20,000 sections must read the same rows as a read of 500\n\
+         500 sections (call, calls, rows): {small:?}\n\
+         20,000 sections (call, calls, rows): {large:?}"
+    );
+}
+
+/// A search index that tallies the rows the scan-text warm would read, without reading anything.
+struct TallySearchIndex {
+    section_count: usize,
+    tally: Arc<Tally>,
+}
+
+#[async_trait]
+impl SearchIndex for TallySearchIndex {
+    async fn index(&self, _document: &Document) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+
+    async fn search(
+        &self,
+        _document_id: &DocumentId,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<SearchHit>, ApplicationError> {
+        Ok(Vec::new())
+    }
+
+    fn prewarm(&self, _document_id: &DocumentId, _hash: &NormalizedDocumentHash) {
+        // The warm reads every section row and every section text; one row per section is the
+        // whole-table read that must not happen on a reading open.
+        self.tally.record("search.prewarm", self.section_count);
+    }
+}
+
+/// A parser that hands back the wide document the test built.
+struct WideParser {
+    document: Document,
+}
+
+#[async_trait]
+impl Parser for WideParser {
+    async fn parse(&self, _resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        Ok(self.document.clone())
+    }
+}
+
+/// The row tally of one v2 reading `open` (the open a `read` follows).
+async fn reading_open_tally(roots: usize, per_root: usize) -> Vec<(String, usize, usize)> {
+    let document = wide_document(&format!("open-tally-{roots}-{per_root}"), roots, per_root);
+    let tally = Arc::new(Tally::default());
+    let repository: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
+    let units: Arc<dyn TextUnitIndex> = Arc::new(KeyedTextUnitIndex::default());
+    let search: Arc<dyn SearchIndex> = Arc::new(TallySearchIndex {
+        section_count: document.section_count(),
+        tally: Arc::clone(&tally),
+    });
+    let open_document = Arc::new(OpenDocumentUseCase::with_text_unit_index(
+        Arc::new(AllowAllPolicy),
+        Arc::new(StaticRetriever),
+        Arc::new(WideParser {
+            document: document.clone(),
+        }),
+        Arc::clone(&repository),
+        Arc::clone(&units),
+        search,
+    ));
+    let open = OpenReadingUseCase::new(open_document, repository, units);
+    open.execute(OpenReadingCommand {
+        source: document.source.clone(),
+        refresh: true,
+    })
+    .await
+    .expect("reading open");
+    tally.summary()
+}
+
+/// The reading open is the first call of every v2 read, so it must read the same rows at 20,000
+/// sections as at 500. The search scan-text warm is a whole-book read and must not start here.
+#[tokio::test]
+async fn the_v2_reading_open_reads_the_same_rows_for_500_and_20000_sections() {
+    let small = reading_open_tally(10, 49).await; // 500 sections
+    let large = reading_open_tally(200, 99).await; // 20,000 sections
+    let small_rows: usize = small.iter().map(|(_, _, rows)| rows).sum();
+    let large_rows: usize = large.iter().map(|(_, _, rows)| rows).sum();
+    assert_eq!(
+        small_rows, large_rows,
+        "a reading open of 20,000 sections must read the same rows as one of 500\n\
+         500 sections (call, calls, rows): {small:?}\n\
+         20,000 sections (call, calls, rows): {large:?}"
+    );
+    assert_eq!(
+        large, small,
+        "a reading open of 20,000 sections must make the same calls as one of 500\n\
          500 sections (call, calls, rows): {small:?}\n\
          20,000 sections (call, calls, rows): {large:?}"
     );

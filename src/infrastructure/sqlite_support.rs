@@ -17,7 +17,9 @@ pub(super) fn open_connection(
     }
     let connection = Connection::open(path).map_err(|source| error(source.to_string()))?;
     connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-16384;",
+        )
         .map_err(|source| error(source.to_string()))?;
     Ok(connection)
 }

@@ -261,8 +261,9 @@ def run_mode(args: argparse.Namespace) -> int:
             data = os.path.join(args.out_dir, f"{label}.perf.data")
             wrapper = (f"{args.perf} record -F 999 -g --call-graph fp -o {data} --")
         command = MEMORY.server_command(args.binary, wrapper, label)
+        samples: dict = {}
         peak, seconds, error, timed_out, sections, title, *_ = MEMORY.run_one(
-            command, env, entry["path"], args.timeout, stderr_path=telemetry)
+            command, env, entry["path"], args.timeout, stderr_path=telemetry, samples=samples)
         events = MEMORY.read_telemetry_events(telemetry)
         sums = MEMORY.telemetry_sums(events, success_only=True)
         phases = {event: sums.get(event, (0, 0.0))[1] / 1000.0 for event, _ in PHASES}
@@ -281,9 +282,14 @@ def run_mode(args: argparse.Namespace) -> int:
             "phase_rss": MEMORY.telemetry_rss_phases(events),
             "perf": label in args.perf_label,
             "event_count": len(events),
+            # The memory the open leaves resident: sampled from /proc while the server is alive,
+            # which `wait4`'s peak cannot show.
+            "rss_after_open_kib": samples.get("rss_after_open_kib"),
+            "rss_settled_kib": samples.get("rss_settled_kib"),
         }
         rows.append(row)
         print(f"| {label} | {row['open_seconds']} s | {row['peak_rss_kib'] // 1024} MiB | "
+              f"{(row['rss_after_open_kib'] or 0) // 1024} MiB resident | "
               f"{row['sections']} sections | {error or 'ok'} |", flush=True)
         with open(args.out, "w", encoding="utf-8") as handle:
             json.dump(rows, handle, indent=1, sort_keys=True)

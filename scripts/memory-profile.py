@@ -26,6 +26,12 @@ With `--rss-phases` (which implies `--telemetry`), a second per-input table is p
 `rss_kib` and `hwm_kib` the server's telemetry events carried after each open phase. Without the
 flag the output is byte-identical to before.
 
+With `--retained-rss`, every run samples the server's own `VmRSS`/`VmHWM` right after
+`open_document` returns and again after a settle, which is the memory the open leaves resident;
+the row gains `RSS after open KiB` and `RSS settled KiB` columns. The sample is taken before
+stdin is closed, so the server is still alive. Without the flag the table is byte-identical to
+before.
+
 With `--probe-query label=query` (repeatable), an input whose label has a query runs
 `search_document` on its opened `document_id` and then `get_context` around the first hit, in the
 same server process, and the row gains `Search s`, `Hits` and `Context s` columns. The probe runs
@@ -176,6 +182,25 @@ def server_environment(
     )
     env["READING_MCP_STATE_DIR"] = state_dir
     return env
+
+
+def process_memory_kib(pid: int) -> tuple[int, int] | None:
+    """`(VmRSS, VmHWM)` of one live process in KiB from `/proc`, or `None` when it is gone."""
+    values: dict[str, int] = {}
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as handle:
+            for line in handle:
+                key, separator, rest = line.partition(":")
+                if not separator or key not in ("VmRSS", "VmHWM"):
+                    continue
+                fields = rest.split()
+                if fields and fields[0].isdigit():
+                    values[key] = int(fields[0])
+    except OSError:
+        return None
+    if "VmRSS" not in values:
+        return None
+    return values["VmRSS"], values.get("VmHWM", values["VmRSS"])
 
 
 def send(process: subprocess.Popen, message: dict) -> None:
@@ -360,6 +385,8 @@ def run_one(
     run_timeout: float,
     probe_query: str | None = None,
     stderr_path: str | None = None,
+    samples: dict | None = None,
+    settle_seconds: float = 3.0,
 ) -> tuple[
     int,
     float | None,
@@ -377,6 +404,10 @@ def run_one(
     Returns (peak_rss_kib, open_seconds, error, timed_out, section_count, title,
     search_seconds, hit_count, context_seconds, probe_error). The probe runs before stdin is
     closed, so the returned peak RSS includes it.
+
+    `samples`, when given, is filled with the server's `VmRSS`/`VmHWM` in KiB right after the
+    open returned (`rss_after_open_kib`, `hwm_after_open_kib`) and after `settle_seconds`
+    (`rss_settled_kib`): the memory the open leaves resident, which `wait4`'s peak cannot show.
     """
     stderr_handle = open(stderr_path, "wb") if stderr_path else subprocess.DEVNULL
     process = subprocess.Popen(
@@ -425,6 +456,14 @@ def run_one(
                 open_seconds = time.monotonic() - start
                 error = extract_error(response)
                 section_count, title = extract_metadata(response)
+                if samples is not None:
+                    sample = process_memory_kib(process.pid)
+                    if sample is not None:
+                        samples["rss_after_open_kib"], samples["hwm_after_open_kib"] = sample
+                    time.sleep(settle_seconds)
+                    settled = process_memory_kib(process.pid)
+                    if settled is not None:
+                        samples["rss_settled_kib"] = settled[0]
                 if probe_query is not None and error is None:
                     (
                         search_seconds,
@@ -478,7 +517,12 @@ def table_cell(value: object) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def markdown_table(rows: list[dict], reopen: bool = False, probes: bool = False) -> str:
+def markdown_table(
+    rows: list[dict],
+    reopen: bool = False,
+    probes: bool = False,
+    retained: bool = False,
+) -> str:
     columns = [
         "State",
         "Label",
@@ -513,6 +557,9 @@ def markdown_table(rows: list[dict], reopen: bool = False, probes: bool = False)
     if probes:
         columns += ["Search s", "Hits", "Context s"]
         alignments += ["---:", "---:", "---:"]
+    if retained:
+        columns += ["RSS after open KiB", "RSS settled KiB"]
+        alignments += ["---:", "---:"]
     lines = [
         "| " + " | ".join(columns) + " |",
         "| " + " | ".join(alignments) + " |",
@@ -545,6 +592,11 @@ def markdown_table(rows: list[dict], reopen: bool = False, probes: bool = False)
                 search=format_number(row.get("search_seconds")),
                 hits=table_cell(row.get("hit_count")),
                 context=format_number(row.get("context_seconds")),
+            )
+        if retained:
+            text += " {open_rss} | {settled_rss} |".format(
+                open_rss=table_cell(row.get("rss_after_open_kib", "-")),
+                settled_rss=table_cell(row.get("rss_settled_kib", "-")),
             )
         lines.append(text)
     return "\n".join(lines)
@@ -921,6 +973,7 @@ def run_input_group(
     temp_root: str | None = None,
     roots: list[str] | None = None,
     parse_timeout: float | None = None,
+    retained: bool = False,
 ) -> None:
     skip = False
     for entry in inputs:
@@ -963,6 +1016,7 @@ def run_input_group(
             if telemetry and telemetry_dir
             else None
         )
+        samples: dict | None = {} if retained else None
         (
             peak,
             open_seconds,
@@ -981,6 +1035,7 @@ def run_input_group(
             run_timeout,
             probe_query,
             stderr_path=open_stderr,
+            samples=samples,
         )
         row = make_row(
             state,
@@ -994,6 +1049,8 @@ def run_input_group(
             timed_out,
             baseline_peak,
         )
+        if samples:
+            row.update(samples)
         if probe_query is not None:
             row["search_seconds"] = search_seconds
             row["hit_count"] = hit_count
@@ -1075,6 +1132,11 @@ def main() -> int:
         "--rss-phases",
         action="store_true",
         help="also print the RSS and high-water mark after each open phase (implies --telemetry)",
+    )
+    parser.add_argument(
+        "--retained-rss",
+        action="store_true",
+        help="sample VmRSS after the open returns and after a settle (what stays resident)",
     )
     parser.add_argument(
         "--disk",
@@ -1181,6 +1243,7 @@ def main() -> int:
                 temp_root=root,
                 roots=roots,
                 parse_timeout=args.parse_timeout_seconds,
+                retained=args.retained_rss,
             )
             run_input_group(
                 state, input_env, binary, args.wrapper, run_timeout, size_inputs,
@@ -1224,7 +1287,7 @@ def main() -> int:
                     baseline_peak, False, rows, args.out, args.reopen, probe_queries, **common,
                 )
 
-    table = markdown_table(rows, args.reopen, bool(probe_queries))
+    table = markdown_table(rows, args.reopen, bool(probe_queries), args.retained_rss)
     print(table, flush=True)
     outputs = [table]
     if args.telemetry:

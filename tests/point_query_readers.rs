@@ -28,7 +28,7 @@ use reading_mcp::application::outline_reading::{OutlineReadingCommand, OutlineRe
 use reading_mcp::application::ports::{
     ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, Parser,
     RetrievalOptions, RetrievedResource, Retriever, SearchIndex, SectionRow, SectionTextUnits,
-    SourcePolicy, TextUnitIndex,
+    SourcePolicy, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use reading_mcp::application::read_document::{
     ContinueReadCommand, ReadDocumentUseCase, ReadExactTargetCommand, ReadSectionCommand,

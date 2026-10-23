@@ -1066,8 +1066,10 @@ impl DocumentRepository for SqliteDocumentRepository {
                         _ => Ok(len),
                     };
                 }
-                Ok(stored_or_computed_body_order(connection, &id)?
-                    .map(|order| order.map(|order| order.len())))
+                let Some(order) = stored_or_computed_body_order(connection, &id)? else {
+                    return Ok(None);
+                };
+                Ok(Some(order?.len()))
             },
         )
         .await
@@ -1472,11 +1474,11 @@ fn store_section_rows(
     normalized_document_hash: &NormalizedDocumentHash,
     body_order: &Result<Vec<SectionId>, ApplicationError>,
 ) -> Result<(), ApplicationError> {
-    for table in (
+    for table in [
         "document_header_v1",
         "document_sections_v1",
         "document_body_order_rows_v1",
-    ) {
+    ] {
         transaction
             .execute(
                 &format!("DELETE FROM {table} WHERE document_id = ?1"),

@@ -564,11 +564,11 @@ async fn an_old_document_without_rows_answers_through_the_default_path() {
     let database = directory.path().join("section-rows.sqlite");
     {
         let connection = rusqlite::Connection::open(&database).expect("database should open");
-        for table in (
+        for table in [
             "document_header_v1",
             "document_sections_v1",
             "document_body_order_rows_v1",
-        ) {
+        ] {
             connection
                 .execute(&format!("DELETE FROM {table}"), [])
                 .expect("delete should succeed");
@@ -599,7 +599,7 @@ async fn replacing_a_document_with_fewer_sections_leaves_no_orphan_rows() {
     assert_eq!(rows(&repository, &smaller).await.len(), smaller_count);
     let database = directory.path().join("section-rows.sqlite");
     let connection = rusqlite::Connection::open(&database).expect("database should open");
-    for table in ("document_sections_v1", "document_body_order_rows_v1") {
+    for table in ["document_sections_v1", "document_body_order_rows_v1"] {
         let count: i64 = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)

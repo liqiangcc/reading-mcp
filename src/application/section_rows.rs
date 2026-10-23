@@ -71,10 +71,7 @@ pub(crate) fn section_by_id(document: &Document, section_id: &SectionId) -> Opti
 
 /// The row at `section_key`, if the document has that key.
 pub(crate) fn section_by_key(document: &Document, section_key: i64) -> Option<SectionRow> {
-    let rows = flatten_document(document);
-    rows.get(usize::try_from(section_key).ok()?)
-        .filter(|row| row.section_key == section_key)
-        .cloned()
+    row_at(&flatten_document(document), section_key)
 }
 
 /// The rows whose keys are in `[from_key, to_key_inclusive]`, in ascending key order.
@@ -108,22 +105,23 @@ pub(crate) fn section_children(
 pub(crate) fn section_ancestors(document: &Document, section_key: i64) -> Vec<SectionRow> {
     let rows = flatten_document(document);
     let mut ancestors = Vec::new();
-    let mut current = rows
-        .get(usize::try_from(section_key).ok()?)
-        .filter(|row| row.section_key == section_key)
-        .and_then(|row| row.parent_key);
+    let mut current = row_at(&rows, section_key).and_then(|row| row.parent_key);
     while let Some(key) = current {
-        let Some(row) = rows
-            .get(usize::try_from(key).ok()?)
-            .filter(|row| row.section_key == key)
-        else {
+        let Some(row) = row_at(&rows, key) else {
             break;
         };
-        ancestors.push(row.clone());
         current = row.parent_key;
+        ancestors.push(row);
     }
     ancestors.reverse();
     ancestors
+}
+
+/// The row at `section_key`, if the flattened tree has that key.
+fn row_at(rows: &[SectionRow], section_key: i64) -> Option<SectionRow> {
+    rows.get(usize::try_from(section_key).ok()?)
+        .filter(|row| row.section_key == section_key)
+        .cloned()
 }
 
 /// The body-order window around `section_key`, or `None` when the section is not in `order`.

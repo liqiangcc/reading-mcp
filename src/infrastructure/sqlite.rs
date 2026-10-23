@@ -2036,9 +2036,13 @@ fn load_body_order_ids(
 ) -> Result<Vec<SectionId>, ApplicationError> {
     let mut statement = connection
         .prepare_cached(
+            // The `INDEXED BY` pins the join to the unique `(document_id, section_key)` index:
+            // without it SQLite can pick the `(document_id, parent_key, section_key)` index, whose
+            // `section_key` cannot be seeked when `parent_key` is unconstrained, and scan the whole
+            // section table once per order row.
             "SELECT sections.section_id
                FROM document_body_order_rows_v1 AS order_rows
-               JOIN document_sections_v1 AS sections
+               JOIN document_sections_v1 AS sections INDEXED BY idx_document_sections_v1_id
                  ON sections.document_id = order_rows.document_id
                 AND sections.section_key = order_rows.section_key
               WHERE order_rows.document_id = ?1

@@ -359,13 +359,13 @@ impl ReadReadingUseCase {
                     section.section_key
                 ))
             })?;
-        if view.section_by_id(&section_id).await?.is_none() {
+        let Some(row) = view.section_by_id(&section_id).await? else {
             return Err(ReadingError::unknown_handle(format!(
                 "section {} is not part of this document",
                 section.section_key
             )));
-        }
-        walk.ord_of(&section_id).await?.ok_or_else(|| {
+        };
+        walk.ord_of_key(row.section_key).await?.ok_or_else(|| {
             ReadingError::unknown_handle(format!(
                 "section {} is not in the reading order",
                 section.section_key
@@ -424,10 +424,13 @@ impl<'a> Walk<'a> {
                 self.document_id.0
             )));
         };
+        // The section id comes from the section row, not the text-unit index: both stores number
+        // sections by the same depth-first key, and `document_sections_v1` is the smaller table.
         let section_id = self
-            .index
-            .section_id_for_key(self.document_id, section_key)
+            .repository
+            .section_by_key(self.document_id, section_key)
             .await?
+            .map(|row| row.id)
             .ok_or_else(|| {
                 ReadingError::stale_handle(format!(
                     "section key {section_key} of document {} has no stored section id",
@@ -444,14 +447,11 @@ impl<'a> Walk<'a> {
         Ok(self.position_section(index).await?.0)
     }
 
-    /// The body-order position of one section id, or `None` when it is not in the body order.
+    /// The body-order position of one section key, or `None` when it is not in the body order.
     ///
     /// `body_order_position` is the point query for this direction: `body_order_window` would also
     /// count every order row, which a per-call read must not pay.
-    async fn ord_of(&mut self, section_id: &SectionId) -> Result<Option<usize>, ReadingError> {
-        let Some(section_key) = self.index.section_key(self.document_id, section_id).await? else {
-            return Ok(None);
-        };
+    async fn ord_of_key(&mut self, section_key: i64) -> Result<Option<usize>, ReadingError> {
         Ok(self
             .repository
             .body_order_position(self.document_id, section_key)

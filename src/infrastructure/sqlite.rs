@@ -549,12 +549,6 @@ impl SqliteDocumentRepository {
                     value BLOB NOT NULL,
                     UNIQUE(document_id, key)
                  );
-                 CREATE TABLE IF NOT EXISTS document_body_order_v1 (
-                    document_id TEXT NOT NULL,
-                    order_json TEXT,
-                    error TEXT,
-                    UNIQUE(document_id)
-                 );
                  CREATE TABLE IF NOT EXISTS document_header_v1 (
                     document_id TEXT NOT NULL UNIQUE,
                     source TEXT NOT NULL,
@@ -563,7 +557,8 @@ impl SqliteDocumentRepository {
                     content_hash TEXT NOT NULL,
                     normalized_document_hash TEXT,
                     section_count INTEGER NOT NULL,
-                    root_count INTEGER NOT NULL
+                    root_count INTEGER NOT NULL,
+                    body_order_error TEXT
                  );
                  CREATE TABLE IF NOT EXISTS document_sections_v1 (
                     document_id TEXT NOT NULL,
@@ -591,6 +586,7 @@ impl SqliteDocumentRepository {
             )
             .map_err(repository_error)?;
         ensure_normalized_document_hash_column(&connection)?;
+        ensure_body_order_error_column(&connection)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
@@ -711,7 +707,6 @@ impl DocumentRepository for SqliteDocumentRepository {
                             .map_err(repository_error)?;
                     }
                 }
-                store_body_order(&transaction, &document.id, &body_order)?;
                 store_section_rows(
                     &transaction,
                     &document,
@@ -745,12 +740,28 @@ impl DocumentRepository for SqliteDocumentRepository {
         .await
     }
 
-    /// One row read, no section text, no metadata-table read and no cache: a `Document` that
-    /// carries only the light metadata entries and empty section `content`. A row written before
-    /// the metadata split existed keeps every entry inline, so its light metadata is that map split
-    /// the same way a save splits it; a row without a stored normalized hash, or a row with OCR
-    /// metadata, takes the full path instead, so every field of its result matches
-    /// `get_with_hash`.
+    /// The full document rebuilt from the stored section rows, plus its normalized hash: the one
+    /// call a path that needs a whole `Document` uses now that `document_json` keeps no tree. With
+    /// `with_text` the section text comes from `section_text_v3`; without it the tree is built and
+    /// every section's `content` stays empty.
+    async fn get_rebuilt_with_hash(
+        &self,
+        id: &DocumentId,
+        with_text: bool,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        if with_text {
+            return self.get_with_hash(id).await;
+        }
+        self.get_light_with_hash(id).await
+    }
+
+    /// No section text and no metadata-table read: a `Document` that carries only the light
+    /// metadata entries and empty section `content`. The section tree comes from
+    /// `document_sections_v1` when the row's `section_tree_store` says so, so a light read never
+    /// returns an empty tree for a book. A row written before the metadata split existed keeps
+    /// every entry inline, so its light metadata is that map split the same way a save splits it; a
+    /// row without a stored normalized hash, or a row with OCR metadata, takes the full path
+    /// instead, so every field of its result matches `get_with_hash`.
     async fn get_light_with_hash(
         &self,
         id: &DocumentId,
@@ -787,7 +798,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                 if has_ocr_metadata(connection, &id, &stored.metadata)? {
                     return load_document_row(connection, &id, decode_timing);
                 }
-                let document = stored.into_document_light()?;
+                let document = stored.into_document_light(connection)?;
                 Ok(Some((Arc::new(document), NormalizedDocumentHash(stored_hash))))
             },
         )
@@ -1129,10 +1140,10 @@ impl DocumentRepository for SqliteDocumentRepository {
     }
 }
 
-/// One `documents` row decoded in full: the row read, the parse, the section text, the OCR
-/// validation and the normalized hash, which is computed and stored when the row has none.
-/// `get_with_hash` calls it after its cache lookup, and `get_light_with_hash` calls it for the rows
-/// that cannot be read light.
+/// One `documents` row decoded in full: the row read, the parse, the tree rebuilt from the section
+/// rows when the row keeps it there, the section text, the OCR validation and the normalized hash,
+/// which is computed and stored when the row has none. `get_with_hash` calls it, and
+/// `get_light_with_hash` calls it for the rows that cannot be read light.
 fn load_document_row(
     connection: &Connection,
     id: &DocumentId,
@@ -1435,80 +1446,6 @@ fn load_one_section_char_len(
     }
 }
 
-/// Replaces the stored body order of `document_id` with `order`: the section ids in body order, or
-/// the exact error text `body_order_ids` returned for the document. Every error `body_order_ids`
-/// reports is a `RepositoryFailed`, so its message is the whole result.
-fn store_body_order(
-    transaction: &rusqlite::Transaction<'_>,
-    document_id: &DocumentId,
-    order: &Result<Vec<SectionId>, ApplicationError>,
-) -> Result<(), ApplicationError> {
-    let (order_json, error) = match order {
-        Ok(section_ids) => (
-            Some(serde_json::to_string(section_ids).map_err(|error| {
-                ApplicationError::RepositoryFailed(format!(
-                    "body order of document {} cannot be encoded: {error}",
-                    document_id.0
-                ))
-            })?),
-            None,
-        ),
-        Err(ApplicationError::RepositoryFailed(message)) => (None, Some(message.clone())),
-        Err(other) => (None, Some(other.to_string())),
-    };
-    transaction
-        .execute(
-            "INSERT INTO document_body_order_v1(document_id, order_json, error)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(document_id) DO UPDATE SET
-                order_json = excluded.order_json,
-                error = excluded.error",
-            params![document_id.0, order_json, error],
-        )
-        .map_err(repository_error)?;
-    Ok(())
-}
-
-/// One `document_body_order_v1` row: the section ids in body order, or the exact error text
-/// `body_order_ids` reported for the document. `Ok(None)` when the row does not exist.
-fn load_body_order(
-    connection: &Connection,
-    document_id: &DocumentId,
-) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
-    let row = connection
-        .query_row(
-            "SELECT order_json, error FROM document_body_order_v1 WHERE document_id = ?1",
-            params![&document_id.0],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(repository_error)?;
-    let Some((order_json, error)) = row else {
-        return Ok(None);
-    };
-    if let Some(error) = error {
-        return Ok(Some(Err(ApplicationError::RepositoryFailed(error))));
-    }
-    let Some(order_json) = order_json else {
-        return Ok(Some(Err(ApplicationError::RepositoryFailed(format!(
-            "stored body order of document {} holds neither an order nor an error",
-            document_id.0
-        )))));
-    };
-    let section_ids = serde_json::from_str::<Vec<SectionId>>(&order_json).map_err(|error| {
-        ApplicationError::RepositoryFailed(format!(
-            "stored body order of document {} cannot be decoded: {error}",
-            document_id.0
-        ))
-    })?;
-    Ok(Some(Ok(section_ids)))
-}
-
 // ---------------------------------------------------------------------------------------------
 // The section tree and the body order as rows (SEC-1).
 //
@@ -1519,8 +1456,9 @@ fn load_body_order(
 // existed (no header row) falls back to the trait defaults, which read the document itself.
 // ---------------------------------------------------------------------------------------------
 
-/// Replaces the header, the section rows and the body-order rows of `document`. An error result
-/// writes no rows at all: the `document_body_order_v1` error row stays the source of truth for it.
+/// Replaces the header, the section rows and the body-order rows of `document`. A failed body
+/// order writes no order rows: its exact error text goes in the header's `body_order_error`, which
+/// stays the source of truth for it.
 fn store_section_rows(
     transaction: &rusqlite::Transaction<'_>,
     document: &Document,
@@ -1543,6 +1481,11 @@ fn store_section_rows(
     let rows = crate::application::section_rows::flatten_document(document);
     let section_count = section_row_count(rows.len())?;
     let root_count = section_row_count(document.root_sections.len())?;
+    let body_order_error = match body_order {
+        Ok(_) => None,
+        Err(ApplicationError::RepositoryFailed(message)) => Some(message.clone()),
+        Err(other) => Some(other.to_string()),
+    };
     transaction
         .execute(
             "INSERT INTO document_header_v1(
@@ -1553,8 +1496,9 @@ fn store_section_rows(
                 content_hash,
                 normalized_document_hash,
                 section_count,
-                root_count
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                root_count,
+                body_order_error
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 document.id.0,
                 document.source.0,
@@ -1564,6 +1508,7 @@ fn store_section_rows(
                 normalized_document_hash.0,
                 section_count,
                 root_count,
+                body_order_error,
             ],
         )
         .map_err(repository_error)?;
@@ -1893,6 +1838,83 @@ fn load_section_ancestors(
     Ok(ancestors)
 }
 
+/// Every `document_sections_v1` row of `document_id`, in depth-first key order.
+fn load_all_section_rows(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Vec<SectionRow>, ApplicationError> {
+    let mut statement = connection
+        .prepare_cached(&format!(
+            "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
+              WHERE document_id = ?1 ORDER BY section_key"
+        ))
+        .map_err(repository_error)?;
+    let rows = statement
+        .query_map(params![&document_id.0], StoredSectionRow::read)
+        .map_err(repository_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(repository_error)?;
+    rows.into_iter()
+        .map(StoredSectionRow::into_section_row)
+        .collect()
+}
+
+/// The section tree rebuilt from `document_sections_v1`, nested by the stored depth-first keys.
+/// A row whose marker says the tree is in the rows but whose header count disagrees with those rows
+/// is stale: it is never returned as an empty book.
+fn load_section_tree(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Vec<Section>, ApplicationError> {
+    let rows = load_all_section_rows(connection, document_id)?;
+    if let Some(header) = load_document_header(connection, document_id)?
+        && header.section_count != rows.len()
+    {
+        return Err(ApplicationError::StaleDocument(format!(
+            "persisted document {} keeps {} section rows but its header says {}; explicit source reopen required",
+            document_id.0,
+            rows.len(),
+            header.section_count
+        )));
+    }
+    let Some(last) = rows.last() else {
+        return Ok(Vec::new());
+    };
+    Ok(build_section_children(&rows, 0, last.section_key, None))
+}
+
+/// The children of the node at `start`, up to `end_key`, from the flat depth-first rows.
+fn build_section_children(
+    rows: &[SectionRow],
+    start: usize,
+    end_key: i64,
+    parent_id: Option<&SectionId>,
+) -> Vec<Section> {
+    let mut sections = Vec::new();
+    let mut index = start;
+    while index < rows.len() && rows[index].section_key <= end_key {
+        let row = &rows[index];
+        let id = row.id.clone();
+        let children = build_section_children(rows, index + 1, row.subtree_end_key, Some(&id));
+        sections.push(Section {
+            id,
+            parent_id: parent_id.cloned(),
+            title: row.title.clone(),
+            level: row.level,
+            content: String::new(),
+            location: row.location.clone(),
+            children,
+        });
+        // The subtree of `row` is the contiguous key range `[section_key, subtree_end_key]`, so the
+        // next sibling starts just past it. `max` keeps a malformed key from looping forever.
+        index = usize::try_from(row.subtree_end_key)
+            .ok()
+            .map_or(rows.len(), |key| key.saturating_add(1))
+            .max(index + 1);
+    }
+    sections
+}
+
 /// The body-order window around `section_key`, or `None` when the section is not in the body order.
 fn load_body_order_window(
     connection: &Connection,
@@ -1991,17 +2013,62 @@ fn load_body_order_len(
     section_row_usize(len, "body order length").map(Some)
 }
 
-/// The stored body order of `document_id`, or the order computed from the document when its
-/// `document_body_order_v1` row does not exist. `Ok(None)` when the document is unknown.
+/// The exact error text a failed body order stored in `document_header_v1`, or `None`.
+fn load_body_order_error(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<String>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT body_order_error FROM document_header_v1 WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(repository_error)
+        .map(|value| value.flatten())
+}
+
+/// The body order as section ids, from the `(ord, section_key)` rows joined to the section rows.
+fn load_body_order_ids(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Vec<SectionId>, ApplicationError> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT sections.section_id
+               FROM document_body_order_rows_v1 AS order_rows
+               JOIN document_sections_v1 AS sections
+                 ON sections.document_id = order_rows.document_id
+                AND sections.section_key = order_rows.section_key
+              WHERE order_rows.document_id = ?1
+              ORDER BY order_rows.ord",
+        )
+        .map_err(repository_error)?;
+    let rows = statement
+        .query_map(params![&document_id.0], |row| row.get::<_, String>(0))
+        .map_err(repository_error)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map(|ids| ids.into_iter().map(SectionId).collect())
+        .map_err(repository_error)
+}
+
+/// The stored body order of `document_id`: the header's `body_order_error` when the order failed,
+/// otherwise the section ids in `document_body_order_rows_v1`. A document saved before the rows
+/// existed (no header row) has its order computed from the stored document. `Ok(None)` when the
+/// document is unknown.
 fn stored_or_computed_body_order(
     connection: &Connection,
     document_id: &DocumentId,
 ) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
-    if let Some(stored) = load_body_order(connection, document_id)? {
-        return Ok(Some(stored));
+    if document_has_section_rows(connection, document_id)? {
+        if let Some(error) = load_body_order_error(connection, document_id)? {
+            return Ok(Some(Err(ApplicationError::RepositoryFailed(error))));
+        }
+        return Ok(Some(Ok(load_body_order_ids(connection, document_id)?)));
     }
-    // A document saved before `document_body_order_v1` existed: compute the order from the full
-    // document. The read path never writes, so the next save stores it.
+    // A document saved before the section rows existed: compute the order from the full document.
+    // The read path never writes, so the next save stores it.
     let Some((document, _)) = load_document_row(connection, document_id, false)? else {
         return Ok(None);
     };
@@ -2031,6 +2098,11 @@ fn body_order_window_from_document(
 /// The `content_store` value of a `document_json` row that keeps no section text inline: every
 /// section's text is in `section_text_v3` for the same document version.
 const SECTION_TEXT_CONTENT_STORE: &str = "section_text_v3";
+
+/// The `section_tree_store` value of a `document_json` row that keeps no section tree inline:
+/// `root_sections` is empty and every section, its parent link and its DFS key are in
+/// `document_sections_v1`.
+const SECTION_TREE_STORE: &str = "document_sections_v1";
 
 /// The `encoding` of a `section_text_v3` chunk that is the raw UTF-8 bytes of the chunk.
 const SECTION_TEXT_ENCODING_RAW: i64 = 0;
@@ -2088,6 +2160,13 @@ const METADATA_COMPRESS_CHUNK_BYTES: usize = 1024 * 1024;
 fn unknown_metadata_store(store: &str) -> ApplicationError {
     ApplicationError::StaleDocument(format!(
         "persisted document keeps its metadata in unknown store {store}; explicit source reopen required"
+    ))
+}
+
+/// The error an unknown `section_tree_store` value is: the row needs an explicit source reopen.
+fn unknown_section_tree_store(store: &str) -> ApplicationError {
+    ApplicationError::StaleDocument(format!(
+        "persisted document keeps its section tree in unknown store {store}; explicit source reopen required"
     ))
 }
 
@@ -2321,6 +2400,33 @@ fn ensure_normalized_document_hash_column(connection: &Connection) -> Result<(),
     Ok(())
 }
 
+/// Adds the nullable `body_order_error` column to a `document_header_v1` written before the body
+/// order stopped living in its own table. The header row is where a failed body order is kept now:
+/// one string next to the section rows it failed to order, read with the header's one row.
+fn ensure_body_order_error_column(connection: &Connection) -> Result<(), ApplicationError> {
+    let has_column = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(document_header_v1)")
+            .map_err(repository_error)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(repository_error)?;
+        let mut has_column = false;
+        for column in columns {
+            if column.map_err(repository_error)? == "body_order_error" {
+                has_column = true;
+            }
+        }
+        has_column
+    };
+    if !has_column {
+        connection
+            .execute_batch("ALTER TABLE document_header_v1 ADD COLUMN body_order_error TEXT")
+            .map_err(repository_error)?;
+    }
+    Ok(())
+}
+
 /// Stores the open result of each document, keyed by document id and checked against a fingerprint on read.
 pub struct SqliteOpenResultStore {
     connection: Arc<Mutex<Connection>>,
@@ -2500,6 +2606,15 @@ impl SqliteTextUnitIndex {
         // documents on their next open.
         // The text moved to `section_text_v3` (compressed chunks, DISK-1), so the uncompressed v4
         // text table is dropped too: a row that still names it reads as stale and re-ingests.
+        //
+        // v10 (SEC-3) keeps the body order only in `document_body_order_rows_v1` and a failed
+        // order's exact text in `document_header_v1.body_order_error`, so the old one-row
+        // `document_body_order_v1` table (a JSON array of every section id) is dropped here, in
+        // the same open that bumps `TEXT_UNIT_STORE_VERSION`. Dropping is idempotent; the bump
+        // makes every book stored by the previous version re-ingest once on its next open.
+        connection
+            .execute_batch("DROP TABLE IF EXISTS document_body_order_v1;")
+            .map_err(text_unit_index_error)?;
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS section_layout_v1;
@@ -6876,6 +6991,10 @@ struct StoredDocument {
     /// old row and a document whose metadata is all light write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metadata_store: Option<String>,
+    /// Where the section tree lives when `root_sections` is empty. Absent when the tree is inline,
+    /// which is what an old row and a repository used on its own write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    section_tree_store: Option<String>,
     id: String,
     source: String,
     title: String,
@@ -6888,31 +7007,37 @@ struct StoredDocument {
 impl StoredDocument {
     /// `content_store` names where the section text is kept. With `Some`, every section's `content`
     /// is written empty and the text is read back from that store on load; with `None` the text is
-    /// inline, byte for byte as before. `metadata` is the light half of the document's metadata;
-    /// `metadata_store` names where the heavy half is kept, and is `None` when there is no heavy
-    /// entry.
+    /// inline, byte for byte as before. When the text is stored, the tree lives in the section
+    /// rows too, so `root_sections` is written empty and `section_tree_store` names the rows.
+    /// `metadata` is the light half of the document's metadata; `metadata_store` names where the
+    /// heavy half is kept, and is `None` when there is no heavy entry.
     fn with_stores(
         document: &Document,
         content_store: Option<&str>,
         metadata: BTreeMap<String, String>,
         metadata_store: Option<&str>,
     ) -> Self {
-        let omit_content = content_store.is_some();
+        let tree_in_rows = content_store.is_some();
         Self {
             normalization_version: Some(NORMALIZATION_VERSION.into()),
             content_store: content_store.map(str::to_owned),
             metadata_store: metadata_store.map(str::to_owned),
+            section_tree_store: tree_in_rows.then(|| SECTION_TREE_STORE.to_owned()),
             id: document.id.0.clone(),
             source: document.source.0.clone(),
             title: document.title.clone(),
             media_type: document.media_type.0.clone(),
             content_hash: document.content_hash.0.clone(),
             metadata,
-            root_sections: document
-                .root_sections
-                .iter()
-                .map(|section| StoredSection::from_section(section, omit_content))
-                .collect(),
+            root_sections: if tree_in_rows {
+                Vec::new()
+            } else {
+                document
+                    .root_sections
+                    .iter()
+                    .map(|section| StoredSection::from_section(section, false))
+                    .collect()
+            },
         }
     }
 
@@ -6936,6 +7061,7 @@ impl StoredDocument {
         }
         let content_store = self.content_store;
         let metadata_store = self.metadata_store;
+        let tree_store = self.section_tree_store;
         let mut metadata = self.metadata;
         let mut document = Document {
             id: DocumentId(self.id),
@@ -6950,6 +7076,15 @@ impl StoredDocument {
                 .map(StoredSection::into_section)
                 .collect(),
         };
+        // The tree lives in the section rows when the row says so; `root_sections` is empty then.
+        // A marker without a complete set of rows is a stale row, never an empty book.
+        match tree_store.as_deref() {
+            None => {}
+            Some(store) if store == SECTION_TREE_STORE => {
+                document.root_sections = load_section_tree(connection, &document.id)?;
+            }
+            Some(store) => return Err(unknown_section_tree_store(store)),
+        }
         // The decoded document carries every metadata entry, inline and heavy, exactly as a row that
         // kept all of them inline did before the split.
         match metadata_store.as_deref() {
@@ -6975,9 +7110,10 @@ impl StoredDocument {
     }
 
     /// The light decode: the same checks as [`Self::into_document`], but no section text and no
-    /// metadata-table read, so the result costs one `documents` row. The caller has already
+    /// metadata-table read. The tree is rebuilt from `document_sections_v1` when the row keeps it
+    /// there, so the light form carries the whole tree and no text. The caller has already
     /// established that this row has a stored normalized hash and no OCR metadata.
-    fn into_document_light(self) -> Result<Document, ApplicationError> {
+    fn into_document_light(self, connection: &Connection) -> Result<Document, ApplicationError> {
         let persisted_version = self.normalization_version.ok_or_else(|| {
             ApplicationError::StaleDocument(format!(
                 "persisted document has no normalization version; current version is {NORMALIZATION_VERSION}; explicit source reopen required"
@@ -7009,11 +7145,17 @@ impl StoredDocument {
             }
         }
         let keep_inline_text = self.content_store.is_none();
-        let mut root_sections: Vec<Section> = self
-            .root_sections
-            .into_iter()
-            .map(StoredSection::into_section)
-            .collect();
+        let mut root_sections: Vec<Section> = match self.section_tree_store.as_deref() {
+            None => self
+                .root_sections
+                .into_iter()
+                .map(StoredSection::into_section)
+                .collect(),
+            Some(store) if store == SECTION_TREE_STORE => {
+                load_section_tree(connection, &DocumentId(self.id.clone()))?
+            }
+            Some(store) => return Err(unknown_section_tree_store(store)),
+        };
         if keep_inline_text {
             // A row that keeps its text inline would otherwise hand the light read the whole
             // section text: drop it here, so a light document never carries text.

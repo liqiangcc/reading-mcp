@@ -55,6 +55,19 @@ fn section(name: &str, parent: Option<&str>, title: &str, children: Vec<Section>
     }
 }
 
+/// Every section id in depth-first document order.
+fn dfs(document: &Document) -> Vec<SectionId> {
+    fn walk(sections: &[Section], out: &mut Vec<SectionId>) {
+        for section in sections {
+            out.push(section.id.clone());
+            walk(&section.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&document.root_sections, &mut out);
+    out
+}
+
 /// What the full computation reports for `document`.
 async fn computed(document: &Document) -> Result<Vec<SectionId>, ApplicationError> {
     let repository: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
@@ -117,14 +130,22 @@ async fn a_document_saved_before_the_table_existed_falls_back_to_the_computation
     let repository = SqliteDocumentRepository::open(&database).expect("repository should open");
     repository.save(document.clone()).await.expect("save");
 
-    // Simulate a row written by a binary that had no `document_body_order_v1`.
-    rusqlite::Connection::open(&database)
-        .expect("database should open")
-        .execute(
-            "DELETE FROM document_body_order_v1 WHERE document_id = ?1",
-            rusqlite::params![&document.id.0],
-        )
-        .expect("the stored body order row should be deleted");
+    // Simulate a row written before the section rows and the body-order rows existed: no header
+    // row, no section rows, no order rows, so the tree and the order are computed from
+    // `document_json`.
+    for table in [
+        "document_header_v1",
+        "document_sections_v1",
+        "document_body_order_rows_v1",
+    ] {
+        rusqlite::Connection::open(&database)
+            .expect("database should open")
+            .execute(
+                &format!("DELETE FROM {table} WHERE document_id = ?1"),
+                rusqlite::params![&document.id.0],
+            )
+            .expect("the stored rows should be deleted");
+    }
 
     let expected = computed(&document).await.expect("computed order");
     let stored = repository
@@ -134,11 +155,11 @@ async fn a_document_saved_before_the_table_existed_falls_back_to_the_computation
         .expect("the stored document has a body order");
     assert_eq!(stored, Ok(expected));
 
-    // The read path never writes: the row is still absent.
+    // The read path never writes: the rows are still absent.
     let rows: i64 = rusqlite::Connection::open(&database)
         .expect("database should open")
         .query_row(
-            "SELECT COUNT(*) FROM document_body_order_v1 WHERE document_id = ?1",
+            "SELECT COUNT(*) FROM document_header_v1 WHERE document_id = ?1",
             rusqlite::params![&document.id.0],
             |row| row.get(0),
         )
@@ -160,12 +181,16 @@ async fn a_re_save_replaces_the_stored_body_order() {
     let rows: i64 = rusqlite::Connection::open(&database)
         .expect("database should open")
         .query_row(
-            "SELECT COUNT(*) FROM document_body_order_v1 WHERE document_id = ?1",
+            "SELECT COUNT(*) FROM document_body_order_rows_v1 WHERE document_id = ?1",
             rusqlite::params![&second.id.0],
             |row| row.get(0),
         )
         .expect("count");
-    assert_eq!(rows, 1, "one row per document, replaced on every save");
+    assert_eq!(
+        rows,
+        i64::try_from(dfs(&second).len()).expect("section count fits"),
+        "one row per section, replaced on every save"
+    );
 
     let expected = computed(&second).await.expect("computed order");
     assert_ne!(expected, computed(&first).await.expect("computed order"));
@@ -188,7 +213,7 @@ async fn a_saved_error_is_read_back_as_the_same_error() {
     let error: Option<String> = rusqlite::Connection::open(&database)
         .expect("database should open")
         .query_row(
-            "SELECT error FROM document_body_order_v1 WHERE document_id = ?1",
+            "SELECT body_order_error FROM document_header_v1 WHERE document_id = ?1",
             rusqlite::params![&document.id.0],
             |row| row.get(0),
         )

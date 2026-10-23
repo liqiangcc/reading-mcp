@@ -390,6 +390,25 @@ pub trait DocumentRepository: Send + Sync {
         self.get_with_hash(id).await
     }
 
+    /// The full document rebuilt from the stored section rows, plus its normalized document hash:
+    /// the one call a path that needs a whole `Document` uses now that `document_json` no longer
+    /// carries the tree. `with_text` asks for every section's `content`; a caller that renders or
+    /// walks the tree but reads section text elsewhere passes `false`.
+    ///
+    /// The default asks the store for the full document when text is wanted and for the light
+    /// document otherwise, so a store that overrides only one of them answers correctly.
+    async fn get_rebuilt_with_hash(
+        &self,
+        id: &DocumentId,
+        with_text: bool,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        if with_text {
+            self.get_with_hash(id).await
+        } else {
+            self.get_light_with_hash(id).await
+        }
+    }
+
     /// One metadata entry of the document. The default loads the whole document.
     async fn load_metadata(
         &self,

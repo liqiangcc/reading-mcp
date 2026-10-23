@@ -251,7 +251,7 @@ impl GetContextUseCase {
             None => {
                 let (document, hash) = self
                     .repository
-                    .get_with_hash(id)
+                    .get_rebuilt_with_hash(id, true)
                     .await?
                     .ok_or(ApplicationError::DocumentNotFound)?;
                 let view = DocumentView::from_document(

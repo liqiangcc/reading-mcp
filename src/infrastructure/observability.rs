@@ -443,6 +443,22 @@ impl DocumentRepository for ObservedDocumentRepository {
         result
     }
 
+    async fn get_rebuilt_with_hash(
+        &self,
+        id: &DocumentId,
+        with_text: bool,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.get_rebuilt_with_hash(id, with_text).await;
+        emit(json!({
+            "event": "repository_get",
+            "duration_ms": started.elapsed().as_millis(),
+            "hit": result.as_ref().is_ok_and(|value| value.is_some()),
+            "success": result.is_ok()
+        }));
+        result
+    }
+
     async fn load_metadata(
         &self,
         id: &DocumentId,

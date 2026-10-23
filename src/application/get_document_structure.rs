@@ -174,7 +174,7 @@ impl GetDocumentStructureUseCase {
     ) -> Result<ResolveNamedSectionResult, ApplicationError> {
         let (document, normalized_hash) = self
             .repository
-            .get_light_with_hash(&command.document_id)
+            .get_rebuilt_with_hash(&command.document_id, false)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let body_order = load_body_order(self.repository.as_ref(), &document).await?;
@@ -219,7 +219,7 @@ impl GetDocumentStructureUseCase {
 
         let (document, normalized_hash) = self
             .repository
-            .get_light_with_hash(&command.document_id)
+            .get_rebuilt_with_hash(&command.document_id, false)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let body_order = load_body_order(self.repository.as_ref(), &document).await?;

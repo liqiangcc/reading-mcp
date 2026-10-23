@@ -381,8 +381,10 @@ impl SqliteSearchIndex {
         }
         // A caller that has no document in hand (a standalone index, a test) loads it here, light:
         // the scan reads section ids and titles and takes the text from `section_text_v3`.
-        let Some((document, normalized_document_hash)) =
-            self.repository.get_light_with_hash(document_id).await?
+        let Some((document, normalized_document_hash)) = self
+            .repository
+            .get_rebuilt_with_hash(document_id, false)
+            .await?
         else {
             return Err(ApplicationError::DocumentNotFound);
         };

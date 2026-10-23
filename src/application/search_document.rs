@@ -88,10 +88,14 @@ impl SearchDocumentUseCase {
         let loaded = match self.text_unit_index {
             Some(_) => {
                 self.repository
-                    .get_light_with_hash(&command.document_id)
+                    .get_rebuilt_with_hash(&command.document_id, false)
                     .await?
             }
-            None => self.repository.get_with_hash(&command.document_id).await?,
+            None => {
+                self.repository
+                    .get_rebuilt_with_hash(&command.document_id, true)
+                    .await?
+            }
         };
         let (document, normalized_document_hash) =
             loaded.ok_or(ApplicationError::DocumentNotFound)?;

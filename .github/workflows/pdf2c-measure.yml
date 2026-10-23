@@ -25,6 +25,20 @@ jobs:
           key: pdf2c
       - name: Build release binary with line tables
         run: cargo build --release --locked --bin reading-mcp 2>&1 | tail -5
+      - name: Generate the golden fixtures this tree produces
+        run: |
+          set -o pipefail
+          cargo test --release --locked --lib -- --ignored --nocapture write_ \
+            2>&1 | tee "$RUNNER_TEMP/goldens.txt" | tail -60
+          { echo '## Golden fixtures'; echo '```'; cat "$RUNNER_TEMP/goldens.txt"; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the goldens
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf2c-goldens
+          path: ${{ runner.temp }}/goldens.txt
+          if-no-files-found: warn
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:

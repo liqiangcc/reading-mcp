@@ -1493,4 +1493,149 @@ mod tests {
             Some("1")
         );
     }
+
+    /// PDF-2c: a multi-page PDF with text pages and an image page keeps exactly the sections,
+    /// text, locators and bindings it published before the open's memory was cut. The golden is
+    /// generated in CI from the tree *before* the change (`write_mixed_pages_golden`) and
+    /// committed, so this compares against the old output, not against the new one.
+    #[test]
+    fn a_mixed_text_and_image_pdf_keeps_its_golden_sections_and_text() {
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pdf2c-mixed-pages.golden.txt");
+        let Ok(expected) = std::fs::read_to_string(&golden) else {
+            println!(
+                "{} is absent: regenerate it with write_mixed_pages_golden",
+                golden.display()
+            );
+            return;
+        };
+        let actual = mixed_pages_golden();
+        assert_eq!(actual, expected, "the mixed PDF's sections or text changed");
+    }
+
+    /// Writes the golden the test above compares against. Ignored: run once, in CI, from the tree
+    /// before the change, and commit the printed block as
+    /// `tests/fixtures/pdf2c-mixed-pages.golden.txt`.
+    #[test]
+    #[ignore = "pdf2c golden: run once with --ignored --nocapture and commit the printed block"]
+    fn write_mixed_pages_golden() {
+        println!("---8<---\n{}---8<---", mixed_pages_golden());
+    }
+
+    /// PDF-2c: the `document_json` a save writes for a fixture PDF must stay byte-identical. The
+    /// save binds the JSON with a transient copy SQLite makes itself; nothing in this work may
+    /// change one stored byte. The golden is generated in CI from the tree before the change
+    /// (`write_stored_document_json_golden`) and committed.
+    #[tokio::test]
+    async fn the_stored_document_json_of_a_fixture_pdf_is_byte_identical() {
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pdf2c-mixed-pages.document-json.golden.txt");
+        let stored = stored_document_json().await;
+        let Ok(expected) = std::fs::read_to_string(&golden) else {
+            println!(
+                "{} is absent: regenerate it with write_stored_document_json_golden",
+                golden.display()
+            );
+            return;
+        };
+        assert_eq!(stored, expected, "the stored document_json changed");
+    }
+
+    /// Writes the golden the test above compares against. Ignored: run once, in CI, from the tree
+    /// before the change, and commit the printed block as
+    /// `tests/fixtures/pdf2c-mixed-pages.document-json.golden.txt`.
+    #[tokio::test]
+    #[ignore = "pdf2c golden: run once with --ignored --nocapture and commit the printed block"]
+    async fn write_stored_document_json_golden() {
+        println!("---8<---\n{}---8<---", stored_document_json().await);
+    }
+
+    /// The `documents.document_json` row of the mixed-pages fixture, saved through the repository
+    /// exactly as an open saves it (without a text-unit index, so the section text stays inline).
+    async fn stored_document_json() -> String {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("stored.sqlite");
+        let repository =
+            crate::infrastructure::SqliteDocumentRepository::open(&path).expect("repository");
+        let document = parse_bytes(mixed_pages_pdf()).expect("the mixed PDF opens");
+        let id = document.id.0.clone();
+        crate::application::ports::DocumentRepository::save(&repository, document)
+            .await
+            .expect("save");
+        let connection = rusqlite::Connection::open(&path).expect("connection");
+        connection
+            .query_row(
+                "SELECT document_json FROM documents WHERE id = ?1",
+                [&id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("stored document_json")
+    }
+
+    /// Four pages: two plain text pages, a text page that also paints an image, and a page whose
+    /// text is short enough that the image-only evidence runs on it.
+    fn mixed_pages_golden() -> String {
+        let document = parse_bytes(mixed_pages_pdf()).expect("the mixed PDF opens");
+        let mut out = String::new();
+        out.push_str(&format!("title={}\n", document.title));
+        for key in ["pdf_version", "pdf_page_count", "pdf_structure_provenance"] {
+            out.push_str(&format!(
+                "{key}={}\n",
+                document.metadata.get(key).map(String::as_str).unwrap_or("-")
+            ));
+        }
+        for section in &document.root_sections {
+            push_section_golden(&mut out, section);
+        }
+        let bindings = document
+            .original_source_binding_map()
+            .expect("bindings decode")
+            .map(|map| map.bindings)
+            .unwrap_or_default();
+        for binding in bindings {
+            out.push_str(&format!("binding={binding:?}\n"));
+        }
+        out
+    }
+
+    /// The bytes of the four-page fixture the two goldens are made from.
+    fn mixed_pages_pdf() -> Vec<u8> {
+        let mut document = LopdfDocument::with_version("1.5");
+        let resources = text_resources(&mut document);
+        let image = image_xobject(&mut document);
+        let mut text_and_image = resources.clone();
+        text_and_image.set("XObject", dictionary! { "Im1" => image });
+        let mut short_page = image_page_operations();
+        short_page.extend(byte_text_operations("F1", &[65_u8; 12]));
+        let text_page = |text: &[u8], resources: Dictionary| {
+            (byte_text_operations("F1", text), resources)
+        };
+        let pages = vec![
+            text_page(b"First page of the mixed document.", resources.clone()),
+            text_page(b"Second page carries a figure.", text_and_image),
+            text_page(b"Third page closes the document.", resources.clone()),
+            (short_page, resources),
+        ];
+        let mut document = build_pdf(document, pages);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+        bytes
+    }
+
+    fn push_section_golden(out: &mut String, section: &Section) {
+        out.push_str(&format!(
+            "section id={} parent={} level={} title={:?} page={:?} native={:?} path={:?}\n",
+            section.id.0,
+            section.parent_id.as_ref().map(|id| id.0.as_str()).unwrap_or("-"),
+            section.level,
+            section.title,
+            section.location.page,
+            section.location.native_location,
+            section.location.section_path,
+        ));
+        out.push_str(&format!("content={:?}\n", section.content));
+        for child in &section.children {
+            push_section_golden(out, child);
+        }
+    }
 }

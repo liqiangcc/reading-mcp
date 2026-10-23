@@ -16,6 +16,9 @@ database into one text file per side:
   `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
   re-encoded as that blob;
 - section text: one sha256 per section over its chunks in order, plus `char_len`;
+- sections: the section tree rebuilt from `document_sections_v1` plus `document_header_v1` (or, on
+  a side without those rows, from `document_json`), compared field by field in depth-first order,
+  and the body order rebuilt from `document_body_order_rows_v1` (or `document_body_order_v1`);
 - reads: the v1 text-unit/context/read/search sequence and the v2 short-handle sequence, on one
   server per side, every payload compared byte for byte after wall-clock keys are dropped.
 
@@ -69,12 +72,14 @@ OPEN_MESSAGE = {
 
 STATE_DATABASE = "reading-mcp.sqlite"
 
-DUMP_BLOCKS = ("documents", "layouts", "text")
+DUMP_BLOCKS = ("documents", "sections", "layouts", "text")
 
 # The `documents` block is not a byte comparison: it compares the parsed objects after the rebuild,
-# so the column says so.
+# and the `sections` block rebuilds the tree from the head's `document_sections_v1` rows (or, on a
+# side without them, from `document_json`), so the columns say so.
 BLOCK_COLUMNS = {
     "documents": "documents (rebuilt)",
+    "sections": "sections (rebuilt)",
     "layouts": "layouts",
     "text": "text",
 }
@@ -643,8 +648,198 @@ def text_rows(connection: sqlite3.Connection) -> list[str]:
     return rows
 
 
+def canonical_json(value) -> str:
+    """One value as the single line every side of a comparison agrees on."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def json_section_rows(root_sections) -> list[tuple]:
+    """The section tree inside `document_json`, in depth-first order."""
+    rows = []
+
+    def walk(sections) -> None:
+        for section in sections:
+            rows.append(
+                (
+                    section.get("id"),
+                    section.get("parent_id"),
+                    section.get("level"),
+                    section.get("title"),
+                    canonical_json(section.get("location")),
+                )
+            )
+            walk(section.get("children") or [])
+
+    walk(root_sections)
+    return rows
+
+
+def stored_section_rows(connection: sqlite3.Connection, document_id: str) -> list[tuple] | None:
+    """The section tree rebuilt from `document_sections_v1`, or None when the side has no rows."""
+    if not table_exists(connection, "document_sections_v1"):
+        return None
+    stored = list(
+        connection.execute(
+            "SELECT section_key, section_id, parent_key, level, title, location_json"
+            " FROM document_sections_v1 WHERE document_id = ?1 ORDER BY section_key",
+            (document_id,),
+        )
+    )
+    if not stored:
+        return None
+    ids = {section_key: section_id for section_key, section_id, *_ in stored}
+    return [
+        (
+            section_key,
+            section_id,
+            None if parent_key is None else ids.get(parent_key),
+            level,
+            title,
+            canonical_json(json.loads(location_json)),
+        )
+        for section_key, section_id, parent_key, level, title, location_json in stored
+    ]
+
+
+def stored_header_row(connection: sqlite3.Connection, document_id: str) -> tuple | None:
+    """The `document_header_v1` row of one document, or None when the side has no such row."""
+    if not table_exists(connection, "document_header_v1"):
+        return None
+    return connection.execute(
+        "SELECT source, title, media_type, content_hash, normalized_document_hash,"
+        " section_count, root_count FROM document_header_v1 WHERE document_id = ?1",
+        (document_id,),
+    ).fetchone()
+
+
+def stored_body_order_rows(
+    connection: sqlite3.Connection, document_id: str
+) -> list[tuple[int, int]] | None:
+    """The `document_body_order_rows_v1` rows of one document, or None when the side has none."""
+    if not table_exists(connection, "document_body_order_rows_v1"):
+        return None
+    rows = list(
+        connection.execute(
+            "SELECT ord, section_key FROM document_body_order_rows_v1"
+            " WHERE document_id = ?1 ORDER BY ord",
+            (document_id,),
+        )
+    )
+    return rows or None
+
+
+def stored_body_order_json(
+    connection: sqlite3.Connection, document_id: str
+) -> tuple[list[str] | None, str | None]:
+    """The `document_body_order_v1` row of one document: its ids, or its error text."""
+    if not table_exists(connection, "document_body_order_v1"):
+        return (None, None)
+    row = connection.execute(
+        "SELECT order_json, error FROM document_body_order_v1 WHERE document_id = ?1",
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        return (None, None)
+    order_json, error = row
+    if error is not None:
+        return (None, str(error))
+    if order_json is None:
+        return (None, "<no order and no error>")
+    return ([str(section_id) for section_id in json.loads(order_json)], None)
+
+
+def section_block_lines(
+    connection: sqlite3.Connection,
+    document_id: str,
+    content_hash: str,
+    document_json: str,
+    stored_hash: str | None,
+) -> list[str]:
+    """One document's section tree and body order, from rows when the side has them.
+
+    The head stores the tree in `document_sections_v1` and the body order in
+    `document_body_order_rows_v1`; a side without those tables (or without rows for this document)
+    rebuilds both from `document_json` and `document_body_order_v1`, so the block compares the two
+    storages byte for byte.
+    """
+    stored = json.loads(document_json)
+    rows = stored_section_rows(connection, document_id)
+    header = stored_header_row(connection, document_id)
+    from_rows = rows is not None
+    if rows is None:
+        # A side without section rows reports the depth-first index as the key, which is the key the
+        # rows of the other side must carry.
+        rows = [
+            (index, *row)
+            for index, row in enumerate(json_section_rows(stored.get("root_sections") or []))
+        ]
+
+    lines = [f"document\t{document_id}"]
+    if header is not None:
+        source, title, media_type, header_hash, header_normalized, section_count, root_count = header
+        lines.append(
+            "header\t"
+            + "\t".join(
+                [
+                    source,
+                    canonical_json(title),
+                    media_type,
+                    header_hash,
+                    header_normalized if header_normalized is not None else "-",
+                    str(section_count),
+                    str(root_count),
+                ]
+            )
+        )
+    else:
+        roots = stored.get("root_sections") or []
+        lines.append(
+            "header\t"
+            + "\t".join(
+                [
+                    str(stored.get("source")),
+                    canonical_json(stored.get("title")),
+                    str(stored.get("media_type")),
+                    content_hash,
+                    stored_hash if stored_hash is not None else "-",
+                    str(len(rows)),
+                    str(len(roots)),
+                ]
+            )
+        )
+
+    for section_key, section_id, parent_id, level, title, location in rows:
+        lines.append(
+            "section\t"
+            + "\t".join(
+                [
+                    str(section_key),
+                    str(section_id),
+                    "-" if parent_id is None else str(parent_id),
+                    str(level),
+                    canonical_json(title),
+                    location,
+                ]
+            )
+        )
+
+    order_rows = stored_body_order_rows(connection, document_id)
+    if order_rows is not None and from_rows:
+        keys = {section_key: section_id for section_key, section_id, *_rest in rows}
+        for ord_value, section_key in order_rows:
+            lines.append(f"body_order\t{ord_value}\t{keys.get(section_key, '<unknown key>')}")
+    else:
+        section_ids, error = stored_body_order_json(connection, document_id)
+        if error is not None:
+            lines.append(f"body_order_error\t{canonical_json(error)}")
+        elif section_ids is not None:
+            for ord_value, section_id in enumerate(section_ids):
+                lines.append(f"body_order\t{ord_value}\t{section_id}")
+    return lines
+
+
 def dump_state(database: str) -> dict:
-    """The three comparable blocks of one state database, as text."""
+    """The comparable blocks of one state database, as text."""
     blocks = {name: [] for name in DUMP_BLOCKS}
     if not os.path.isfile(database):
         blocks["documents"] = ["<missing state database>"]
@@ -652,9 +847,17 @@ def dump_state(database: str) -> dict:
 
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     try:
+        # A row saved before the normalized hash column existed reports none, which the `sections`
+        # header of that side writes as `-`.
+        document_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(documents)")
+        }
+        has_normalized_hash = "normalized_document_hash" in document_columns
         documents = list(
             connection.execute(
-                "SELECT id, content_hash, document_json FROM documents ORDER BY id"
+                "SELECT id, content_hash, document_json"
+                + (", normalized_document_hash" if has_normalized_hash else ", NULL")
+                + " FROM documents ORDER BY id"
             )
         )
         blocks["layouts"] = layout_rows(connection)
@@ -677,16 +880,24 @@ def dump_state(database: str) -> dict:
                 metadata_by_document[document_id][key] = decode_metadata_value(
                     encoding, value
                 )
+        for document_id, content_hash, document_json, normalized_hash in documents:
+            rebuilt = rebuild_document_json(
+                document_json,
+                texts_by_document.get(document_id, {}),
+                metadata_by_document.get(document_id, {}),
+            )
+            blocks["documents"].append(f"{document_id}\t{content_hash}\t{rebuilt}")
+            blocks["sections"].extend(
+                section_block_lines(
+                    connection,
+                    document_id,
+                    content_hash,
+                    document_json,
+                    normalized_hash,
+                )
+            )
     finally:
         connection.close()
-
-    for document_id, content_hash, document_json in documents:
-        rebuilt = rebuild_document_json(
-            document_json,
-            texts_by_document.get(document_id, {}),
-            metadata_by_document.get(document_id, {}),
-        )
-        blocks["documents"].append(f"{document_id}\t{content_hash}\t{rebuilt}")
 
     return {name: "\n".join(lines) + "\n" for name, lines in blocks.items()}
 

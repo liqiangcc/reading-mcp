@@ -794,6 +794,9 @@ def measure_disk(state_dir: str) -> dict:
         "total_bytes": sqlite_bytes + cache_bytes + other_bytes,
         "top_objects": top_objects,
         "dbstat_unavailable": dbstat_unavailable,
+        # Every dbstat object's page bytes, so a caller can report one table's own footprint (the
+        # section-row tables of SEC-1 are additions and are measured that way).
+        "tables": {name: size for name, size in (dbstat or [])},
     }
 
 

@@ -6,10 +6,10 @@ use serde_json::json;
 
 use crate::application::get_text_units::{EffectiveTextUnitKind, TextUnitDirection};
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, LexicalSearchHit, OwnedStreamUnit, ParsedCacheKey,
-    ParsedDocumentCache, Parser, RawResourceCache, RetrievalOptions, RetrievedResource, Retriever,
-    SearchHit, SearchIndex, SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey,
-    TextUnitStreamSummary,
+    ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, LexicalSearchHit,
+    OwnedStreamUnit, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
+    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex, SectionRow,
+    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSegmentation, DocumentSource, NormalizedDocumentHash,
@@ -472,6 +472,84 @@ impl DocumentRepository for ObservedDocumentRepository {
         id: &DocumentId,
     ) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
         self.inner.body_order(id).await
+    }
+
+    // The section-row calls are forwarded, never left to their trait defaults: a default here would
+    // load the whole document inside the wrapper and silently disable the fast path (#207).
+    async fn document_header(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentHeader>, ApplicationError> {
+        self.inner.document_header(id).await
+    }
+
+    async fn section_by_id(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        self.inner.section_by_id(id, section_id).await
+    }
+
+    async fn section_by_key(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        self.inner.section_by_key(id, section_key).await
+    }
+
+    async fn sections_in_key_range(
+        &self,
+        id: &DocumentId,
+        from_key: i64,
+        to_key_inclusive: i64,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        self.inner
+            .sections_in_key_range(id, from_key, to_key_inclusive, limit)
+            .await
+    }
+
+    async fn section_children(
+        &self,
+        id: &DocumentId,
+        parent_key: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        self.inner.section_children(id, parent_key, limit).await
+    }
+
+    async fn section_ancestors(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        self.inner.section_ancestors(id, section_key).await
+    }
+
+    async fn body_order_window(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+        before: usize,
+        after: usize,
+    ) -> Result<Option<BodyOrderWindow>, ApplicationError> {
+        self.inner
+            .body_order_window(id, section_key, before, after)
+            .await
+    }
+
+    async fn body_order_at(
+        &self,
+        id: &DocumentId,
+        ord: usize,
+    ) -> Result<Option<i64>, ApplicationError> {
+        self.inner.body_order_at(id, ord).await
+    }
+
+    async fn body_order_len(&self, id: &DocumentId) -> Result<Option<usize>, ApplicationError> {
+        self.inner.body_order_len(id).await
     }
 }
 

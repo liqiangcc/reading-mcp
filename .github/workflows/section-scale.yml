@@ -1,0 +1,104 @@
+name: Section scale
+
+# The section tree as rows is only worth its bytes if it holds at scale, so this gate opens
+# synthetic EPUBs whose section count is the variable (N = 500, 2,000, 8,000, 20,000, in a
+# three-level nest and flat) and reports what one open costs: open seconds, state-directory bytes
+# and the number of rows in `document_header_v1`, `document_sections_v1` and
+# `document_body_order_rows_v1`. No read is measured here; the read gate is SEC-2.
+#
+# `workflow_dispatch` only fires for a workflow that already exists on the default branch, so a
+# `section-scale-*` push is how this gate runs on the branch that introduces it.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['section-scale-*']
+
+jobs:
+  scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the release binary
+        run: cargo build --release --locked --bin reading-mcp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generate the many-section EPUBs
+        run: |
+          python3 scripts/gen-sections-epub.py \
+            --out-dir "$RUNNER_TEMP/sections" \
+            --sections 500 2000 8000 20000 \
+            --layouts nested flat
+      - name: Open each EPUB and dump the section-row facts
+        run: |
+          set -uo pipefail
+          INPUTS="$RUNNER_TEMP/sections"
+          mkdir -p scale
+          args=(--binary target/release/reading-mcp --out-dir "$RUNNER_TEMP/scale-state")
+          for sections in 500 2000 8000 20000; do
+            for layout in nested flat; do
+              args+=(--documents "sections-$layout-$sections=$INPUTS/sections-$layout-$sections.epub")
+            done
+          done
+          python3 scripts/sqlite-facts.py "${args[@]}" 2>&1 | tee scale/facts.txt
+      - name: Section scale table
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          FIELDS = re.compile(r"(\w+)=(\S+)")
+          rows = []
+          if os.path.isfile("scale/facts.txt"):
+              with open("scale/facts.txt", encoding="utf-8") as handle:
+                  for line in handle:
+                      fields = dict(FIELDS.findall(line))
+                      if fields.get("input"):
+                          rows.append(fields)
+          lines = [
+              "| input | layout | sections | open s | peak RSS KiB | state bytes | header rows "
+              "| section rows | body order rows | section row bytes |",
+              "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+          for fields in rows:
+              label = fields["input"]
+              parts = label.split("-")
+              layout = parts[1] if len(parts) > 1 else "-"
+              sections = parts[-1]
+              lines.append(
+                  "| {label} | {layout} | {sections} | {open_s} | {rss} | {bytes} | {hr} | {sr} | "
+                  "{br} | {sb} |".format(
+                      label=label,
+                      layout=layout,
+                      sections=sections,
+                      open_s=fields.get("open_seconds", "-"),
+                      rss=fields.get("peak_rss_kib", "-"),
+                      bytes=fields.get("sqlite_file_bytes", "-"),
+                      hr=fields.get("document_header_v1_rows", "-"),
+                      sr=fields.get("document_sections_v1_rows", "-"),
+                      br=fields.get("document_body_order_rows_v1_rows", "-"),
+                      sb=fields.get("document_sections_v1_bytes", "-"),
+                  )
+              )
+          table = "\n".join(lines) + "\n"
+          with open("scale/table.md", "w", encoding="utf-8") as handle:
+              handle.write(table)
+          print(table)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(table)
+          PY
+      - name: Upload scale data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: section-scale
+          path: scale/

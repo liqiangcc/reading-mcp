@@ -28,9 +28,11 @@ use crate::application::get_text_units::{
 };
 use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, OpenResultStore, OwnedStreamUnit, SearchHitKind,
-    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
+    ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, OpenResultStore,
+    OwnedStreamUnit, SearchHitKind, SectionRow, SectionTextUnits, StoredStreamItem, TextUnitIndex,
+    TextUnitStreamKey, TextUnitStreamSummary,
 };
+use crate::application::section_rows;
 use crate::application::text_unit_stream::{
     ParagraphCoverageDesc, ParagraphDesc, SectionCoverageDesc, SectionStreamCounts, SentenceDesc,
     UnitRef, walk_section_stream,
@@ -552,7 +554,40 @@ impl SqliteDocumentRepository {
                     order_json TEXT,
                     error TEXT,
                     UNIQUE(document_id)
-                 );",
+                 );
+                 CREATE TABLE IF NOT EXISTS document_header_v1 (
+                    document_id TEXT NOT NULL UNIQUE,
+                    source TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    normalized_document_hash TEXT,
+                    section_count INTEGER NOT NULL,
+                    root_count INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS document_sections_v1 (
+                    document_id TEXT NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    section_id TEXT NOT NULL,
+                    parent_key INTEGER,
+                    level INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    location_json TEXT NOT NULL,
+                    subtree_end_key INTEGER NOT NULL,
+                    UNIQUE(document_id, section_key)
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_sections_v1_id
+                    ON document_sections_v1(document_id, section_id);
+                 CREATE INDEX IF NOT EXISTS idx_document_sections_v1_parent
+                    ON document_sections_v1(document_id, parent_key, section_key);
+                 CREATE TABLE IF NOT EXISTS document_body_order_rows_v1 (
+                    document_id TEXT NOT NULL,
+                    ord INTEGER NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    UNIQUE(document_id, ord)
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_body_order_rows_v1_key
+                    ON document_body_order_rows_v1(document_id, section_key);",
             )
             .map_err(repository_error)?;
         ensure_normalized_document_hash_column(&connection)?;
@@ -659,7 +694,13 @@ impl DocumentRepository for SqliteDocumentRepository {
                             .map_err(repository_error)?;
                     }
                 }
-                store_body_order(&transaction, &document.id, body_order)?;
+                store_body_order(&transaction, &document.id, &body_order)?;
+                store_section_rows(
+                    &transaction,
+                    &document,
+                    &normalized_document_hash,
+                    &body_order,
+                )?;
                 transaction.commit().map_err(repository_error)?;
                 Ok(())
             },
@@ -789,16 +830,244 @@ impl DocumentRepository for SqliteDocumentRepository {
         run_sqlite(
             &self.connection,
             ApplicationError::RepositoryFailed,
+            move |connection| stored_or_computed_body_order(connection, &id),
+        )
+        .await
+    }
+
+    /// One `document_header_v1` row. A document saved before that table existed has none, so its
+    /// header is built from the document itself, exactly as the trait default builds it.
+    async fn document_header(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentHeader>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
             move |connection| {
-                if let Some(stored) = load_body_order(connection, &id)? {
-                    return Ok(Some(stored));
+                if let Some(header) = load_document_header(connection, &id)? {
+                    return Ok(Some(header));
                 }
-                // A document saved before `document_body_order_v1` existed: compute the order from
-                // the full document. The read path never writes, so the next save stores it.
-                let Some((document, _)) = load_document_row(connection, &id, false)? else {
+                Ok(load_document_row(connection, &id, false)?
+                    .map(|(document, hash)| section_rows::header_of(&document, &hash)))
+            },
+        )
+        .await
+    }
+
+    /// One section row, by id: one unique-index row read.
+    async fn section_by_id(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        let id = id.clone();
+        let section_id = section_id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let row = load_section_row_by_id(connection, &id, &section_id)?;
+                if row.is_some() || document_has_section_rows(connection, &id)? {
+                    return Ok(row);
+                }
+                Ok(load_document_row(connection, &id, false)?
+                    .and_then(|(document, _)| section_rows::section_by_id(&document, &section_id)))
+            },
+        )
+        .await
+    }
+
+    /// One section row, by key: one unique-index row read.
+    async fn section_by_key(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let row = load_section_row_by_key(connection, &id, section_key)?;
+                if row.is_some() || document_has_section_rows(connection, &id)? {
+                    return Ok(row);
+                }
+                Ok(load_document_row(connection, &id, false)?
+                    .and_then(|(document, _)| section_rows::section_by_key(&document, section_key)))
+            },
+        )
+        .await
+    }
+
+    /// The rows of one key range: one range scan of the `(document_id, section_key)` index.
+    async fn sections_in_key_range(
+        &self,
+        id: &DocumentId,
+        from_key: i64,
+        to_key_inclusive: i64,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let rows =
+                    load_section_rows_in_range(connection, &id, from_key, to_key_inclusive, limit)?;
+                if !rows.is_empty() || document_has_section_rows(connection, &id)? {
+                    return Ok(rows);
+                }
+                Ok(load_document_row(connection, &id, false)?.map_or_else(
+                    Vec::new,
+                    |(document, _)| {
+                        section_rows::sections_in_key_range(
+                            &document,
+                            from_key,
+                            to_key_inclusive,
+                            limit,
+                        )
+                    },
+                ))
+            },
+        )
+        .await
+    }
+
+    /// The children of one section: one `(document_id, parent_key, section_key)` index range read.
+    async fn section_children(
+        &self,
+        id: &DocumentId,
+        parent_key: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let rows = load_section_children(connection, &id, parent_key, limit)?;
+                if !rows.is_empty() || document_has_section_rows(connection, &id)? {
+                    return Ok(rows);
+                }
+                Ok(load_document_row(connection, &id, false)?
+                    .map_or_else(Vec::new, |(document, _)| {
+                        section_rows::section_children(&document, parent_key, limit)
+                    }))
+            },
+        )
+        .await
+    }
+
+    /// The ancestors of one section: one row read per level.
+    async fn section_ancestors(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let rows = load_section_ancestors(connection, &id, section_key)?;
+                if !rows.is_empty() || document_has_section_rows(connection, &id)? {
+                    return Ok(rows);
+                }
+                Ok(load_document_row(connection, &id, false)?
+                    .map_or_else(Vec::new, |(document, _)| {
+                        section_rows::section_ancestors(&document, section_key)
+                    }))
+            },
+        )
+        .await
+    }
+
+    /// The body-order window around one section: the position, the length and the window rows, each
+    /// one `document_body_order_rows_v1` index read.
+    async fn body_order_window(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+        before: usize,
+        after: usize,
+    ) -> Result<Option<BodyOrderWindow>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                if let Some(window) =
+                    load_body_order_window(connection, &id, section_key, before, after)?
+                {
+                    return Ok(Some(window));
+                }
+                // Rows exist but the section is not among them: a document whose body order could
+                // not be computed reports that same error, and anything else is simply not in the
+                // body order.
+                if document_has_section_rows(connection, &id)? {
+                    return match stored_or_computed_body_order(connection, &id)? {
+                        Some(Err(error)) => Err(error),
+                        _ => Ok(None),
+                    };
+                }
+                body_order_window_from_document(connection, &id, section_key, before, after)
+            },
+        )
+        .await
+    }
+
+    /// The `section_key` at one body-order position.
+    async fn body_order_at(
+        &self,
+        id: &DocumentId,
+        ord: usize,
+    ) -> Result<Option<i64>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                if let Some(key) = load_body_order_at(connection, &id, ord)? {
+                    return Ok(Some(key));
+                }
+                if document_has_section_rows(connection, &id)? {
+                    return match stored_or_computed_body_order(connection, &id)? {
+                        Some(Err(error)) => Err(error),
+                        _ => Ok(None),
+                    };
+                }
+                let Some(order) = stored_or_computed_body_order(connection, &id)? else {
                     return Ok(None);
                 };
-                Ok(Some(crate::application::body_order_ids(&document)))
+                let order = order?;
+                Ok(load_document_row(connection, &id, false)?
+                    .and_then(|(document, _)| section_rows::body_order_at(&document, &order, ord)))
+            },
+        )
+        .await
+    }
+
+    /// The length of the stored body order.
+    async fn body_order_len(&self, id: &DocumentId) -> Result<Option<usize>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let len = load_body_order_len(connection, &id)?;
+                if len.is_some_and(|len| len > 0) {
+                    return Ok(len);
+                }
+                if document_has_section_rows(connection, &id)? {
+                    return match stored_or_computed_body_order(connection, &id)? {
+                        Some(Err(error)) => Err(error),
+                        _ => Ok(len),
+                    };
+                }
+                Ok(stored_or_computed_body_order(connection, &id)?
+                    .map(|order| order.map(|order| order.len())))
             },
         )
         .await
@@ -1117,11 +1386,11 @@ fn load_one_section_char_len(
 fn store_body_order(
     transaction: &rusqlite::Transaction<'_>,
     document_id: &DocumentId,
-    order: Result<Vec<SectionId>, ApplicationError>,
+    order: &Result<Vec<SectionId>, ApplicationError>,
 ) -> Result<(), ApplicationError> {
     let (order_json, error) = match order {
         Ok(section_ids) => (
-            Some(serde_json::to_string(&section_ids).map_err(|error| {
+            Some(serde_json::to_string(section_ids).map_err(|error| {
                 ApplicationError::RepositoryFailed(format!(
                     "body order of document {} cannot be encoded: {error}",
                     document_id.0
@@ -1129,7 +1398,7 @@ fn store_body_order(
             })?),
             None,
         ),
-        Err(ApplicationError::RepositoryFailed(message)) => (None, Some(message)),
+        Err(ApplicationError::RepositoryFailed(message)) => (None, Some(message.clone())),
         Err(other) => (None, Some(other.to_string())),
     };
     transaction
@@ -1183,6 +1452,508 @@ fn load_body_order(
         ))
     })?;
     Ok(Some(Ok(section_ids)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The section tree and the body order as rows (SEC-1).
+//
+// `document_sections_v1` keeps one row per section in depth-first document order, the numbering
+// `section_layout_v2.section_key` uses, with `subtree_end_key` closing its contiguous key range.
+// `document_body_order_rows_v1` keeps the body order as `(ord, section_key)` rows.
+// `document_header_v1` marks a document as having both, so a document stored before these tables
+// existed (no header row) falls back to the trait defaults, which read the document itself.
+// ---------------------------------------------------------------------------------------------
+
+/// Replaces the header, the section rows and the body-order rows of `document`. An error result
+/// writes no rows at all: the `document_body_order_v1` error row stays the source of truth for it.
+fn store_section_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    document: &Document,
+    normalized_document_hash: &NormalizedDocumentHash,
+    body_order: &Result<Vec<SectionId>, ApplicationError>,
+) -> Result<(), ApplicationError> {
+    for table in (
+        "document_header_v1",
+        "document_sections_v1",
+        "document_body_order_rows_v1",
+    ) {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE document_id = ?1"),
+                params![document.id.0],
+            )
+            .map_err(repository_error)?;
+    }
+
+    let rows = crate::application::section_rows::flatten_document(document);
+    let section_count = section_row_count(rows.len())?;
+    let root_count = section_row_count(document.root_sections.len())?;
+    transaction
+        .execute(
+            "INSERT INTO document_header_v1(
+                document_id,
+                source,
+                title,
+                media_type,
+                content_hash,
+                normalized_document_hash,
+                section_count,
+                root_count
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                document.id.0,
+                document.source.0,
+                document.title,
+                document.media_type.0,
+                document.content_hash.0,
+                normalized_document_hash.0,
+                section_count,
+                root_count,
+            ],
+        )
+        .map_err(repository_error)?;
+
+    {
+        let mut statement = transaction
+            .prepare_cached(
+                "INSERT INTO document_sections_v1(
+                    document_id,
+                    section_key,
+                    section_id,
+                    parent_key,
+                    level,
+                    title,
+                    location_json,
+                    subtree_end_key
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )
+            .map_err(repository_error)?;
+        for row in &rows {
+            let location_json =
+                serde_json::to_string(&StoredLocation::from_location(&row.location))
+                    .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+            statement
+                .execute(params![
+                    document.id.0,
+                    row.section_key,
+                    row.id.0,
+                    row.parent_key,
+                    i64::from(row.level),
+                    row.title,
+                    location_json,
+                    row.subtree_end_key,
+                ])
+                .map_err(repository_error)?;
+        }
+    }
+
+    let Ok(order) = body_order else {
+        return Ok(());
+    };
+    let keys_by_id: HashMap<SectionId, i64> = rows
+        .iter()
+        .map(|row| (row.id.clone(), row.section_key))
+        .collect();
+    let mut statement = transaction
+        .prepare_cached(
+            "INSERT INTO document_body_order_rows_v1(document_id, ord, section_key)
+             VALUES (?1, ?2, ?3)",
+        )
+        .map_err(repository_error)?;
+    for (ord, section_id) in order.iter().enumerate() {
+        let section_key = keys_by_id.get(section_id).ok_or_else(|| {
+            ApplicationError::RepositoryFailed(format!(
+                "body order of document {} names a section the tree does not hold",
+                document.id.0
+            ))
+        })?;
+        statement
+            .execute(params![document.id.0, section_row_count(ord)?, section_key,])
+            .map_err(repository_error)?;
+    }
+    Ok(())
+}
+
+/// `count` as the `INTEGER` the section-row tables store, or an error when it does not fit.
+fn section_row_count(count: usize) -> Result<i64, ApplicationError> {
+    i64::try_from(count).map_err(|_| {
+        ApplicationError::RepositoryFailed("document has too many sections for the store".into())
+    })
+}
+
+/// `limit` as a `LIMIT` value: clamped, so an unlimited request stays unlimited.
+fn section_row_limit(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+/// `value` as a `usize`, or an error when it does not fit.
+fn section_row_usize(value: i64, field: &str) -> Result<usize, ApplicationError> {
+    usize::try_from(value).map_err(|_| {
+        ApplicationError::RepositoryFailed(format!(
+            "stored {field} value {value} is outside the usize range"
+        ))
+    })
+}
+
+/// Whether `document_id` has a `document_header_v1` row, i.e. was saved with section rows.
+fn document_has_section_rows(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<bool, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM document_header_v1 WHERE document_id = ?1",
+            params![&document_id.0],
+            |_row| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(repository_error)
+}
+
+/// The columns every section-row read selects, in `StoredSectionRow::read` order.
+const SECTION_ROW_COLUMNS: &str =
+    "section_key, section_id, parent_key, level, title, location_json, subtree_end_key";
+
+/// One `document_sections_v1` row, with its location still as the stored JSON text.
+struct StoredSectionRow {
+    section_key: i64,
+    section_id: String,
+    parent_key: Option<i64>,
+    level: i64,
+    title: String,
+    location_json: String,
+    subtree_end_key: i64,
+}
+
+impl StoredSectionRow {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            section_key: row.get(0)?,
+            section_id: row.get(1)?,
+            parent_key: row.get(2)?,
+            level: row.get(3)?,
+            title: row.get(4)?,
+            location_json: row.get(5)?,
+            subtree_end_key: row.get(6)?,
+        })
+    }
+
+    fn into_section_row(self) -> Result<SectionRow, ApplicationError> {
+        let location = serde_json::from_str::<StoredLocation>(&self.location_json)
+            .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?
+            .into_location();
+        Ok(SectionRow {
+            section_key: self.section_key,
+            id: SectionId(self.section_id),
+            parent_key: self.parent_key,
+            level: u8::try_from(self.level).map_err(|_| {
+                ApplicationError::RepositoryFailed(format!(
+                    "stored section {} has level {} out of the u8 range",
+                    self.section_key, self.level
+                ))
+            })?,
+            title: self.title,
+            location,
+            subtree_end_key: self.subtree_end_key,
+        })
+    }
+}
+
+/// One `document_header_v1` row.
+fn load_document_header(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<DocumentHeader>, ApplicationError> {
+    let row = connection
+        .query_row(
+            "SELECT document_id, source, title, media_type, content_hash,
+                    normalized_document_hash, section_count, root_count
+               FROM document_header_v1 WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some((id, source, title, media_type, content_hash, hash, section_count, root_count)) = row
+    else {
+        return Ok(None);
+    };
+    Ok(Some(DocumentHeader {
+        id: DocumentId(id),
+        source: DocumentSource(source),
+        title,
+        media_type: MediaType(media_type),
+        content_hash: ContentHash(content_hash),
+        normalized_document_hash: hash.map(NormalizedDocumentHash),
+        section_count: section_row_usize(section_count, "section_count")?,
+        root_count: section_row_usize(root_count, "root_count")?,
+    }))
+}
+
+/// One `document_sections_v1` row, by section id.
+fn load_section_row_by_id(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+) -> Result<Option<SectionRow>, ApplicationError> {
+    let row = connection
+        .query_row(
+            &format!(
+                "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
+                  WHERE document_id = ?1 AND section_id = ?2"
+            ),
+            params![&document_id.0, &section_id.0],
+            StoredSectionRow::read,
+        )
+        .optional()
+        .map_err(repository_error)?;
+    row.map(StoredSectionRow::into_section_row).transpose()
+}
+
+/// One `document_sections_v1` row, by section key.
+fn load_section_row_by_key(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_key: i64,
+) -> Result<Option<SectionRow>, ApplicationError> {
+    let row = connection
+        .query_row(
+            &format!(
+                "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
+                  WHERE document_id = ?1 AND section_key = ?2"
+            ),
+            params![&document_id.0, section_key],
+            StoredSectionRow::read,
+        )
+        .optional()
+        .map_err(repository_error)?;
+    row.map(StoredSectionRow::into_section_row).transpose()
+}
+
+/// The rows whose keys are in `[from_key, to_key_inclusive]`, in ascending key order.
+fn load_section_rows_in_range(
+    connection: &Connection,
+    document_id: &DocumentId,
+    from_key: i64,
+    to_key_inclusive: i64,
+    limit: usize,
+) -> Result<Vec<SectionRow>, ApplicationError> {
+    let mut statement = connection
+        .prepare_cached(&format!(
+            "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
+              WHERE document_id = ?1 AND section_key BETWEEN ?2 AND ?3
+              ORDER BY section_key LIMIT ?4"
+        ))
+        .map_err(repository_error)?;
+    let rows = statement
+        .query_map(
+            params![
+                &document_id.0,
+                from_key,
+                to_key_inclusive,
+                section_row_limit(limit)
+            ],
+            StoredSectionRow::read,
+        )
+        .map_err(repository_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(repository_error)?;
+    rows.into_iter()
+        .map(StoredSectionRow::into_section_row)
+        .collect()
+}
+
+/// The children of `parent_key` (the roots when it is `None`), in ascending key order.
+fn load_section_children(
+    connection: &Connection,
+    document_id: &DocumentId,
+    parent_key: Option<i64>,
+    limit: usize,
+) -> Result<Vec<SectionRow>, ApplicationError> {
+    // Two statements, so the `(document_id, parent_key, section_key)` index answers both the root
+    // question and the child question without scanning the document's sections.
+    let mut statement = match parent_key {
+        None => connection
+            .prepare_cached(&format!(
+                "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
+                  WHERE document_id = ?1 AND parent_key IS NULL
+                  ORDER BY section_key LIMIT ?2"
+            ))
+            .map_err(repository_error)?,
+        Some(_) => connection
+            .prepare_cached(&format!(
+                "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
+                  WHERE document_id = ?1 AND parent_key = ?2
+                  ORDER BY section_key LIMIT ?3"
+            ))
+            .map_err(repository_error)?,
+    };
+    let rows = match parent_key {
+        None => statement.query_map(
+            params![&document_id.0, section_row_limit(limit)],
+            StoredSectionRow::read,
+        ),
+        Some(parent_key) => statement.query_map(
+            params![&document_id.0, parent_key, section_row_limit(limit)],
+            StoredSectionRow::read,
+        ),
+    }
+    .map_err(repository_error)?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(repository_error)?;
+    rows.into_iter()
+        .map(StoredSectionRow::into_section_row)
+        .collect()
+}
+
+/// The ancestors of `section_key`, root first, one indexed row read per level.
+fn load_section_ancestors(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_key: i64,
+) -> Result<Vec<SectionRow>, ApplicationError> {
+    let mut ancestors = Vec::new();
+    let mut current = load_section_row_by_key(connection, document_id, section_key)?
+        .and_then(|row| row.parent_key);
+    while let Some(key) = current {
+        let Some(row) = load_section_row_by_key(connection, document_id, key)? else {
+            break;
+        };
+        current = row.parent_key;
+        ancestors.push(row);
+    }
+    ancestors.reverse();
+    Ok(ancestors)
+}
+
+/// The body-order window around `section_key`, or `None` when the section is not in the body order.
+fn load_body_order_window(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_key: i64,
+    before: usize,
+    after: usize,
+) -> Result<Option<BodyOrderWindow>, ApplicationError> {
+    let ord = connection
+        .query_row(
+            "SELECT ord FROM document_body_order_rows_v1 WHERE document_id = ?1 AND section_key = ?2",
+            params![&document_id.0, section_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    let Some(ord) = ord else {
+        return Ok(None);
+    };
+    let ord = section_row_usize(ord, "body order position")?;
+    let Some(len) = load_body_order_len(connection, document_id)? else {
+        return Ok(None);
+    };
+    let start = ord.saturating_sub(before);
+    let end = ord.saturating_add(after).min(len.saturating_sub(1));
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT ord, section_key FROM document_body_order_rows_v1
+              WHERE document_id = ?1 AND ord BETWEEN ?2 AND ?3
+              ORDER BY ord",
+        )
+        .map_err(repository_error)?;
+    let window = statement
+        .query_map(
+            params![
+                &document_id.0,
+                section_row_count(start)?,
+                section_row_count(end)?
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(repository_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(repository_error)?
+        .into_iter()
+        .map(|(ord, key)| Ok((section_row_usize(ord, "body order position")?, key)))
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
+    Ok(Some(BodyOrderWindow { ord, len, window }))
+}
+
+/// The `section_key` at body-order position `ord`.
+fn load_body_order_at(
+    connection: &Connection,
+    document_id: &DocumentId,
+    ord: usize,
+) -> Result<Option<i64>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT section_key FROM document_body_order_rows_v1 WHERE document_id = ?1 AND ord = ?2",
+            params![&document_id.0, section_row_count(ord)?],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(repository_error)
+}
+
+/// The number of rows in the document's body order.
+fn load_body_order_len(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<usize>, ApplicationError> {
+    let len = connection
+        .query_row(
+            "SELECT COUNT(*) FROM document_body_order_rows_v1 WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(repository_error)?;
+    section_row_usize(len, "body order length").map(Some)
+}
+
+/// The stored body order of `document_id`, or the order computed from the document when its
+/// `document_body_order_v1` row does not exist. `Ok(None)` when the document is unknown.
+fn stored_or_computed_body_order(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
+    if let Some(stored) = load_body_order(connection, document_id)? {
+        return Ok(Some(stored));
+    }
+    // A document saved before `document_body_order_v1` existed: compute the order from the full
+    // document. The read path never writes, so the next save stores it.
+    let Some((document, _)) = load_document_row(connection, document_id, false)? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::application::body_order_ids(&document)))
+}
+
+/// The body-order window around `section_key` for a document without body-order rows: the same
+/// computation the trait default performs.
+fn body_order_window_from_document(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_key: i64,
+    before: usize,
+    after: usize,
+) -> Result<Option<BodyOrderWindow>, ApplicationError> {
+    let Some(order) = stored_or_computed_body_order(connection, document_id)? else {
+        return Ok(None);
+    };
+    let order = order?;
+    Ok(
+        load_document_row(connection, document_id, false)?.and_then(|(document, _)| {
+            section_rows::body_order_window(&document, &order, section_key, before, after)
+        }),
+    )
 }
 
 /// The `content_store` value of a `document_json` row that keeps no section text inline: every

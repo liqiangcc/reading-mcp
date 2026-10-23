@@ -848,10 +848,15 @@ async fn the_section_row_queries_use_indexes_and_never_scan_the_table() {
     ];
 
     for (label, sql) in queries {
-        let plan: Vec<String> = connection
+        let mut statement = connection
             .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-            .expect("query should prepare")
-            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query should prepare");
+        // The plan does not depend on the bound values, so every parameter is NULL.
+        let params = vec![rusqlite::types::Value::Null; statement.parameter_count()];
+        let plan: Vec<String> = statement
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                row.get::<_, String>(3)
+            })
             .expect("plan should run")
             .collect::<Result<Vec<_>, _>>()
             .expect("plan rows should decode");

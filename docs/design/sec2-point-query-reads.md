@@ -11,6 +11,19 @@ Reference points: `src/application/ports.rs` holds the nine SEC-1 calls
 `section_ancestors`, `body_order_window`, `body_order_at`, `body_order_len`) and
 `src/application/section_rows.rs` is the flattening the trait defaults and the SQLite fallback share.
 
+## One call beyond the nine
+
+SEC-2 adds one point query to `DocumentRepository`: `body_order_position(id, section_key)`. The v2
+`read` walk needs the body-order position of its anchor section, and the only SEC-1 call that
+answers that direction is `body_order_window`, which also returns the length of the whole order — a
+`COUNT(*)` over every `document_body_order_rows_v1` row of the document. The section-scale read gate
+measured exactly that: `v2 read` read 19.6x more bytes per call at N = 20,000 than at N = 500. The
+new call is the same `(document_id, section_key)` unique-index row read without the count; its
+default implementation is `body_order_window(…, 0, 0).map(|window| window.ord)`, so a store that
+does not implement it answers identically. `ObservedDocumentRepository` forwards it like the other
+nine. No table, no index and no store version changes: `document_body_order_rows_v1` already has
+both unique indexes these lookups need.
+
 ## The view layer
 
 `src/application/section_view.rs` adds:

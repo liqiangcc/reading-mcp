@@ -445,15 +445,17 @@ impl<'a> Walk<'a> {
     }
 
     /// The body-order position of one section id, or `None` when it is not in the body order.
+    ///
+    /// `body_order_position` is the point query for this direction: `body_order_window` would also
+    /// count every order row, which a per-call read must not pay.
     async fn ord_of(&mut self, section_id: &SectionId) -> Result<Option<usize>, ReadingError> {
         let Some(section_key) = self.index.section_key(self.document_id, section_id).await? else {
             return Ok(None);
         };
         Ok(self
             .repository
-            .body_order_window(self.document_id, section_key, 0, 0)
-            .await?
-            .map(|window| window.ord))
+            .body_order_position(self.document_id, section_key)
+            .await?)
     }
 
     fn stream_key<'s>(&'s self, section_id: &'s SectionId) -> TextUnitStreamKey<'s> {

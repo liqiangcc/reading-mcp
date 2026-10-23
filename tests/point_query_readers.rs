@@ -1755,6 +1755,11 @@ async fn every_query_a_migrated_reader_issues_uses_an_index() {
                FROM document_sections_v1 WHERE document_id = ?1 AND section_key = ?2",
         ),
         (
+            "body_order_position",
+            "SELECT ord FROM document_body_order_rows_v1
+              WHERE document_id = ?1 AND section_key = ?2",
+        ),
+        (
             "body_order_window",
             "SELECT ord, section_key FROM document_body_order_rows_v1
               WHERE document_id = ?1 AND section_key = ?2",

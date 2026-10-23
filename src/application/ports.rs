@@ -507,6 +507,24 @@ pub trait DocumentRepository: Send + Sync {
         }))
     }
 
+    /// The body-order position of one section, or `Ok(None)` when the document has no stored body
+    /// order or the section is not in it. A document whose body order could not be computed reports
+    /// the same error `body_order` reports.
+    ///
+    /// This is exactly `body_order_window(id, section_key, 0, 0).map(|window| window.ord)` without
+    /// the length of the whole order: a reader that only needs the position must not pay for a
+    /// `COUNT(*)` over every order row. The default asks `body_order_window`.
+    async fn body_order_position(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<usize>, ApplicationError> {
+        Ok(self
+            .body_order_window(id, section_key, 0, 0)
+            .await?
+            .map(|window| window.ord))
+    }
+
     /// The `section_key` at body-order position `ord`, or `Ok(None)` when the document has no
     /// stored body order or `ord` is past its end. The default loads the whole document.
     async fn body_order_at(

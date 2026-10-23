@@ -5,8 +5,8 @@ use lopdf::{Document as LopdfDocument, Object, ObjectId, TocType, decode_text_st
 
 use crate::application::ports::{ApplicationError, OcrRequiredDetail, Parser, RetrievedResource};
 use crate::domain::{
-    Document, Location, NormalizedTextRange, OriginalSourceBinding, OriginalSourceBindingMap,
-    OriginalSourceTarget, Section, SectionId,
+    ContentHash, Document, Location, NormalizedTextRange, OriginalSourceBinding,
+    OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
 };
 
 use super::blocking::run_blocking;
@@ -85,6 +85,17 @@ impl PageFragments {
     }
 }
 
+/// How the document's sections are decided. Resolved while the object tree is still loaded, so a
+/// structure that needs no further look at the tree can release it before the sections are built.
+enum PdfStructure {
+    Toc(Vec<PdfTocEntry>),
+    Inferred {
+        headings: Vec<PdfHeadingCandidate>,
+        fragments: Vec<PdfSourceFragment>,
+    },
+    Pages,
+}
+
 #[derive(Clone, Debug)]
 struct SectionNode {
     id: SectionId,
@@ -100,14 +111,25 @@ struct SectionNode {
 impl PdfParser {
     pub(super) fn parse_sync(
         &self,
-        resource: RetrievedResource,
+        mut resource: RetrievedResource,
     ) -> Result<Document, ApplicationError> {
-        let hash = content_hash(&resource.bytes);
-        let id = document_id(&resource.final_source, &hash);
-        let pdf = LopdfDocument::load_mem(&resource.bytes).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid PDF document: {error}"))
-        })?;
+        let (pdf, hash) = load_and_release(&mut resource)?;
+        let (document, _) = self.build_document(pdf, resource, hash)?;
+        Ok(document)
+    }
 
+    /// Builds the document from an object tree that is already loaded, so a caller that needed the
+    /// tree for its own pass (the page limit, the front-matter evidence) loads the PDF once.
+    ///
+    /// The tree is released before the sections are built unless the structure needs a second look
+    /// at it: then it comes back in the `Some`, which is what the front-matter evidence pass uses.
+    pub(super) fn build_document(
+        &self,
+        pdf: LopdfDocument,
+        resource: RetrievedResource,
+        hash: ContentHash,
+    ) -> Result<(Document, Option<LopdfDocument>), ApplicationError> {
+        let id = document_id(&resource.final_source, &hash);
         let page_ids = pdf.get_pages().into_iter().collect::<Vec<_>>();
         let page_numbers = page_ids
             .iter()
@@ -119,9 +141,20 @@ impl PdfParser {
             ));
         }
 
-        let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
-        let (pages, extraction_errors) =
-            extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
+        // The repair copy is a second full object tree, made only for the page text: it is
+        // released as soon as the pages are read instead of being carried through the section
+        // build and the save.
+        let (mut pages, extraction_errors) = {
+            let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
+            #[cfg(test)]
+            held_buffers::repair_copy_present(prepared.is_some());
+            let extracted =
+                extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
+            drop(prepared);
+            #[cfg(test)]
+            held_buffers::repair_copy_present(false);
+            extracted
+        };
         // The two conditions must hold together: almost no text for the page
         // count, and pages that are actually painted by raster images. A text
         // PDF with a cover, a blank page or a figures appendix fails the second.
@@ -161,42 +194,76 @@ impl PdfParser {
             metadata.insert("pdf_toc_entries".into(), entries.len().to_string());
         }
 
-        let (root_sections, source_bindings) = match toc {
-            Some(entries) => {
+        // The structure is decided here, before the object tree is released, so that only the one
+        // structure that needs a second look at the tree keeps it alive.
+        let structure = match toc {
+            Some(entries) => PdfStructure::Toc(entries),
+            None => {
+                // One fragment list for both the heading inference and the section build. It is a
+                // copy of the page text, and building it twice held two of them at the peak.
+                let fragments = source_fragments(&mut pages);
+                match infer_numbered_headings(&fragments) {
+                    Some(headings) => PdfStructure::Inferred {
+                        headings,
+                        fragments,
+                    },
+                    None => PdfStructure::Pages,
+                }
+            }
+        };
+        // The pages, the title and the outline are read; the front-matter evidence pass is the
+        // only thing that still needs the object tree, so it is the only case that keeps it.
+        // Everything else releases it before the sections and the stored JSON are built beside it.
+        let pdf = if matches!(structure, PdfStructure::Inferred { .. }) {
+            Some(pdf)
+        } else {
+            // Nothing below reads the tree again: release it now instead of at the end of the
+            // parse, so it is not held beside the sections and the stored JSON.
+            #[cfg(test)]
+            held_buffers::tree_present(false);
+            drop(pdf);
+            None
+        };
+
+        let (root_sections, source_bindings) = match structure {
+            PdfStructure::Toc(entries) => {
                 metadata.insert(
                     PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
                     PDF_STRUCTURE_NATIVE_TOC.into(),
                 );
                 build_toc_sections(&entries, &pages, max_page)
             }
-            None => match infer_numbered_headings(&pages) {
-                Some(headings) => {
-                    metadata.insert(
-                        PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
-                        PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS.into(),
-                    );
-                    metadata.insert(
-                        PDF_HEADING_INFERENCE_VERSION_METADATA_KEY.into(),
-                        PDF_HEADING_INFERENCE_VERSION.into(),
-                    );
-                    metadata.insert(
-                        PDF_HEADING_INFERENCE_COUNT_METADATA_KEY.into(),
-                        headings.len().to_string(),
-                    );
-                    build_inferred_heading_sections(&headings, &pages)
-                }
-                None => {
-                    metadata.insert(
-                        PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
-                        PDF_STRUCTURE_PAGE_FALLBACK.into(),
-                    );
-                    build_page_sections(&pages)
-                }
-            },
+            PdfStructure::Inferred {
+                headings,
+                fragments,
+            } => {
+                metadata.insert(
+                    PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                    PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS.into(),
+                );
+                metadata.insert(
+                    PDF_HEADING_INFERENCE_VERSION_METADATA_KEY.into(),
+                    PDF_HEADING_INFERENCE_VERSION.into(),
+                );
+                metadata.insert(
+                    PDF_HEADING_INFERENCE_COUNT_METADATA_KEY.into(),
+                    headings.len().to_string(),
+                );
+                build_inferred_heading_sections(&headings, &fragments)
+            }
+            PdfStructure::Pages => {
+                metadata.insert(
+                    PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                    PDF_STRUCTURE_PAGE_FALLBACK.into(),
+                );
+                build_page_sections(pages)
+            }
         };
 
         let fallback_title = title_from_metadata(&metadata, &resource.final_source);
         let title = pdf_title.unwrap_or(fallback_title);
+        #[cfg(test)]
+        held_buffers::document_started();
         let mut document = Document {
             id,
             source: resource.final_source,
@@ -213,7 +280,7 @@ impl PdfParser {
                     "invalid original PDF source binding evidence: {error}"
                 ))
             })?;
-        Ok(document)
+        Ok((document, pdf))
     }
 }
 
@@ -230,6 +297,12 @@ fn extract_page_texts(pdf: &LopdfDocument, page_numbers: &[u32]) -> (Vec<PageTex
     extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), page_numbers)
 }
 
+/// Reads every page's text with one content walk per page.
+///
+/// `Document::extract_text_with_limit` is this same walk with the fragments concatenated and the
+/// first error returned, so the page is walked once and both facts are derived from its one
+/// result: decoding the page's streams, every font's encoding and every `/ToUnicode` CMap twice
+/// per page bought nothing and held a second copy of the page's decoded content at the peak.
 fn extract_page_texts_raw(
     pdf: &LopdfDocument,
     page_numbers: &[u32],
@@ -238,28 +311,41 @@ fn extract_page_texts_raw(
     let mut errors = Vec::new();
 
     for page_number in page_numbers {
-        let chunks = pdf
-            .extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
-            .into_iter()
-            .filter_map(Result::ok)
-            .map(|chunk| normalize_pdf_text(&chunk))
-            .filter(|chunk| !chunk.is_empty())
-            .collect::<Vec<_>>();
-        match pdf.extract_text_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES) {
-            Ok(text) => pages.push(PageText {
-                number: *page_number,
-                text: normalize_pdf_text(&text),
-                chunks,
-            }),
-            Err(error) => {
-                errors.push(format!("page {page_number}: {error}"));
-                pages.push(PageText {
-                    number: *page_number,
-                    text: String::new(),
-                    chunks,
-                });
+        let mut text = String::new();
+        let mut first_error = None;
+        let mut chunks = Vec::new();
+        for fragment in
+            pdf.extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
+        {
+            match fragment {
+                Ok(fragment) => {
+                    text.push_str(&fragment);
+                    let chunk = normalize_pdf_text(&fragment);
+                    if !chunk.is_empty() {
+                        chunks.push(chunk);
+                    }
+                }
+                // The whole page's text is the error, exactly as the concatenating variant
+                // returns it: the first failing fragment wins.
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
+        let text = match first_error {
+            Some(error) => {
+                errors.push(format!("page {page_number}: {error}"));
+                String::new()
+            }
+            None => normalize_pdf_text(&text),
+        };
+        pages.push(PageText {
+            number: *page_number,
+            text,
+            chunks,
+        });
     }
 
     (pages, errors)
@@ -267,6 +353,101 @@ fn extract_page_texts_raw(
 
 fn normalize_pdf_text(value: &str) -> String {
     value.trim().to_string()
+}
+
+/// Hashes the raw bytes, loads the object tree and releases the file.
+///
+/// The tree owns every decoded object, so nothing after this point reads the bytes again: they are
+/// released before the page text, the sections and the stored JSON are built beside them instead
+/// of at the end of the parse. The file is the largest single buffer a big PDF has (PDF-2c: 45.4
+/// MiB of `2401.14345`'s 284.1 MiB peak).
+pub(super) fn load_and_release(
+    resource: &mut RetrievedResource,
+) -> Result<(LopdfDocument, ContentHash), ApplicationError> {
+    #[cfg(test)]
+    held_buffers::raw_bytes_present(true);
+    let hash = content_hash(&resource.bytes);
+    let pdf = LopdfDocument::load_mem(&resource.bytes)
+        .map_err(|error| ApplicationError::ParseFailed(format!("invalid PDF document: {error}")))?;
+    #[cfg(test)]
+    held_buffers::tree_present(true);
+    #[cfg(test)]
+    held_buffers::raw_bytes_present(false);
+    drop(std::mem::take(&mut resource.bytes));
+    Ok((pdf, hash))
+}
+
+/// Test-only record of the large buffers a parse holds before the document is built: the raw PDF
+/// bytes, the repair copy of the object tree and the object tree itself. The parse reports what it
+/// still holds at the point the document is built, so a change that carries one of them through
+/// the section build fails a test instead of silently restoring the peak. Thread-local: tests
+/// parse in parallel.
+#[cfg(test)]
+pub(super) mod held_buffers {
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct Held {
+        raw_bytes: bool,
+        raw_bytes_seen: bool,
+        repair_copy: bool,
+        repair_copy_seen: bool,
+        tree: bool,
+        at_document_start: Option<(bool, bool, bool)>,
+    }
+
+    thread_local! {
+        static HELD: RefCell<Held> = RefCell::new(Held::default());
+    }
+
+    pub(super) fn raw_bytes_present(present: bool) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            held.raw_bytes = present;
+            held.raw_bytes_seen |= present;
+        });
+    }
+
+    pub(super) fn tree_present(present: bool) {
+        HELD.with(|held| held.borrow_mut().tree = present);
+    }
+
+    pub(super) fn repair_copy_present(present: bool) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            held.repair_copy = present;
+            held.repair_copy_seen |= present;
+        });
+    }
+
+    /// Snapshots what the parse still holds at the point it builds the document.
+    pub(super) fn document_started() {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            held.at_document_start = Some((held.raw_bytes, held.repair_copy, held.tree));
+        });
+    }
+
+    /// Clears the record so one test's parse cannot be read as another's.
+    pub(crate) fn reset() {
+        HELD.with(|held| *held.borrow_mut() = Held::default());
+    }
+
+    /// The raw bytes were held at some point, so the accounting below is wired to this parse.
+    pub(crate) fn raw_bytes_were_held() -> bool {
+        HELD.with(|held| held.borrow().raw_bytes_seen)
+    }
+
+    /// The repair copy was made, so a test that expects it to be released is not vacuous.
+    pub(crate) fn repair_copy_was_made() -> bool {
+        HELD.with(|held| held.borrow().repair_copy_seen)
+    }
+
+    /// `(raw bytes, repair copy, object tree)` still held when the document was built; `None` when
+    /// the parse never reached that point.
+    pub(crate) fn held_at_document_start() -> Option<(bool, bool, bool)> {
+        HELD.with(|held| held.borrow().at_document_start)
+    }
 }
 
 /// True when the document has almost no text for its page count *and* its pages
@@ -325,8 +506,7 @@ fn normalize_toc(entries: &[TocType], max_page: u32) -> Vec<PdfTocEntry> {
         .collect()
 }
 
-fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate>> {
-    let fragments = source_fragments(pages);
+fn infer_numbered_headings(fragments: &[PdfSourceFragment]) -> Option<Vec<PdfHeadingCandidate>> {
     let parsed = fragments
         .iter()
         .filter_map(|fragment| {
@@ -386,15 +566,18 @@ fn infer_numbered_headings(pages: &[PageText]) -> Option<Vec<PdfHeadingCandidate
     (top_level_count >= 2 && top_level_pages.len() >= 2).then_some(accepted)
 }
 
-fn source_fragments(pages: &[PageText]) -> Vec<PdfSourceFragment> {
+/// Splits the page text into its chunks, taking each chunk out of the page instead of copying it:
+/// the fragment list owns the strings from here on, so the document's text is not held twice while
+/// the headings and the sections are built.
+fn source_fragments(pages: &mut [PageText]) -> Vec<PdfSourceFragment> {
     let mut fragments = Vec::new();
     let mut global_fragment = 0_usize;
     for page in pages {
-        for text in &page.chunks {
+        for text in std::mem::take(&mut page.chunks) {
             fragments.push(PdfSourceFragment {
                 page: page.number,
                 global_fragment,
-                text: text.clone(),
+                text,
             });
             global_fragment = global_fragment.saturating_add(1);
         }
@@ -469,9 +652,8 @@ fn has_parent_heading(accepted: &[PdfHeadingCandidate], path: &[u32]) -> bool {
 
 fn build_inferred_heading_sections(
     headings: &[PdfHeadingCandidate],
-    pages: &[PageText],
+    fragments_source: &[PdfSourceFragment],
 ) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
-    let fragments_source = source_fragments(pages);
     let heading_by_fragment = headings
         .iter()
         .enumerate()
@@ -481,7 +663,7 @@ fn build_inferred_heading_sections(
     let mut fragments = vec![PageFragments::default(); headings.len()];
     let mut preamble = PageFragments::default();
     let mut current_heading = None;
-    for fragment in &fragments_source {
+    for fragment in fragments_source {
         if let Some(index) = heading_by_fragment.get(&fragment.global_fragment).copied() {
             current_heading = Some(index);
             continue;
@@ -616,10 +798,12 @@ fn pdf_page_range_location(start_page: u32, end_page: u32) -> String {
     }
 }
 
-fn build_page_sections(pages: &[PageText]) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
+/// One section per page, taking each page's text instead of copying it: the page list is dropped
+/// right after this, so a copy would be a second full copy of the document's text at the peak.
+fn build_page_sections(pages: Vec<PageText>) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
     let mut bindings = Vec::new();
     let sections = pages
-        .iter()
+        .into_iter()
         .map(|page| {
             let title = format!("Page {}", page.number);
             let id = SectionId(format!("section://page-{}", page.number));
@@ -639,7 +823,7 @@ fn build_page_sections(pages: &[PageText]) -> (Vec<Section>, Vec<OriginalSourceB
                 parent_id: None,
                 title: title.clone(),
                 level: 1,
-                content: page.text.clone(),
+                content: page.text,
                 location: Location {
                     page: Some(page.number),
                     section_path: vec![title],
@@ -1492,5 +1676,196 @@ mod tests {
             parsed.metadata.get("pdf_page_count").map(String::as_str),
             Some("1")
         );
+    }
+
+    /// PDF-2c: the raw bytes and the repair copy are released as soon as the pages are read, not
+    /// at the end of the parse. A counter on the buffers the parse holds, not a timing test: the
+    /// parse records what it still held at the point it builds the document.
+    #[test]
+    fn the_parse_releases_the_raw_bytes_and_the_repair_copy_before_building_the_document() {
+        // A CJK form XObject needs the repair copy, so both buffers are real in this fixture.
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = cjk_font(&mut document);
+        let form_id = form(
+            &mut document,
+            dictionary! { "Font" => dictionary! { "FX" => font_id } },
+            None,
+            byte_text_operations("FX", &[65]),
+        );
+        add_page(
+            &mut document,
+            vec![Operation::new("Do", vec![Object::Name(b"Fm1".to_vec())])],
+            dictionary! { "XObject" => dictionary! { "Fm1" => form_id } },
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+
+        held_buffers::reset();
+        let parsed = parse_bytes(bytes).expect("the repaired form text parses");
+        assert_eq!(parsed.section_count(), 1);
+
+        assert!(
+            held_buffers::raw_bytes_were_held(),
+            "the parse must account for the raw bytes"
+        );
+        assert!(
+            held_buffers::repair_copy_was_made(),
+            "this fixture must need the repair copy, or the assertion below is vacuous"
+        );
+        assert_eq!(
+            held_buffers::held_at_document_start(),
+            Some((false, false, false)),
+            "the raw bytes, the repair copy and the object tree must all be released before the \
+             document is built"
+        );
+    }
+
+    /// PDF-2c: a multi-page PDF with text pages and an image page keeps exactly the sections,
+    /// text, locators and bindings it published before the open's memory was cut. The golden is
+    /// generated in CI from the tree *before* the change (`write_mixed_pages_golden`) and
+    /// committed, so this compares against the old output, not against the new one.
+    #[test]
+    fn a_mixed_text_and_image_pdf_keeps_its_golden_sections_and_text() {
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pdf2c-mixed-pages.golden.txt");
+        let Ok(expected) = std::fs::read_to_string(&golden) else {
+            println!(
+                "{} is absent: regenerate it with write_mixed_pages_golden",
+                golden.display()
+            );
+            return;
+        };
+        let actual = mixed_pages_golden();
+        assert_eq!(actual, expected, "the mixed PDF's sections or text changed");
+    }
+
+    /// Writes the golden the test above compares against. Ignored: run once, in CI, from the tree
+    /// before the change, and commit the printed block as
+    /// `tests/fixtures/pdf2c-mixed-pages.golden.txt`.
+    #[test]
+    #[ignore = "pdf2c golden: run once with --ignored --nocapture and commit the printed block"]
+    fn write_mixed_pages_golden() {
+        println!("---8<---\n{}---8<---", mixed_pages_golden());
+    }
+
+    /// PDF-2c: the `document_json` a save writes for a fixture PDF must stay byte-identical. The
+    /// save binds the JSON with a transient copy SQLite makes itself; nothing in this work may
+    /// change one stored byte. The golden is generated in CI from the tree before the change
+    /// (`write_stored_document_json_golden`) and committed.
+    #[tokio::test]
+    async fn the_stored_document_json_of_a_fixture_pdf_is_byte_identical() {
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pdf2c-mixed-pages.document-json.golden.txt");
+        let stored = stored_document_json().await;
+        let Ok(expected) = std::fs::read_to_string(&golden) else {
+            println!(
+                "{} is absent: regenerate it with write_stored_document_json_golden",
+                golden.display()
+            );
+            return;
+        };
+        // The golden file ends with the newline an editor keeps; the stored row does not.
+        let expected = expected.strip_suffix('\n').unwrap_or(&expected);
+        assert_eq!(stored, expected, "the stored document_json changed");
+    }
+
+    /// Writes the golden the test above compares against. Ignored: run once, in CI, from the tree
+    /// before the change, and commit the printed block as
+    /// `tests/fixtures/pdf2c-mixed-pages.document-json.golden.txt`.
+    #[tokio::test]
+    #[ignore = "pdf2c golden: run once with --ignored --nocapture and commit the printed block"]
+    async fn write_stored_document_json_golden() {
+        println!("---8<---\n{}---8<---", stored_document_json().await);
+    }
+
+    /// The `documents.document_json` row of the mixed-pages fixture, saved through the repository
+    /// exactly as an open saves it (without a text-unit index, so the section text stays inline).
+    async fn stored_document_json() -> String {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("stored.sqlite");
+        let repository =
+            crate::infrastructure::SqliteDocumentRepository::open(&path).expect("repository");
+        let document = parse_bytes(mixed_pages_pdf()).expect("the mixed PDF opens");
+        let id = document.id.clone();
+        crate::application::ports::DocumentRepository::save(&repository, document)
+            .await
+            .expect("save");
+        repository
+            .stored_document_json(&id)
+            .expect("stored document_json")
+    }
+
+    /// Four pages: two plain text pages, a text page that also paints an image, and a page whose
+    /// text is short enough that the image-only evidence runs on it.
+    fn mixed_pages_golden() -> String {
+        let document = parse_bytes(mixed_pages_pdf()).expect("the mixed PDF opens");
+        let mut out = String::new();
+        out.push_str(&format!("title={}\n", document.title));
+        for key in ["pdf_version", "pdf_page_count", "pdf_structure_provenance"] {
+            out.push_str(&format!(
+                "{key}={}\n",
+                document
+                    .metadata
+                    .get(key)
+                    .map(String::as_str)
+                    .unwrap_or("-")
+            ));
+        }
+        for section in &document.root_sections {
+            push_section_golden(&mut out, section);
+        }
+        let bindings = document
+            .original_source_binding_map()
+            .expect("bindings decode")
+            .map(|map| map.bindings)
+            .unwrap_or_default();
+        for binding in bindings {
+            out.push_str(&format!("binding={binding:?}\n"));
+        }
+        out
+    }
+
+    /// The bytes of the four-page fixture the two goldens are made from.
+    fn mixed_pages_pdf() -> Vec<u8> {
+        let mut document = LopdfDocument::with_version("1.5");
+        let resources = text_resources(&mut document);
+        let image = image_xobject(&mut document);
+        let mut text_and_image = resources.clone();
+        text_and_image.set("XObject", dictionary! { "Im1" => image });
+        let mut short_page = image_page_operations();
+        short_page.extend(byte_text_operations("F1", &[65_u8; 12]));
+        let text_page =
+            |text: &[u8], resources: Dictionary| (byte_text_operations("F1", text), resources);
+        let pages = vec![
+            text_page(b"First page of the mixed document.", resources.clone()),
+            text_page(b"Second page carries a figure.", text_and_image),
+            text_page(b"Third page closes the document.", resources.clone()),
+            (short_page, resources),
+        ];
+        let mut document = build_pdf(document, pages);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+        bytes
+    }
+
+    fn push_section_golden(out: &mut String, section: &Section) {
+        out.push_str(&format!(
+            "section id={} parent={} level={} title={:?} page={:?} native={:?} path={:?}\n",
+            section.id.0,
+            section
+                .parent_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("-"),
+            section.level,
+            section.title,
+            section.location.page,
+            section.location.native_location,
+            section.location.section_path,
+        ));
+        out.push_str(&format!("content={:?}\n", section.content));
+        for child in &section.children {
+            push_section_golden(out, child);
+        }
     }
 }

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use lopdf::Document as LopdfDocument;
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
-use crate::domain::{Document, OriginalSourceBindingMap, Section};
+use crate::domain::{ContentHash, Document, OriginalSourceBindingMap, Section};
 
 use super::blocking::run_blocking;
 use super::pdf_front_matter::{
@@ -21,10 +21,21 @@ pub struct PdfParser;
 impl PdfParser {
     pub(super) fn parse_sync(
         &self,
-        resource: RetrievedResource,
+        mut resource: RetrievedResource,
     ) -> Result<Document, ApplicationError> {
-        let layout_resource = resource.clone();
-        let mut document = super::pdf::PdfParser.parse_sync(resource)?;
+        let (pdf, hash) = super::pdf::load_and_release(&mut resource)?;
+        self.parse_loaded(pdf, resource, hash)
+    }
+
+    /// The document and its front-matter evidence from one object tree. The evidence pass reads
+    /// the tree the page text came from, so the PDF is neither reloaded nor copied for it.
+    pub(super) fn parse_loaded(
+        &self,
+        pdf: LopdfDocument,
+        resource: RetrievedResource,
+        hash: ContentHash,
+    ) -> Result<Document, ApplicationError> {
+        let (mut document, pdf) = super::pdf::PdfParser.build_document(pdf, resource, hash)?;
 
         if document
             .metadata
@@ -40,12 +51,11 @@ impl PdfParser {
         else {
             return Ok(document);
         };
+        // The builder keeps the tree exactly for this pass; without it there is nothing to read.
+        let Some(pdf) = pdf else {
+            return Ok(document);
+        };
 
-        let pdf = LopdfDocument::load_mem(&layout_resource.bytes).map_err(|error| {
-            ApplicationError::ParseFailed(format!(
-                "cannot reopen PDF for layout evidence extraction: {error}"
-            ))
-        })?;
         let page_numbers = pdf.get_pages().keys().copied().collect::<Vec<_>>();
         let (evidence, layout_errors) =
             extract_text_fragment_evidence(&pdf, &page_numbers, MAX_PAGE_DECOMPRESSED_BYTES);

@@ -85,6 +85,18 @@ jobs:
                 || echo "::warning::read probe failed: $label"
             done
           done
+      - name: Trace v2 read SQL at 20k
+        if: always()
+        run: |
+          mkdir -p trace
+          python3 scripts/doc-read-probe.py \
+            --binary target/release/reading-mcp \
+            --document "$RUNNER_TEMP/sections/sections-nested-20000.epub" \
+            --label trace-20000 --side branch --calls 2 --start-fraction 0.5 \
+            --env READING_MCP_TOOLS=both --env READING_MCP_TRACE_SQL=1 \
+            --out trace/trace.json || true
+          echo "=== last 120 SQL statements ==="
+          grep -a "^SQL " .tmp/doc-read-server-trace-20000.log | tail -120
       - name: Diagnose stored identity
         if: always()
         run: |

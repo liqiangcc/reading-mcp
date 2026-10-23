@@ -21,7 +21,20 @@ pub(super) fn open_connection(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-16384;",
         )
         .map_err(|source| error(source.to_string()))?;
+    if std::env::var_os("READING_MCP_TRACE_SQL").is_some() {
+        connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(trace_sql),
+        );
+    }
     Ok(connection)
+}
+
+/// Logs one statement's SQL to stderr when `READING_MCP_TRACE_SQL` is set.
+fn trace_sql(event: rusqlite::trace::TraceEvent<'_>) {
+    if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+        eprintln!("SQL {sql}");
+    }
 }
 
 /// Runs SQLite work on Tokio's blocking pool so disk I/O and lock waits never stall async workers.

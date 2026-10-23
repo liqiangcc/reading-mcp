@@ -1631,6 +1631,415 @@ impl DocumentRepository for CountingRepository {
     }
 }
 
+/// A tally of one read call: how often each repository call ran and how many rows it returned.
+#[derive(Default)]
+struct Tally {
+    entries: Mutex<Vec<(&'static str, usize)>>,
+}
+
+impl Tally {
+    fn record(&self, call: &'static str, rows: usize) {
+        self.entries.lock().expect("lock").push((call, rows));
+    }
+
+    /// `call:count/rows` per call site, sorted, so two books can be compared line by line.
+    fn summary(&self) -> Vec<(String, usize, usize)> {
+        let mut by_call: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+        for (call, rows) in self.entries.lock().expect("lock").iter() {
+            let entry = by_call.entry(call).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += rows;
+        }
+        by_call
+            .into_iter()
+            .map(|(call, (count, rows))| (call.to_owned(), count, rows))
+            .collect()
+    }
+}
+
+/// A repository that answers like a store of rows and tallies every call.
+struct TallyRepository {
+    document: Document,
+    tally: Arc<Tally>,
+}
+
+impl TallyRepository {
+    fn rows(&self) -> Vec<SectionRow> {
+        let mut rows = Vec::new();
+        for (key, row) in flatten(&self.document).into_iter().enumerate() {
+            rows.push(SectionRow {
+                section_key: i64::try_from(key).expect("key"),
+                ..row
+            });
+        }
+        rows
+    }
+
+    fn body_order(&self) -> Vec<i64> {
+        let rows = self.rows();
+        let by_id: HashMap<SectionId, i64> = rows
+            .iter()
+            .map(|row| (row.id.clone(), row.section_key))
+            .collect();
+        let mut ids = Vec::new();
+        collect_ids(&self.document.root_sections, &mut ids);
+        ids.into_iter()
+            .map(|id| by_id.get(&id).copied().unwrap_or(-1))
+            .collect()
+    }
+}
+
+fn flatten(document: &Document) -> Vec<SectionRow> {
+    fn walk(section: &Section, parent_key: Option<i64>, output: &mut Vec<SectionRow>) -> i64 {
+        let section_key = i64::try_from(output.len()).expect("key");
+        output.push(SectionRow {
+            section_key,
+            id: section.id.clone(),
+            parent_key,
+            level: section.level,
+            title: section.title.clone(),
+            location: section.location.clone(),
+            subtree_end_key: section_key,
+        });
+        for child in &section.children {
+            walk(child, Some(section_key), output);
+        }
+        let end = i64::try_from(output.len() - 1).expect("key");
+        output[usize::try_from(section_key).expect("key")].subtree_end_key = end;
+        end
+    }
+    let mut output = Vec::new();
+    for root in &document.root_sections {
+        walk(root, None, &mut output);
+    }
+    output
+}
+
+#[async_trait]
+impl DocumentRepository for TallyRepository {
+    async fn save(&self, _document: Document) -> Result<(), ApplicationError> {
+        panic!("the tally store must not save");
+    }
+
+    async fn get(&self, _id: &DocumentId) -> Result<Option<Arc<Document>>, ApplicationError> {
+        self.tally.record("get", self.document.section_count());
+        Ok(Some(Arc::new(self.document.clone())))
+    }
+
+    async fn get_with_hash(
+        &self,
+        _id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        self.tally
+            .record("get_with_hash", self.document.section_count());
+        let hash = self.document.normalized_document_hash();
+        Ok(Some((Arc::new(self.document.clone()), hash)))
+    }
+
+    async fn get_light_with_hash(
+        &self,
+        _id: &DocumentId,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        self.tally
+            .record("get_light_with_hash", self.document.section_count());
+        let hash = self.document.normalized_document_hash();
+        Ok(Some((Arc::new(self.document.clone()), hash)))
+    }
+
+    async fn document_header(
+        &self,
+        _id: &DocumentId,
+    ) -> Result<Option<DocumentHeader>, ApplicationError> {
+        self.tally.record("document_header", 1);
+        let document = &self.document;
+        Ok(Some(DocumentHeader {
+            id: document.id.clone(),
+            source: document.source.clone(),
+            title: document.title.clone(),
+            media_type: document.media_type.clone(),
+            content_hash: document.content_hash.clone(),
+            normalized_document_hash: Some(document.normalized_document_hash()),
+            section_count: document.section_count(),
+            root_count: document.root_sections.len(),
+        }))
+    }
+
+    async fn section_by_id(
+        &self,
+        _id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        let found = self.rows().into_iter().find(|row| row.id == *section_id);
+        self.tally
+            .record("section_by_id", usize::from(found.is_some()));
+        Ok(found)
+    }
+
+    async fn section_by_key(
+        &self,
+        _id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<SectionRow>, ApplicationError> {
+        let found = self
+            .rows()
+            .into_iter()
+            .find(|row| row.section_key == section_key);
+        self.tally
+            .record("section_by_key", usize::from(found.is_some()));
+        Ok(found)
+    }
+
+    async fn sections_in_key_range(
+        &self,
+        _id: &DocumentId,
+        from_key: i64,
+        to_key_inclusive: i64,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        let rows: Vec<SectionRow> = self
+            .rows()
+            .into_iter()
+            .filter(|row| row.section_key >= from_key && row.section_key <= to_key_inclusive)
+            .take(limit)
+            .collect();
+        self.tally.record("sections_in_key_range", rows.len());
+        Ok(rows)
+    }
+
+    async fn section_children(
+        &self,
+        _id: &DocumentId,
+        parent_key: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        let rows: Vec<SectionRow> = self
+            .rows()
+            .into_iter()
+            .filter(|row| row.parent_key == parent_key)
+            .take(limit)
+            .collect();
+        self.tally.record("section_children", rows.len());
+        Ok(rows)
+    }
+
+    async fn section_ancestors(
+        &self,
+        _id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Vec<SectionRow>, ApplicationError> {
+        let rows = self.rows();
+        let mut ancestors = Vec::new();
+        let mut current = rows
+            .iter()
+            .find(|row| row.section_key == section_key)
+            .and_then(|row| row.parent_key);
+        while let Some(key) = current {
+            let Some(row) = rows.iter().find(|row| row.section_key == key) else {
+                break;
+            };
+            current = row.parent_key;
+            ancestors.push(row.clone());
+        }
+        ancestors.reverse();
+        self.tally.record("section_ancestors", ancestors.len());
+        Ok(ancestors)
+    }
+
+    async fn body_order_position(
+        &self,
+        _id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<usize>, ApplicationError> {
+        let position = self.body_order().iter().position(|key| *key == section_key);
+        self.tally
+            .record("body_order_position", usize::from(position.is_some()));
+        Ok(position)
+    }
+
+    async fn body_order_at(
+        &self,
+        _id: &DocumentId,
+        ord: usize,
+    ) -> Result<Option<i64>, ApplicationError> {
+        let key = self.body_order().get(ord).copied();
+        self.tally
+            .record("body_order_at", usize::from(key.is_some()));
+        Ok(key)
+    }
+
+    async fn body_order_window(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+        before: usize,
+        after: usize,
+    ) -> Result<Option<BodyOrderWindow>, ApplicationError> {
+        // A window also counts the whole order, exactly as the SQLite store's does.
+        self.tally
+            .record("body_order_window", self.document.section_count());
+        let order = self.body_order();
+        let Some(ord) = order.iter().position(|key| *key == section_key) else {
+            return Ok(None);
+        };
+        let _ = id;
+        let start = ord.saturating_sub(before);
+        let end = ord.saturating_add(after).min(order.len().saturating_sub(1));
+        Ok(Some(BodyOrderWindow {
+            ord,
+            len: order.len(),
+            window: order[start..=end]
+                .iter()
+                .enumerate()
+                .map(|(offset, key)| (start + offset, *key))
+                .collect(),
+        }))
+    }
+
+    async fn body_order_len(&self, _id: &DocumentId) -> Result<Option<usize>, ApplicationError> {
+        // `COUNT(*)` over every order row.
+        self.tally
+            .record("body_order_len", self.document.section_count());
+        Ok(Some(self.body_order().len()))
+    }
+
+    async fn body_order(
+        &self,
+        _id: &DocumentId,
+    ) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
+        self.tally
+            .record("body_order", self.document.section_count());
+        let mut ids = Vec::new();
+        collect_ids(&self.document.root_sections, &mut ids);
+        Ok(Some(Ok(ids)))
+    }
+}
+
+/// A text-unit index that tallies every call into the same [`Tally`].
+struct TallyIndex {
+    inner: Arc<KeyedTextUnitIndex>,
+    tally: Arc<Tally>,
+}
+
+#[async_trait]
+impl TextUnitIndex for TallyIndex {
+    async fn replace_document(
+        &self,
+        document_id: &DocumentId,
+        units: &[TextUnit],
+    ) -> Result<(), ApplicationError> {
+        self.inner.replace_document(document_id, units).await
+    }
+
+    async fn list_document(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<TextUnit>, ApplicationError> {
+        self.inner.list_document(document_id).await
+    }
+
+    async fn replace_document_sets(
+        &self,
+        document: &Arc<Document>,
+        paragraphs: Arc<ParagraphTextUnitSet>,
+        sentences: Arc<SentenceTextUnitSet>,
+    ) -> Result<(), ApplicationError> {
+        self.inner
+            .replace_document_sets(document, paragraphs, sentences)
+            .await
+    }
+
+    async fn section_units(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<SectionTextUnits>, ApplicationError> {
+        let units = self.inner.section_units(document_id, section_id).await?;
+        self.tally.record(
+            "index.section_units",
+            units
+                .as_ref()
+                .map_or(0, |units| units.paragraphs.len() + units.sentences.len()),
+        );
+        Ok(units)
+    }
+
+    async fn document_key(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        self.tally.record("index.document_key", 1);
+        self.inner.document_key(document_id).await
+    }
+
+    async fn document_id_for_key(
+        &self,
+        doc_key: i64,
+    ) -> Result<Option<DocumentId>, ApplicationError> {
+        self.tally.record("index.document_id_for_key", 1);
+        self.inner.document_id_for_key(doc_key).await
+    }
+
+    async fn section_key(
+        &self,
+        document_id: &DocumentId,
+        section_id: &SectionId,
+    ) -> Result<Option<i64>, ApplicationError> {
+        self.tally.record("index.section_key", 1);
+        self.inner.section_key(document_id, section_id).await
+    }
+
+    async fn section_id_for_key(
+        &self,
+        document_id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<SectionId>, ApplicationError> {
+        self.tally.record("index.section_id_for_key", 1);
+        self.inner
+            .section_id_for_key(document_id, section_key)
+            .await
+    }
+
+    async fn section_stream_summary(
+        &self,
+        key: TextUnitStreamKey<'_>,
+    ) -> Result<Option<TextUnitStreamSummary>, ApplicationError> {
+        let summary = self.inner.section_stream_summary(key).await?;
+        self.tally.record(
+            "index.section_stream_summary",
+            usize::from(summary.is_some()),
+        );
+        Ok(summary)
+    }
+
+    async fn section_stream_items(
+        &self,
+        key: TextUnitStreamKey<'_>,
+        direction: TextUnitDirection,
+        position: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredStreamItem>, ApplicationError> {
+        let items = self
+            .inner
+            .section_stream_items(key, direction, position, limit)
+            .await?;
+        self.tally.record("index.section_stream_items", items.len());
+        Ok(items)
+    }
+
+    async fn section_stream_position(
+        &self,
+        key: TextUnitStreamKey<'_>,
+        unit_kind: reading_mcp::application::get_text_units::EffectiveTextUnitKind,
+        paragraph_index: usize,
+        sentence_index: Option<usize>,
+    ) -> Result<Option<usize>, ApplicationError> {
+        self.tally.record("index.section_stream_position", 1);
+        self.inner
+            .section_stream_position(key, unit_kind, paragraph_index, sentence_index)
+            .await
+    }
+}
+
 /// `roots` root sections with `per_root` children each: `roots * (per_root + 1)` sections.
 fn wide_document(name: &str, roots: usize, per_root: usize) -> Document {
     let root_sections = (0..roots)
@@ -1692,6 +2101,54 @@ async fn read_path_calls(roots: usize, per_root: usize) -> usize {
         .expect("read");
     assert!(!result.items.is_empty());
     counting.count() - before
+}
+
+/// The per-call-site tally of one `read` call: how many times each repository call ran and how
+/// many rows it returned. Both must be the same for a small and a large book.
+async fn read_path_tally(roots: usize, per_root: usize) -> Vec<(String, usize, usize)> {
+    let document = wide_document(&format!("tally-{roots}-{per_root}"), roots, per_root);
+    let tally = Arc::new(Tally::default());
+    let repository: Arc<dyn DocumentRepository> = Arc::new(TallyRepository {
+        document: document.clone(),
+        tally: Arc::clone(&tally),
+    });
+    let index = Arc::new(KeyedTextUnitIndex::default());
+    index.store(&document).await;
+    let units: Arc<dyn TextUnitIndex> = Arc::new(TallyIndex {
+        inner: Arc::clone(&index),
+        tally: Arc::clone(&tally),
+    });
+    let handle = DocumentHandle {
+        doc_key: 1,
+        checksum: handle_checksum(&document.id, &document.normalized_document_hash()),
+    };
+    let read = ReadReadingUseCase::new(repository, units);
+    let result = read
+        .execute(ReadReadingCommand {
+            from: handle.to_string(),
+            unit: RequestedTextUnitKind::Sentence,
+            max_chars: None,
+            direction: None,
+            back: 2,
+        })
+        .await
+        .expect("read");
+    assert!(!result.items.is_empty());
+    tally.summary()
+}
+
+/// The rows one `read` call reads must not depend on the book's size: a call that reads a whole
+/// table shows up here as a growing row total for one call site.
+#[tokio::test]
+async fn the_read_path_reads_the_same_rows_for_500_and_20000_sections() {
+    let small = read_path_tally(10, 49).await; // 500 sections
+    let large = read_path_tally(200, 99).await; // 20,000 sections
+    assert_eq!(
+        large, small,
+        "a read of 20,000 sections must read the same rows as a read of 500\n\
+         500 sections (call, calls, rows): {small:?}\n\
+         20,000 sections (call, calls, rows): {large:?}"
+    );
 }
 
 #[tokio::test]

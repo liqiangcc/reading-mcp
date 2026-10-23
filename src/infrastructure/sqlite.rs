@@ -615,6 +615,27 @@ impl SqliteDocumentRepository {
             .ok()
             .flatten()
     }
+
+    /// Test only: the body-order length the header answers, and the VM steps the header statement
+    /// takes. A count over the order grows with the section count; this stays flat.
+    #[doc(hidden)]
+    pub fn body_order_len_header_steps(
+        &self,
+        id: &DocumentId,
+    ) -> Result<(usize, i32), ApplicationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ApplicationError::RepositoryFailed("SQLite lock poisoned".into()))?;
+        let mut statement = connection
+            .prepare(BODY_ORDER_LEN_FROM_HEADER_SQL)
+            .map_err(repository_error)?;
+        let section_count = statement
+            .query_row(params![&id.0], |row| row.get::<_, i64>(0))
+            .map_err(repository_error)?;
+        let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+        section_row_usize(section_count, "section_count").map(|count| (count, steps))
+    }
 }
 
 #[async_trait]
@@ -2014,11 +2035,46 @@ fn load_body_order_at(
         .map_err(repository_error)
 }
 
+/// The body-order length from the header: the stored count, the failed-order text, and whether
+/// any order row exists. A readable stored body order holds every section exactly once, so the
+/// header's `section_count` is its length; the `EXISTS` probe keeps the no-rows case answering 0
+/// exactly as the old count did, without walking the order.
+const BODY_ORDER_LEN_FROM_HEADER_SQL: &str = "SELECT section_count, body_order_error,
+            EXISTS(SELECT 1 FROM document_body_order_rows_v1 WHERE document_id = ?1)
+       FROM document_header_v1 WHERE document_id = ?1";
+
 /// The number of rows in the document's body order.
+///
+/// A document saved with a header answers from `document_header_v1.section_count` when its body
+/// order is readable (`body_order_error` is NULL and at least one order row exists): the body
+/// order is a permutation of every section, so the stored count is its length and this is one
+/// header row plus one index probe, not a `COUNT(*)` over every order row. A failed order, a
+/// document with no order rows, and a pre-header document fall back to the count, so their
+/// answers and errors are unchanged.
 fn load_body_order_len(
     connection: &Connection,
     document_id: &DocumentId,
 ) -> Result<Option<usize>, ApplicationError> {
+    let header = connection
+        .query_row(
+            BODY_ORDER_LEN_FROM_HEADER_SQL,
+            params![&document_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(repository_error)?;
+    if let Some((section_count, error, has_row)) = header
+        && error.is_none()
+        && has_row
+    {
+        return section_row_usize(section_count, "section_count").map(Some);
+    }
     let len = connection
         .query_row(
             "SELECT COUNT(*) FROM document_body_order_rows_v1 WHERE document_id = ?1",

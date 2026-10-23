@@ -2399,7 +2399,9 @@ async fn every_query_a_migrated_reader_issues_uses_an_index() {
         ),
         (
             "body_order_len",
-            "SELECT COUNT(*) FROM document_body_order_rows_v1 WHERE document_id = ?1",
+            "SELECT section_count, body_order_error,
+                    EXISTS(SELECT 1 FROM document_body_order_rows_v1 WHERE document_id = ?1)
+               FROM document_header_v1 WHERE document_id = ?1",
         ),
     ];
 
@@ -2428,6 +2430,41 @@ async fn every_query_a_migrated_reader_issues_uses_an_index() {
         );
         assert!(upper.contains("USING"), "{label} must use an index: {plan}");
     }
+}
+
+/// The body-order length answers from the header, so its cost does not grow with the section count.
+///
+/// A `COUNT(*)` over `document_body_order_rows_v1` walks every order row: 20,000 rows cost
+/// thousands of VM steps where 500 cost dozens. The header's `section_count` is the same number
+/// for a readable body order (the order is a permutation of every section), so the steps stay flat.
+#[tokio::test]
+async fn body_order_len_reads_the_header_not_the_order_rows() {
+    async fn measure(roots: usize, per_root: usize) -> (usize, i32) {
+        let (directory, repository) = open_sqlite_repository().await;
+        let document = wide_document(
+            &format!("body-order-len-{roots}-{per_root}"),
+            roots,
+            per_root,
+        );
+        repository.save(document.clone()).await.expect("save");
+        let measured = repository
+            .body_order_len_header_steps(&document.id)
+            .expect("body order length");
+        drop(directory);
+        measured
+    }
+
+    let small = measure(10, 49).await; // 500 sections
+    let large = measure(200, 99).await; // 20,000 sections
+    assert_eq!(small.0, 500);
+    assert_eq!(large.0, 20_000);
+    assert!(
+        large.1 <= small.1 + 10,
+        "the body-order length must read the header, not count the order: \
+         500 sections took {} VM steps, 20,000 took {}",
+        small.1,
+        large.1
+    );
 }
 
 // ------------------------------------------------------------------------------------------------

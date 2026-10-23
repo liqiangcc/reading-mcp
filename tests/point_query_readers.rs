@@ -1322,6 +1322,26 @@ async fn an_old_shape_document_answers_every_migrated_reader_identically() {
     let directory = tempfile::tempdir().expect("temp directory");
     let database = directory.path().join("point-queries.sqlite");
     let document = document_fixture();
+    // The row shape a binary before SEC-1 wrote: every section inline, no `content_store`, no
+    // `section_tree_store`. A repository used on its own, with no text-unit store, writes exactly
+    // that shape, so capture its `document_json` before the main store overwrites it.
+    let old_database = directory.path().join("old-shape.sqlite");
+    let old_json: String = {
+        let old_repository =
+            SqliteDocumentRepository::open(&old_database).expect("old repository should open");
+        old_repository
+            .save(document.clone())
+            .await
+            .expect("old document should save");
+        rusqlite::Connection::open(&old_database)
+            .expect("old database should open")
+            .query_row(
+                "SELECT document_json FROM documents WHERE id = ?1",
+                rusqlite::params![&document.id.0],
+                |row| row.get(0),
+            )
+            .expect("old document_json should read")
+    };
     // The stored text units and the document live in the same state database, as a real store
     // keeps them.
     let index = SqliteTextUnitIndex::open(&database).expect("text unit index should open");
@@ -1455,6 +1475,14 @@ async fn an_old_shape_document_answers_every_migrated_reader_identically() {
             )
             .expect("rows should delete");
     }
+    // Put the inline tree back: the row is now the shape a binary before SEC-1 wrote, not a
+    // v10 row whose rows were deleted.
+    connection
+        .execute(
+            "UPDATE documents SET document_json = ?1 WHERE id = ?2",
+            rusqlite::params![old_json, &document.id.0],
+        )
+        .expect("old document_json should restore");
     drop(connection);
 
     let after = answers(&stored, &units, &document, &handle, &section).await;

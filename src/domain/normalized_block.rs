@@ -177,10 +177,22 @@ impl Document {
         &mut self,
         map: NormalizedBlockMap,
     ) -> Result<(), NormalizedBlockMapError> {
-        self.validate_normalized_block_map(&map)?;
+        self.set_normalized_block_map_ref(&map)
+    }
+
+    /// The same metadata [`Self::set_normalized_block_map`] writes, from a map the caller keeps.
+    ///
+    /// A parser that has the map in hand for its own validation and segmentation sets it through
+    /// this, so the map is neither moved away before those steps nor decoded back out of the JSON
+    /// afterwards.
+    pub fn set_normalized_block_map_ref(
+        &mut self,
+        map: &NormalizedBlockMap,
+    ) -> Result<(), NormalizedBlockMapError> {
+        self.validate_normalized_block_map(map)?;
         // A book's block map is the largest metadata value there is: exact capacity, not
         // `to_string`'s doubling slack, because this string lives for the whole open.
-        let json = to_string_exact(&map)
+        let json = to_string_exact(map)
             .map_err(|error| NormalizedBlockMapError::InvalidJson(error.to_string()))?;
         self.metadata.insert(
             NORMALIZED_BLOCK_MAP_VERSION_METADATA_KEY.into(),

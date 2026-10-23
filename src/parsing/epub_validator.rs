@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Document, DocumentSegmentation, NormalizedBlockKind, Section, SectionId, SentenceEligibility,
+    Document, DocumentSegmentation, NormalizedBlockKind, NormalizedBlockMap, Section, SectionId,
+    SentenceEligibility,
 };
 
 use super::epub_navigation::{
@@ -216,7 +217,7 @@ struct StoredStructureMap {
 }
 
 pub fn validate_epub_document(document: &Document) -> EpubValidationReport {
-    validate_epub_document_inner(document, None)
+    validate_epub_document_inner(document, None, None)
 }
 
 /// Runs the same checks as [`validate_epub_document`] but reuses the segmentation the caller
@@ -225,12 +226,15 @@ pub fn validate_epub_document_with_segmentation(
     document: &Document,
     segmentation: &DocumentSegmentation,
 ) -> EpubValidationReport {
-    validate_epub_document_inner(document, Some(segmentation))
+    validate_epub_document_inner(document, Some(segmentation), None)
 }
 
+/// Runs the same checks as [`validate_epub_document`] but reuses the segmentation and the block map
+/// the caller already built, so the block map is not decoded back out of its metadata JSON.
 fn validate_epub_document_inner(
     document: &Document,
     segmentation: Option<&DocumentSegmentation>,
+    blocks: Option<&NormalizedBlockMap>,
 ) -> EpubValidationReport {
     let mut findings = Vec::new();
     let mut coverage = EpubValidationCoverage::default();
@@ -260,7 +264,7 @@ fn validate_epub_document_inner(
         );
     }
 
-    validate_blocks_and_text_units(document, segmentation, &mut coverage, &mut findings);
+    validate_blocks_and_text_units(document, segmentation, blocks, &mut coverage, &mut findings);
 
     let error_count = findings
         .iter()
@@ -285,8 +289,9 @@ fn validate_epub_document_inner(
 
 pub(crate) fn attach_epub_validation_report(
     document: &mut Document,
+    blocks: &NormalizedBlockMap,
 ) -> Result<EpubValidationReport, serde_json::Error> {
-    attach_epub_validation_report_inner(document, None)
+    attach_epub_validation_report_inner(document, None, blocks)
 }
 
 /// Attaches the same report [`attach_epub_validation_report`] attaches, reusing a segmentation the
@@ -295,18 +300,20 @@ pub(crate) fn attach_epub_validation_report(
 pub(crate) fn attach_epub_validation_report_with_segmentation(
     document: &mut Document,
     segmentation: &DocumentSegmentation,
+    blocks: &NormalizedBlockMap,
 ) -> Result<EpubValidationReport, serde_json::Error> {
-    attach_epub_validation_report_inner(document, Some(segmentation))
+    attach_epub_validation_report_inner(document, Some(segmentation), blocks)
 }
 
+/// Both callers hand over the block map they just set, so the report is validated from the map in
+/// memory: decoding the metadata JSON back into an identical map would allocate a second copy of
+/// the largest fact a book has (MEM-2a: 15.7 MiB of 宋史's 92.0 MiB heap peak).
 fn attach_epub_validation_report_inner(
     document: &mut Document,
     segmentation: Option<&DocumentSegmentation>,
+    blocks: &NormalizedBlockMap,
 ) -> Result<EpubValidationReport, serde_json::Error> {
-    let report = match segmentation {
-        Some(segmentation) => validate_epub_document_with_segmentation(document, segmentation),
-        None => validate_epub_document(document),
-    };
+    let report = validate_epub_document_inner(document, segmentation, Some(blocks));
     let json = crate::json::to_string_exact(&report)?;
     document.metadata.insert(
         EPUB_VALIDATION_REPORT_VERSION_METADATA_KEY.into(),
@@ -1169,28 +1176,38 @@ fn validate_canonical_sibling_source_order(
 fn validate_blocks_and_text_units(
     document: &Document,
     segmentation: Option<&DocumentSegmentation>,
+    blocks: Option<&NormalizedBlockMap>,
     coverage: &mut EpubValidationCoverage,
     findings: &mut Vec<EpubValidationFinding>,
 ) {
-    let blocks = match document.normalized_block_map() {
-        Ok(Some(map)) => map,
-        Ok(None) => {
-            push_error(
-                findings,
-                "blocks",
-                "missing_normalized_block_map",
-                "persisted EPUB Document has no normalized_block_map fact",
-            );
-            return;
-        }
-        Err(error) => {
-            push_error(
-                findings,
-                "blocks",
-                "invalid_normalized_block_map",
-                error.to_string(),
-            );
-            return;
+    // A caller that already has the map in memory passes it: decoding the metadata JSON back into
+    // an identical map allocates a second copy of the largest fact a book has (MEM-2a).
+    let decoded;
+    let blocks = match blocks {
+        Some(blocks) => blocks,
+        None => {
+            decoded = match document.normalized_block_map() {
+                Ok(Some(map)) => map,
+                Ok(None) => {
+                    push_error(
+                        findings,
+                        "blocks",
+                        "missing_normalized_block_map",
+                        "persisted EPUB Document has no normalized_block_map fact",
+                    );
+                    return;
+                }
+                Err(error) => {
+                    push_error(
+                        findings,
+                        "blocks",
+                        "invalid_normalized_block_map",
+                        error.to_string(),
+                    );
+                    return;
+                }
+            };
+            &decoded
         }
     };
 
@@ -1202,12 +1219,14 @@ fn validate_blocks_and_text_units(
         findings,
     );
 
-    let mut blocks_per_section = HashMap::<SectionId, usize>::new();
+    // Keyed by the section id's text: a clone per block would be a second copy of every block's
+    // owner id, and `&str` hashes and compares exactly as `SectionId` does.
+    let mut blocks_per_section = HashMap::<&str, usize>::new();
     for block in &blocks.blocks {
         coverage.blocks.blocks_total += 1;
         coverage.blocks.block_chars += block.normalized_range.len();
         *blocks_per_section
-            .entry(block.owner_section_id.clone())
+            .entry(block.owner_section_id.0.as_str())
             .or_default() += 1;
         match block.kind {
             NormalizedBlockKind::Paragraph => coverage.blocks.paragraph_blocks += 1,
@@ -1238,7 +1257,7 @@ fn validate_blocks_and_text_units(
         coverage.blocks.section_content_chars += chars;
         if chars > 0 {
             coverage.blocks.sections_with_nonempty_content += 1;
-            if blocks_per_section.contains_key(&section.id) {
+            if blocks_per_section.contains_key(section.id.0.as_str()) {
                 coverage.blocks.sections_with_blocks += 1;
             } else {
                 coverage.blocks.nonempty_sections_without_blocks += 1;
@@ -1275,7 +1294,8 @@ fn validate_blocks_and_text_units(
         .iter()
         .map(|section| section.paragraphs.len())
         .sum();
-    let mut paragraph_ranges = HashSet::new();
+    // The same clone-free keying: the paragraph ranges are looked up per block and per sentence.
+    let mut paragraph_ranges = HashSet::<(&str, usize, usize)>::new();
     let mut expected_paragraph_source_order = 0usize;
     for section in &segmentation.sections {
         let section_id = &section.section_id;
@@ -1337,7 +1357,7 @@ fn validate_blocks_and_text_units(
             }
             coverage.text_units.paragraph_chars += paragraph.range().len();
             paragraph_ranges.insert((
-                section_id.clone(),
+                section_id.0.as_str(),
                 paragraph.range().start(),
                 paragraph.range().end(),
             ));
@@ -1363,7 +1383,7 @@ fn validate_blocks_and_text_units(
 
     for block in &blocks.blocks {
         if paragraph_ranges.contains(&(
-            block.owner_section_id.clone(),
+            block.owner_section_id.0.as_str(),
             block.normalized_range.start(),
             block.normalized_range.end(),
         )) {
@@ -1450,7 +1470,7 @@ fn validate_blocks_and_text_units(
                 continue;
             };
             let parent = (parent_range.start(), parent_range.end());
-            if !paragraph_ranges.contains(&(section_id.clone(), parent.0, parent.1)) {
+            if !paragraph_ranges.contains(&(section_id.0.as_str(), parent.0, parent.1)) {
                 push_error(
                     findings,
                     "text_units",
@@ -1656,4 +1676,99 @@ fn push_degradation(
         code: code.into(),
         message: message.into(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        ContentHash, DocumentId, DocumentSource, Location, MediaType, NormalizedBlock,
+        NormalizedBlockProvenance, NormalizedTextRange,
+    };
+
+    /// A document whose block map is set from the struct, exactly as `EpubParser` sets it.
+    fn document_with_blocks() -> (Document, NormalizedBlockMap) {
+        let section_id = SectionId("section://chapter".into());
+        let content = "First paragraph.\n\nSecond paragraph.";
+        let mut document = Document {
+            id: DocumentId("doc:validator-blocks".into()),
+            source: DocumentSource("memory:validator-blocks.epub".into()),
+            title: "Validator blocks".into(),
+            media_type: MediaType("application/epub+zip".into()),
+            content_hash: ContentHash("sha256:validator-blocks".into()),
+            metadata: Default::default(),
+            root_sections: vec![Section {
+                id: section_id.clone(),
+                parent_id: None,
+                title: "Chapter".into(),
+                level: 1,
+                content: content.into(),
+                location: Location::default(),
+                children: Vec::new(),
+            }],
+        };
+        let second_start = "First paragraph.\n\n".chars().count();
+        let map = NormalizedBlockMap::new(vec![
+            NormalizedBlock {
+                owner_section_id: section_id.clone(),
+                block_index: 1,
+                source_order: 0,
+                kind: NormalizedBlockKind::Paragraph,
+                normalized_range: NormalizedTextRange::new(0, second_start).expect("range"),
+                native_anchor: Some("p1".into()),
+                native_location: Some("epub:OEBPS/chapter.xhtml#p1".into()),
+                provenance: NormalizedBlockProvenance::XhtmlNativeBlock,
+            },
+            NormalizedBlock {
+                owner_section_id: section_id,
+                block_index: 2,
+                source_order: 1,
+                kind: NormalizedBlockKind::Paragraph,
+                normalized_range: NormalizedTextRange::new(second_start, content.chars().count())
+                    .expect("range"),
+                native_anchor: Some("p2".into()),
+                native_location: Some("epub:OEBPS/chapter.xhtml#p2".into()),
+                provenance: NormalizedBlockProvenance::XhtmlNativeBlock,
+            },
+        ]);
+        document
+            .set_normalized_block_map_ref(&map)
+            .expect("valid map");
+        (document, map)
+    }
+
+    /// The report a caller that has the block map in memory gets is the report a caller that
+    /// decodes it back out of the metadata JSON gets: the same facts, checked the same way.
+    #[test]
+    fn validating_from_the_block_map_matches_validating_from_the_json() {
+        let (document, map) = document_with_blocks();
+
+        let from_json = validate_epub_document(&document);
+        let segmentation = document.segmentation_from_block_map(Some(&map));
+        let from_map = validate_epub_document_inner(&document, Some(&segmentation), Some(&map));
+
+        assert_eq!(from_json, from_map);
+        assert_eq!(
+            from_json,
+            validate_epub_document_with_segmentation(&document, &segmentation)
+        );
+    }
+
+    /// The same for the attach path `EpubParser` uses: the metadata it writes is the same.
+    #[test]
+    fn attaching_from_the_block_map_writes_the_same_metadata() {
+        let (mut from_json, map) = document_with_blocks();
+        let (mut from_map, _) = document_with_blocks();
+
+        attach_epub_validation_report(&mut from_json, &map).expect("report");
+        let segmentation = from_map.segmentation_from_block_map(Some(&map));
+        attach_epub_validation_report_with_segmentation(&mut from_map, &segmentation, &map)
+            .expect("report");
+
+        assert_eq!(from_json.metadata, from_map.metadata);
+        assert_eq!(
+            from_json.metadata[EPUB_VALIDATION_REPORT_METADATA_KEY],
+            from_map.metadata[EPUB_VALIDATION_REPORT_METADATA_KEY]
+        );
+    }
 }

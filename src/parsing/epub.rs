@@ -317,23 +317,33 @@ impl EpubParser {
             metadata,
             root_sections: reconciled.root_sections,
         };
+        // The map stays in hand until the report is built: it is the largest fact a book has, so
+        // it is not moved away here and then decoded back out of the metadata JSON for the
+        // segmentation and again for the validation.
+        let block_map = NormalizedBlockMap::new(normalized_blocks);
         document
-            .set_normalized_block_map(NormalizedBlockMap::new(normalized_blocks))
+            .set_normalized_block_map_ref(&block_map)
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
         let (report, segmentation) = if keep_segmentation {
             // The report attaches only metadata: the block map and the section contents the
             // segmentation reads are the ones set just above, so this is the segmentation
             // `Document::try_segmentation` builds from the returned document.
-            let segmentation = Arc::new(document.segmentation());
-            let report =
-                attach_epub_validation_report_with_segmentation(&mut document, &segmentation)
-                    .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
+            let segmentation = Arc::new(document.segmentation_from_block_map(Some(&block_map)));
+            let report = attach_epub_validation_report_with_segmentation(
+                &mut document,
+                &segmentation,
+                &block_map,
+            )
+            .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
             (report, Some(segmentation))
         } else {
-            let report = attach_epub_validation_report(&mut document)
+            let report = attach_epub_validation_report(&mut document, &block_map)
                 .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
             (report, None)
         };
+        // Dropped here, before the document leaves the parser: the metadata JSON is the canonical
+        // copy from this point on, and the next large allocation is not made beside this one.
+        drop(block_map);
         if report.has_errors() {
             return Err(ApplicationError::ParseFailed(format!(
                 "EPUB structural validation failed: {}",

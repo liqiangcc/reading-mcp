@@ -752,7 +752,9 @@ async fn structural_result(
         .await?
         .ok_or(ApplicationError::SectionNotFound)?;
     let owner = carrier_section(&owner_row);
-    let limit = MAX_STRUCTURAL_CONTEXT_ITEMS + 1;
+    // No limit: the over-limit error names the exact item count, and a section with more children
+    // than the limit costs exactly the walk the tree version did.
+    let limit = usize::MAX;
 
     let rows = match kind {
         StructuralContextKind::OwnerSection => vec![owner_row.clone()],

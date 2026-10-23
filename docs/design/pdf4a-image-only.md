@@ -38,15 +38,20 @@ image scan (99 pages, 197 image objects, no fonts at all) answered
 
 `ApplicationError::OcrRequired` now carries the evidence it measured:
 `OcrRequiredDetail { pages, characters }`. The Display string is one English
-sentence with the document's own numbers and no path:
+sentence with the document's own numbers and no path, and it is identical on
+both surfaces:
 
 * measured: `this PDF has no text layer (99 pages, 0 characters); it needs OCR`
+  (singular counts read `1 page`, `1 character`)
 * unmeasured (the layout backend's worker path, which has no text-layer count):
-  `this PDF has no text layer; it needs OCR`
+  the message it already had,
+  `source contains image-only pages requiring inspection; enable local OCR or provide a usable text layer`
 
-v1 reads this through `error.to_string()`; v2 carries the same string as
-`ReadingError.detail`. v2's wire `hint` stays the contract's localized hint for
-the `ocr_required` code, identical to the layout backend's case.
+v1 reads this through `error.to_string()` and puts it in the JSON-RPC message;
+v2 carries the same string as `ReadingError.detail`, which the v2 contract
+never sends as-is. v2's wire `hint` stays the contract's localized hint for the
+`ocr_required` code — "该来源需要本地 OCR 才能读取，请启用 OCR 后重新 open。" —
+identical to the layout backend's case, and its `retry` stays absent.
 
 ## What the default backend already has
 
@@ -116,20 +121,24 @@ extracted characters, `ok`. `naturebp.pdf` is the same shape at 156 characters.
 Computed from the committed PDF-5a corpus (`scripts/pdf-sweep-ids.txt`, now on
 `main` as of `4e750f8`; originally `4bc298f` on `bench/pdf5a`) and the reference
 `PDF wide sweep` run 39898185205; every one of the 121 documents opened `ok`
-there.
+there. The statistic is the sweep's `quality.default_chars_per_page`: the text
+the **default** backend extracted, divided by the page count. Percentiles are
+nearest-rank over the 121 sorted values.
 
 | statistic | chars/page |
 |---|---:|
 | min | 842.6 (`2403.02163`) |
-| p1 | 872.2 |
-| p5 | 1454.5 |
-| p25 | 2166.3 |
+| p1 | 977.1 |
+| p5 | 1461.4 |
+| p25 | 2179.3 |
 | median | 3140.5 |
-| p75 | 5015.3 |
-| max | 22034.2 |
+| p75 | 5011.2 |
+| max | 22034.2 (`2403.04803`) |
 
 Documents below 400 chars/page: **0**. Below 200: **0**. The minimum, 842.6, is
-the number the threshold must sit under.
+the number the threshold must sit under. `2311.05131` is the hardest control in
+the corpus: 495 pages, 130,172 embedded images on 446 pages, and still 977.1
+chars/page because no page has a raster over 20% of its area.
 
 ## The rule
 
@@ -137,10 +146,9 @@ the number the threshold must sit under.
 
 1. **nearly no text for the page count:** `chars / pages < 200`.
    Margin: 4.2x below the 842.6 minimum of every legitimate text PDF in the
-   corpus, and no corpus document is even below 400. The threshold is not
-   "small": a 30-character one-page text PDF is still above it in practice only
-   because condition 2 fails, and that is deliberate — text length alone must
-   never flag a document.
+   corpus, and no corpus document is even below 400. Text length alone never
+   flags a document: a 30-character one-page text PDF passes this condition and
+   still stays `ok` because condition 2 fails.
 2. **pages dominated by raster images:** mean raster coverage `>= 0.5`.
    A text PDF with a cover image, one blank page or a figures appendix has a
    mean far below 0.5 (one full-page image in ten pages is 0.1). `F05` at 0.75
@@ -160,8 +168,9 @@ rule never guesses.
 
 ## Step 2: the fixture table after the change
 
-Measured on the PR head by the same ignored test (`PDF4a measure` run
-39910517242).
+Measured by the same ignored test in the `PDF4a measure` workflow on `5aa9bdd`
+(run 39912839747) and reproduced unchanged on the final head; the final head's
+run ID is in the PR body.
 
 | input | before | after | pages | chars | chars/page | coverage |
 |---|---|---|---:|---:|---:|---:|
@@ -182,19 +191,21 @@ Measured on the PR head by the same ignored test (`PDF4a measure` run
 | F13.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
 | F14.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
 
-12 of the 15 files report `ocr_required`. Three stay `ok` because they really
-do carry a reachable text layer: `F01` (native, 448 chars), `F03` and
-`F04-flat` (flat hidden layer, 448 chars). Flagging them would be a
-false positive on a text layer, which the task forbids. `F04-form` carries the
-same hidden layer inside a Form XObject, but lopdf cannot reach it, so the
-default backend extracts 0 characters — from the reader's point of view the
-text is not there, and `ocr_required` is the honest answer.
+12 of the 14 `F*` fixtures (15 files, because `F04` has a flat and a form
+variant) report `ocr_required`. Three stay `ok` because they really do carry a
+reachable text layer: `F01` (native, 448 chars), `F03` and `F04-flat` (flat
+hidden layer, 448 chars). Flagging them would be a false positive on a text
+layer, which the task forbids, and would change how a PDF that **has** a text
+layer is extracted.
 
 The task expected all 14 `F*.pdf` to report `ocr_required`. That expectation
 does not hold for `F01`/`F03`/`F04-flat`, and should not: the fixture README
 documents them as native/hidden-layer controls, not scans. The gate is met for
-every genuinely image-only fixture, plus `F12` (the watermark case that used to
-open `ok` with 4 characters) and `F05` (half its pages are scans).
+every genuinely image-only fixture (`F02`, `F04-form`, `F06`–`F14`: 11 of 11),
+plus the mixed `F05`. `F04-form` carries the same hidden layer as `F04-flat`
+inside a Form XObject, but lopdf cannot reach it, so the default backend extracts
+0 characters — from the reader's point of view the text is not there, and
+`ocr_required` is the honest answer.
 
 ## Why `F09` (blank) is flagged
 
@@ -209,6 +220,57 @@ blank page yields nothing, and the alternative is a pixel scan of every image.
 A failed parse publishes nothing: `OpenDocumentUseCase::ingest` only stores an
 open result after the parser returns a document. Reopening the same bytes parses
 again and, because the rule is a pure function of the bytes, reports
-`ocr_required` again with the same message. There is no stored `ok` to flap to.
-The reopen test uses a real `SqliteOpenResultStore` and asserts both opens fail
-identically.
+`ocr_required` again with the same message. The reopen test uses a real
+`SqliteOpenResultStore` and asserts both opens fail identically.
+
+That alone would leave one flap: a document that opened `ok` under an older
+build has a stored open result, and the store would return it instead of the new
+failure. The open-result key already carries `PDF_TEXT_EXTRACTION_VERSION`, so
+this change bumps it to `pdf-text-extraction/v2`. The stored `ok` is then a
+fingerprint miss, the PDF is re-parsed once, and every later open reports
+`ocr_required` again. The same bump invalidates the parsed-document cache for
+PDFs, so no cached `ok` document survives either.
+
+## Gates
+
+* **Fixtures.** 12 of 14 `F*` report `ocr_required`; the three text-layer
+  controls stay `ok` (table above).
+* **121-document corpus.** `PDF wide sweep` on the head reports 121/121 `ok`,
+  the same outcome classes as the reference run 39898185205 (121/121 `ok`): no
+  document changes class. `2403.02163` (842.6 chars/page) and `2311.05131`
+  (977.1 chars/page, 130,172 images) stay `ok`; both have a text layer.
+* **`ingest-parity`.** The six labelled inputs and the text-layer fixtures
+  (`F01`, `F03`, `F04-flat`) are `same` in every column, including the PDF
+  input's `result` and `reads`. The image-only fixtures differ in exactly the
+  intended direction: `open payload` and `reads` go from `parse failed`/
+  `unreadable` to `this PDF has no text layer ...; it needs OCR` and from `ok`
+  to the same error (`F05`, `F12`), and their stored `documents`/`sections`/
+  `layouts`/`text` columns differ only because the head no longer publishes the
+  document at all. That is the deliverable, not a regression: no PDF with a
+  reachable text layer changes a single byte.
+* **The 300-page CJK text PDF.** Added to `ingest-parity`'s inputs
+  (`text-long-cjk-300`, generated by `scripts/pdf-gen-inputs.py`) so base and
+  head are compared on it directly: `result` and `text` are `same`. The
+  1500-page `pdf-text-1500p` input is `same` in every column.
+* **`book-profile`.** `mismatches=0` on the head (run ID in the PR body).
+
+## Host repro
+
+On the deployed host, the tunnel service runs `reading-mcp` over stdio
+(`deploy/systemd/reading-mcp-tunnel.service`). Opening the local file must now
+answer `ocr_required` instead of `ok` with 156 watermark characters. Run the
+same server the tunnel runs and feed it the three MCP messages:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"pdf4a","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"open_document","arguments":{"source":"/root/mcp-data/doc/naturebp.pdf"}}}' \
+  | /root/reading-mcp/target/release/reading-mcp
+```
+
+The same call through the tunnel-connected client (or the HTTP binary at
+`/mcp` with its Bearer token) returns the same answer. It carries
+`"code":"OCR_REQUIRED"`, `"retryable":false` and the message
+`this PDF has no text layer (4 pages, 156 characters); it needs OCR`. The v2
+surface answers `"error":"ocr_required"` with no `retry`.

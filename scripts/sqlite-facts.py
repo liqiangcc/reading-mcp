@@ -108,6 +108,9 @@ def database_sizes(database: str) -> dict[str, int]:
         rows, stored_bytes, text_bytes = section_text_facts(connection)
         meta_v1 = metadata_table_facts(connection, "document_meta_v1")
         meta_v2 = metadata_table_facts(connection, "document_meta_v2")
+        header = metadata_table_facts(connection, "document_header_v1")
+        sections = metadata_table_facts(connection, "document_sections_v1")
+        body_order = metadata_table_facts(connection, "document_body_order_rows_v1")
         return {
             "documents": int(documents[0]),
             "document_json_bytes": int(documents[1]),
@@ -118,21 +121,52 @@ def database_sizes(database: str) -> dict[str, int]:
             "document_meta_v1_bytes": meta_v1[1],
             "document_meta_v2_rows": meta_v2[0],
             "document_meta_v2_bytes": meta_v2[1],
+            "document_header_v1_rows": header[0],
+            "document_header_v1_bytes": header[1],
+            "document_sections_v1_rows": sections[0],
+            "document_sections_v1_bytes": sections[1],
+            "document_body_order_rows_v1_rows": body_order[0],
+            "document_body_order_rows_v1_bytes": body_order[1],
         }
     finally:
         connection.close()
 
 
+# The variable-width payload of each document-scoped table, as a SQL expression over one row. The
+# two fixed-width section-row tables keep their numbers in `INTEGER` columns, so only the payload
+# counts; a page of the file holds both kinds the same way.
+TABLE_PAYLOAD = {
+    "document_meta_v1": "length(CAST(value AS BLOB))",
+    "document_meta_v2": "length(CAST(value AS BLOB))",
+    "document_header_v1": (
+        "length(CAST(source AS BLOB)) + length(CAST(title AS BLOB))"
+        " + length(CAST(media_type AS BLOB)) + length(CAST(content_hash AS BLOB))"
+        " + COALESCE(length(CAST(normalized_document_hash AS BLOB)), 0)"
+    ),
+    "document_sections_v1": (
+        "length(CAST(section_id AS BLOB)) + length(CAST(title AS BLOB))"
+        " + length(CAST(location_json AS BLOB))"
+    ),
+    "document_body_order_rows_v1": "0",
+}
+
+
 def metadata_table_facts(connection, table: str) -> tuple[int, int]:
-    """The row count and UTF-8/compressed byte total of one metadata table, or zeros."""
+    """The row count and stored byte total of one document-scoped table, or zeros."""
     if not connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
     ).fetchone():
         return (0, 0)
+    payload = TABLE_PAYLOAD.get(table, "0")
     rows, size = connection.execute(
-        f"SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0) FROM {table}"
+        f"SELECT COUNT(*), COALESCE(SUM({payload}), 0) FROM {table}"
     ).fetchone()
     return (int(rows), int(size))
+
+
+def format_open_seconds(value: float | None) -> str:
+    """The open duration with three decimals, or `-` when the open reported none."""
+    return "-" if value is None else f"{value:.3f}"
 
 
 def sqlite_file_bytes(database: str) -> int:
@@ -197,7 +231,7 @@ def main() -> int:
         )
         (
             peak_rss_kib,
-            _,
+            open_seconds,
             error,
             timed_out,
             _,
@@ -224,6 +258,7 @@ def main() -> int:
             pragma_lines.append(f"sqlite_file_bytes={sqlite_file_bytes(database)}")
         print(
             "input={label} size_mib={size_mb:g} ok=yes peak_rss_kib={peak} "
+            "open_seconds={open_seconds} "
             "documents={documents} document_json_bytes={document_json_bytes} "
             "section_text_rows={section_text_rows} "
             "section_text_stored_bytes={section_text_stored_bytes} "
@@ -232,10 +267,17 @@ def main() -> int:
             "document_meta_v1_bytes={document_meta_v1_bytes} "
             "document_meta_v2_rows={document_meta_v2_rows} "
             "document_meta_v2_bytes={document_meta_v2_bytes} "
+            "document_header_v1_rows={document_header_v1_rows} "
+            "document_header_v1_bytes={document_header_v1_bytes} "
+            "document_sections_v1_rows={document_sections_v1_rows} "
+            "document_sections_v1_bytes={document_sections_v1_bytes} "
+            "document_body_order_rows_v1_rows={document_body_order_rows_v1_rows} "
+            "document_body_order_rows_v1_bytes={document_body_order_rows_v1_bytes} "
             "sqlite_file_bytes={file_bytes}".format(
                 label=label,
                 size_mb=size_mb,
                 peak=peak_rss_kib,
+                open_seconds=format_open_seconds(open_seconds),
                 file_bytes=sqlite_file_bytes(database),
                 **sizes,
             ),

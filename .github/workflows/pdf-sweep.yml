@@ -13,7 +13,7 @@ on:
 jobs:
   select:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -78,7 +78,7 @@ jobs:
     needs: [build, select]
     if: always() && needs.build.result == 'success' && needs.select.result != 'failure'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -97,17 +97,21 @@ jobs:
         with:
           name: pdf-sweep-ids
           path: ${{ runner.temp }}/ids
-          if-no-files-found: ignore
       - name: Resolve the corpus list path
         id: ids
         run: |
-          if [ -s "$RUNNER_TEMP/ids/pdf-sweep-ids.txt" ]; then
-            path="$RUNNER_TEMP/ids/pdf-sweep-ids.txt"
-          else
-            path=scripts/pdf-sweep-ids.txt
+          if [ ! -s scripts/pdf-sweep-ids.txt ]; then
+            found=$(find "$RUNNER_TEMP/ids" -name pdf-sweep-ids.txt -type f 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+              cp "$found" scripts/pdf-sweep-ids.txt
+            fi
           fi
-          echo "path=$path" >> "$GITHUB_OUTPUT"
-          grep -c '^{' "$path"
+          if [ ! -s scripts/pdf-sweep-ids.txt ]; then
+            echo "::error::no corpus list: neither committed nor selected in this run"
+            exit 1
+          fi
+          echo "path=scripts/pdf-sweep-ids.txt" >> "$GITHUB_OUTPUT"
+          echo "documents: $(grep -c '^{' scripts/pdf-sweep-ids.txt)"
       - uses: actions/download-artifact@v4
         with:
           name: pdf-sweep-bin
@@ -132,7 +136,7 @@ jobs:
             --work-dir "$RUNNER_TEMP/work" \
             --state-root "$RUNNER_TEMP/state" \
             --out "$RUNNER_TEMP/results/sweep-${{ matrix.shard }}.jsonl" \
-            --deadline-minutes 42 \
+            --deadline-minutes 40 \
             --per-document-minutes 4.5 | tail -150
       - name: Upload shard results
         if: always()
@@ -147,7 +151,7 @@ jobs:
     needs: [probe]
     if: always() && needs.probe.result != 'cancelled'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -164,14 +168,14 @@ jobs:
         with:
           name: pdf-sweep-ids
           path: ${{ runner.temp }}/ids
-          if-no-files-found: ignore
       - name: Merge every shard into the final tables
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/final"
+          report=$(find "$RUNNER_TEMP/ids" -name select-report.json -type f 2>/dev/null | head -1)
           python3 scripts/pdf-sweep.py --aggregate \
             --jsonl-dir "$RUNNER_TEMP/all" \
-            --select-report "$RUNNER_TEMP/ids/select-report.json" \
+            --select-report "$report" \
             --out "$RUNNER_TEMP/final/pdf-sweep-summary.json" \
             --markdown "$RUNNER_TEMP/final/pdf-sweep.md" \
             --suspects "$RUNNER_TEMP/final/pdf-sweep-suspects.jsonl" | tail -150

@@ -52,11 +52,10 @@ ARXIV_PDF = "https://arxiv.org/pdf/{id}"
 ARXIV_DELAY_S = 3.0
 FETCH_DELAY_S = 2.0
 USER_AGENT = "reading-mcp-bench-pdf5a"
-CC_LICENSE_MARKERS = (
-    "licenses/by/4.0",
-    "licenses/by-sa/4.0",
-    "publicdomain/zero/1.0",
-)
+# arXiv offered CC-BY(-SA) 1.0/2.0/2.5 before 4.0, so the version is not pinned: the task's
+# rule is the licence family (CC-BY / CC-BY-SA / CC0), not the version.
+CC_LICENSE_RE = re.compile(r"creativecommons\.org/licenses/(by|by-sa)/[0-9.]+")
+CC0_RE = re.compile(r"creativecommons\.org/publicdomain/zero/[0-9.]+")
 MAX_PDF_BYTES = 134217728  # the server's own default READING_MCP_MAX_DOCUMENT_BYTES
 DATE_FILTER = "submittedDate:[202301010000 TO 202612312359]"
 OLD_DATE_FILTER = "submittedDate:[199401010000 TO 200412312359]"
@@ -97,6 +96,7 @@ ORDINARY_SLOTS = [
     ("econ/eess", "(cat:econ.EM OR cat:econ.GN OR cat:eess.SP OR cat:eess.IV)", 10),
 ]
 OLD_QUERIES = [
+    "submittedDate:[200401010000 TO 200412312359]",
     "(cat:cs.DL OR cat:cs.CL OR cat:cs.CV OR cat:cs.LG)",
     "(cat:math.NT OR cat:math.CO OR cat:math.PR)",
     "cat:hep-th",
@@ -110,10 +110,14 @@ LONG_QUERIES = [
     '(abs:"course notes" OR abs:"review of" OR abs:survey)',
 ]
 HARD_SLOTS = [
-    ("hard-math", '(cat:math.* AND (abs:theorem OR abs:"we prove"))'),
-    ("hard-tables", '(abs:table AND (cat:cs.DB OR cat:cs.CL OR cat:cs.IR))'),
-    ("hard-figures", '(abs:figure AND (cat:cs.CV OR cat:q-bio.QM OR cat:eess.IV))'),
-    ("hard-slides", '(abs:slides OR abs:beamer OR abs:presentation OR abs:talk)'),
+    ("hard-math", ['(cat:math.* AND (abs:theorem OR abs:"we prove"))']),
+    ("hard-tables", ['(abs:table AND (cat:cs.DB OR cat:cs.CL OR cat:cs.IR))']),
+    ("hard-figures", ['(abs:figure AND (cat:cs.CV OR cat:q-bio.QM OR cat:eess.IV))',
+                      '(abs:"Fig." AND (cat:cs.CV OR cat:q-bio.QM OR cat:eess.IV))',
+                      '(cat:cs.CV AND (abs:microscopy OR abs:segmentation))']),
+    ("hard-slides", ['(abs:slides OR abs:beamer OR abs:"slide deck")',
+                     '(co:slides OR co:beamer OR co:talk)',
+                     '(abs:presentation AND (cat:cs.CL OR cat:cs.LG OR cat:cs.CV))']),
 ]
 GROUP_TARGET = {
     "ordinary": 100,
@@ -126,10 +130,11 @@ GROUP_TARGET = {
 }
 GROUP_ORDER = ["ordinary", "long", "hard-math", "hard-tables", "hard-figures", "hard-slides",
                "old-scan"]
-MAX_DOWNLOADS = 340
-MAX_CANDIDATES_PER_SLOT = 16
-LONG_MAX_DOWNLOADS = 60
-LONG_MAX_CANDIDATES = 90
+MAX_DOWNLOADS = 380
+MAX_CANDIDATES_PER_SLOT = 40
+HARD_MAX_CANDIDATES = 20
+LONG_MAX_DOWNLOADS = 30
+LONG_MAX_CANDIDATES = 30
 OLD_MAX_CANDIDATES = 40
 
 
@@ -206,10 +211,18 @@ def arxiv_query(query: str, start: int, max_results: int) -> list[dict]:
     return entries
 
 
+def cc_marker(url: str) -> str | None:
+    """The licence family of a URL, or None when it is not CC-BY / CC-BY-SA / CC0."""
+    match = CC_LICENSE_RE.search(url) or CC0_RE.search(url)
+    if match is None:
+        return None
+    return re.sub(r"^https?://", "", match.group(0))
+
+
 def abs_license(identifier: str) -> tuple[str | None, str | None]:
     page = fetch(ARXIV_ABS.format(id=identifier), 120).decode("utf-8", "ignore")
     for found in re.findall(r"https?://(?:creativecommons\.org|arxiv\.org)/[a-z0-9./\-]+", page):
-        marker = license_marker(found)
+        marker = cc_marker(found)
         if marker is not None:
             return found, marker
     return None, None
@@ -223,6 +236,7 @@ def pdf_facts(path: str, group: str) -> dict:
     math_chars = 0
     cjk_chars = 0
     raster_pages = 0
+    figure_pages = 0
     landscape_pages = 0
     image_pages = 0
     tables = 0
@@ -246,6 +260,8 @@ def pdf_facts(path: str, group: str) -> dict:
                 image_pages += 1
                 if largest >= RASTER_SHARE:
                     raster_pages += 1
+                if largest >= 0.05:
+                    figure_pages += 1
             if page.rect.width > page.rect.height:
                 landscape_pages += 1
             if group == "hard-tables":
@@ -261,6 +277,7 @@ def pdf_facts(path: str, group: str) -> dict:
         "cjk_chars": cjk_chars,
         "image_pages": image_pages,
         "raster_pages": raster_pages,
+        "figure_pages": figure_pages,
         "landscape_share": round(landscape_pages / pages, 3) if pages else 0.0,
         "producer": (metadata.get("producer") or "")[:120],
         "creator": (metadata.get("creator") or "")[:120],
@@ -300,13 +317,12 @@ def qualify(group: str, facts: dict) -> tuple[bool, str, dict]:
             return False, f"tables={facts.get('tables')}", {}
         return True, f"tables={facts['tables']}", {}
     if group == "hard-figures":
-        share = facts["raster_pages"] / pages if pages else 0.0
-        if share < 0.3:
-            return False, f"raster_share={share:.2f}", {}
-        return True, f"raster_share={share:.2f}", {}
+        if facts["figure_pages"] < 5:
+            return False, f"figure_pages={facts['figure_pages']}", {}
+        return True, f"figure_pages={facts['figure_pages']}", {}
     if group == "hard-slides":
         beamer = "beamer" in f"{facts['producer']} {facts['creator']}".lower()
-        landscape = facts["landscape_share"] >= 0.8 and facts["chars_per_page"] <= 1500
+        landscape = facts["landscape_share"] >= 0.6 and facts["chars_per_page"] <= 1500
         if not (beamer or landscape):
             return False, f"slides=no(landscape={facts['landscape_share']})", {}
         return True, "slides=beamer" if beamer else "slides=landscape", {}
@@ -481,10 +497,12 @@ def select_mode(args) -> int:
             break
         selector.slot(query, "long", GROUP_TARGET["long"] - selector.kept["long"],
                       LONG_MAX_CANDIDATES, LONG_MAX_DOWNLOADS)
-    for group, query in HARD_SLOTS:
-        if not selector.downloads_left():
-            break
-        selector.slot(query, group, GROUP_TARGET[group], MAX_CANDIDATES_PER_SLOT)
+    for group, queries in HARD_SLOTS:
+        for query in queries:
+            if selector.kept[group] >= GROUP_TARGET[group] or not selector.downloads_left():
+                break
+            selector.slot(query, group, GROUP_TARGET[group] - selector.kept[group],
+                          HARD_MAX_CANDIDATES)
     for query in OLD_QUERIES:
         if selector.kept["old-scan"] >= GROUP_TARGET["old-scan"] or not selector.downloads_left():
             break
@@ -826,7 +844,7 @@ def download_pdf(entry: dict, work_dir: str) -> tuple[str | None, dict]:
     os.makedirs(pdf_dir, exist_ok=True)
     path = os.path.join(pdf_dir, f"{entry['id'].replace('/', '_')}.pdf")
     status: dict = {"download": "ok", "error": None}
-    marker = entry.get("license_marker") or license_marker(entry.get("license") or "")
+    marker = entry.get("license_marker") or cc_marker(entry.get("license") or "")
     try:
         _licence_url, found = abs_license(entry["id"])
         time.sleep(FETCH_DELAY_S)

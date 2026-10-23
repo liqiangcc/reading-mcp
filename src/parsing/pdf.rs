@@ -249,6 +249,12 @@ fn extract_page_texts(pdf: &LopdfDocument, page_numbers: &[u32]) -> (Vec<PageTex
     extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), page_numbers)
 }
 
+/// Reads every page's text with one content walk per page.
+///
+/// `Document::extract_text_with_limit` is this same walk with the fragments concatenated and the
+/// first error returned, so the page is walked once and both facts are derived from its one
+/// result: decoding the page's streams, every font's encoding and every `/ToUnicode` CMap twice
+/// per page bought nothing and held a second copy of the page's decoded content at the peak.
 fn extract_page_texts_raw(
     pdf: &LopdfDocument,
     page_numbers: &[u32],
@@ -257,28 +263,41 @@ fn extract_page_texts_raw(
     let mut errors = Vec::new();
 
     for page_number in page_numbers {
-        let chunks = pdf
-            .extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
-            .into_iter()
-            .filter_map(Result::ok)
-            .map(|chunk| normalize_pdf_text(&chunk))
-            .filter(|chunk| !chunk.is_empty())
-            .collect::<Vec<_>>();
-        match pdf.extract_text_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES) {
-            Ok(text) => pages.push(PageText {
-                number: *page_number,
-                text: normalize_pdf_text(&text),
-                chunks,
-            }),
-            Err(error) => {
-                errors.push(format!("page {page_number}: {error}"));
-                pages.push(PageText {
-                    number: *page_number,
-                    text: String::new(),
-                    chunks,
-                });
+        let mut text = String::new();
+        let mut first_error = None;
+        let mut chunks = Vec::new();
+        for fragment in
+            pdf.extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
+        {
+            match fragment {
+                Ok(fragment) => {
+                    text.push_str(&fragment);
+                    let chunk = normalize_pdf_text(&fragment);
+                    if !chunk.is_empty() {
+                        chunks.push(chunk);
+                    }
+                }
+                // The whole page's text is the error, exactly as the concatenating variant
+                // returns it: the first failing fragment wins.
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
+        let text = match first_error {
+            Some(error) => {
+                errors.push(format!("page {page_number}: {error}"));
+                String::new()
+            }
+            None => normalize_pdf_text(&text),
+        };
+        pages.push(PageText {
+            number: *page_number,
+            text,
+            chunks,
+        });
     }
 
     (pages, errors)

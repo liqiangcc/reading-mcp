@@ -1294,8 +1294,10 @@ fn validate_blocks_and_text_units(
         .iter()
         .map(|section| section.paragraphs.len())
         .sum();
-    // The same clone-free keying: the paragraph ranges are looked up per block and per sentence.
-    let mut paragraph_ranges = HashSet::<(&str, usize, usize)>::new();
+    // The same clone-free keying, and a sorted vector rather than a hash set: the number of
+    // paragraphs is known here, so the vector is exact in size and carries no table overhead (the
+    // set this replaced was 3.1 MiB of 宋史's heap peak, MEM-2a).
+    let mut paragraph_ranges = Vec::with_capacity(coverage.text_units.paragraph_units);
     let mut expected_paragraph_source_order = 0usize;
     for section in &segmentation.sections {
         let section_id = &section.section_id;
@@ -1356,7 +1358,7 @@ fn validate_blocks_and_text_units(
                 );
             }
             coverage.text_units.paragraph_chars += paragraph.range().len();
-            paragraph_ranges.insert((
+            paragraph_ranges.push((
                 section_id.0.as_str(),
                 paragraph.range().start(),
                 paragraph.range().end(),
@@ -1381,12 +1383,16 @@ fn validate_blocks_and_text_units(
         coverage.text_units.paragraph_separator_chars += section_coverage.separator_chars;
     }
 
+    paragraph_ranges.sort_unstable();
     for block in &blocks.blocks {
-        if paragraph_ranges.contains(&(
-            block.owner_section_id.0.as_str(),
-            block.normalized_range.start(),
-            block.normalized_range.end(),
-        )) {
+        if paragraph_ranges
+            .binary_search(&(
+                block.owner_section_id.0.as_str(),
+                block.normalized_range.start(),
+                block.normalized_range.end(),
+            ))
+            .is_ok()
+        {
             coverage.blocks.blocks_with_exact_paragraph_match += 1;
         } else {
             coverage.blocks.blocks_without_exact_paragraph_match += 1;
@@ -1470,7 +1476,10 @@ fn validate_blocks_and_text_units(
                 continue;
             };
             let parent = (parent_range.start(), parent_range.end());
-            if !paragraph_ranges.contains(&(section_id.0.as_str(), parent.0, parent.1)) {
+            if paragraph_ranges
+                .binary_search(&(section_id.0.as_str(), parent.0, parent.1))
+                .is_err()
+            {
                 push_error(
                     findings,
                     "text_units",

@@ -651,7 +651,7 @@ impl DocumentRepository for CountingStore {
 
     async fn document_header(
         &self,
-        id: &DocumentId,
+        _id: &DocumentId,
     ) -> Result<Option<DocumentHeader>, ApplicationError> {
         self.record("document_header");
         let Some(document) = &self.document else {

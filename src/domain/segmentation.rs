@@ -378,6 +378,17 @@ impl Document {
             .expect("canonical normalized block map must be valid for text segmentation")
     }
 
+    /// The same segmentation [`Self::segmentation`] builds, from a block map the caller already
+    /// holds. A parser that set the map through [`Document::set_normalized_block_map_ref`] segments
+    /// from the map it has instead of decoding the metadata JSON back into an identical one.
+    pub fn segmentation_from_block_map(
+        &self,
+        block_map: Option<&NormalizedBlockMap>,
+    ) -> DocumentSegmentation {
+        self.build_segmentation(block_map)
+            .expect("canonical normalized block map must be valid for text segmentation")
+    }
+
     fn build_segmentation(
         &self,
         block_map: Option<&NormalizedBlockMap>,

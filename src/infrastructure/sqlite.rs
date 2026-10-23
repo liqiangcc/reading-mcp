@@ -602,7 +602,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                 // value of a book, so it is computed once here — from the document in hand — and
                 // stored, instead of on every `read`.
                 let body_order = crate::application::body_order_ids(&document);
-                let json = serde_json::to_string(&StoredDocument::with_stores(
+                let json = crate::json::to_string_exact(&StoredDocument::with_stores(
                     &document,
                     content_store,
                     light_metadata,
@@ -651,6 +651,8 @@ impl DocumentRepository for SqliteDocumentRepository {
                         )
                         .map_err(repository_error)?;
                     for (key, value) in &heavy_metadata {
+                        // Borrowed from the document: the compressor reads the value in place.
+                        let (key, value) = (*key, *value);
                         let (encoding, blob) = encode_metadata_value(value)?;
                         statement
                             .execute(params![document.id.0, key, encoding, blob])
@@ -1248,14 +1250,20 @@ fn unknown_metadata_store(store: &str) -> ApplicationError {
 
 /// Splits a document's metadata into the entries that stay inline in `document_json` and the heavy
 /// ones that `document_meta_v2` holds.
+///
+/// The heavy entries are borrowed, not cloned: their values are the largest facts a document has
+/// (the 19 MB normalized block map of 宋史), they are only ever streamed into the compressor, and a
+/// clone of them is a second copy that lives as long as the save does — 3.7 MiB of en-novel's
+/// 18.3 MiB heap peak in MEM-2a. The borrow ends with `save_shared`'s call, so nothing outlives the
+/// document the caller handed in.
 fn split_metadata(
     metadata: &BTreeMap<String, String>,
-) -> (BTreeMap<String, String>, Vec<(String, String)>) {
+) -> (BTreeMap<String, String>, Vec<(&str, &str)>) {
     let mut light = BTreeMap::new();
     let mut heavy = Vec::new();
     for (key, value) in metadata {
         if value.len() > METADATA_HEAVY_BYTES {
-            heavy.push((key.clone(), value.clone()));
+            heavy.push((key.as_str(), value.as_str()));
         } else {
             light.insert(key.clone(), value.clone());
         }

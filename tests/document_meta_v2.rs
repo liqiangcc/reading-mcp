@@ -409,3 +409,115 @@ async fn saving_removes_rows_from_both_tables() {
         "a save with no heavy entry names no metadata store"
     );
 }
+
+/// A value of exactly five mebibytes, shaped like `normalized_block_map`: the size the borrowed
+/// split in `split_metadata` must compress without ever copying the value (MEM-2b).
+fn five_mebibyte_value() -> String {
+    let mut value = String::from("{\"blocks\":[");
+    let mut index = 0usize;
+    while value.len() < 5 * 1024 * 1024 {
+        if index > 0 {
+            value.push(',');
+        }
+        value.push_str(&format!(
+            "{{\"owner_section_id\":\"section://chapter/{}\",\"native_location\":\"OEBPS/text/chapter{}.xhtml#p{}\",\"text\":\"第{}段的正文内容\"}}",
+            index / 100,
+            index / 100,
+            index,
+            index
+        ));
+        index += 1;
+    }
+    value.push_str("]}");
+    assert!(value.len() >= 5 * 1024 * 1024, "value is {}", value.len());
+    value
+}
+
+/// The zlib blob this value is stored as, encoded here independently: the level and the 1 MiB
+/// feeding chunks `encode_metadata_value` uses, so a change to either — or a copy that changes the
+/// bytes — fails the comparison.
+fn expected_zlib(value: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+    for chunk in value.as_bytes().chunks(1024 * 1024) {
+        encoder.write_all(chunk).expect("zlib chunk");
+    }
+    encoder.finish().expect("zlib finish")
+}
+
+/// The stored `zlib` blob of `key`, and its encoding.
+fn stored_blob(database: &Path, document_id: &DocumentId, key: &str) -> (String, Vec<u8>) {
+    let rows = metadata_rows(database, "document_meta_v2", document_id);
+    let (_, encoding, blob) = rows
+        .into_iter()
+        .find(|(row_key, _, _)| row_key == key)
+        .expect("the heavy row should exist");
+    (encoding, blob)
+}
+
+#[tokio::test]
+async fn a_five_mebibyte_value_round_trips_and_compresses_to_the_same_bytes() {
+    let mut document = document();
+    let value = five_mebibyte_value();
+    document
+        .metadata
+        .insert("normalized_block_map".into(), value.clone());
+    let (_directory, database) = save(document.clone()).await;
+
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
+    let (full, _) = repository
+        .get_with_hash(&document.id)
+        .await
+        .expect("full read")
+        .expect("document should exist");
+    assert_eq!(*full, document, "the loaded document is the saved one");
+    assert_eq!(
+        full.metadata["normalized_block_map"].as_bytes(),
+        value.as_bytes(),
+        "the five-mebibyte value is byte-identical after the round trip"
+    );
+
+    let (encoding, blob) = stored_blob(&database, &document.id, "normalized_block_map");
+    assert_eq!(encoding, "zlib");
+    assert_eq!(
+        blob,
+        expected_zlib(&value),
+        "the stored blob is the same zlib stream: no copy changed the compressor's input"
+    );
+    assert_eq!(decode(&encoding, &blob), value);
+    assert!(
+        !stored_json(&database, &document.id).contains("owner_section_id"),
+        "a heavy value stays out of document_json"
+    );
+}
+
+#[tokio::test]
+async fn a_value_of_exactly_the_heavy_threshold_round_trips_and_compresses_to_the_same_bytes() {
+    // 1025 bytes: one over `METADATA_HEAVY_BYTES`, so this is the smallest heavy entry there is.
+    let value = just_heavy_value();
+    assert_eq!(value.len(), 1025);
+    let mut document = document();
+    document
+        .metadata
+        .insert("original_source_binding_map".into(), value.clone());
+    let (_directory, database) = save(document.clone()).await;
+
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
+    let (full, _) = repository
+        .get_with_hash(&document.id)
+        .await
+        .expect("full read")
+        .expect("document should exist");
+    assert_eq!(*full, document, "the loaded document is the saved one");
+
+    let (encoding, blob) = stored_blob(&database, &document.id, "original_source_binding_map");
+    assert_eq!(encoding, "zlib");
+    assert_eq!(blob, expected_zlib(&value), "the stored blob is unchanged");
+    assert_eq!(
+        repository
+            .load_metadata(&document.id, "original_source_binding_map")
+            .await
+            .expect("metadata read"),
+        Some(value),
+    );
+}

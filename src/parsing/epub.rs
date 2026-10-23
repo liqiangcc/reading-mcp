@@ -121,6 +121,15 @@ impl EpubParser {
             })
             .collect::<Vec<_>>();
 
+        // The container and package trees have been read into owned facts: `package_path`,
+        // `package_title`, `package_facts` and `spine_linearity` are all that is needed below, so
+        // the two XML trees and the strings they borrow are freed before the spine documents are
+        // parsed (MEM-2a: the package tree is a site at the heap peak).
+        drop(container_xml);
+        drop(container);
+        drop(package_xml);
+        drop(package);
+
         let mut parsed_spine_documents = Vec::new();
         let mut spine_records = Vec::with_capacity(package_facts.spine.len());
         let mut normalized_blocks = Vec::<NormalizedBlock>::new();
@@ -321,6 +330,10 @@ impl EpubParser {
             metadata,
             root_sections: reconciled.root_sections,
         };
+        // The blocks were pushed one spine item at a time, so the vector's capacity is whatever
+        // doubling last reached, and it is the map the whole open then holds: shrink it to the
+        // exact count (MEM-2a: that vector is 7.0 MiB of 宋史's heap peak).
+        normalized_blocks.shrink_to_fit();
         // The map stays in hand until the report is built: it is the largest fact a book has, so
         // it is not moved away here and then decoded back out of the metadata JSON for the
         // segmentation and again for the validation.

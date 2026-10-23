@@ -28,6 +28,7 @@ mod reading_support;
 pub mod search_document;
 pub mod search_reading;
 pub(crate) mod section_rows;
+mod section_view;
 pub mod short_handle;
 pub mod source_view;
 mod structure_cursor;

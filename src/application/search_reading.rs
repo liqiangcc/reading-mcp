@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::application::handle_reading::resolve_document;
+use crate::application::handle_reading::resolve_header;
 use crate::application::ports::{DocumentRepository, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
 use crate::application::search_document::{
@@ -77,9 +77,9 @@ impl SearchReadingUseCase {
                 format!("doc must be a document handle: {}", error.message),
             )
         })?;
-        let resolved = resolve_document(
+        let resolved = resolve_header(
             self.text_unit_index.as_ref(),
-            self.repository.as_ref(),
+            &self.repository,
             handle.document(),
         )
         .await?;
@@ -87,7 +87,7 @@ impl SearchReadingUseCase {
         let found = self
             .search_document
             .execute(SearchDocumentCommand {
-                document_id: resolved.document.id.clone(),
+                document_id: resolved.id().clone(),
                 query: command.query,
                 limit: command.limit,
             })
@@ -109,7 +109,7 @@ impl SearchReadingUseCase {
             };
             let section_key = self
                 .text_unit_index
-                .section_key(&resolved.document.id, &hit.section_id)
+                .section_key(resolved.id(), &hit.section_id)
                 .await?
                 .ok_or_else(|| {
                     ReadingError::stale_handle(format!(

@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::light_sections::SectionTexts;
-use crate::application::locator_resolution::{ResolvedTextLocator, resolve_text_locator};
+use crate::application::locator_resolution::{ResolvedTextLocator, resolve_text_locator_at};
 use crate::application::ports::{ApplicationError, DocumentRepository, TextUnitIndex};
 use crate::application::read_cursor::{ReadCursorClaims, decode_read_cursor, encode_read_cursor};
 use crate::application::reading_support::{
     SECTION_TREE_READ_MODE, SECTION_TREE_RENDERING_VERSION, SECTION_TREE_STREAM_COORDINATE_SPACE,
     content_response_limit, render_section_tree, slice_rendered_stream,
 };
+use crate::application::section_view::DocumentView;
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, NormalizedTextRange,
     Section, SectionId, TextLocator,
@@ -95,17 +96,17 @@ impl ReadDocumentUseCase {
         &self,
         command: ReadSectionCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
-        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
-        let section = document
-            .find_section(&command.section_id)
-            .ok_or(ApplicationError::SectionNotFound)?;
+        let document = self.load_document(&command.document_id).await?;
+        let Some(section) = document.view.subtree_of(&command.section_id).await? else {
+            return Err(ApplicationError::SectionNotFound);
+        };
         let mut texts = self.section_texts(&document);
-        let rendered = render_subtree(section, &mut texts).await?;
+        let rendered = render_subtree(&section, &mut texts).await?;
 
         read_rendered_section_segment(
-            &document,
-            section,
-            normalized_hash,
+            &document.carrier,
+            &section,
+            document.normalized_document_hash.clone(),
             rendered,
             0,
             command.max_chars,
@@ -121,21 +122,25 @@ impl ReadDocumentUseCase {
         validate_cursor_target(&claims, &command.document_id, &command.section_id)?;
         validate_section_tree_cursor_contract(&claims)?;
 
-        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
-        validate_cursor_document_identity(&claims, &document, &normalized_hash)?;
+        let document = self.load_document(&command.document_id).await?;
+        validate_cursor_document_identity(
+            &claims,
+            &document.carrier,
+            &document.normalized_document_hash,
+        )?;
 
-        let section = document
-            .find_section(&command.section_id)
-            .ok_or(ApplicationError::SectionNotFound)?;
+        let Some(section) = document.view.subtree_of(&command.section_id).await? else {
+            return Err(ApplicationError::SectionNotFound);
+        };
         let mut texts = self.section_texts(&document);
-        let rendered = render_subtree(section, &mut texts).await?;
+        let rendered = render_subtree(&section, &mut texts).await?;
         let total_chars = rendered.chars().count();
         validate_resumable_position(claims.next_char, total_chars)?;
 
         read_rendered_section_segment(
-            &document,
-            section,
-            normalized_hash,
+            &document.carrier,
+            &section,
+            document.normalized_document_hash.clone(),
             rendered,
             claims.next_char,
             command.max_chars,
@@ -146,21 +151,30 @@ impl ReadDocumentUseCase {
         &self,
         command: ReadExactTargetCommand,
     ) -> Result<ReadSectionResult, ApplicationError> {
-        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
+        let document = self.load_document(&command.document_id).await?;
         let units = self.text_units(&document);
         let mut texts = self.section_texts(&document);
-        let target = resolve_text_locator(
-            &document,
+        let target = resolve_text_locator_at(
+            &document.carrier,
+            &document.view,
             &command.target_locator,
-            &normalized_hash,
+            &document.normalized_document_hash,
             units.as_ref(),
             &mut texts,
         )
         .await?;
+        let Some(section) = document
+            .view
+            .section_of(&target.locator.owner_section_id)
+            .await?
+        else {
+            return Err(ApplicationError::SectionNotFound);
+        };
         read_exact_segment(
-            &document,
+            &document.carrier,
+            &section,
             target,
-            &normalized_hash,
+            &document.normalized_document_hash,
             0,
             command.max_chars,
             &mut texts,
@@ -181,26 +195,39 @@ impl ReadDocumentUseCase {
         )?;
         validate_exact_cursor_contract(&claims)?;
 
-        let (document, normalized_hash) = self.load_document(&command.document_id).await?;
-        validate_cursor_document_identity(&claims, &document, &normalized_hash)?;
+        let document = self.load_document(&command.document_id).await?;
+        validate_cursor_document_identity(
+            &claims,
+            &document.carrier,
+            &document.normalized_document_hash,
+        )?;
         let units = self.text_units(&document);
         let mut texts = self.section_texts(&document);
-        let target = resolve_text_locator(
-            &document,
+        let target = resolve_text_locator_at(
+            &document.carrier,
+            &document.view,
             &command.target_locator,
-            &normalized_hash,
+            &document.normalized_document_hash,
             units.as_ref(),
             &mut texts,
         )
         .await?;
         validate_exact_cursor_binding(&claims, &target)?;
 
+        let Some(section) = document
+            .view
+            .section_of(&target.locator.owner_section_id)
+            .await?
+        else {
+            return Err(ApplicationError::SectionNotFound);
+        };
         let target_chars = target.range.len();
         validate_resumable_position(claims.next_char, target_chars)?;
         read_exact_segment(
-            &document,
+            &document.carrier,
+            &section,
             target,
-            &normalized_hash,
+            &document.normalized_document_hash,
             claims.next_char,
             command.max_chars,
             &mut texts,
@@ -208,33 +235,68 @@ impl ReadDocumentUseCase {
         .await
     }
 
-    /// The light document when a stored text-unit index serves the units — the renderer then asks the
-    /// repository for the text of exactly the sections it renders — and the full document when the
-    /// units come from `DerivedTextUnits`, which segments the document's own text.
-    async fn load_document(
-        &self,
-        id: &DocumentId,
-    ) -> Result<(Arc<Document>, NormalizedDocumentHash), ApplicationError> {
-        let loaded = match self.text_unit_index {
-            Some(_) => self.repository.get_light_with_hash(id).await?,
-            None => self.repository.get_with_hash(id).await?,
+    /// The header and the rows when a stored text-unit index serves the units — the renderer then
+    /// asks the repository for the text of exactly the sections it renders — and the full document
+    /// when the units come from `DerivedTextUnits`, which segments the document's own text.
+    async fn load_document(&self, id: &DocumentId) -> Result<ReadDocument, ApplicationError> {
+        let (view, full, normalized_document_hash) = match self.text_unit_index {
+            Some(_) => {
+                let (view, hash) = DocumentView::load_with_hash(Arc::clone(&self.repository), id)
+                    .await?
+                    .ok_or(ApplicationError::DocumentNotFound)?;
+                (view, None, hash)
+            }
+            None => {
+                let (document, hash) = self
+                    .repository
+                    .get_with_hash(id)
+                    .await?
+                    .ok_or(ApplicationError::DocumentNotFound)?;
+                let view = DocumentView::from_document(
+                    Arc::clone(&self.repository),
+                    Arc::clone(&document),
+                    &hash,
+                );
+                (view, Some(document), hash)
+            }
         };
-        loaded.ok_or(ApplicationError::DocumentNotFound)
+        let carrier = view.document();
+        Ok(ReadDocument {
+            view,
+            carrier,
+            full,
+            normalized_document_hash,
+        })
     }
 
-    fn section_texts<'a>(&self, document: &'a Arc<Document>) -> SectionTexts<'a> {
-        match self.text_unit_index {
-            Some(_) => SectionTexts::from_repository(document, Arc::clone(&self.repository)),
-            None => SectionTexts::from_document(document),
+    fn section_texts<'a>(&self, document: &'a ReadDocument) -> SectionTexts<'a> {
+        match &document.full {
+            Some(full) => SectionTexts::from_document(full),
+            None => SectionTexts::from_repository(&document.carrier, Arc::clone(&self.repository)),
         }
     }
 
-    fn text_units(&self, document: &Arc<Document>) -> Arc<dyn TextUnitIndex> {
+    fn text_units(&self, document: &ReadDocument) -> Arc<dyn TextUnitIndex> {
         match &self.text_unit_index {
             Some(index) => Arc::clone(index),
-            None => Arc::new(DerivedTextUnits::new(Arc::clone(document))),
+            None => Arc::new(DerivedTextUnits::new(Arc::clone(
+                document
+                    .full
+                    .as_ref()
+                    .expect("the derived path loads the full document"),
+            ))),
         }
     }
+}
+
+/// The document one read call works on.
+struct ReadDocument {
+    view: DocumentView,
+    /// The identity-only document the locator constructors and the result carry read.
+    carrier: Document,
+    /// The full document, only when the units are derived from it.
+    full: Option<Arc<Document>>,
+    normalized_document_hash: NormalizedDocumentHash,
 }
 
 /// The section tree rendered from the text of exactly the sections it renders: the section and every
@@ -298,15 +360,13 @@ fn read_rendered_section_segment(
 
 async fn read_exact_segment(
     document: &Document,
+    section: &Section,
     target: ResolvedTextLocator,
     normalized_hash: &NormalizedDocumentHash,
     start_char: usize,
     max_chars: Option<usize>,
     texts: &mut SectionTexts<'_>,
 ) -> Result<ReadSectionResult, ApplicationError> {
-    let section = document
-        .find_section(&target.locator.owner_section_id)
-        .ok_or(ApplicationError::SectionNotFound)?;
     let section_text = texts.text(&section.id).await?;
     let target_text = target.range.slice(&section_text).map_err(|error| {
         ApplicationError::InvalidLocator(format!("resolved target range is invalid: {error}"))

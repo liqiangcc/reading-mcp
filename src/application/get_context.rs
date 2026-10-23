@@ -5,14 +5,15 @@ use crate::application::get_text_units::{
     EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
 };
 use crate::application::light_sections::SectionTexts;
-use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
+use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator_at};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex,
     TextUnitStreamKey,
 };
 use crate::application::reading_support::{
-    content_response_limit, flatten_sections, render_section_shallow, truncate_chars,
+    content_response_limit, render_section_shallow, truncate_chars,
 };
+use crate::application::section_view::{DocumentView, carrier_section};
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, ParagraphContentClass,
     Section, SectionId, TEXT_SEGMENTATION_VERSION, TextLocator,
@@ -144,15 +145,14 @@ impl GetContextUseCase {
         command: GetContextCommand,
     ) -> Result<GetContextResult, ApplicationError> {
         validate_window(command.before, command.after)?;
-        let (document, normalized_document_hash) = self.load_document(&command.document_id).await?;
-        let mut texts = self.section_texts(&document);
+        let context = self.load_context(&command.document_id).await?;
+        let mut texts = self.section_texts(&context);
         section_neighbor_result(
-            &document,
+            &context,
             &command.section_id,
             command.before,
             command.after,
             command.max_chars,
-            &normalized_document_hash,
             &mut texts,
         )
         .await
@@ -166,17 +166,10 @@ impl GetContextUseCase {
             validate_window(*before, *after)?;
         }
 
-        let (document, normalized_document_hash) = self.load_document(&command.document_id).await?;
-        let units = self.text_units(&document);
-        let mut texts = self.section_texts(&document);
-        let resolved = resolve_target(
-            &document,
-            command.target,
-            &normalized_document_hash,
-            units.as_ref(),
-            &mut texts,
-        )
-        .await?;
+        let context = self.load_context(&command.document_id).await?;
+        let units = self.text_units(&context);
+        let mut texts = self.section_texts(&context);
+        let resolved = resolve_target(&context, command.target, units.as_ref(), &mut texts).await?;
 
         match command.relation {
             ContextRelation::Neighbor {
@@ -186,12 +179,11 @@ impl GetContextUseCase {
             } => {
                 require_anchor_kind(&resolved, ContextItemKind::Section)?;
                 section_neighbor_result(
-                    &document,
+                    &context,
                     &resolved.locator.owner_section_id,
                     before,
                     after,
                     command.max_chars,
-                    &normalized_document_hash,
                     &mut texts,
                 )
                 .await
@@ -203,7 +195,7 @@ impl GetContextUseCase {
             } => {
                 require_anchor_kind(&resolved, ContextItemKind::Paragraph)?;
                 text_unit_neighbor_result(
-                    &document,
+                    &context,
                     resolved,
                     ContextUnit::Paragraph,
                     before,
@@ -220,7 +212,7 @@ impl GetContextUseCase {
             } => {
                 require_anchor_kind(&resolved, ContextItemKind::Sentence)?;
                 text_unit_neighbor_result(
-                    &document,
+                    &context,
                     resolved,
                     ContextUnit::Sentence,
                     before,
@@ -233,57 +225,90 @@ impl GetContextUseCase {
             ContextRelation::Container {
                 kind: ContextContainerKind::Paragraph,
             } => {
-                paragraph_container_result(&document, resolved, command.max_chars, units.as_ref())
+                paragraph_container_result(&context, resolved, command.max_chars, units.as_ref())
                     .await
             }
             ContextRelation::Container {
                 kind: ContextContainerKind::Section,
-            } => {
-                section_container_result(
-                    &document,
-                    resolved,
-                    command.max_chars,
-                    &normalized_document_hash,
-                    &mut texts,
-                )
-                .await
+            } => section_container_result(&context, resolved, command.max_chars, &mut texts).await,
+            ContextRelation::Structural { kind } => {
+                structural_result(&context, resolved, kind, command.max_chars).await
             }
-            ContextRelation::Structural { kind } => structural_result(
-                &document,
-                resolved,
-                kind,
-                command.max_chars,
-                &normalized_document_hash,
-            ),
         }
     }
 
-    /// The light document when a stored text-unit index serves the units — every reader then asks
-    /// the repository for the text of exactly the sections it renders — and the full document when
-    /// the units come from `DerivedTextUnits`, which segments the document's own text.
-    async fn load_document(
-        &self,
-        id: &DocumentId,
-    ) -> Result<(Arc<Document>, NormalizedDocumentHash), ApplicationError> {
-        let loaded = match self.text_unit_index {
-            Some(_) => self.repository.get_light_with_hash(id).await?,
-            None => self.repository.get_with_hash(id).await?,
+    /// The document one context call works on: the header and one row per section question, and —
+    /// only when the units come from `DerivedTextUnits` — the full document, which that fallback
+    /// segments itself.
+    async fn load_context(&self, id: &DocumentId) -> Result<ContextDocument, ApplicationError> {
+        let (view, full, normalized_document_hash) = match self.text_unit_index {
+            Some(_) => {
+                let (view, hash) = DocumentView::load_with_hash(Arc::clone(&self.repository), id)
+                    .await?
+                    .ok_or(ApplicationError::DocumentNotFound)?;
+                (view, None, hash)
+            }
+            None => {
+                let (document, hash) = self
+                    .repository
+                    .get_with_hash(id)
+                    .await?
+                    .ok_or(ApplicationError::DocumentNotFound)?;
+                let view = DocumentView::from_document(
+                    Arc::clone(&self.repository),
+                    Arc::clone(&document),
+                    &hash,
+                );
+                (view, Some(document), hash)
+            }
         };
-        loaded.ok_or(ApplicationError::DocumentNotFound)
+        let carrier = view.document();
+        Ok(ContextDocument {
+            view,
+            carrier,
+            full,
+            normalized_document_hash,
+        })
     }
 
-    fn section_texts<'a>(&self, document: &'a Arc<Document>) -> SectionTexts<'a> {
-        match self.text_unit_index {
-            Some(_) => SectionTexts::from_repository(document, Arc::clone(&self.repository)),
-            None => SectionTexts::from_document(document),
+    fn section_texts<'a>(&self, context: &'a ContextDocument) -> SectionTexts<'a> {
+        match &context.full {
+            Some(document) => SectionTexts::from_document(document),
+            None => SectionTexts::from_repository(&context.carrier, Arc::clone(&self.repository)),
         }
     }
 
-    fn text_units(&self, document: &Arc<Document>) -> Arc<dyn TextUnitIndex> {
+    fn text_units(&self, context: &ContextDocument) -> Arc<dyn TextUnitIndex> {
         match &self.text_unit_index {
             Some(index) => Arc::clone(index),
-            None => Arc::new(DerivedTextUnits::new(Arc::clone(document))),
+            None => Arc::new(DerivedTextUnits::new(Arc::clone(
+                context
+                    .full
+                    .as_ref()
+                    .expect("the derived path loads the full document"),
+            ))),
         }
+    }
+}
+
+/// The document one context call works on.
+struct ContextDocument {
+    view: DocumentView,
+    /// The identity-only document the locator constructors read: `id`, `source`, `content_hash`
+    /// and no tree. Never rendered.
+    carrier: Document,
+    /// The full document, only when the units are derived from it.
+    full: Option<Arc<Document>>,
+    normalized_document_hash: NormalizedDocumentHash,
+}
+
+impl ContextDocument {
+    fn document(&self) -> &Document {
+        &self.carrier
+    }
+
+    fn normalized_hash(&self) -> &NormalizedDocumentHash {
+        &self.normalized_document_hash
     }
 }
 
@@ -294,30 +319,37 @@ struct ResolvedTarget {
 }
 
 async fn resolve_target(
-    document: &Document,
+    context: &ContextDocument,
     target: ContextTarget,
-    normalized_document_hash: &NormalizedDocumentHash,
     units: &dyn TextUnitIndex,
     texts: &mut SectionTexts<'_>,
 ) -> Result<ResolvedTarget, ApplicationError> {
     match target {
         ContextTarget::Section(section_id) => {
-            let section = document
-                .find_section(&section_id)
+            let row = context
+                .view
+                .section_by_id(&section_id)
+                .await?
                 .ok_or(ApplicationError::SectionNotFound)?;
             Ok(ResolvedTarget {
                 locator: TextLocator::for_section_with_hash(
-                    document,
-                    section,
-                    normalized_document_hash,
+                    context.document(),
+                    &carrier_section(&row),
+                    context.normalized_hash(),
                 ),
                 kind: ContextItemKind::Section,
             })
         }
         ContextTarget::Locator(locator) => {
-            let resolved =
-                resolve_text_locator(document, &locator, normalized_document_hash, units, texts)
-                    .await?;
+            let resolved = resolve_text_locator_at(
+                context.document(),
+                &context.view,
+                &locator,
+                context.normalized_hash(),
+                units,
+                texts,
+            )
+            .await?;
             let kind = match resolved.kind {
                 ResolvedLocatorKind::Section => ContextItemKind::Section,
                 ResolvedLocatorKind::Paragraph => ContextItemKind::Paragraph,
@@ -358,49 +390,57 @@ fn require_anchor_kind(
     Ok(())
 }
 
+/// Section neighbours are depth-first document order, which is exactly `section_key` order, so the
+/// window is one key-range read: `before` rows below the owner's key and `after` rows above it.
 async fn section_neighbor_result(
-    document: &Document,
+    context: &ContextDocument,
     section_id: &SectionId,
     before: usize,
     after: usize,
     max_chars: Option<usize>,
-    normalized_document_hash: &NormalizedDocumentHash,
     texts: &mut SectionTexts<'_>,
 ) -> Result<GetContextResult, ApplicationError> {
-    let mut sections = Vec::new();
-    flatten_sections(&document.root_sections, &mut sections);
-    let owner_index = sections
-        .iter()
-        .position(|section| section.id == *section_id)
+    let owner = context
+        .view
+        .section_by_id(section_id)
+        .await?
         .ok_or(ApplicationError::SectionNotFound)?;
-    let owner = sections[owner_index];
-
-    let start = owner_index.saturating_sub(before);
-    let end = (owner_index + after + 1).min(sections.len());
+    let before = i64::try_from(before).unwrap_or(i64::MAX);
+    let after = i64::try_from(after).unwrap_or(i64::MAX);
+    let sections = context
+        .view
+        .key_range(
+            owner.section_key.saturating_sub(before),
+            owner.section_key.saturating_add(after),
+        )
+        .await?;
     // Each rendered neighbour's own text, and nothing else: `before + after + 1` sections.
-    let mut rendered = Vec::with_capacity(end - start);
-    for section in &sections[start..end] {
-        let content = texts.text(&section.id).await?;
-        rendered.push(render_section_shallow(section, &content));
+    let mut rendered = Vec::with_capacity(sections.len());
+    for row in &sections {
+        let content = texts.text(&row.id).await?;
+        rendered.push(render_section_shallow(&carrier_section(row), &content));
     }
     let rendered = rendered.join("\n\n");
     let (content, truncated) = truncate_chars(rendered, max_chars);
-    let anchor_locator =
-        TextLocator::for_section_with_hash(document, owner, normalized_document_hash);
-    let items = sections[start..end]
+    let owner_section = carrier_section(&owner);
+    let anchor_locator = TextLocator::for_section_with_hash(
+        context.document(),
+        &owner_section,
+        context.normalized_hash(),
+    );
+    let items = sections
         .iter()
-        .enumerate()
-        .map(|(offset, section)| {
-            let absolute = start + offset;
+        .map(|row| {
+            let section = carrier_section(row);
             ContextItem {
                 title: Some(section.title.clone()),
                 content: None,
                 locator: TextLocator::for_section_with_hash(
-                    document,
-                    section,
-                    normalized_document_hash,
+                    context.document(),
+                    &section,
+                    context.normalized_hash(),
                 ),
-                role: relative_role(absolute, owner_index),
+                role: relative_role(row.section_key, owner.section_key),
                 effective_kind: ContextItemKind::Section,
                 content_class: None,
                 degradation: None,
@@ -409,8 +449,8 @@ async fn section_neighbor_result(
         .collect();
 
     Ok(GetContextResult {
-        document_id: document.id.clone(),
-        source: document.source.clone(),
+        document_id: context.document().id.clone(),
+        source: context.document().source.clone(),
         owner_section_id: owner.id.clone(),
         content,
         location: owner.location.clone(),
@@ -419,15 +459,15 @@ async fn section_neighbor_result(
         anchor_locator,
         relation: ContextRelation::Neighbor {
             unit: ContextUnit::Section,
-            before,
-            after,
+            before: usize::try_from(before).unwrap_or(usize::MAX),
+            after: usize::try_from(after).unwrap_or(usize::MAX),
         },
         items,
     })
 }
 
 async fn text_unit_neighbor_result(
-    document: &Document,
+    context: &ContextDocument,
     target: ResolvedTarget,
     unit: ContextUnit,
     before: usize,
@@ -435,9 +475,13 @@ async fn text_unit_neighbor_result(
     max_chars: Option<usize>,
     units: &dyn TextUnitIndex,
 ) -> Result<GetContextResult, ApplicationError> {
-    let section = document
-        .find_section(&target.locator.owner_section_id)
+    let row = context
+        .view
+        .section_by_id(&target.locator.owner_section_id)
+        .await?
         .ok_or(ApplicationError::SectionNotFound)?;
+    let section = carrier_section(&row);
+    let document = context.document();
 
     let (requested_kind, unit_kind) = match unit {
         ContextUnit::Paragraph => (
@@ -483,7 +527,7 @@ async fn text_unit_neighbor_result(
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
         let position = row.position;
-        let mut item = context_item_from_row(document, section, row, unit);
+        let mut item = context_item_from_row(document, &section, row, unit);
         if position == anchor_position {
             if item.locator != target.locator {
                 return Err(not_in_stream(unit));
@@ -517,7 +561,7 @@ async fn text_unit_neighbor_result(
 }
 
 async fn paragraph_container_result(
-    document: &Document,
+    context: &ContextDocument,
     target: ResolvedTarget,
     max_chars: Option<usize>,
     units: &dyn TextUnitIndex,
@@ -528,9 +572,13 @@ async fn paragraph_container_result(
         ));
     }
 
-    let section = document
-        .find_section(&target.locator.owner_section_id)
+    let row = context
+        .view
+        .section_by_id(&target.locator.owner_section_id)
+        .await?
         .ok_or(ApplicationError::SectionNotFound)?;
+    let section = carrier_section(&row);
+    let document = context.document();
     let paragraph_index = target.locator.paragraph_index.ok_or_else(|| {
         ApplicationError::InvalidLocator("text locator has no paragraph ownership".into())
     })?;
@@ -575,7 +623,7 @@ async fn paragraph_container_result(
     let item = ContextItem {
         title: None,
         content: Some(paragraph.text.clone()),
-        locator: TextLocator::for_paragraph(document, section, &paragraph),
+        locator: TextLocator::for_paragraph(document, &section, &paragraph),
         role: ContextItemRole::Container,
         effective_kind: ContextItemKind::Paragraph,
         content_class: Some(content_class.as_str().into()),
@@ -654,22 +702,24 @@ fn stale_text_units(document: &Document) -> ApplicationError {
 }
 
 async fn section_container_result(
-    document: &Document,
+    context: &ContextDocument,
     target: ResolvedTarget,
     max_chars: Option<usize>,
-    normalized_document_hash: &NormalizedDocumentHash,
     texts: &mut SectionTexts<'_>,
 ) -> Result<GetContextResult, ApplicationError> {
-    let section = document
-        .find_section(&target.locator.owner_section_id)
+    let row = context
+        .view
+        .section_by_id(&target.locator.owner_section_id)
+        .await?
         .ok_or(ApplicationError::SectionNotFound)?;
+    let section = carrier_section(&row);
     let section_text = texts.text(&section.id).await?;
     let (content, truncated) =
-        truncate_chars(render_section_shallow(section, &section_text), max_chars);
+        truncate_chars(render_section_shallow(&section, &section_text), max_chars);
 
     Ok(GetContextResult {
-        document_id: document.id.clone(),
-        source: document.source.clone(),
+        document_id: context.document().id.clone(),
+        source: context.document().source.clone(),
         owner_section_id: section.id.clone(),
         content,
         location: section.location.clone(),
@@ -680,38 +730,55 @@ async fn section_container_result(
             kind: ContextContainerKind::Section,
         },
         items: vec![section_context_item(
-            document,
-            section,
+            context.document(),
+            &section,
             ContextItemRole::Container,
-            normalized_document_hash,
+            context.normalized_hash(),
         )],
     })
 }
 
-fn structural_result(
-    document: &Document,
+/// The structural relations, each one point query: `section_ancestors` for the parent chain,
+/// `section_children` for siblings and for children.
+async fn structural_result(
+    context: &ContextDocument,
     target: ResolvedTarget,
     kind: StructuralContextKind,
     max_chars: Option<usize>,
-    normalized_document_hash: &NormalizedDocumentHash,
 ) -> Result<GetContextResult, ApplicationError> {
-    let owner = document
-        .find_section(&target.locator.owner_section_id)
+    let owner_row = context
+        .view
+        .section_by_id(&target.locator.owner_section_id)
+        .await?
         .ok_or(ApplicationError::SectionNotFound)?;
+    let owner = carrier_section(&owner_row);
+    let limit = MAX_STRUCTURAL_CONTEXT_ITEMS + 1;
 
-    let sections = match kind {
-        StructuralContextKind::OwnerSection => vec![owner],
-        StructuralContextKind::Ancestors => ancestors(document, owner)?,
-        StructuralContextKind::Siblings => siblings(document, owner)?,
-        StructuralContextKind::Children => owner.children.iter().collect(),
+    let rows = match kind {
+        StructuralContextKind::OwnerSection => vec![owner_row.clone()],
+        StructuralContextKind::Ancestors => context.view.ancestors(owner_row.section_key).await?,
+        StructuralContextKind::Siblings => {
+            let candidates = context.view.children(owner_row.parent_key, limit).await?;
+            candidates
+                .into_iter()
+                .filter(|row| row.id != owner.id)
+                .collect()
+        }
+        StructuralContextKind::Children => {
+            context
+                .view
+                .children(Some(owner_row.section_key), limit)
+                .await?
+        }
     };
-    if sections.len() > MAX_STRUCTURAL_CONTEXT_ITEMS {
+    if rows.len() > MAX_STRUCTURAL_CONTEXT_ITEMS {
         return Err(ApplicationError::ResourceLimitExceeded(format!(
             "structural context contains {} items, exceeding limit {MAX_STRUCTURAL_CONTEXT_ITEMS}",
-            sections.len()
+            rows.len()
         )));
     }
 
+    let sections = rows.iter().map(carrier_section).collect::<Vec<Section>>();
     let metadata_projection = sections
         .iter()
         .map(|section| section.title.as_str())
@@ -722,17 +789,17 @@ fn structural_result(
         .iter()
         .map(|section| {
             section_context_item(
-                document,
+                context.document(),
                 section,
                 ContextItemRole::Structural,
-                normalized_document_hash,
+                context.normalized_hash(),
             )
         })
         .collect();
 
     Ok(GetContextResult {
-        document_id: document.id.clone(),
-        source: document.source.clone(),
+        document_id: context.document().id.clone(),
+        source: context.document().source.clone(),
         owner_section_id: owner.id.clone(),
         content: String::new(),
         location: owner.location.clone(),
@@ -742,50 +809,6 @@ fn structural_result(
         relation: ContextRelation::Structural { kind },
         items,
     })
-}
-
-fn ancestors<'a>(
-    document: &'a Document,
-    owner: &'a Section,
-) -> Result<Vec<&'a Section>, ApplicationError> {
-    let mut result = Vec::new();
-    let mut current = owner;
-    while let Some(parent_id) = &current.parent_id {
-        let current_id = current.id.0.clone();
-        let parent = document.find_section(parent_id).ok_or_else(|| {
-            ApplicationError::InvalidRequest(format!(
-                "section {current_id} references missing parent {}",
-                parent_id.0
-            ))
-        })?;
-        result.push(parent);
-        current = parent;
-    }
-    result.reverse();
-    Ok(result)
-}
-
-fn siblings<'a>(
-    document: &'a Document,
-    owner: &'a Section,
-) -> Result<Vec<&'a Section>, ApplicationError> {
-    let candidates: Vec<&Section> = match &owner.parent_id {
-        Some(parent_id) => {
-            let parent = document.find_section(parent_id).ok_or_else(|| {
-                ApplicationError::InvalidRequest(format!(
-                    "section {} references missing parent {}",
-                    owner.id.0, parent_id.0
-                ))
-            })?;
-            parent.children.iter().collect()
-        }
-        None => document.root_sections.iter().collect(),
-    };
-
-    Ok(candidates
-        .into_iter()
-        .filter(|section| section.id != owner.id)
-        .collect())
 }
 
 fn coarse_sentence_context_degradation(content_class: ParagraphContentClass) -> &'static str {
@@ -821,7 +844,7 @@ fn section_context_item(
     }
 }
 
-fn relative_role(index: usize, anchor_index: usize) -> ContextItemRole {
+fn relative_role<T: Ord>(index: T, anchor_index: T) -> ContextItemRole {
     if index < anchor_index {
         ContextItemRole::Before
     } else if index == anchor_index {

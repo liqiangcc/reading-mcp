@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use crate::application::light_sections::SectionTexts;
-use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
+use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator_at};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex,
     TextUnitStreamKey,
 };
+use crate::application::section_view::{DocumentView, carrier_section};
 use crate::application::text_unit_cursor::{
     TextUnitCursorClaims, decode_text_unit_cursor, encode_text_unit_cursor,
 };
@@ -212,14 +213,18 @@ impl GetTextUnitsUseCase {
             validate_cursor_scope(claims, &command)?;
         }
 
-        let (document, normalized_hash) = self
-            .repository
-            .get_light_with_hash(&command.document_id)
+        // The header and one section row: this reader needs the document identity and the target
+        // section, never the tree.
+        let (view, normalized_hash) =
+            DocumentView::load_with_hash(Arc::clone(&self.repository), &command.document_id)
+                .await?
+                .ok_or(ApplicationError::DocumentNotFound)?;
+        let row = view
+            .section_by_id(&command.section_id)
             .await?
-            .ok_or(ApplicationError::DocumentNotFound)?;
-        let section = document
-            .find_section(&command.section_id)
             .ok_or(ApplicationError::SectionNotFound)?;
+        let document = view.document();
+        let section = carrier_section(&row);
 
         if let Some(claims) = &cursor_claims {
             if claims.content_hash != document.content_hash.0 {
@@ -253,7 +258,7 @@ impl GetTextUnitsUseCase {
             validate_cursor_origin_anchor(claims.origin_anchor_index, total_items)?;
             let locator = match claims.origin_anchor_index {
                 Some(index) => {
-                    self.stream_item_locator(&document, section, &command, index)
+                    self.stream_item_locator(&document, &section, &command, index)
                         .await?
                 }
                 None => None,
@@ -263,8 +268,9 @@ impl GetTextUnitsUseCase {
             let mut texts = SectionTexts::from_repository(&document, Arc::clone(&self.repository));
             let (index, locator) = self
                 .resolve_anchor_index(
+                    &view,
                     &document,
-                    section,
+                    &section,
                     anchor_locator,
                     command.requested_kind,
                     command.coverage_policy,
@@ -304,7 +310,7 @@ impl GetTextUnitsUseCase {
         };
 
         let page = self
-            .page(&document, section, &command, position, total_items)
+            .page(&document, &section, &command, position, total_items)
             .await?;
         let next_cursor = if page.complete {
             None
@@ -332,7 +338,7 @@ impl GetTextUnitsUseCase {
             document_id: document.id.clone(),
             target_section_locator: TextLocator::for_section_with_hash(
                 &document,
-                section,
+                &section,
                 &normalized_hash,
             ),
             start_anchor_locator,
@@ -384,6 +390,7 @@ impl GetTextUnitsUseCase {
     #[allow(clippy::too_many_arguments)]
     async fn resolve_anchor_index(
         &self,
+        view: &DocumentView,
         document: &Document,
         section: &Section,
         anchor_locator: &TextLocator,
@@ -392,8 +399,9 @@ impl GetTextUnitsUseCase {
         normalized_document_hash: &NormalizedDocumentHash,
         texts: &mut SectionTexts<'_>,
     ) -> Result<(usize, TextLocator), ApplicationError> {
-        let resolved = resolve_text_locator(
+        let resolved = resolve_text_locator_at(
             document,
+            view,
             anchor_locator,
             normalized_document_hash,
             self.text_unit_index.as_ref(),

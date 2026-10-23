@@ -490,6 +490,13 @@ impl DocumentRepository for ObservedDocumentRepository {
         self.inner.body_order(id).await
     }
 
+    async fn body_order_keys(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<Result<Vec<i64>, ApplicationError>>, ApplicationError> {
+        self.inner.body_order_keys(id).await
+    }
+
     // The section-row calls are forwarded, never left to their trait defaults: a default here would
     // load the whole document inside the wrapper and silently disable the fast path (#207).
     async fn document_header(

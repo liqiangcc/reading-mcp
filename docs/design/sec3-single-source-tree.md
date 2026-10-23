@@ -77,6 +77,11 @@ error text. Both copies are gone.
   column avoids a second per-document row and a second lookup on the error path.
 - A document saved before the rows existed (no `document_header_v1` row) still computes its order
   from `document_json`, exactly as the trait default does.
+- `get_document_structure` reads the order as **section keys**
+  (`DocumentRepository::body_order_keys`, one sequential scan of the order rows) and maps them to
+  ids through the tree it already rebuilt, instead of `body_order`, which would join every order row
+  to `document_sections_v1` — one random index seek per section. That keeps a structure page's
+  order read proportional to the order rows, not to a join.
 
 ## Migration and store version
 

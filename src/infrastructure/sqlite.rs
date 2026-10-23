@@ -863,6 +863,21 @@ impl DocumentRepository for SqliteDocumentRepository {
         .await
     }
 
+    /// The body order as depth-first section keys: one sequential scan of
+    /// `document_body_order_rows_v1`, no join to the section table.
+    async fn body_order_keys(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<Result<Vec<i64>, ApplicationError>>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| stored_or_computed_body_order_keys(connection, &id),
+        )
+        .await
+    }
+
     /// One `document_header_v1` row. A document saved before that table existed has none, so its
     /// header is built from the document itself, exactly as the trait default builds it.
     async fn document_header(
@@ -2036,13 +2051,9 @@ fn load_body_order_ids(
 ) -> Result<Vec<SectionId>, ApplicationError> {
     let mut statement = connection
         .prepare_cached(
-            // The `INDEXED BY` pins the join to the unique `(document_id, section_key)` index:
-            // without it SQLite can pick the `(document_id, parent_key, section_key)` index, whose
-            // `section_key` cannot be seeked when `parent_key` is unconstrained, and scan the whole
-            // section table once per order row.
             "SELECT sections.section_id
                FROM document_body_order_rows_v1 AS order_rows
-               JOIN document_sections_v1 AS sections INDEXED BY idx_document_sections_v1_id
+               JOIN document_sections_v1 AS sections
                  ON sections.document_id = order_rows.document_id
                 AND sections.section_key = order_rows.section_key
               WHERE order_rows.document_id = ?1
@@ -2055,6 +2066,45 @@ fn load_body_order_ids(
     rows.collect::<Result<Vec<_>, _>>()
         .map(|ids| ids.into_iter().map(SectionId).collect())
         .map_err(repository_error)
+}
+
+/// The body order as depth-first section keys, from the `(ord, section_key)` rows: one sequential
+/// index scan, no join to the section table.
+fn load_body_order_keys(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Vec<i64>, ApplicationError> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT section_key FROM document_body_order_rows_v1
+              WHERE document_id = ?1 ORDER BY ord",
+        )
+        .map_err(repository_error)?;
+    let rows = statement
+        .query_map(params![&document_id.0], |row| row.get::<_, i64>(0))
+        .map_err(repository_error)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(repository_error)
+}
+
+/// [`stored_or_computed_body_order`] as section keys instead of section ids. A document without
+/// section rows computes the order from its stored document and flattens it in memory.
+fn stored_or_computed_body_order_keys(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<Result<Vec<i64>, ApplicationError>>, ApplicationError> {
+    if document_has_section_rows(connection, document_id)? {
+        if let Some(error) = load_body_order_error(connection, document_id)? {
+            return Ok(Some(Err(ApplicationError::RepositoryFailed(error))));
+        }
+        return Ok(Some(Ok(load_body_order_keys(connection, document_id)?)));
+    }
+    let Some((document, _)) = load_document_row(connection, document_id, false)? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::application::body_order_ids(&document).map(
+        |order| section_rows::body_order_keys(&document, &order),
+    )))
 }
 
 /// The stored body order of `document_id`: the header's `body_order_error` when the order failed,

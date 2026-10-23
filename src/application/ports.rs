@@ -467,6 +467,27 @@ pub trait DocumentRepository: Send + Sync {
         )))
     }
 
+    /// The document's canonical body order as depth-first section keys, or the exact error that
+    /// function returns for this document. `Ok(None)` when this repository holds no body order.
+    ///
+    /// This is the same order as [`Self::body_order`] without turning each position into a
+    /// `SectionId`: a caller that already holds the tree (`get_document_structure`) maps the keys
+    /// itself, so the store never has to join every order row to the section table. The default
+    /// computes it from the document, like [`Self::body_order`].
+    async fn body_order_keys(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<Result<Vec<i64>, ApplicationError>>, ApplicationError> {
+        let Some((document, _)) = self.get_with_hash(id).await? else {
+            return Ok(None);
+        };
+        let Some(order) = self.body_order(id).await? else {
+            return Ok(None);
+        };
+        let order = order?;
+        Ok(Some(Ok(section_rows::body_order_keys(&document, &order))))
+    }
+
     /// The header of one stored document. The default loads the whole document.
     async fn document_header(
         &self,

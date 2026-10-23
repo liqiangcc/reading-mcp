@@ -35,7 +35,7 @@ impl PdfParser {
         resource: RetrievedResource,
         hash: ContentHash,
     ) -> Result<Document, ApplicationError> {
-        let mut document = super::pdf::PdfParser.build_document(&pdf, resource, hash)?;
+        let (mut document, pdf) = super::pdf::PdfParser.build_document(pdf, resource, hash)?;
 
         if document
             .metadata
@@ -49,6 +49,10 @@ impl PdfParser {
         let Some((first_section_page, first_section_title)) =
             first_numbered_top_level_section(&document.root_sections)
         else {
+            return Ok(document);
+        };
+        // The builder keeps the tree exactly for this pass; without it there is nothing to read.
+        let Some(pdf) = pdf else {
             return Ok(document);
         };
 

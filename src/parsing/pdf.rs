@@ -85,6 +85,17 @@ impl PageFragments {
     }
 }
 
+/// How the document's sections are decided. Resolved while the object tree is still loaded, so a
+/// structure that needs no further look at the tree can release it before the sections are built.
+enum PdfStructure {
+    Toc(Vec<PdfTocEntry>),
+    Inferred {
+        headings: Vec<PdfHeadingCandidate>,
+        fragments: Vec<PdfSourceFragment>,
+    },
+    Pages,
+}
+
 #[derive(Clone, Debug)]
 struct SectionNode {
     id: SectionId,
@@ -103,17 +114,21 @@ impl PdfParser {
         mut resource: RetrievedResource,
     ) -> Result<Document, ApplicationError> {
         let (pdf, hash) = load_and_release(&mut resource)?;
-        self.build_document(&pdf, resource, hash)
+        let (document, _) = self.build_document(pdf, resource, hash)?;
+        Ok(document)
     }
 
     /// Builds the document from an object tree that is already loaded, so a caller that needed the
     /// tree for its own pass (the page limit, the front-matter evidence) loads the PDF once.
+    ///
+    /// The tree is released before the sections are built unless the structure needs a second look
+    /// at it: then it comes back in the `Some`, which is what the front-matter evidence pass uses.
     pub(super) fn build_document(
         &self,
-        pdf: &LopdfDocument,
+        pdf: LopdfDocument,
         resource: RetrievedResource,
         hash: ContentHash,
-    ) -> Result<Document, ApplicationError> {
+    ) -> Result<(Document, Option<LopdfDocument>), ApplicationError> {
         let id = document_id(&resource.final_source, &hash);
         let page_ids = pdf.get_pages().into_iter().collect::<Vec<_>>();
         let page_numbers = page_ids
@@ -130,10 +145,11 @@ impl PdfParser {
         // released as soon as the pages are read instead of being carried through the section
         // build and the save.
         let (pages, extraction_errors) = {
-            let prepared = super::pdf_text_repair::prepare_text_extraction(pdf);
+            let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
             #[cfg(test)]
             held_buffers::repair_copy_present(prepared.is_some());
-            let extracted = extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), &page_numbers);
+            let extracted =
+                extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
             drop(prepared);
             #[cfg(test)]
             held_buffers::repair_copy_present(false);
@@ -142,7 +158,7 @@ impl PdfParser {
         // The two conditions must hold together: almost no text for the page
         // count, and pages that are actually painted by raster images. A text
         // PDF with a cover, a blank page or a figures appendix fails the second.
-        if let Some(detail) = image_only_scan_evidence(pdf, &page_ids, &pages) {
+        if let Some(detail) = image_only_scan_evidence(&pdf, &page_ids, &pages) {
             return Err(ApplicationError::OcrRequired(detail));
         }
         if pages.iter().all(|page| page.text.trim().is_empty()) {
@@ -162,7 +178,7 @@ impl PdfParser {
             );
         }
 
-        let pdf_title = pdf_title(pdf);
+        let pdf_title = pdf_title(&pdf);
         if let Some(title) = &pdf_title {
             metadata.insert("pdf_title".into(), title.clone());
         }
@@ -178,42 +194,69 @@ impl PdfParser {
             metadata.insert("pdf_toc_entries".into(), entries.len().to_string());
         }
 
-        let (root_sections, source_bindings) = match toc {
-            Some(entries) => {
+        // The structure is decided here, before the object tree is released, so that only the one
+        // structure that needs a second look at the tree keeps it alive.
+        let structure = match toc {
+            Some(entries) => PdfStructure::Toc(entries),
+            None => {
+                // One fragment list for both the heading inference and the section build. It is a
+                // copy of the page text, and building it twice held two of them at the peak.
+                let fragments = source_fragments(&pages);
+                match infer_numbered_headings(&fragments) {
+                    Some(headings) => PdfStructure::Inferred {
+                        headings,
+                        fragments,
+                    },
+                    None => PdfStructure::Pages,
+                }
+            }
+        };
+        // The pages, the title and the outline are read; the front-matter evidence pass is the
+        // only thing that still needs the object tree, so it is the only case that keeps it.
+        // Everything else releases it before the sections and the stored JSON are built beside it.
+        let pdf = if matches!(structure, PdfStructure::Inferred { .. }) {
+            Some(pdf)
+        } else {
+            // Nothing below reads the tree again: release it now instead of at the end of the
+            // parse, so it is not held beside the sections and the stored JSON.
+            #[cfg(test)]
+            held_buffers::tree_present(false);
+            drop(pdf);
+            None
+        };
+
+        let (root_sections, source_bindings) = match structure {
+            PdfStructure::Toc(entries) => {
                 metadata.insert(
                     PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
                     PDF_STRUCTURE_NATIVE_TOC.into(),
                 );
                 build_toc_sections(&entries, &pages, max_page)
             }
-            None => {
-                // One fragment list for both the heading inference and the section build. It is a
-                // copy of the page text, and building it twice held two of them at the peak.
-                let fragments = source_fragments(&pages);
-                match infer_numbered_headings(&fragments) {
-                    Some(headings) => {
-                        metadata.insert(
-                            PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
-                            PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS.into(),
-                        );
-                        metadata.insert(
-                            PDF_HEADING_INFERENCE_VERSION_METADATA_KEY.into(),
-                            PDF_HEADING_INFERENCE_VERSION.into(),
-                        );
-                        metadata.insert(
-                            PDF_HEADING_INFERENCE_COUNT_METADATA_KEY.into(),
-                            headings.len().to_string(),
-                        );
-                        build_inferred_heading_sections(&headings, &fragments)
-                    }
-                    None => {
-                        metadata.insert(
-                            PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
-                            PDF_STRUCTURE_PAGE_FALLBACK.into(),
-                        );
-                        build_page_sections(pages)
-                    }
-                }
+            PdfStructure::Inferred {
+                headings,
+                fragments,
+            } => {
+                metadata.insert(
+                    PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                    PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS.into(),
+                );
+                metadata.insert(
+                    PDF_HEADING_INFERENCE_VERSION_METADATA_KEY.into(),
+                    PDF_HEADING_INFERENCE_VERSION.into(),
+                );
+                metadata.insert(
+                    PDF_HEADING_INFERENCE_COUNT_METADATA_KEY.into(),
+                    headings.len().to_string(),
+                );
+                build_inferred_heading_sections(&headings, &fragments)
+            }
+            PdfStructure::Pages => {
+                metadata.insert(
+                    PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
+                    PDF_STRUCTURE_PAGE_FALLBACK.into(),
+                );
+                build_page_sections(pages)
             }
         };
 
@@ -237,7 +280,7 @@ impl PdfParser {
                     "invalid original PDF source binding evidence: {error}"
                 ))
             })?;
-        Ok(document)
+        Ok((document, pdf))
     }
 }
 
@@ -324,19 +367,21 @@ pub(super) fn load_and_release(
     #[cfg(test)]
     held_buffers::raw_bytes_present(true);
     let hash = content_hash(&resource.bytes);
-    let pdf = LopdfDocument::load_mem(&resource.bytes).map_err(|error| {
-        ApplicationError::ParseFailed(format!("invalid PDF document: {error}"))
-    })?;
+    let pdf = LopdfDocument::load_mem(&resource.bytes)
+        .map_err(|error| ApplicationError::ParseFailed(format!("invalid PDF document: {error}")))?;
+    #[cfg(test)]
+    held_buffers::tree_present(true);
     #[cfg(test)]
     held_buffers::raw_bytes_present(false);
     drop(std::mem::take(&mut resource.bytes));
     Ok((pdf, hash))
 }
 
-/// Test-only record of the two large buffers a parse holds before the document is built: the raw
-/// PDF bytes and the repair copy of the object tree. `parse_sync` reports what it still holds at
-/// the point the document is built, so a change that carries either one through the section build
-/// fails a test instead of silently restoring the peak. Thread-local: tests parse in parallel.
+/// Test-only record of the large buffers a parse holds before the document is built: the raw PDF
+/// bytes, the repair copy of the object tree and the object tree itself. The parse reports what it
+/// still holds at the point the document is built, so a change that carries one of them through
+/// the section build fails a test instead of silently restoring the peak. Thread-local: tests
+/// parse in parallel.
 #[cfg(test)]
 pub(super) mod held_buffers {
     use std::cell::RefCell;
@@ -347,7 +392,8 @@ pub(super) mod held_buffers {
         raw_bytes_seen: bool,
         repair_copy: bool,
         repair_copy_seen: bool,
-        at_document_start: Option<(bool, bool)>,
+        tree: bool,
+        at_document_start: Option<(bool, bool, bool)>,
     }
 
     thread_local! {
@@ -362,6 +408,10 @@ pub(super) mod held_buffers {
         });
     }
 
+    pub(super) fn tree_present(present: bool) {
+        HELD.with(|held| held.borrow_mut().tree = present);
+    }
+
     pub(super) fn repair_copy_present(present: bool) {
         HELD.with(|held| {
             let mut held = held.borrow_mut();
@@ -374,7 +424,7 @@ pub(super) mod held_buffers {
     pub(super) fn document_started() {
         HELD.with(|held| {
             let mut held = held.borrow_mut();
-            held.at_document_start = Some((held.raw_bytes, held.repair_copy));
+            held.at_document_start = Some((held.raw_bytes, held.repair_copy, held.tree));
         });
     }
 
@@ -393,9 +443,9 @@ pub(super) mod held_buffers {
         HELD.with(|held| held.borrow().repair_copy_seen)
     }
 
-    /// `(raw bytes, repair copy)` still held when the document was built; `None` when the parse
-    /// never reached that point.
-    pub(crate) fn held_at_document_start() -> Option<(bool, bool)> {
+    /// `(raw bytes, repair copy, object tree)` still held when the document was built; `None` when
+    /// the parse never reached that point.
+    pub(crate) fn held_at_document_start() -> Option<(bool, bool, bool)> {
         HELD.with(|held| held.borrow().at_document_start)
     }
 }
@@ -1661,8 +1711,9 @@ mod tests {
         );
         assert_eq!(
             held_buffers::held_at_document_start(),
-            Some((false, false)),
-            "neither the raw bytes nor the repair copy may still be held when the document is built"
+            Some((false, false, false)),
+            "the raw bytes, the repair copy and the object tree must all be released before the \
+             document is built"
         );
     }
 
@@ -1710,6 +1761,8 @@ mod tests {
             );
             return;
         };
+        // The golden file ends with the newline an editor keeps; the stored row does not.
+        let expected = expected.strip_suffix('\n').unwrap_or(&expected);
         assert_eq!(stored, expected, "the stored document_json changed");
     }
 
@@ -1753,7 +1806,11 @@ mod tests {
         for key in ["pdf_version", "pdf_page_count", "pdf_structure_provenance"] {
             out.push_str(&format!(
                 "{key}={}\n",
-                document.metadata.get(key).map(String::as_str).unwrap_or("-")
+                document
+                    .metadata
+                    .get(key)
+                    .map(String::as_str)
+                    .unwrap_or("-")
             ));
         }
         for section in &document.root_sections {
@@ -1779,9 +1836,8 @@ mod tests {
         text_and_image.set("XObject", dictionary! { "Im1" => image });
         let mut short_page = image_page_operations();
         short_page.extend(byte_text_operations("F1", &[65_u8; 12]));
-        let text_page = |text: &[u8], resources: Dictionary| {
-            (byte_text_operations("F1", text), resources)
-        };
+        let text_page =
+            |text: &[u8], resources: Dictionary| (byte_text_operations("F1", text), resources);
         let pages = vec![
             text_page(b"First page of the mixed document.", resources.clone()),
             text_page(b"Second page carries a figure.", text_and_image),
@@ -1798,7 +1854,11 @@ mod tests {
         out.push_str(&format!(
             "section id={} parent={} level={} title={:?} page={:?} native={:?} path={:?}\n",
             section.id.0,
-            section.parent_id.as_ref().map(|id| id.0.as_str()).unwrap_or("-"),
+            section
+                .parent_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("-"),
             section.level,
             section.title,
             section.location.page,

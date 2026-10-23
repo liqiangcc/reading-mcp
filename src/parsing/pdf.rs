@@ -144,7 +144,7 @@ impl PdfParser {
         // The repair copy is a second full object tree, made only for the page text: it is
         // released as soon as the pages are read instead of being carried through the section
         // build and the save.
-        let (pages, extraction_errors) = {
+        let (mut pages, extraction_errors) = {
             let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
             #[cfg(test)]
             held_buffers::repair_copy_present(prepared.is_some());
@@ -201,7 +201,7 @@ impl PdfParser {
             None => {
                 // One fragment list for both the heading inference and the section build. It is a
                 // copy of the page text, and building it twice held two of them at the peak.
-                let fragments = source_fragments(&pages);
+                let fragments = source_fragments(&mut pages);
                 match infer_numbered_headings(&fragments) {
                     Some(headings) => PdfStructure::Inferred {
                         headings,
@@ -566,15 +566,18 @@ fn infer_numbered_headings(fragments: &[PdfSourceFragment]) -> Option<Vec<PdfHea
     (top_level_count >= 2 && top_level_pages.len() >= 2).then_some(accepted)
 }
 
-fn source_fragments(pages: &[PageText]) -> Vec<PdfSourceFragment> {
+/// Splits the page text into its chunks, taking each chunk out of the page instead of copying it:
+/// the fragment list owns the strings from here on, so the document's text is not held twice while
+/// the headings and the sections are built.
+fn source_fragments(pages: &mut [PageText]) -> Vec<PdfSourceFragment> {
     let mut fragments = Vec::new();
     let mut global_fragment = 0_usize;
     for page in pages {
-        for text in &page.chunks {
+        for text in std::mem::take(&mut page.chunks) {
             fragments.push(PdfSourceFragment {
                 page: page.number,
                 global_fragment,
-                text: text.clone(),
+                text,
             });
             global_fragment = global_fragment.saturating_add(1);
         }

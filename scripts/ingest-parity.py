@@ -1727,10 +1727,12 @@ def main() -> int:
 
     rows = []
     failed = False
+    # The comparison columns, in the order the table prints them.
+    column_names = [BLOCK_COLUMNS[block] for block in DUMP_BLOCKS]
     for label, path in inputs:
         if not os.path.isfile(path):
             rows.append(
-                (label, "missing", "missing", "missing", "missing", "missing", "DIFF")
+                (label, "missing", "missing", *(["missing"] * len(column_names)), "DIFF")
             )
             failed = True
             continue
@@ -1744,19 +1746,15 @@ def main() -> int:
                 label,
                 columns["payload"],
                 columns["reads"],
-                columns["documents (rebuilt)"],
-                columns["layouts"],
-                columns["text"],
+                *[columns[column] for column in column_names],
                 result,
             )
         )
         print(f"{label}: {result}", flush=True)
 
     print()
-    print(
-        "| Input | open payload | reads | documents (rebuilt) | layouts | text | result |"
-    )
-    print("| --- | --- | --- | --- | --- | --- | --- |")
+    print("| Input | open payload | reads | " + " | ".join(column_names) + " | result |")
+    print("| --- | --- | --- | " + " | ".join("---" for _ in column_names) + " | --- |")
     for row in rows:
         print("| " + " | ".join(row) + " |")
 

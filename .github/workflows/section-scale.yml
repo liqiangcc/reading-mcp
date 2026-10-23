@@ -50,6 +50,19 @@ jobs:
             done
           done
           python3 scripts/sqlite-facts.py "${args[@]}" 2>&1 | tee scale/facts.txt
+      - name: Open-phase breakdown per N
+        if: always()
+        run: |
+          set -uo pipefail
+          INPUTS="$RUNNER_TEMP/sections"
+          mkdir -p phases
+          python3 scripts/memory-profile.py \
+            --binary target/release/reading-mcp \
+            --out phases/phases.json \
+            --states dir \
+            --telemetry \
+            --documents "sections-nested-500=$INPUTS/sections-nested-500.epub,sections-nested-2000=$INPUTS/sections-nested-2000.epub,sections-nested-8000=$INPUTS/sections-nested-8000.epub,sections-nested-20000=$INPUTS/sections-nested-20000.epub" \
+            2>&1 | tee phases/phases.txt || echo "::warning::the phase breakdown failed"
       - name: Measure the read tools at every N
         if: always()
         run: |
@@ -229,3 +242,4 @@ jobs:
           path: |
             scale/
             read-measure/
+            phases/

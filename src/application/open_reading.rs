@@ -5,8 +5,9 @@ use std::sync::Arc;
 use crate::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use crate::application::ports::{DocumentRepository, RetrievalOptions, TextUnitIndex};
 use crate::application::reading_error::{ReadingError, ReadingErrorCode};
+use crate::application::section_view::DocumentView;
 use crate::application::short_handle::{DocumentHandle, SectionHandle, handle_checksum};
-use crate::domain::{Document, DocumentSource, MediaType};
+use crate::domain::{DocumentSource, MediaType};
 
 /// How many root sections `open` lists before `more_top`.
 pub const MAX_TOP_SECTIONS: usize = 10;
@@ -93,9 +94,12 @@ impl OpenReadingUseCase {
             checksum: handle_checksum(&opened.document_id, &opened.normalized_document_hash),
         };
 
-        let document = self.document(&opened.document_id).await?;
-        let top = self.top_sections(&document, &handle).await?;
-        let more_top = document.root_sections.len().saturating_sub(top.len());
+        // The header and the root rows: `open` reads no section text and no tree.
+        let view = DocumentView::load(Arc::clone(&self.repository), &opened.document_id)
+            .await?
+            .ok_or_else(ReadingError::not_opened)?;
+        let top = self.top_sections(&view, &handle).await?;
+        let more_top = view.header().root_count.saturating_sub(top.len());
 
         Ok(OpenReadingResult {
             handle: handle.to_string(),
@@ -108,35 +112,22 @@ impl OpenReadingUseCase {
         })
     }
 
-    /// The light document: `open` reads only the root section ids and titles, so it shares the
-    /// repository's `Arc` instead of cloning the decoded document.
-    async fn document(
-        &self,
-        document_id: &crate::domain::DocumentId,
-    ) -> Result<Arc<Document>, ReadingError> {
-        match self.repository.get_light_with_hash(document_id).await? {
-            Some((document, _)) => Ok(document),
-            None => Err(ReadingError::not_opened()),
-        }
-    }
-
+    /// The root section handles and titles, from the first `MAX_TOP_SECTIONS` root rows.
     async fn top_sections(
         &self,
-        document: &Arc<Document>,
+        view: &DocumentView,
         handle: &DocumentHandle,
     ) -> Result<Vec<(String, String)>, ReadingError> {
         let mut top = Vec::new();
-        for section in document.root_sections.iter().take(MAX_TOP_SECTIONS) {
-            let Some(section_key) = self
-                .text_unit_index
-                .section_key(&document.id, &section.id)
-                .await?
+        for row in view.children(None, MAX_TOP_SECTIONS).await? {
+            let Some(section_key) = self.text_unit_index.section_key(view.id(), &row.id).await?
             else {
                 return Err(ReadingError::new(
                     ReadingErrorCode::NotOpened,
                     format!(
                         "section {} of document {} has no stored section key",
-                        section.id.0, document.id.0
+                        row.id.0,
+                        view.id().0
                     ),
                 ));
             };
@@ -144,7 +135,7 @@ impl OpenReadingUseCase {
                 document: handle.clone(),
                 section_key,
             };
-            top.push((section_handle.to_string(), section.title.clone()));
+            top.push((section_handle.to_string(), row.title));
         }
         Ok(top)
     }

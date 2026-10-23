@@ -6,9 +6,10 @@
 
 use std::sync::Arc;
 
-use crate::application::handle_reading::{resolve_document, resolve_locator};
+use crate::application::handle_reading::{resolve_header, resolve_locator};
 use crate::application::ports::{DocumentRepository, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
+use crate::application::section_view::carrier_section;
 use crate::application::short_handle::parse_handle;
 use crate::domain::{
     NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, TEXT_SEGMENTATION_VERSION, TextLocator,
@@ -62,9 +63,9 @@ impl CiteReadingUseCase {
             let handle = parse_handle(at).map_err(|error| {
                 ReadingError::invalid("at", format!("at must be a handle: {}", error.message))
             })?;
-            let resolved = resolve_document(
+            let resolved = resolve_header(
                 self.text_unit_index.as_ref(),
-                self.repository.as_ref(),
+                &self.repository,
                 handle.document(),
             )
             .await?;
@@ -79,8 +80,8 @@ impl CiteReadingUseCase {
                 locator,
                 source_position,
                 page,
-                document_id: resolved.document.id.0.clone(),
-                content_hash: resolved.document.content_hash.0.clone(),
+                document_id: resolved.id().0.clone(),
+                content_hash: resolved.header().content_hash.0.clone(),
                 normalized_document_hash: resolved.normalized_document_hash.0.clone(),
             });
         }
@@ -94,13 +95,13 @@ impl CiteReadingUseCase {
         let handle = parse_handle(at).map_err(|error| {
             ReadingError::invalid("at", format!("at must be a handle: {}", error.message))
         })?;
-        let resolved = resolve_document(
+        let resolved = resolve_header(
             self.text_unit_index.as_ref(),
-            self.repository.as_ref(),
+            &self.repository,
             handle.document(),
         )
         .await?;
-        if !resolved.document.media_type.is_pdf() {
+        if !resolved.header().media_type.is_pdf() {
             return Err(ReadingError::invalid(
                 "at",
                 "source view renders an original page, which only a PDF source has",
@@ -111,20 +112,19 @@ impl CiteReadingUseCase {
         {
             return Ok(locator);
         }
-        let order = crate::application::body_order::section_body_order(&resolved.document)?;
-        let mut sections = order.into_iter().collect::<Vec<_>>();
-        sections.sort_by_key(|(_, order)| *order);
-        let section_id = sections
-            .first()
-            .map(|(id, _)| id.clone())
-            .ok_or_else(|| ReadingError::unknown_handle("the document has no sections"))?;
-        let section = resolved
-            .document
-            .find_section(&section_id)
+        // The first section in body order is body-order position 0: one point query, not the
+        // whole order.
+        let Some(section_key) = self.repository.body_order_at(resolved.id(), 0).await? else {
+            return Err(ReadingError::unknown_handle("the document has no sections"));
+        };
+        let row = resolved
+            .view
+            .section_by_key(section_key)
+            .await?
             .ok_or_else(|| ReadingError::unknown_handle("the first section disappeared"))?;
         Ok(TextLocator::for_section_with_hash(
-            &resolved.document,
-            section,
+            &resolved.document(),
+            &carrier_section(&row),
             &resolved.normalized_document_hash,
         ))
     }

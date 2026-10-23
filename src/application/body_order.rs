@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde::Deserialize;
 
@@ -9,18 +9,10 @@ pub(crate) const BODY_ORDER_VERSION: &str = "body-order/v1";
 const EPUB_STRUCTURE_MAP_VERSION: &str = "epub-structure-reconciliation/v1";
 const EPUB_STRUCTURE_MAP_METADATA_KEY: &str = "epub_structure_map";
 
-pub(crate) fn section_body_order(
-    document: &Document,
-) -> Result<HashMap<SectionId, usize>, ApplicationError> {
-    Ok(body_order_ids(document)?
-        .into_iter()
-        .enumerate()
-        .map(|(order, id)| (id, order))
-        .collect())
-}
-
-/// The section ids of `document` in canonical body order, or the exact error `section_body_order`
-/// reports for it. This is the form a store keeps: the order of the ids is the whole result.
+/// The section ids of `document` in canonical body order, or the exact error that order reports for
+/// it. This is the form a store keeps: the order of the ids is the whole result, and a reader that
+/// needs one position asks the store for it (`body_order_at`, `body_order_window`) instead of
+/// materializing this vector.
 pub fn body_order_ids(document: &Document) -> Result<Vec<SectionId>, ApplicationError> {
     let ordered_ids = if is_epub(&document.media_type) {
         epub_body_order(document)?
@@ -121,7 +113,7 @@ struct EpubStructureSectionFact {
 
 #[cfg(test)]
 mod tests {
-    use super::section_body_order;
+    use super::body_order_ids;
     use crate::domain::{
         ContentHash, Document, DocumentId, DocumentSource, MediaType, Section, SectionId,
     };
@@ -132,9 +124,14 @@ mod tests {
             MediaType("text/markdown".into()),
             vec![section("parent", vec![section("child", Vec::new())])],
         );
-        let order = section_body_order(&document).expect("body order should be available");
-        assert_eq!(order[&SectionId("section://parent".into())], 0);
-        assert_eq!(order[&SectionId("section://child".into())], 1);
+        let order = body_order_ids(&document).expect("body order should be available");
+        assert_eq!(
+            order,
+            vec![
+                SectionId("section://parent".into()),
+                SectionId("section://child".into())
+            ]
+        );
     }
 
     #[test]
@@ -147,9 +144,14 @@ mod tests {
             "epub_structure_map".into(),
             r#"{"schema_version":"epub-structure-reconciliation/v1","sections":[{"section_id":"section://parent","source_order":1},{"section_id":"section://child","source_order":0}]}"#.into(),
         );
-        let order = section_body_order(&document).expect("EPUB body order should be available");
-        assert_eq!(order[&SectionId("section://child".into())], 0);
-        assert_eq!(order[&SectionId("section://parent".into())], 1);
+        let order = body_order_ids(&document).expect("EPUB body order should be available");
+        assert_eq!(
+            order,
+            vec![
+                SectionId("section://child".into()),
+                SectionId("section://parent".into())
+            ]
+        );
     }
 
     fn document(media_type: MediaType, root_sections: Vec<Section>) -> Document {

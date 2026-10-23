@@ -14,12 +14,13 @@ use crate::application::ports::{
     DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex, TextUnitStreamKey,
 };
 use crate::application::reading_error::ReadingError;
+use crate::application::section_view::DocumentView;
 use crate::application::short_handle::{
     CursorUnit, DocumentHandle, ReadingCursor, ReadingFrom, ReadingHandle, SectionHandle,
     handle_checksum, paragraph_handle, parse_from, sentence_handle,
 };
 use crate::application::text_unit_stream::item_kind;
-use crate::domain::{Document, DocumentId, SectionId};
+use crate::domain::{DocumentId, SectionId};
 
 /// The largest `max_chars` a batch read accepts.
 pub const MAX_BATCH_CHARS: usize = 16_000;
@@ -144,20 +145,26 @@ impl ReadReadingUseCase {
                     document_handle.doc_key
                 ))
             })?;
-        let (document, normalized_hash) = self
-            .repository
-            .get_light_with_hash(&document_id)
-            .await?
-            .ok_or_else(ReadingError::not_opened)?;
-        if handle_checksum(&document.id, &normalized_hash) != document_handle.checksum {
+        // The header carries the identity the handle is bound to; the body order is read by
+        // position, never materialized as a `Vec<SectionId>`.
+        let (view, normalized_hash) =
+            DocumentView::load_with_hash(Arc::clone(&self.repository), &document_id)
+                .await?
+                .ok_or_else(ReadingError::not_opened)?;
+        if handle_checksum(view.id(), &normalized_hash) != document_handle.checksum {
             return Err(ReadingError::stale_handle(format!(
                 "handle checksum {} does not match the current document identity",
                 document_handle.checksum
             )));
         }
 
-        let ordered = reading_order(self.repository.as_ref(), &document.id).await?;
-        if ordered.is_empty() {
+        // The body order's length. A stored body order that is readable holds every section
+        // exactly once (`body_order_ids` rejects anything else), so the header's section count is
+        // that length, and reading it is one row instead of a `COUNT(*)` over every order row.
+        // A document whose stored order could not be computed still reports that error, unchanged,
+        // from the first `body_order_at`/`body_order_window` this call makes.
+        let order_len = view.header().section_count;
+        if order_len == 0 {
             return Ok(ReadReadingResult {
                 items: Vec::new(),
                 sections: Vec::new(),
@@ -167,13 +174,14 @@ impl ReadReadingUseCase {
         }
         let mut walk = Walk::new(
             self.text_unit_index.as_ref(),
-            &document.id,
-            &ordered,
+            self.repository.as_ref(),
+            view.id(),
+            order_len,
             command.unit,
         );
 
         let anchor = self
-            .anchor(&mut walk, &document, &from, cursor_position, command.unit)
+            .anchor(&mut walk, &view, &from, cursor_position, command.unit)
             .await?;
 
         // `back` first steps backwards in reading order, clamped at the start of the book.
@@ -191,13 +199,7 @@ impl ReadReadingUseCase {
             (Some(_), _) => None,
         };
 
-        let mut fill = Fill::new(
-            &document,
-            &document_handle,
-            command.unit,
-            anchor,
-            command.back > 0,
-        );
+        let mut fill = Fill::new(&document_handle, command.unit, anchor, command.back > 0);
         match direction {
             TextUnitDirection::Forward => {
                 fill.forward(&mut walk, start, count_limit, command.max_chars)
@@ -230,16 +232,14 @@ impl ReadReadingUseCase {
     async fn anchor(
         &self,
         walk: &mut Walk<'_>,
-        document: &Document,
+        view: &DocumentView,
         from: &ReadingFrom,
         cursor_position: Option<usize>,
         unit: RequestedTextUnitKind,
     ) -> Result<(usize, usize), ReadingError> {
         match from {
             ReadingFrom::Cursor(cursor) => {
-                let index = self
-                    .section_index(document, walk.ordered(), &cursor.section)
-                    .await?;
+                let index = self.section_index(view, walk, &cursor.section).await?;
                 Ok((index, cursor_position.unwrap_or(0)))
             }
             ReadingFrom::Handle(handle) => match handle {
@@ -248,18 +248,14 @@ impl ReadReadingUseCase {
                     None => Ok((0, 0)),
                 },
                 ReadingHandle::Section(section) => {
-                    let index = self
-                        .section_index(document, walk.ordered(), section)
-                        .await?;
+                    let index = self.section_index(view, walk, section).await?;
                     Ok((index, 0))
                 }
                 ReadingHandle::Paragraph {
                     section,
                     paragraph_index,
                 } => {
-                    let index = self
-                        .section_index(document, walk.ordered(), section)
-                        .await?;
+                    let index = self.section_index(view, walk, section).await?;
                     let position = match unit {
                         RequestedTextUnitKind::Paragraph => {
                             walk.position(
@@ -310,9 +306,7 @@ impl ReadReadingUseCase {
                     paragraph_index,
                     sentence_index,
                 } => {
-                    let index = self
-                        .section_index(document, walk.ordered(), section)
-                        .await?;
+                    let index = self.section_index(view, walk, section).await?;
                     let position = match unit {
                         RequestedTextUnitKind::Sentence => {
                             walk.position(
@@ -347,15 +341,17 @@ impl ReadReadingUseCase {
         }
     }
 
+    /// The body-order position of one section handle: the stored section id proves the section
+    /// belongs to the document, and the stored body order gives its position.
     async fn section_index(
         &self,
-        document: &Document,
-        ordered: &[SectionId],
+        view: &DocumentView,
+        walk: &mut Walk<'_>,
         section: &SectionHandle,
     ) -> Result<usize, ReadingError> {
         let section_id = self
             .text_unit_index
-            .section_id_for_key(&document.id, section.section_key)
+            .section_id_for_key(view.id(), section.section_key)
             .await?
             .ok_or_else(|| {
                 ReadingError::unknown_handle(format!(
@@ -363,79 +359,109 @@ impl ReadReadingUseCase {
                     section.section_key
                 ))
             })?;
-        if document.find_section(&section_id).is_none() {
+        if view.section_by_id(&section_id).await?.is_none() {
             return Err(ReadingError::unknown_handle(format!(
                 "section {} is not part of this document",
                 section.section_key
             )));
         }
-        ordered
-            .iter()
-            .position(|candidate| *candidate == section_id)
-            .ok_or_else(|| {
-                ReadingError::unknown_handle(format!(
-                    "section {} is not in the reading order",
-                    section.section_key
-                ))
-            })
+        walk.ord_of(&section_id).await?.ok_or_else(|| {
+            ReadingError::unknown_handle(format!(
+                "section {} is not in the reading order",
+                section.section_key
+            ))
+        })
     }
 }
 
-/// The section order of a document: v1 `body_order`, from the repository's stored result.
-async fn reading_order(
-    repository: &dyn DocumentRepository,
-    document_id: &DocumentId,
-) -> Result<Vec<SectionId>, ReadingError> {
-    let stored = repository.body_order(document_id).await?;
-    let sections = match stored {
-        Some(sections) => sections?,
-        // A repository that cannot say: compute it from the document it keeps.
-        None => {
-            let (document, _) = repository
-                .get_with_hash(document_id)
-                .await?
-                .ok_or_else(ReadingError::not_opened)?;
-            crate::application::body_order::body_order_ids(&document)?
-        }
-    };
-    Ok(sections)
-}
-
 /// The per-call view of a document's section streams, with the neighbour search every walk needs.
+///
+/// A position is a body-order position, never an index into a materialized `Vec<SectionId>`:
+/// `body_order_at` turns a position into a section key, `section_id_for_key` into the section id a
+/// stream key needs, and `body_order_window` turns a section id back into its position. The two
+/// maps are this call's own memos, so a section the walk crosses is resolved once per call.
 struct Walk<'a> {
     index: &'a dyn TextUnitIndex,
+    repository: &'a dyn DocumentRepository,
     document_id: &'a DocumentId,
-    ordered: &'a [SectionId],
     unit: RequestedTextUnitKind,
+    len: usize,
     totals: HashMap<usize, usize>,
-    keys: HashMap<usize, i64>,
+    sections: HashMap<usize, (i64, SectionId)>,
 }
 
 impl<'a> Walk<'a> {
     fn new(
         index: &'a dyn TextUnitIndex,
+        repository: &'a dyn DocumentRepository,
         document_id: &'a DocumentId,
-        ordered: &'a [SectionId],
+        len: usize,
         unit: RequestedTextUnitKind,
     ) -> Self {
         Self {
             index,
+            repository,
             document_id,
-            ordered,
             unit,
+            len,
             totals: HashMap::new(),
-            keys: HashMap::new(),
+            sections: HashMap::new(),
         }
     }
 
-    fn ordered(&self) -> &'a [SectionId] {
-        self.ordered
+    /// The section key and id at one body-order position.
+    async fn position_section(&mut self, index: usize) -> Result<(i64, SectionId), ReadingError> {
+        if let Some(section) = self.sections.get(&index) {
+            return Ok(section.clone());
+        }
+        let Some(section_key) = self
+            .repository
+            .body_order_at(self.document_id, index)
+            .await?
+        else {
+            return Err(ReadingError::stale_handle(format!(
+                "body order position {index} of document {} has no section",
+                self.document_id.0
+            )));
+        };
+        let section_id = self
+            .index
+            .section_id_for_key(self.document_id, section_key)
+            .await?
+            .ok_or_else(|| {
+                ReadingError::stale_handle(format!(
+                    "section key {section_key} of document {} has no stored section id",
+                    self.document_id.0
+                ))
+            })?;
+        let section = (section_key, section_id);
+        self.sections.insert(index, section.clone());
+        Ok(section)
     }
 
-    fn key(&self, index: usize) -> TextUnitStreamKey<'_> {
+    /// The section key at one body-order position.
+    async fn section_key(&mut self, index: usize) -> Result<i64, ReadingError> {
+        Ok(self.position_section(index).await?.0)
+    }
+
+    /// The body-order position of one section id, or `None` when it is not in the body order.
+    ///
+    /// `body_order_position` is the point query for this direction: `body_order_window` would also
+    /// count every order row, which a per-call read must not pay.
+    async fn ord_of(&mut self, section_id: &SectionId) -> Result<Option<usize>, ReadingError> {
+        let Some(section_key) = self.index.section_key(self.document_id, section_id).await? else {
+            return Ok(None);
+        };
+        Ok(self
+            .repository
+            .body_order_position(self.document_id, section_key)
+            .await?)
+    }
+
+    fn stream_key<'s>(&'s self, section_id: &'s SectionId) -> TextUnitStreamKey<'s> {
         TextUnitStreamKey {
             document_id: self.document_id,
-            section_id: &self.ordered[index],
+            section_id,
             kind: self.unit,
             policy: TextUnitCoveragePolicy::PreserveSource,
         }
@@ -446,73 +472,65 @@ impl<'a> Walk<'a> {
         if let Some(total) = self.totals.get(&index) {
             return Ok(*total);
         }
-        let total = {
-            let key = TextUnitStreamKey {
-                document_id: self.document_id,
-                section_id: &self.ordered[index],
-                kind: self.unit,
-                policy: TextUnitCoveragePolicy::PreserveSource,
-            };
-            self.index
-                .section_stream_summary(key)
-                .await?
-                .map_or(0, |summary| summary.total_items)
-        };
+        let (_, section_id) = self.position_section(index).await?;
+        let total = self
+            .index
+            .section_stream_summary(self.stream_key(&section_id))
+            .await?
+            .map_or(0, |summary| summary.total_items);
         self.totals.insert(index, total);
         Ok(total)
     }
 
-    async fn section_key(&mut self, index: usize) -> Result<i64, ReadingError> {
-        if let Some(key) = self.keys.get(&index) {
-            return Ok(*key);
-        }
-        let section_id = self.ordered[index].clone();
-        let key = self
-            .index
-            .section_key(self.document_id, &section_id)
-            .await?;
-        match key {
-            Some(key) => {
-                self.keys.insert(index, key);
-                Ok(key)
-            }
-            None => Err(ReadingError::stale_handle(format!(
-                "section {} has no stored section key",
-                section_id.0
-            ))),
-        }
+    /// The section key and title of one body-order position, for a section banner.
+    async fn banner(&mut self, index: usize) -> Result<(i64, String), ReadingError> {
+        let section_key = self.section_key(index).await?;
+        let title = self
+            .repository
+            .section_by_key(self.document_id, section_key)
+            .await?
+            .map(|row| row.title)
+            .unwrap_or_default();
+        Ok((section_key, title))
     }
 
     async fn items(
-        &self,
+        &mut self,
         index: usize,
         direction: TextUnitDirection,
         position: usize,
         limit: usize,
     ) -> Result<Vec<StoredStreamItem>, ReadingError> {
+        let (_, section_id) = self.position_section(index).await?;
         let rows = self
             .index
-            .section_stream_items(self.key(index), direction, position, limit)
+            .section_stream_items(self.stream_key(&section_id), direction, position, limit)
             .await?;
         Ok(rows)
     }
 
     async fn position(
-        &self,
+        &mut self,
         index: usize,
         kind: EffectiveTextUnitKind,
         paragraph_index: usize,
         sentence_index: Option<usize>,
     ) -> Result<Option<usize>, ReadingError> {
+        let (_, section_id) = self.position_section(index).await?;
         let position = self
             .index
-            .section_stream_position(self.key(index), kind, paragraph_index, sentence_index)
+            .section_stream_position(
+                self.stream_key(&section_id),
+                kind,
+                paragraph_index,
+                sentence_index,
+            )
             .await?;
         Ok(position)
     }
 
     async fn next_non_empty(&mut self, from: usize) -> Result<Option<usize>, ReadingError> {
-        for index in from..self.ordered.len() {
+        for index in from..self.len {
             if self.total(index).await? > 0 {
                 return Ok(Some(index));
             }
@@ -590,7 +608,6 @@ impl<'a> Walk<'a> {
 
 /// Accumulates the answer while walking.
 struct Fill<'a> {
-    document: &'a Document,
     handle: &'a DocumentHandle,
     unit: RequestedTextUnitKind,
     items: Vec<ReadReadingItem>,
@@ -602,14 +619,12 @@ struct Fill<'a> {
 
 impl<'a> Fill<'a> {
     fn new(
-        document: &'a Document,
         handle: &'a DocumentHandle,
         unit: RequestedTextUnitKind,
         anchor_at: (usize, usize),
         track_anchor: bool,
     ) -> Self {
         Self {
-            document,
             handle,
             unit,
             items: Vec::new(),
@@ -811,12 +826,7 @@ impl<'a> Fill<'a> {
             self.anchor = Some(at);
         }
         if position == 0 {
-            let section_key = walk.section_key(section).await?;
-            let title = self
-                .document
-                .find_section(&walk.ordered()[section])
-                .map(|section| section.title.clone())
-                .unwrap_or_default();
+            let (section_key, title) = walk.banner(section).await?;
             self.sections.push(ReadReadingSection {
                 at,
                 handle: SectionHandle {

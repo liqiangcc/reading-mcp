@@ -540,6 +540,14 @@ impl DocumentRepository for ObservedDocumentRepository {
             .await
     }
 
+    async fn body_order_position(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<usize>, ApplicationError> {
+        self.inner.body_order_position(id, section_key).await
+    }
+
     async fn body_order_at(
         &self,
         id: &DocumentId,

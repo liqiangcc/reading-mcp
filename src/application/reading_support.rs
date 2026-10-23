@@ -58,13 +58,6 @@ pub(crate) fn render_section_shallow(section: &Section, content: &str) -> String
     output
 }
 
-pub(crate) fn flatten_sections<'a>(sections: &'a [Section], output: &mut Vec<&'a Section>) {
-    for section in sections {
-        output.push(section);
-        flatten_sections(&section.children, output);
-    }
-}
-
 pub(crate) fn content_response_limit(requested_max_chars: Option<usize>) -> usize {
     requested_max_chars
         .unwrap_or(DEFAULT_CONTENT_RESPONSE_CHARS)

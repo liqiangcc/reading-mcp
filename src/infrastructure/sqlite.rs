@@ -1018,6 +1018,42 @@ impl DocumentRepository for SqliteDocumentRepository {
         .await
     }
 
+    /// The body-order position of one section: one unique-index row read on
+    /// `(document_id, section_key)`, with no `COUNT(*)` over the whole order.
+    async fn body_order_position(
+        &self,
+        id: &DocumentId,
+        section_key: i64,
+    ) -> Result<Option<usize>, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                if let Some(ord) = load_body_order_position(connection, &id, section_key)? {
+                    return Ok(Some(ord));
+                }
+                if document_has_section_rows(connection, &id)? {
+                    return match stored_or_computed_body_order(connection, &id)? {
+                        Some(Err(error)) => Err(error),
+                        _ => Ok(None),
+                    };
+                }
+                let Some(order) = stored_or_computed_body_order(connection, &id)? else {
+                    return Ok(None);
+                };
+                let order = order?;
+                Ok(
+                    load_document_row(connection, &id, false)?.and_then(|(document, _)| {
+                        section_rows::body_order_window(&document, &order, section_key, 0, 0)
+                            .map(|window| window.ord)
+                    }),
+                )
+            },
+        )
+        .await
+    }
+
     /// The `section_key` at one body-order position.
     async fn body_order_at(
         &self,
@@ -1891,6 +1927,23 @@ fn load_body_order_window(
 }
 
 /// The `section_key` at body-order position `ord`.
+/// The body-order position of one section: one `(document_id, section_key)` unique-index read.
+fn load_body_order_position(
+    connection: &Connection,
+    document_id: &DocumentId,
+    section_key: i64,
+) -> Result<Option<usize>, ApplicationError> {
+    let ord = connection
+        .query_row(
+            "SELECT ord FROM document_body_order_rows_v1 WHERE document_id = ?1 AND section_key = ?2",
+            params![&document_id.0, section_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(repository_error)?;
+    ord.map(|ord| section_row_usize(ord, "ord")).transpose()
+}
+
 fn load_body_order_at(
     connection: &Connection,
     document_id: &DocumentId,

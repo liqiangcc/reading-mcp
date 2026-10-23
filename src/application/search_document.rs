@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::light_sections::SectionTexts;
-use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator};
+use crate::application::locator_resolution::{ResolvedLocatorKind, resolve_text_locator_at};
 use crate::application::ports::{
     ApplicationError, DocumentRepository, SearchHitKind, SearchIndex, TextUnitIndex,
 };
+use crate::application::section_view::{DocumentView, carrier_section};
 use crate::domain::{
     Document, DocumentId, DocumentSource, Location, NormalizedDocumentHash, SectionId, TextLocator,
 };
@@ -94,6 +95,21 @@ impl SearchDocumentUseCase {
         };
         let (document, normalized_document_hash) =
             loaded.ok_or(ApplicationError::DocumentNotFound)?;
+        // The scan walks the tree (a search is a scan), but every section it reports is resolved
+        // from one row instead of a walk of that tree.
+        let view = match self.text_unit_index {
+            Some(_) => {
+                DocumentView::load_with_hash(Arc::clone(&self.repository), &command.document_id)
+                    .await?
+                    .map(|(view, _)| view)
+                    .ok_or(ApplicationError::DocumentNotFound)?
+            }
+            None => DocumentView::from_document(
+                Arc::clone(&self.repository),
+                Arc::clone(&document),
+                &normalized_document_hash,
+            ),
+        };
         let tokenizer_version = self.search_index.tokenizer_version();
         let units: Arc<dyn TextUnitIndex> = match &self.text_unit_index {
             Some(index) => Arc::clone(index),
@@ -103,6 +119,7 @@ impl SearchDocumentUseCase {
         let hits = if self.search_index.supports_precise_lexical_candidates() {
             self.precise_hits(
                 &document,
+                &view,
                 query,
                 command.limit,
                 &normalized_document_hash,
@@ -110,8 +127,14 @@ impl SearchDocumentUseCase {
             )
             .await?
         } else {
-            self.legacy_hits(&document, query, command.limit, &normalized_document_hash)
-                .await?
+            self.legacy_hits(
+                &document,
+                &view,
+                query,
+                command.limit,
+                &normalized_document_hash,
+            )
+            .await?
         };
 
         Ok(SearchDocumentResult {
@@ -124,6 +147,7 @@ impl SearchDocumentUseCase {
     async fn precise_hits(
         &self,
         document: &Document,
+        view: &DocumentView,
         query: &str,
         limit: usize,
         normalized_document_hash: &NormalizedDocumentHash,
@@ -165,8 +189,9 @@ impl SearchDocumentUseCase {
                 )));
             }
 
-            let resolved = resolve_text_locator(
+            let resolved = resolve_text_locator_at(
                 document,
+                view,
                 &hit.text_locator,
                 normalized_document_hash,
                 units,
@@ -202,6 +227,7 @@ impl SearchDocumentUseCase {
     async fn legacy_hits(
         &self,
         document: &Document,
+        view: &DocumentView,
         query: &str,
         limit: usize,
         normalized_document_hash: &NormalizedDocumentHash,
@@ -215,7 +241,7 @@ impl SearchDocumentUseCase {
                     hit.source.0, document.source.0
                 )));
             }
-            let section = document.find_section(&hit.section_id).ok_or_else(|| {
+            let row = view.section_by_id(&hit.section_id).await?.ok_or_else(|| {
                 ApplicationError::IndexFailed(format!(
                     "legacy search hit references missing canonical section {}",
                     hit.section_id.0
@@ -231,7 +257,7 @@ impl SearchDocumentUseCase {
                 candidate_kind: SearchCandidateKind::Section,
                 text_locator: TextLocator::for_section_with_hash(
                     document,
-                    section,
+                    &carrier_section(&row),
                     normalized_document_hash,
                 ),
             });

@@ -1,8 +1,10 @@
 use crate::application::get_text_units::EffectiveTextUnitKind;
 use crate::application::light_sections::SectionTexts;
 use crate::application::ports::{ApplicationError, OwnedStreamUnit, TextUnitIndex};
+use crate::application::section_view::{DocumentView, carrier_section};
 use crate::domain::{
-    Document, NormalizedDocumentHash, NormalizedTextRange, TEXT_SEGMENTATION_VERSION, TextLocator,
+    Document, NormalizedDocumentHash, NormalizedTextRange, Section, TEXT_SEGMENTATION_VERSION,
+    TextLocator,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,10 @@ pub(crate) struct ResolvedTextLocator {
     pub(crate) range: NormalizedTextRange,
 }
 
+/// Resolves `locator` against `document`, looking its owner section up in the document's tree.
+///
+/// This is the path for a caller that already holds the tree (`source_view`). A caller that holds
+/// rows instead resolves the section itself and calls [`resolve_text_locator_at`].
 pub(crate) async fn resolve_text_locator(
     document: &Document,
     locator: &TextLocator,
@@ -38,26 +44,7 @@ pub(crate) async fn resolve_text_locator(
     units: &dyn TextUnitIndex,
     texts: &mut SectionTexts<'_>,
 ) -> Result<ResolvedTextLocator, ApplicationError> {
-    if locator.document_id != document.id {
-        return Err(ApplicationError::InvalidLocator(format!(
-            "locator document {} does not match requested document {}",
-            locator.document_id.0, document.id.0
-        )));
-    }
-    if locator.content_hash != document.content_hash {
-        return Err(ApplicationError::StaleLocator(format!(
-            "raw content hash changed from {} to {}",
-            locator.content_hash.0, document.content_hash.0
-        )));
-    }
-
-    if locator.normalized_document_hash != *normalized_document_hash {
-        return Err(ApplicationError::StaleLocator(format!(
-            "normalized document hash changed from {} to {}",
-            locator.normalized_document_hash.0, normalized_document_hash.0
-        )));
-    }
-
+    check_identity(document, locator, normalized_document_hash)?;
     let section = document
         .find_section(&locator.owner_section_id)
         .ok_or_else(|| {
@@ -66,7 +53,60 @@ pub(crate) async fn resolve_text_locator(
                 locator.owner_section_id.0
             ))
         })?;
+    resolve_in_section(
+        document,
+        section,
+        locator,
+        normalized_document_hash,
+        units,
+        texts,
+    )
+    .await
+}
 
+/// Resolves `locator` against `document` and the owner section read from `view`'s rows.
+///
+/// The section is a carrier built from one row, so the cost is one point query; this function
+/// reads only its `id` and `location`.
+pub(crate) async fn resolve_text_locator_at(
+    document: &Document,
+    view: &DocumentView,
+    locator: &TextLocator,
+    normalized_document_hash: &NormalizedDocumentHash,
+    units: &dyn TextUnitIndex,
+    texts: &mut SectionTexts<'_>,
+) -> Result<ResolvedTextLocator, ApplicationError> {
+    check_identity(document, locator, normalized_document_hash)?;
+    let section = view
+        .section_by_id(&locator.owner_section_id)
+        .await?
+        .map(|row| carrier_section(&row))
+        .ok_or_else(|| {
+            ApplicationError::InvalidLocator(format!(
+                "locator owner section {} does not exist",
+                locator.owner_section_id.0
+            ))
+        })?;
+    resolve_in_section(
+        document,
+        &section,
+        locator,
+        normalized_document_hash,
+        units,
+        texts,
+    )
+    .await
+}
+
+/// The shape decision and range checks of one locator, against the section that owns it.
+async fn resolve_in_section(
+    document: &Document,
+    section: &Section,
+    locator: &TextLocator,
+    normalized_document_hash: &NormalizedDocumentHash,
+    units: &dyn TextUnitIndex,
+    texts: &mut SectionTexts<'_>,
+) -> Result<ResolvedTextLocator, ApplicationError> {
     match (
         locator.paragraph_index,
         locator.sentence_index,
@@ -179,6 +219,33 @@ pub(crate) async fn resolve_text_locator(
             "locator Section/CharacterRange/Paragraph/Sentence fields form an invalid shape".into(),
         )),
     }
+}
+
+/// The identity a locator is bound to: document, raw content hash and normalized hash.
+fn check_identity(
+    document: &Document,
+    locator: &TextLocator,
+    normalized_document_hash: &NormalizedDocumentHash,
+) -> Result<(), ApplicationError> {
+    if locator.document_id != document.id {
+        return Err(ApplicationError::InvalidLocator(format!(
+            "locator document {} does not match requested document {}",
+            locator.document_id.0, document.id.0
+        )));
+    }
+    if locator.content_hash != document.content_hash {
+        return Err(ApplicationError::StaleLocator(format!(
+            "raw content hash changed from {} to {}",
+            locator.content_hash.0, document.content_hash.0
+        )));
+    }
+    if locator.normalized_document_hash != *normalized_document_hash {
+        return Err(ApplicationError::StaleLocator(format!(
+            "normalized document hash changed from {} to {}",
+            locator.normalized_document_hash.0, normalized_document_hash.0
+        )));
+    }
+    Ok(())
 }
 
 fn validate_segmentation_version(version: &str) -> Result<(), ApplicationError> {

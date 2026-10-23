@@ -1552,6 +1552,75 @@ def run_read_probe(
                     ),
                 }
             )
+
+            # A backward read returns a `b:` cursor in `next`; the cursor itself must resume
+            # identically, so it is one more recorded shape.
+            backward = call(
+                "read", {"from": section, "direction": "backward", "max_chars": 64}
+            )
+            records.append({"step": "read backward 64", "payload": backward})
+            backward_cursor = backward.get("next") if isinstance(backward, dict) else None
+            if isinstance(backward_cursor, str):
+                records.append(
+                    {
+                        "step": "read backward cursor",
+                        "payload": call("read", {"from": backward_cursor, "max_chars": 64}),
+                    }
+                )
+
+            # The preorder listing at two depths, and scoped to one section, so the point-query
+            # preorder and its `next` cursor are compared with the tree walk it replaced.
+            for depth in (1, 2):
+                records.append(
+                    {
+                        "step": f"outline depth {depth}",
+                        "payload": call("outline", {"at": document, "depth": depth}),
+                    }
+                )
+            records.append(
+                {
+                    "step": "outline section depth 1",
+                    "payload": call("outline", {"at": section, "depth": 1}),
+                }
+            )
+            paged = call("outline", {"at": document, "depth": 2, "limit": 3})
+            records.append({"step": "outline paged 3", "payload": paged})
+            outline_cursor = paged.get("next") if isinstance(paged, dict) else None
+            if isinstance(outline_cursor, str):
+                records.append(
+                    {
+                        "step": "outline paged continue",
+                        "payload": call(
+                            "outline",
+                            {"at": document, "depth": 2, "limit": 3, "cursor": outline_cursor},
+                        ),
+                    }
+                )
+
+            # `search` resolves its document handle from the header; the query is the section
+            # title, which the scan answers with a section-kind hit on inputs that have one.
+            title = None
+            if isinstance(top, list) and top:
+                first = top[0]
+                if isinstance(first, (list, tuple)) and len(first) > 1:
+                    title = first[1]
+            if isinstance(title, str) and title.strip():
+                records.append(
+                    {
+                        "step": "search title",
+                        "payload": call(
+                            "search", {"doc": document, "query": title.strip()[:24], "limit": 5}
+                        ),
+                    }
+                )
+
+            # `cite` returns the canonical locators of the handles it is given.
+            records.append(
+                {"step": "cite section", "payload": call("cite", {"at": [section]})}
+            )
+            records.append(
+                {"step": "cite document", "payload": call("cite", {"at": [document]})}
+            )
         except (TimeoutError, RuntimeError, ProbeError) as error:
             records.append(
                 {"step": "probe", "payload": {"error": f"{type(error).__name__}: {error}"}}

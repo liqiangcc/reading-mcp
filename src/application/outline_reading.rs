@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use crate::application::handle_reading::{resolve_document, resolve_section};
-use crate::application::ports::{DocumentRepository, TextUnitIndex};
+use crate::application::handle_reading::{ResolvedHeader, resolve_header, resolve_section};
+use crate::application::ports::{ApplicationError, DocumentRepository, SectionRow, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
+use crate::application::section_view::DocumentView;
 use crate::application::short_handle::{ReadingHandle, SectionHandle, parse_handle};
-use crate::domain::Section;
 
 /// How many nodes one `outline` answer lists when the caller does not say.
 pub const DEFAULT_OUTLINE_LIMIT: usize = 100;
@@ -89,30 +89,25 @@ impl OutlineReadingUseCase {
                 format!("at must be a document or section handle: {}", error.message),
             )
         })?;
-        let resolved = resolve_document(
+        let resolved = resolve_header(
             self.text_unit_index.as_ref(),
-            self.repository.as_ref(),
+            &self.repository,
             handle.document(),
         )
         .await?;
-        let section_scope = match &handle {
-            ReadingHandle::Section(section) => {
-                Some(resolve_section(self.text_unit_index.as_ref(), &resolved, section).await?)
-            }
-            _ => None,
-        };
-        let (scope_key, scope) = match &handle {
+        let (scope_key, mut preorder) = match &handle {
             ReadingHandle::Document(_) => (
                 resolved.handle.to_string(),
-                preorder(&resolved.document.root_sections, command.depth),
+                Preorder::roots(&resolved.view, command.depth),
             ),
-            ReadingHandle::Section(section) => (
-                section.to_string(),
-                preorder(
-                    &section_scope.as_ref().expect("resolved above").children,
-                    command.depth,
-                ),
-            ),
+            ReadingHandle::Section(section) => {
+                let row =
+                    resolve_section(self.text_unit_index.as_ref(), &resolved, section).await?;
+                (
+                    section.to_string(),
+                    Preorder::below(&resolved.view, &row, command.depth),
+                )
+            }
             ReadingHandle::Paragraph { .. } | ReadingHandle::Sentence { .. } => {
                 return Err(ReadingError::invalid(
                     "at",
@@ -124,72 +119,123 @@ impl OutlineReadingUseCase {
 
         let start = match command.cursor.as_deref() {
             None => 0,
-            Some(cursor) => {
-                let position = decode_cursor(cursor, &resolved.handle.to_string(), &check)?;
-                if position > scope.len() {
-                    return Err(ReadingError::stale_handle(
-                        "outline cursor points past the end of its scope",
-                    ));
-                }
-                position
-            }
+            Some(cursor) => decode_cursor(cursor, &resolved.handle.to_string(), &check)?,
         };
-        let end = (start + command.limit).min(scope.len());
-        let mut items = Vec::with_capacity(end - start);
-        for section in &scope[start..end] {
-            let section_key = self
-                .text_unit_index
-                .section_key(&resolved.document.id, &section.id)
-                .await?
-                .ok_or_else(|| {
-                    ReadingError::stale_handle(format!(
-                        "section {} has no stored section key",
-                        section.id.0
-                    ))
-                })?;
-            items.push(OutlineReadingItem {
-                handle: SectionHandle {
-                    document: resolved.handle.clone(),
-                    section_key,
-                }
-                .to_string(),
-                title: section.title.clone(),
-                level: section.level,
-                // The stored length of the section's normalized text, which is exactly what
-                // `section.content.chars().count()` counted on the full document.
-                chars: self
-                    .repository
-                    .load_section_char_len(&resolved.document.id, &section.id)
-                    .await?
-                    .ok_or_else(|| {
-                        ReadingError::stale_handle(format!(
-                            "section {} has no stored text",
-                            section.id.0
-                        ))
-                    })?,
-            });
+        // Skip to the cursor position one row at a time; a cursor past the end of the scope is the
+        // same `stale_handle` it always was.
+        for _ in 0..start {
+            if preorder.next().await?.is_none() {
+                return Err(ReadingError::stale_handle(
+                    "outline cursor points past the end of its scope",
+                ));
+            }
         }
-        let next = (end < scope.len()).then(|| format!("o:{}.{}~{}", resolved.handle, end, check));
+        let mut items = Vec::with_capacity(command.limit);
+        while items.len() < command.limit {
+            let Some(row) = preorder.next().await? else {
+                break;
+            };
+            items.push(self.item(&resolved, &row).await?);
+        }
+        // One row past the page decides `has_more`, without listing the rest of the tree.
+        let next = preorder
+            .next()
+            .await?
+            .map(|_| format!("o:{}.{}~{}", resolved.handle, start + items.len(), check));
         Ok(OutlineReadingResult { items, next })
     }
+
+    async fn item(
+        &self,
+        resolved: &ResolvedHeader,
+        row: &SectionRow,
+    ) -> Result<OutlineReadingItem, ReadingError> {
+        let section_key = self
+            .text_unit_index
+            .section_key(resolved.id(), &row.id)
+            .await?
+            .ok_or_else(|| {
+                ReadingError::stale_handle(format!(
+                    "section {} has no stored section key",
+                    row.id.0
+                ))
+            })?;
+        Ok(OutlineReadingItem {
+            handle: SectionHandle {
+                document: resolved.handle.clone(),
+                section_key,
+            }
+            .to_string(),
+            title: row.title.clone(),
+            level: row.level,
+            // The stored length of the section's normalized text, which is exactly what
+            // `section.content.chars().count()` counted on the full document.
+            chars: self
+                .repository
+                .load_section_char_len(resolved.id(), &row.id)
+                .await?
+                .ok_or_else(|| {
+                    ReadingError::stale_handle(format!("section {} has no stored text", row.id.0))
+                })?,
+        })
+    }
 }
 
-/// The preorder listing of `roots`, at most `depth` levels below the scope.
-fn preorder(roots: &[Section], depth: usize) -> Vec<&Section> {
-    let mut output = Vec::new();
-    for root in roots {
-        collect(root, 1, depth, &mut output);
-    }
-    output
+/// The preorder listing of a scope, one `section_children` read per listed node: the scope's roots
+/// (or one section's children) first, then their children, at most `depth` levels below the scope.
+struct Preorder<'a> {
+    view: &'a DocumentView,
+    depth: usize,
+    stack: Vec<(SectionRow, usize)>,
+    /// The parent whose children seed the walk, until the first `next` loads them.
+    seed: Option<Option<i64>>,
 }
 
-fn collect<'a>(section: &'a Section, level: usize, depth: usize, output: &mut Vec<&'a Section>) {
-    if level > depth {
-        return;
+impl<'a> Preorder<'a> {
+    fn roots(view: &'a DocumentView, depth: usize) -> Self {
+        Self {
+            view,
+            depth,
+            stack: Vec::new(),
+            seed: Some(None),
+        }
     }
-    output.push(section);
-    for child in &section.children {
-        collect(child, level + 1, depth, output);
+
+    fn below(view: &'a DocumentView, section: &SectionRow, depth: usize) -> Self {
+        Self {
+            view,
+            depth,
+            stack: Vec::new(),
+            seed: Some(Some(section.section_key)),
+        }
+    }
+
+    /// The next row in preorder, or `None` at the end of the scope.
+    async fn next(&mut self) -> Result<Option<SectionRow>, ApplicationError> {
+        if let Some(parent_key) = self.seed.take() {
+            self.push_children(parent_key, 1).await?;
+        }
+        let Some((row, level)) = self.stack.pop() else {
+            return Ok(None);
+        };
+        if level < self.depth {
+            self.push_children(Some(row.section_key), level + 1).await?;
+        }
+        Ok(Some(row))
+    }
+
+    /// Pushes `parent_key`'s children in reverse so that popping yields ascending key order, which
+    /// is the order the document holds them in.
+    async fn push_children(
+        &mut self,
+        parent_key: Option<i64>,
+        level: usize,
+    ) -> Result<(), ApplicationError> {
+        let children = self.view.children(parent_key, usize::MAX).await?;
+        for child in children.into_iter().rev() {
+            self.stack.push((child, level));
+        }
+        Ok(())
     }
 }
 

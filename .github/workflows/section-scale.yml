@@ -4,7 +4,10 @@ name: Section scale
 # synthetic EPUBs whose section count is the variable (N = 500, 2,000, 8,000, 20,000, in a
 # three-level nest and flat) and reports what one open costs: open seconds, state-directory bytes
 # and the number of rows in `document_header_v1`, `document_sections_v1` and
-# `document_body_order_rows_v1`. No read is measured here; the read gate is SEC-2.
+# `document_body_order_rows_v1`. It also measures what one read costs (SEC-2): `v2 read` sentence
+# steps, `get_text_units` and `get_context`, 200 calls each at 50% of the book, mean ms and
+# rchar/call per N. The read gate is flatness: at N = 20,000 each tool's mean is at most 1.3x its
+# N = 500 mean, its absolute mean is at most 5 ms, and rchar/call does not grow.
 #
 # `workflow_dispatch` only fires for a workflow that already exists on the default branch, so a
 # `section-scale-*` push is how this gate runs on the branch that introduces it.
@@ -16,7 +19,7 @@ on:
 jobs:
   scale:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust 1.99.1
@@ -47,6 +50,141 @@ jobs:
             done
           done
           python3 scripts/sqlite-facts.py "${args[@]}" 2>&1 | tee scale/facts.txt
+      - name: Open-phase breakdown per N
+        if: always()
+        run: |
+          set -uo pipefail
+          INPUTS="$RUNNER_TEMP/sections"
+          mkdir -p phases
+          python3 scripts/memory-profile.py \
+            --binary target/release/reading-mcp \
+            --out phases/phases.json \
+            --states dir \
+            --telemetry \
+            --documents "sections-nested-500=$INPUTS/sections-nested-500.epub,sections-nested-2000=$INPUTS/sections-nested-2000.epub,sections-nested-8000=$INPUTS/sections-nested-8000.epub,sections-nested-20000=$INPUTS/sections-nested-20000.epub" \
+            2>&1 | tee phases/phases.txt || echo "::warning::the phase breakdown failed"
+      - name: Measure the read tools at every N
+        if: always()
+        run: |
+          set -uo pipefail
+          INPUTS="$RUNNER_TEMP/sections"
+          mkdir -p read-measure
+          for sections in 500 2000 8000 20000; do
+            for layout in nested flat; do
+              label="sections-$layout-$sections"
+              python3 scripts/doc-read-probe.py \
+                --binary target/release/reading-mcp \
+                --document "$INPUTS/$label.epub" \
+                --label "$label" \
+                --side branch \
+                --calls 200 \
+                --start-fraction 0.5 \
+                --io-bytes \
+                --env READING_MCP_TOOLS=both \
+                --out "read-measure/$label.json" \
+                || echo "::warning::read probe failed: $label"
+            done
+          done
+      - name: Read scale table and flatness gate
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          import sys
+
+          TOOLS = ("v2_read", "get_text_units", "get_context")
+          results = {}
+          for path in sorted(glob.glob("read-measure/*.json")):
+              with open(path, encoding="utf-8") as handle:
+                  result = json.load(handle)
+              results[result["label"]] = result
+
+          lines = [
+              "| input | layout | sections | tool | calls | mean ms | median ms | p95 ms "
+              "| rchar/call |",
+              "|---|---|---:|---|---:|---:|---:|---:|---:|",
+          ]
+          for label in sorted(results, key=lambda name: (name.split("-")[1], int(name.split("-")[-1]))):
+              result = results[label]
+              parts = label.split("-")
+              layout = parts[1]
+              sections = parts[-1]
+              for tool in TOOLS:
+                  summary = result.get("shapes", {}).get(tool)
+                  if summary is None:
+                      lines.append(
+                          f"| {label} | {layout} | {sections} | {tool} | - | - | - | - | - |"
+                      )
+                      continue
+                  lines.append(
+                      "| {label} | {layout} | {sections} | {tool} | {calls} | {mean:.3f} "
+                      "| {median:.3f} | {p95:.3f} | {rchar:.0f} |".format(
+                          label=label,
+                          layout=layout,
+                          sections=sections,
+                          tool=tool,
+                          calls=result.get("calls", "-"),
+                          mean=summary.get("mean_ms", 0.0),
+                          median=summary.get("median_ms", 0.0),
+                          p95=summary.get("p95_ms", 0.0),
+                          rchar=summary.get("io_rchar_mean", 0.0),
+                      )
+                  )
+          table = "\n".join(lines) + "\n"
+          with open("read-measure/table.md", "w", encoding="utf-8") as handle:
+              handle.write(table)
+          print(table)
+
+          failures = []
+          for layout in ("nested", "flat"):
+              small = results.get(f"sections-{layout}-500")
+              large = results.get(f"sections-{layout}-20000")
+              if small is None or large is None:
+                  failures.append(f"{layout}: missing the N=500 or N=20000 probe")
+                  continue
+              for tool in TOOLS:
+                  small_summary = small.get("shapes", {}).get(tool)
+                  large_summary = large.get("shapes", {}).get(tool)
+                  if small_summary is None or large_summary is None:
+                      failures.append(f"{layout}/{tool}: no measurement")
+                      continue
+                  small_ms = small_summary.get("mean_ms", 0.0)
+                  large_ms = large_summary.get("mean_ms", 0.0)
+                  ratio = large_ms / small_ms if small_ms > 0 else float("inf")
+                  small_rchar = small_summary.get("io_rchar_mean", 0.0)
+                  large_rchar = large_summary.get("io_rchar_mean", 0.0)
+                  rchar_ratio = large_rchar / small_rchar if small_rchar > 0 else float("inf")
+                  print(
+                      f"{layout}/{tool}: mean_ms 500={small_ms:.3f} 20000={large_ms:.3f} "
+                      f"flatness={ratio:.2f} rchar/call 500={small_rchar:.0f} "
+                      f"20000={large_rchar:.0f} rchar_flatness={rchar_ratio:.2f}"
+                  )
+                  if ratio > 1.3:
+                      failures.append(
+                          f"{layout}/{tool}: N=20000 mean {large_ms:.3f} ms is {ratio:.2f}x "
+                          f"the N=500 mean {small_ms:.3f} ms (gate 1.3x)"
+                      )
+                  if large_ms > 5.0:
+                      failures.append(
+                          f"{layout}/{tool}: N=20000 mean {large_ms:.3f} ms exceeds 5 ms"
+                      )
+                  if rchar_ratio > 1.3:
+                      failures.append(
+                          f"{layout}/{tool}: rchar/call grew {rchar_ratio:.2f}x from N=500 to "
+                          f"N=20000"
+                      )
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(table)
+          for failure in failures:
+              print(f"::error::{failure}")
+          if failures:
+              sys.exit(1)
+          PY
       - name: Section scale table
         if: always()
         run: |
@@ -101,4 +239,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: section-scale
-          path: scale/
+          path: |
+            scale/
+            read-measure/
+            phases/

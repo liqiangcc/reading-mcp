@@ -201,7 +201,7 @@ jobs:
               peak = row["peak_rss_kib"] or 0
               resident = row.get("rss_after_open_kib") or 0
               ratio = f"{peak * 1024 / text_bytes:.1f}x" if text_bytes else "-"
-              print(f"| {label} | {row['bytes'] / mib:.1f} | {row['open_seconds']} | "
+              print(f"| {label} | {row['bytes'] / (mib * mib):.1f} | {row['open_seconds']} | "
                     f"{peak / 1024:.1f} | {resident / 1024:.1f} | {text_bytes} | {ratio} |")
           print()
           print("### RSS after each open phase (rss/hwm MiB)")

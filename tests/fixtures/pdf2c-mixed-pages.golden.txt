@@ -1,0 +1,16 @@
+title=file:///synthetic.pdf
+pdf_version=1.5
+pdf_page_count=4
+pdf_structure_provenance=page_fallback
+section id=section://page-1 parent=- level=1 title="Page 1" page=Some(1) native=Some("pdf:page:1") path=["Page 1"]
+content="First page of the mixed document."
+section id=section://page-2 parent=- level=1 title="Page 2" page=Some(2) native=Some("pdf:page:2") path=["Page 2"]
+content="Second page carries a figure."
+section id=section://page-3 parent=- level=1 title="Page 3" page=Some(3) native=Some("pdf:page:3") path=["Page 3"]
+content="Third page closes the document."
+section id=section://page-4 parent=- level=1 title="Page 4" page=Some(4) native=Some("pdf:page:4") path=["Page 4"]
+content="AAAAAAAAAAAA"
+binding=OriginalSourceBinding { owner_section_id: SectionId("section://page-1"), normalized_range: NormalizedTextRange { start: 0, end: 33 }, target: Page { page_number: 1 } }
+binding=OriginalSourceBinding { owner_section_id: SectionId("section://page-2"), normalized_range: NormalizedTextRange { start: 0, end: 29 }, target: Page { page_number: 2 } }
+binding=OriginalSourceBinding { owner_section_id: SectionId("section://page-3"), normalized_range: NormalizedTextRange { start: 0, end: 31 }, target: Page { page_number: 3 } }
+binding=OriginalSourceBinding { owner_section_id: SectionId("section://page-4"), normalized_range: NormalizedTextRange { start: 0, end: 12 }, target: Page { page_number: 4 } }

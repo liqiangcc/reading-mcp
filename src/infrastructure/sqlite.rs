@@ -601,6 +601,23 @@ impl SqliteDocumentRepository {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The stored `document_json` row of one document, byte for byte, or `None` when the row is
+    /// absent. Test-only: it is how a test compares a save against a committed golden without
+    /// reaching into the database itself.
+    #[cfg(test)]
+    pub(crate) fn stored_document_json(&self, id: &DocumentId) -> Option<String> {
+        let connection = self.connection.lock().expect("repository connection");
+        connection
+            .query_row(
+                "SELECT document_json FROM documents WHERE id = ?1",
+                params![id.0],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
 }
 
 #[async_trait]

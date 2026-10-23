@@ -1786,17 +1786,12 @@ mod tests {
         let repository =
             crate::infrastructure::SqliteDocumentRepository::open(&path).expect("repository");
         let document = parse_bytes(mixed_pages_pdf()).expect("the mixed PDF opens");
-        let id = document.id.0.clone();
+        let id = document.id.clone();
         crate::application::ports::DocumentRepository::save(&repository, document)
             .await
             .expect("save");
-        let connection = rusqlite::Connection::open(&path).expect("connection");
-        connection
-            .query_row(
-                "SELECT document_json FROM documents WHERE id = ?1",
-                [&id],
-                |row| row.get::<_, String>(0),
-            )
+        repository
+            .stored_document_json(&id)
             .expect("stored document_json")
     }
 

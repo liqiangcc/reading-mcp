@@ -179,6 +179,8 @@ pub enum ApplicationError {
     OcrResourceLimit,
     #[error("resource limit exceeded: {0}")]
     ResourceLimitExceeded(String),
+    #[error("authentication profile failed: {0}")]
+    AuthenticationFailed(String),
     #[error("document repository failed: {0}")]
     RepositoryFailed(String),
     #[error("cache failed: {0}")]

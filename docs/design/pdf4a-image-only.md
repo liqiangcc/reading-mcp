@@ -10,10 +10,43 @@ text. The local case is `/root/mcp-data/doc/naturebp.pdf`: 4 pages, `ok`, 156
 characters of watermark. A reader that trusts `ok` reads an empty book and never
 learns why.
 
-A PDF with *zero* extractable text does not open `ok`; it already fails with
-`ParseFailed` ("contains no extractable text"). That is the wrong code — the
-document is not unreadable, it needs OCR — but it is not silent. The silent case
-is the watermark/cover scan.
+A PDF with *zero* extractable text does not open `ok`; before this change it
+fails with `ParseFailed` ("contains no extractable text"). That is the wrong
+code — the document is not unreadable, it needs OCR — and v2 maps `ParseFailed`
+to `unreadable`, whose hint says "the format or encoding is unsupported". A
+reader is told the file is broken when the truth is that it is a pure scan.
+Both shapes are fixed here:
+
+* zero text, image-dominated → `ocr_required` with the page and character count;
+* a few characters of watermark, image-dominated → `ocr_required` under the
+  two-condition rule.
+
+## Local repro
+
+Both files are outside the repository; nothing is committed.
+
+| file | pages | extracted chars | raster coverage | before | after |
+|---|---:|---:|---:|---|---|
+| `/root/mcp-data/doc/如何培养分析能力 (孙英陆编著) (z-library.sk, 1lib.sk, z-lib.sk).pdf` | 99 | 0 | 1.0 (197 `/Image`, 0 `/Font`, 0 `/ToUnicode`) | `unreadable` | `ocr_required` — "this PDF has no text layer (99 pages, 0 characters); it needs OCR" |
+| `/root/mcp-data/doc/naturebp.pdf` | 4 | 156 (watermark) | 1.0 | `ok` | `ocr_required` — "this PDF has no text layer (4 pages, 156 characters); it needs OCR" |
+
+The first file is the user report that motivated the message change: a pure
+image scan (99 pages, 197 image objects, no fonts at all) answered
+`error=unreadable` with the hint "来源无法解析或文本编码不受支持".
+
+## The message
+
+`ApplicationError::OcrRequired` now carries the evidence it measured:
+`OcrRequiredDetail { pages, characters }`. The Display string is one English
+sentence with the document's own numbers and no path:
+
+* measured: `this PDF has no text layer (99 pages, 0 characters); it needs OCR`
+* unmeasured (the layout backend's worker path, which has no text-layer count):
+  `this PDF has no text layer; it needs OCR`
+
+v1 reads this through `error.to_string()`; v2 carries the same string as
+`ReadingError.detail`. v2's wire `hint` stays the contract's localized hint for
+the `ocr_required` code, identical to the layout backend's case.
 
 ## What the default backend already has
 

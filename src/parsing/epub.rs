@@ -222,6 +222,11 @@ impl EpubParser {
             &self.limits,
             &mut total_read,
         )?;
+        // Nothing below reads the archive again, and it borrows the source bytes: both are freed
+        // before the navigation and structure JSON, the block map and the segmentation are built,
+        // instead of being carried beside them (MEM-2a: 6.8 MiB of 宋史's 92.0 MiB heap peak).
+        drop(archive);
+        drop(resource.bytes);
         let navigation_json = crate::json::to_string_exact(&navigation_map)
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
         let reconciled =
@@ -229,7 +234,6 @@ impl EpubParser {
         let structure_json = crate::json::to_string_exact(&reconciled.structure_map)
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
 
-        drop(archive);
         let mut metadata = resource.metadata;
         metadata.insert("epub_package_path".into(), package_path);
         metadata.insert(

@@ -1325,7 +1325,7 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::UnsupportedTextEncoding(_)
         | ApplicationError::OcrFailed
         | ApplicationError::OcrUnavailable
-        | ApplicationError::OcrRequired
+        | ApplicationError::OcrRequired(_)
         | ApplicationError::OcrNoSupportedProjection
         | ApplicationError::OcrBusy
         | ApplicationError::OcrTimeout
@@ -1360,7 +1360,7 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::UnsupportedTextEncoding(_) => ("UNSUPPORTED_TEXT_ENCODING", false),
         ApplicationError::OcrFailed => ("OCR_FAILED", false),
         ApplicationError::OcrUnavailable => ("OCR_UNAVAILABLE", false),
-        ApplicationError::OcrRequired => ("OCR_REQUIRED", false),
+        ApplicationError::OcrRequired(_) => ("OCR_REQUIRED", false),
         ApplicationError::OcrNoSupportedProjection => ("OCR_NO_SUPPORTED_PROJECTION", false),
         ApplicationError::OcrBusy => ("OCR_RESOURCE_LIMIT", true),
         ApplicationError::OcrTimeout => ("OCR_TIMEOUT", true),
@@ -1381,8 +1381,11 @@ mod ocr_error_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::error_descriptor;
-    use crate::application::ports::ApplicationError;
+    use super::{error_descriptor, retry_for};
+    use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
+    use crate::application::reading_error::ReadingError;
+    use crate::domain::{DocumentSource, MediaType};
+    use crate::mcp::v2_contracts::ErrorView;
 
     #[test]
     fn error_taxonomy_is_stable_and_exposes_retryability() {
@@ -1448,5 +1451,57 @@ mod tests {
             error_descriptor(&ApplicationError::TextUnitIndexFailed("sqlite".into())),
             ("TEXT_UNIT_INDEX_FAILED", true)
         );
+    }
+
+    #[tokio::test]
+    async fn an_image_only_fixture_reports_the_same_ocr_required_on_both_surfaces() {
+        for (fixture, expected_counts) in [
+            ("F12.pdf", "(1 pages, 4 characters)"),
+            ("F02.pdf", "(1 pages, 0 characters)"),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/scanned_pdf/pdf")
+                .join(fixture);
+            let source = DocumentSource(format!("file://{}", path.display()));
+            let resource = RetrievedResource {
+                source: source.clone(),
+                final_source: source,
+                media_type: MediaType("application/pdf".into()),
+                bytes: std::fs::read(&path).expect("fixture bytes"),
+                etag: None,
+                last_modified: None,
+                metadata: Default::default(),
+            };
+            let error = crate::parsing::PdfParser
+                .parse(resource)
+                .await
+                .expect_err("an image-only fixture must not publish a document");
+            assert!(matches!(error, ApplicationError::OcrRequired(_)));
+
+            // v1: code, retriability and the message a v1 caller reads.
+            let (v1_code, v1_retryable) = error_descriptor(&error);
+            let v1_message = error.to_string();
+            assert_eq!(v1_code, "OCR_REQUIRED");
+            assert!(!v1_retryable);
+
+            // v2: the same failure through the v2 contract.
+            let v2 = ReadingError::from(error);
+            assert_eq!(v2.code.as_str(), "ocr_required");
+            assert!(retry_for(&v2).is_none());
+            assert_eq!(v2.detail, v1_message);
+
+            let encoded = serde_json::to_string(&ErrorView::new(&v2, retry_for(&v2)))
+                .expect("the v2 error serializes");
+            assert!(encoded.contains(r#""error":"ocr_required""#));
+            assert!(!encoded.contains("\"retry\""));
+
+            assert!(v1_message.contains("no text layer"), "{v1_message}");
+            assert!(v1_message.contains("OCR"), "{v1_message}");
+            assert!(
+                v1_message.contains(expected_counts),
+                "{fixture}: {v1_message}"
+            );
+            assert!(!v1_message.contains('/'), "{v1_message}");
+        }
     }
 }

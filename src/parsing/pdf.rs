@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
-use lopdf::{Document as LopdfDocument, Object, TocType, decode_text_string};
+use lopdf::{Document as LopdfDocument, Object, ObjectId, TocType, decode_text_string};
 
-use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
+use crate::application::ports::{ApplicationError, OcrRequiredDetail, Parser, RetrievedResource};
 use crate::domain::{
     Document, Location, NormalizedTextRange, OriginalSourceBinding, OriginalSourceBindingMap,
     OriginalSourceTarget, Section, SectionId,
@@ -23,6 +23,14 @@ const PDF_HEADING_INFERENCE_COUNT_METADATA_KEY: &str = "pdf_heading_inference_co
 const PDF_HEADING_INFERENCE_VERSION: &str = "pdf-numbered-heading-inference/v2";
 const MAX_INFERRED_HEADING_CHARS: usize = 160;
 const MAX_INFERRED_HEADING_WORDS: usize = 24;
+/// Below this many normalized characters per page the PDF is treated as having
+/// no usable text layer. The minimum among the 121 text PDFs that open `ok` is
+/// 842.6 chars/page, so this leaves a 4.2x margin below every legitimate text
+/// PDF and never fires on text length alone.
+const OCR_IMAGE_ONLY_MAX_CHARS_PER_PAGE: f64 = 200.0;
+/// At or above this mean raster coverage the pages are image-dominated. A text
+/// PDF with a cover image, a blank page or a figure appendix stays far below it.
+const OCR_IMAGE_ONLY_MIN_RASTER_COVERAGE: f64 = 0.5;
 
 #[derive(Default)]
 pub struct PdfParser;
@@ -96,7 +104,11 @@ impl PdfParser {
             ApplicationError::ParseFailed(format!("invalid PDF document: {error}"))
         })?;
 
-        let page_numbers = pdf.get_pages().keys().copied().collect::<Vec<_>>();
+        let page_ids = pdf.get_pages().into_iter().collect::<Vec<_>>();
+        let page_numbers = page_ids
+            .iter()
+            .map(|(number, _)| *number)
+            .collect::<Vec<_>>();
         if page_numbers.is_empty() {
             return Err(ApplicationError::ParseFailed(
                 "PDF does not contain any pages".into(),
@@ -106,6 +118,12 @@ impl PdfParser {
         let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
         let (pages, extraction_errors) =
             extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
+        // The two conditions must hold together: almost no text for the page
+        // count, and pages that are actually painted by raster images. A text
+        // PDF with a cover, a blank page or a figures appendix fails the second.
+        if let Some(detail) = image_only_scan_evidence(&pdf, &page_ids, &pages) {
+            return Err(ApplicationError::OcrRequired(detail));
+        }
         if pages.iter().all(|page| page.text.trim().is_empty()) {
             return Err(ApplicationError::ParseFailed(
                 "PDF contains no extractable text; scanned PDFs require OCR, which is not supported in this phase"
@@ -245,6 +263,29 @@ fn extract_page_texts_raw(
 
 fn normalize_pdf_text(value: &str) -> String {
     value.trim().to_string()
+}
+
+/// True when the document has almost no text for its page count *and* its pages
+/// are dominated by raster images. Either condition alone is not enough.
+fn image_only_scan_evidence(
+    pdf: &LopdfDocument,
+    page_ids: &[(u32, ObjectId)],
+    pages: &[PageText],
+) -> Option<OcrRequiredDetail> {
+    if page_ids.is_empty() {
+        return None;
+    }
+    let characters = pages
+        .iter()
+        .map(|page| page.text.chars().count())
+        .sum::<usize>();
+    let chars_per_page = characters as f64 / page_ids.len() as f64;
+    if chars_per_page >= OCR_IMAGE_ONLY_MAX_CHARS_PER_PAGE {
+        return None;
+    }
+    let coverage = super::pdf_raster::document_raster_coverage(pdf, page_ids);
+    (coverage >= OCR_IMAGE_ONLY_MIN_RASTER_COVERAGE)
+        .then_some(OcrRequiredDetail::measured(page_ids.len(), characters))
 }
 
 fn pdf_title(pdf: &LopdfDocument) -> Option<String> {
@@ -1244,7 +1285,9 @@ mod tests {
             let pages = page_ids.len();
             let (outcome, sections) = match PdfParser.parse_sync(resource) {
                 Ok(document) => ("ok".to_string(), document.section_count().to_string()),
-                Err(ApplicationError::OcrRequired) => ("ocr_required".to_string(), "-".to_string()),
+                Err(ApplicationError::OcrRequired(_)) => {
+                    ("ocr_required".to_string(), "-".to_string())
+                }
                 Err(ApplicationError::ParseFailed(_)) => {
                     ("unreadable".to_string(), "-".to_string())
                 }
@@ -1261,5 +1304,189 @@ mod tests {
                 coverage
             );
         }
+    }
+
+    fn build_pdf(
+        mut document: LopdfDocument,
+        pages: Vec<(Vec<Operation>, Dictionary)>,
+    ) -> LopdfDocument {
+        let pages_id = document.new_object_id();
+        let mut kids = Vec::new();
+        for (operations, resources) in pages {
+            let content_id = document.add_object(Stream::new(
+                Dictionary::new(),
+                Content { operations }
+                    .encode()
+                    .expect("page content encodes"),
+            ));
+            let page_id = document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+                "Resources" => Object::Dictionary(resources),
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            });
+            kids.push(Object::Reference(page_id));
+        }
+        let count = kids.len() as i64;
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => count,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        document
+    }
+
+    fn image_xobject(document: &mut LopdfDocument) -> ObjectId {
+        document.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1_i64,
+                "Height" => 1_i64,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8_i64,
+            },
+            vec![0_u8],
+        ))
+    }
+
+    fn image_page_operations() -> Vec<Operation> {
+        vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    595.into(),
+                    0.into(),
+                    0.into(),
+                    842.into(),
+                    0.into(),
+                    0.into(),
+                ],
+            ),
+            Operation::new("Do", vec![Object::Name(b"Im1".to_vec())]),
+            Operation::new("Q", vec![]),
+        ]
+    }
+
+    fn text_resources(document: &mut LopdfDocument) -> Dictionary {
+        // A `Differences` name is what lopdf actually decodes; a bare Helvetica
+        // with no encoding extracts nothing.
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![Object::Integer(65), Object::Name(b"A".to_vec())],
+            },
+        });
+        dictionary! { "Font" => dictionary! { "F1" => font_id } }
+    }
+
+    fn parse_bytes(bytes: Vec<u8>) -> Result<Document, ApplicationError> {
+        let source = crate::domain::DocumentSource("file:///synthetic.pdf".into());
+        PdfParser.parse_sync(RetrievedResource {
+            source: source.clone(),
+            final_source: source,
+            media_type: crate::domain::MediaType("application/pdf".into()),
+            bytes,
+            etag: None,
+            last_modified: None,
+            metadata: Default::default(),
+        })
+    }
+
+    #[test]
+    fn an_image_only_page_without_a_text_layer_reports_ocr_required() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let image = image_xobject(&mut document);
+        let mut document = build_pdf(
+            document,
+            vec![(
+                image_page_operations(),
+                dictionary! { "XObject" => dictionary! { "Im1" => image } },
+            )],
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+
+        let error = parse_bytes(bytes).expect_err("an image-only page must not open");
+        assert!(matches!(error, ApplicationError::OcrRequired(_)));
+        assert!(
+            error.to_string().contains("(1 pages, 0 characters)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_image_only_page_with_a_watermark_reports_ocr_required() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let image = image_xobject(&mut document);
+        let mut resources = text_resources(&mut document);
+        resources.set("XObject", dictionary! { "Im1" => image });
+        let mut operations = image_page_operations();
+        operations.extend(byte_text_operations("F1", &[65_u8; 9]));
+        let mut document = build_pdf(document, vec![(operations, resources)]);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+
+        let error = parse_bytes(bytes).expect_err("a watermarked scan must not open");
+        assert!(matches!(error, ApplicationError::OcrRequired(_)));
+        assert!(
+            error.to_string().contains("(1 pages, 9 characters)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_text_pdf_with_one_image_page_stays_ok() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let image = image_xobject(&mut document);
+        let mut pages = Vec::new();
+        for _ in 0..9 {
+            let resources = text_resources(&mut document);
+            pages.push((byte_text_operations("F1", &[65_u8; 60]), resources));
+        }
+        pages.push((
+            image_page_operations(),
+            dictionary! { "XObject" => dictionary! { "Im1" => image } },
+        ));
+        let mut document = build_pdf(document, pages);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+
+        let parsed = parse_bytes(bytes).expect("a text PDF with one image page stays ok");
+        assert_eq!(
+            parsed.metadata.get("pdf_page_count").map(String::as_str),
+            Some("10")
+        );
+    }
+
+    #[test]
+    fn a_one_page_text_pdf_with_thirty_characters_stays_ok() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let resources = text_resources(&mut document);
+        let mut document = build_pdf(
+            document,
+            vec![(byte_text_operations("F1", &[65_u8; 30]), resources)],
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+
+        let parsed = parse_bytes(bytes).expect("thirty characters are still a text layer");
+        assert_eq!(
+            parsed.metadata.get("pdf_page_count").map(String::as_str),
+            Some("1")
+        );
     }
 }

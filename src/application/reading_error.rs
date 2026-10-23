@@ -116,7 +116,7 @@ impl From<ApplicationError> for ReadingError {
             ApplicationError::BlockedSource(_) | ApplicationError::AuthenticationFailed(_) => {
                 ReadingErrorCode::BlockedSource
             }
-            ApplicationError::OcrRequired
+            ApplicationError::OcrRequired(_)
             | ApplicationError::OcrNoSupportedProjection
             | ApplicationError::OcrFailed
             | ApplicationError::OcrUnavailable => ReadingErrorCode::OcrRequired,

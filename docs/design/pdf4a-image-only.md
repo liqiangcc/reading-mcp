@@ -80,9 +80,10 @@ extracted characters, `ok`. `naturebp.pdf` is the same shape at 156 characters.
 
 ## Step 1: chars/page distribution of the 121-document corpus
 
-Computed from the committed PDF-5a corpus and the reference `PDF wide sweep`
-run 39898185205 (`bench/pdf5a`, `4bc298f`); every one of the 121 documents
-opened `ok` there.
+Computed from the committed PDF-5a corpus (`scripts/pdf-sweep-ids.txt`, now on
+`main` as of `4e750f8`; originally `4bc298f` on `bench/pdf5a`) and the reference
+`PDF wide sweep` run 39898185205; every one of the 121 documents opened `ok`
+there.
 
 | statistic | chars/page |
 |---|---:|
@@ -123,6 +124,44 @@ Both conditions are required, so:
 The walk counts only XObject images and forms. Inline images (`BI ... ID ...
 EI`) are not counted, so such a page reports coverage 0 and is not flagged; the
 rule never guesses.
+
+## Step 2: the fixture table after the change
+
+Measured on the PR head by the same ignored test (`PDF4a measure` run
+39910517242).
+
+| input | before | after | pages | chars | chars/page | coverage |
+|---|---|---|---:|---:|---:|---:|
+| pdf-text-1500p.pdf | ok | ok | 1500 | 2999183 | 1999.5 | 0.000 |
+| F01.pdf | ok | ok | 1 | 448 | 448.0 | 0.000 |
+| F02.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F03.pdf | ok | ok | 1 | 448 | 448.0 | 1.000 |
+| F04-flat.pdf | ok | ok | 1 | 448 | 448.0 | 1.000 |
+| F04-form.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F05.pdf | ok | **ocr_required** | 4 | 276 | 69.0 | 0.750 |
+| F06.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F07.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F08.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F09.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F10.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F11.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F12.pdf | ok | **ocr_required** | 1 | 4 | 4.0 | 1.000 |
+| F13.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+| F14.pdf | unreadable | **ocr_required** | 1 | 0 | 0.0 | 1.000 |
+
+12 of the 15 files report `ocr_required`. Three stay `ok` because they really
+do carry a reachable text layer: `F01` (native, 448 chars), `F03` and
+`F04-flat` (flat hidden layer, 448 chars). Flagging them would be a
+false positive on a text layer, which the task forbids. `F04-form` carries the
+same hidden layer inside a Form XObject, but lopdf cannot reach it, so the
+default backend extracts 0 characters — from the reader's point of view the
+text is not there, and `ocr_required` is the honest answer.
+
+The task expected all 14 `F*.pdf` to report `ocr_required`. That expectation
+does not hold for `F01`/`F03`/`F04-flat`, and should not: the fixture README
+documents them as native/hidden-layer controls, not scans. The gate is met for
+every genuinely image-only fixture, plus `F12` (the watermark case that used to
+open `ok` with 4 characters) and `F05` (half its pages are scans).
 
 ## Why `F09` (blank) is flagged
 

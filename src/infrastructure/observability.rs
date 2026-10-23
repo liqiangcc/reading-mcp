@@ -773,7 +773,7 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::UnsupportedTextEncoding(_) => "unsupported_text_encoding",
         ApplicationError::OcrFailed => "ocr_failed",
         ApplicationError::OcrUnavailable => "ocr_unavailable",
-        ApplicationError::OcrRequired => "ocr_required",
+        ApplicationError::OcrRequired(_) => "ocr_required",
         ApplicationError::OcrBusy => "ocr_busy",
         ApplicationError::OcrTimeout => "ocr_timeout",
         ApplicationError::OcrResourceLimit => "ocr_resource_limit",

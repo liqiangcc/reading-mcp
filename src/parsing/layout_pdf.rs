@@ -802,7 +802,9 @@ impl Parser for LayoutPdfParser {
                     return Err(error);
                 }
                 if !ocr_enabled && validated_ocr_required(&output, &resource.bytes) {
-                    return Err(ApplicationError::OcrRequired);
+                    return Err(ApplicationError::OcrRequired(
+                        crate::application::ports::OcrRequiredDetail::unmeasured(),
+                    ));
                 }
                 if ocr_enabled && let Some(identity) = &self.ocr_identity {
                     use sha2::{Digest, Sha256};

@@ -602,7 +602,7 @@ impl DocumentRepository for SqliteDocumentRepository {
                 // value of a book, so it is computed once here — from the document in hand — and
                 // stored, instead of on every `read`.
                 let body_order = crate::application::body_order_ids(&document);
-                let json = serde_json::to_string(&StoredDocument::with_stores(
+                let json = crate::json::to_string_exact(&StoredDocument::with_stores(
                     &document,
                     content_store,
                     light_metadata,

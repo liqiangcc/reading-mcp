@@ -81,7 +81,7 @@ impl Document {
         map: OriginalSourceBindingMap,
     ) -> Result<(), OriginalSourceBindingError> {
         self.validate_original_source_binding_map(&map)?;
-        let json = serde_json::to_string(&map)
+        let json = crate::json::to_string_exact(&map)
             .map_err(|error| OriginalSourceBindingError::InvalidJson(error.to_string()))?;
         self.metadata.insert(
             ORIGINAL_SOURCE_BINDING_VERSION_METADATA_KEY.into(),

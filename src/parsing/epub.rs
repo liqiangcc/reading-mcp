@@ -222,11 +222,11 @@ impl EpubParser {
             &self.limits,
             &mut total_read,
         )?;
-        let navigation_json = serde_json::to_string(&navigation_map)
+        let navigation_json = crate::json::to_string_exact(&navigation_map)
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
         let reconciled =
             reconcile_epub_structure(parsed_spine_documents, spine_records, &navigation_map);
-        let structure_json = serde_json::to_string(&reconciled.structure_map)
+        let structure_json = crate::json::to_string_exact(&reconciled.structure_map)
             .map_err(|error| ApplicationError::ParseFailed(error.to_string()))?;
 
         drop(archive);

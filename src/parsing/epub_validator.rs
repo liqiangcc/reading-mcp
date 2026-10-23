@@ -307,7 +307,7 @@ fn attach_epub_validation_report_inner(
         Some(segmentation) => validate_epub_document_with_segmentation(document, segmentation),
         None => validate_epub_document(document),
     };
-    let json = serde_json::to_string(&report)?;
+    let json = crate::json::to_string_exact(&report)?;
     document.metadata.insert(
         EPUB_VALIDATION_REPORT_VERSION_METADATA_KEY.into(),
         report.schema_version.clone(),

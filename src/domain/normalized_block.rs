@@ -4,6 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::json::to_string_exact;
+
 use super::{Document, NormalizedTextRange, SectionId};
 
 pub const NORMALIZED_BLOCK_MODEL_VERSION: &str = "normalized-block-model/v1";
@@ -176,7 +178,9 @@ impl Document {
         map: NormalizedBlockMap,
     ) -> Result<(), NormalizedBlockMapError> {
         self.validate_normalized_block_map(&map)?;
-        let json = serde_json::to_string(&map)
+        // A book's block map is the largest metadata value there is: exact capacity, not
+        // `to_string`'s doubling slack, because this string lives for the whole open.
+        let json = to_string_exact(&map)
             .map_err(|error| NormalizedBlockMapError::InvalidJson(error.to_string()))?;
         self.metadata.insert(
             NORMALIZED_BLOCK_MAP_VERSION_METADATA_KEY.into(),

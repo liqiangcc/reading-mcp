@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use lopdf::Document as LopdfDocument;
 
 use crate::application::ports::{ApplicationError, Parser, RetrievedResource};
 use crate::domain::Document;
@@ -17,10 +16,8 @@ impl LimitedPdfParser {
         Self { max_pages }
     }
 
-    fn parse_sync(&self, resource: RetrievedResource) -> Result<Document, ApplicationError> {
-        let pdf = LopdfDocument::load_mem(&resource.bytes).map_err(|error| {
-            ApplicationError::ParseFailed(format!("invalid PDF document: {error}"))
-        })?;
+    fn parse_sync(&self, mut resource: RetrievedResource) -> Result<Document, ApplicationError> {
+        let (pdf, hash) = super::pdf::load_and_release(&mut resource)?;
         let page_count = pdf.get_pages().len();
         if page_count > self.max_pages {
             return Err(ApplicationError::ResourceLimitExceeded(format!(
@@ -28,7 +25,9 @@ impl LimitedPdfParser {
                 self.max_pages
             )));
         }
-        PdfParser.parse_sync(resource)
+        // The tree is already loaded: hand it to the parser instead of loading the same bytes a
+        // second time, which used to keep two full object trees alive at the parse's peak.
+        PdfParser.parse_loaded(pdf, resource, hash)
     }
 }
 

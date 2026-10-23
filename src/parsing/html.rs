@@ -66,10 +66,6 @@ impl HtmlParser {
         let root = content_root(&document)?;
         let (events, preamble) = collect_content(root)?;
         capture_html_metadata(&document, &mut metadata)?;
-        // The parsed DOM is not needed past this point: `events` and `preamble` own their text, so
-        // the tree is freed before the section and block facts (and their JSON) are built beside
-        // it, not after.
-        drop(document);
 
         let fallback_title = title_from_metadata(&metadata, &resource.final_source);
         let title = events

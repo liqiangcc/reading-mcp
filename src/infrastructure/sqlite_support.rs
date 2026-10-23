@@ -16,9 +16,15 @@ pub(super) fn open_connection(
             .map_err(|source| error(format!("{}: {source}", parent.display())))?;
     }
     let connection = Connection::open(path).map_err(|source| error(source.to_string()))?;
+    // The page cache keeps a reader's point-query pages resident while a whole-book scan (the
+    // lexical search) runs on another connection. 16 MiB held the SEC-2 working set, but at
+    // 20,000 sections the repository's full section load is ~10 MiB and the scan's layout/text
+    // pages are larger still, so 16 MiB evicted the reader's pages after a few searches and every
+    // read re-read them. 32 MiB holds the 20,000-section working set; it is the same cache, sized
+    // for the book the gate measures, not a new one.
     connection
         .execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-16384;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;",
         )
         .map_err(|source| error(source.to_string()))?;
     Ok(connection)

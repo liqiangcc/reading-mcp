@@ -359,13 +359,13 @@ impl ReadReadingUseCase {
                     section.section_key
                 ))
             })?;
-        if view.section_by_id(&section_id).await?.is_none() {
+        let Some(row) = view.section_by_id(&section_id).await? else {
             return Err(ReadingError::unknown_handle(format!(
                 "section {} is not part of this document",
                 section.section_key
             )));
-        }
-        walk.ord_of(&section_id).await?.ok_or_else(|| {
+        };
+        walk.ord_of_key(row.section_key).await?.ok_or_else(|| {
             ReadingError::unknown_handle(format!(
                 "section {} is not in the reading order",
                 section.section_key
@@ -387,7 +387,8 @@ struct Walk<'a> {
     unit: RequestedTextUnitKind,
     len: usize,
     totals: HashMap<usize, usize>,
-    sections: HashMap<usize, (i64, SectionId)>,
+    /// The section key, id and title at one body-order position, resolved once per call.
+    sections: HashMap<usize, (i64, SectionId, String)>,
 }
 
 impl<'a> Walk<'a> {
@@ -411,6 +412,15 @@ impl<'a> Walk<'a> {
 
     /// The section key and id at one body-order position.
     async fn position_section(&mut self, index: usize) -> Result<(i64, SectionId), ReadingError> {
+        let (section_key, section_id, _) = self.position_section_row(index).await?;
+        Ok((section_key, section_id))
+    }
+
+    /// The section key, id and title at one body-order position.
+    async fn position_section_row(
+        &mut self,
+        index: usize,
+    ) -> Result<(i64, SectionId, String), ReadingError> {
         if let Some(section) = self.sections.get(&index) {
             return Ok(section.clone());
         }
@@ -424,9 +434,11 @@ impl<'a> Walk<'a> {
                 self.document_id.0
             )));
         };
-        let section_id = self
-            .index
-            .section_id_for_key(self.document_id, section_key)
+        // The section id comes from the section row, not the text-unit index: both stores number
+        // sections by the same depth-first key, and `document_sections_v1` is the smaller table.
+        let row = self
+            .repository
+            .section_by_key(self.document_id, section_key)
             .await?
             .ok_or_else(|| {
                 ReadingError::stale_handle(format!(
@@ -434,7 +446,7 @@ impl<'a> Walk<'a> {
                     self.document_id.0
                 ))
             })?;
-        let section = (section_key, section_id);
+        let section = (section_key, row.id, row.title);
         self.sections.insert(index, section.clone());
         Ok(section)
     }
@@ -444,14 +456,11 @@ impl<'a> Walk<'a> {
         Ok(self.position_section(index).await?.0)
     }
 
-    /// The body-order position of one section id, or `None` when it is not in the body order.
+    /// The body-order position of one section key, or `None` when it is not in the body order.
     ///
     /// `body_order_position` is the point query for this direction: `body_order_window` would also
     /// count every order row, which a per-call read must not pay.
-    async fn ord_of(&mut self, section_id: &SectionId) -> Result<Option<usize>, ReadingError> {
-        let Some(section_key) = self.index.section_key(self.document_id, section_id).await? else {
-            return Ok(None);
-        };
+    async fn ord_of_key(&mut self, section_key: i64) -> Result<Option<usize>, ReadingError> {
         Ok(self
             .repository
             .body_order_position(self.document_id, section_key)
@@ -484,13 +493,7 @@ impl<'a> Walk<'a> {
 
     /// The section key and title of one body-order position, for a section banner.
     async fn banner(&mut self, index: usize) -> Result<(i64, String), ReadingError> {
-        let section_key = self.section_key(index).await?;
-        let title = self
-            .repository
-            .section_by_key(self.document_id, section_key)
-            .await?
-            .map(|row| row.title)
-            .unwrap_or_default();
+        let (section_key, _, title) = self.position_section_row(index).await?;
         Ok((section_key, title))
     }
 

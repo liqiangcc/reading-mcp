@@ -268,8 +268,33 @@ def run_open(binary: str, source: str, state_dir: str, timeout: float, log_path:
     return drop_wall_clock(payload)
 
 
+def nested_sections(section_rows) -> list[dict]:
+    """The section tree inside `document_sections_v1`, nested back into the `document_json` shape."""
+    nodes: dict[str, dict] = {}
+    roots: list[dict] = []
+    for _section_key, section_id, parent_id, level, title, location_json in section_rows:
+        node = {
+            "id": section_id,
+            "parent_id": parent_id,
+            "title": title,
+            "level": level,
+            "content": "",
+            "location": json.loads(location_json),
+            "children": [],
+        }
+        nodes[section_id] = node
+        if parent_id is None:
+            roots.append(node)
+        else:
+            nodes[parent_id]["children"].append(node)
+    return roots
+
+
 def rebuild_document_json(
-    document_json: str, texts: dict[int, str], metadata: dict[str, str] | None = None
+    document_json: str,
+    texts: dict[int, str],
+    metadata: dict[str, str] | None = None,
+    section_rows=None,
 ) -> str:
     """One `documents` row as a parsed object, with what it keeps elsewhere put back.
 
@@ -277,6 +302,11 @@ def rebuild_document_json(
     text lives in `section_text_v1`. Filling it back in depth-first section order — the order
     `section_key` numbers the sections in — and dropping the key leaves the JSON a row that keeps
     its text inline would have written, so both sides compare as the same parsed object.
+
+    A row whose `section_tree_store` is `document_sections_v1` holds no tree at all: `root_sections`
+    is empty and the tree lives in the section rows. Nesting those rows back into `root_sections`
+    and dropping the key leaves the JSON a row that keeps its tree inline would have written, so
+    the `documents` block compares the rebuilt document while the stored JSON shrinks.
 
     A row whose `metadata_store` is `document_meta_v1` or `document_meta_v2` holds only its light
     metadata entries: the heavy ones live in that table, keyed by document. Merging them back into `metadata` and
@@ -287,6 +317,8 @@ def rebuild_document_json(
     stored = json.loads(document_json)
     if not isinstance(stored, dict):
         return json.dumps(stored, ensure_ascii=False, sort_keys=True)
+    if stored.pop("section_tree_store", None) == "document_sections_v1":
+        stored["root_sections"] = nested_sections(section_rows or [])
     if stored.pop("content_store", None) in SECTION_TEXT_STORES:
         fill_section_text(stored.get("root_sections") or [], texts, itertools.count())
     if stored.pop("metadata_store", None) in ("document_meta_v1", "document_meta_v2"):
@@ -748,6 +780,30 @@ def stored_body_order_json(
     return ([str(section_id) for section_id in json.loads(order_json)], None)
 
 
+def stored_header_body_order_error(
+    connection: sqlite3.Connection, document_id: str
+) -> str | None:
+    """The `document_header_v1.body_order_error` of one document, or None.
+
+    The column exists only on a side that keeps the failed body order in the header (SEC-3). A side
+    without it reads the error from `document_body_order_v1` instead.
+    """
+    if not table_exists(connection, "document_header_v1"):
+        return None
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(document_header_v1)")
+    }
+    if "body_order_error" not in columns:
+        return None
+    row = connection.execute(
+        "SELECT body_order_error FROM document_header_v1 WHERE document_id = ?1",
+        (document_id,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
 def section_block_lines(
     connection: sqlite3.Connection,
     document_id: str,
@@ -830,6 +886,8 @@ def section_block_lines(
             lines.append(f"body_order\t{ord_value}\t{keys.get(section_key, '<unknown key>')}")
     else:
         section_ids, error = stored_body_order_json(connection, document_id)
+        if error is None:
+            error = stored_header_body_order_error(connection, document_id)
         if error is not None:
             lines.append(f"body_order_error\t{canonical_json(error)}")
         elif section_ids is not None:
@@ -885,6 +943,7 @@ def dump_state(database: str) -> dict:
                 document_json,
                 texts_by_document.get(document_id, {}),
                 metadata_by_document.get(document_id, {}),
+                stored_section_rows(connection, document_id),
             )
             blocks["documents"].append(f"{document_id}\t{content_hash}\t{rebuilt}")
             blocks["sections"].extend(

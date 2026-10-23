@@ -390,6 +390,25 @@ pub trait DocumentRepository: Send + Sync {
         self.get_with_hash(id).await
     }
 
+    /// The full document rebuilt from the stored section rows, plus its normalized document hash:
+    /// the one call a path that needs a whole `Document` uses now that `document_json` no longer
+    /// carries the tree. `with_text` asks for every section's `content`; a caller that renders or
+    /// walks the tree but reads section text elsewhere passes `false`.
+    ///
+    /// The default asks the store for the full document when text is wanted and for the light
+    /// document otherwise, so a store that overrides only one of them answers correctly.
+    async fn get_rebuilt_with_hash(
+        &self,
+        id: &DocumentId,
+        with_text: bool,
+    ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
+        if with_text {
+            self.get_with_hash(id).await
+        } else {
+            self.get_light_with_hash(id).await
+        }
+    }
+
     /// One metadata entry of the document. The default loads the whole document.
     async fn load_metadata(
         &self,
@@ -446,6 +465,27 @@ pub trait DocumentRepository: Send + Sync {
         Ok(Some(crate::application::body_order::body_order_ids(
             &document,
         )))
+    }
+
+    /// The document's canonical body order as depth-first section keys, or the exact error that
+    /// function returns for this document. `Ok(None)` when this repository holds no body order.
+    ///
+    /// This is the same order as [`Self::body_order`] without turning each position into a
+    /// `SectionId`: a caller that already holds the tree (`get_document_structure`) maps the keys
+    /// itself, so the store never has to join every order row to the section table. The default
+    /// computes it from the document, like [`Self::body_order`].
+    async fn body_order_keys(
+        &self,
+        id: &DocumentId,
+    ) -> Result<Option<Result<Vec<i64>, ApplicationError>>, ApplicationError> {
+        let Some((document, _)) = self.get_with_hash(id).await? else {
+            return Ok(None);
+        };
+        let Some(order) = self.body_order(id).await? else {
+            return Ok(None);
+        };
+        let order = order?;
+        Ok(Some(Ok(section_rows::body_order_keys(&document, &order))))
     }
 
     /// The header of one stored document. The default loads the whole document.

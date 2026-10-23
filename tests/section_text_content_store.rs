@@ -161,19 +161,17 @@ fn doc_key(database: &Path, document_id: &DocumentId) -> i64 {
 }
 
 /// Asserts every stored section's `content` is empty and returns how many sections there are.
-fn assert_empty_contents(sections: &Value) -> usize {
-    let sections = sections.as_array().expect("sections should be an array");
-    let mut count = 0;
-    for section in sections {
-        assert_eq!(
-            section["content"],
-            Value::String(String::new()),
-            "section {} must store no text",
-            section["id"]
-        );
-        count += 1 + assert_empty_contents(&section["children"]);
-    }
-    count
+/// The number of `document_sections_v1` rows of one document: every section of the tree.
+fn stored_section_row_count(database: &Path, document_id: &DocumentId) -> usize {
+    let connection = Connection::open(database).expect("database should open");
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM document_sections_v1 WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| row.get(0),
+        )
+        .expect("section rows should count");
+    usize::try_from(count).expect("section count fits")
 }
 
 fn standalone_document() -> Document {
@@ -207,7 +205,16 @@ async fn runtime_open_stores_no_section_text_and_a_new_repository_reads_it_back(
         Value::String("section_text_v3".into())
     );
     assert_eq!(
-        assert_empty_contents(&stored["root_sections"]),
+        stored["section_tree_store"],
+        Value::String("document_sections_v1".into())
+    );
+    assert_eq!(
+        stored["root_sections"],
+        Value::Array(Vec::new()),
+        "the tree lives in the section rows, not in `document_json`"
+    );
+    assert_eq!(
+        stored_section_row_count(&database, &document.id),
         document.section_count(),
         "every section must be stored"
     );
@@ -455,9 +462,18 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
         Value::String("section_text_v3".into())
     );
     assert_eq!(
-        assert_empty_contents(&stored["root_sections"]),
+        stored["section_tree_store"],
+        Value::String("document_sections_v1".into())
+    );
+    assert_eq!(
+        stored["root_sections"],
+        Value::Array(Vec::new()),
+        "the re-ingested row must keep its tree and text out of `document_json`"
+    );
+    assert_eq!(
+        stored_section_row_count(&database, &document.id),
         document.section_count(),
-        "the re-ingested row must keep its text out of `document_json`"
+        "the re-ingested row must store every section"
     );
     let index = SqliteTextUnitIndex::open(&database).expect("index should reopen");
     let summary = index

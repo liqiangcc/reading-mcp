@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::application::body_order::BODY_ORDER_VERSION;
 use crate::application::ports::{ApplicationError, DocumentRepository};
+use crate::application::section_rows;
 use crate::application::structure_cursor::{
     STRUCTURE_TRAVERSAL_VERSION, StructureCursorClaims, decode_structure_cursor,
     encode_structure_cursor,
@@ -174,7 +175,7 @@ impl GetDocumentStructureUseCase {
     ) -> Result<ResolveNamedSectionResult, ApplicationError> {
         let (document, normalized_hash) = self
             .repository
-            .get_light_with_hash(&command.document_id)
+            .get_rebuilt_with_hash(&command.document_id, false)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let body_order = load_body_order(self.repository.as_ref(), &document).await?;
@@ -219,7 +220,7 @@ impl GetDocumentStructureUseCase {
 
         let (document, normalized_hash) = self
             .repository
-            .get_light_with_hash(&command.document_id)
+            .get_rebuilt_with_hash(&command.document_id, false)
             .await?
             .ok_or(ApplicationError::DocumentNotFound)?;
         let body_order = load_body_order(self.repository.as_ref(), &document).await?;
@@ -309,15 +310,33 @@ impl GetDocumentStructureUseCase {
 
 /// The document's canonical body order as a section-id -> position map, from the repository's
 /// stored order when it keeps one and from the document otherwise.
+///
+/// The order is read as depth-first section keys, one sequential scan of the order rows, and mapped
+/// to ids through the tree the caller already holds. Asking for `body_order` instead would join
+/// every order row to the section table, which is one random index seek per section.
 async fn load_body_order(
     repository: &dyn DocumentRepository,
     document: &Document,
 ) -> Result<HashMap<SectionId, usize>, ApplicationError> {
-    let ordered = match repository.body_order(&document.id).await? {
-        Some(ordered) => ordered?,
-        // A repository that keeps no stored order: compute it from the document it returned. The
-        // default trait implementation already does this, so this is only for a store that cannot
-        // say and still hands out a document carrying its own metadata.
+    let ordered = match repository.body_order_keys(&document.id).await? {
+        Some(Ok(keys)) => {
+            let ids_by_key: HashMap<i64, SectionId> = section_rows::flatten_document(document)
+                .into_iter()
+                .map(|row| (row.section_key, row.id))
+                .collect();
+            keys.into_iter()
+                .map(|key| {
+                    ids_by_key.get(&key).cloned().ok_or_else(|| {
+                        ApplicationError::RepositoryFailed(format!(
+                            "body order of document {} names section key {key}, which the tree does not hold",
+                            document.id.0
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        Some(Err(error)) => return Err(error),
+        // A repository that keeps no stored order: compute it from the document it returned.
         None => crate::application::body_order_ids(document)?,
     };
     Ok(ordered

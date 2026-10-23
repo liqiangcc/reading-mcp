@@ -82,6 +82,17 @@ error text. Both copies are gone.
   ids through the tree it already rebuilt, instead of `body_order`, which would join every order row
   to `document_sections_v1` — one random index seek per section. That keeps a structure page's
   order read proportional to the order rows, not to a join.
+- `document_body_order_rows_v1` is a `WITHOUT ROWID` table with `PRIMARY KEY(document_id, ord)`.
+  The primary key carries `section_key`, and the `(document_id, section_key)` index carries the
+  primary key, so `body_order_at` and `body_order_position` are both answered from an index with no
+  table lookup. The old rowid shape read a table page per point query. `SqliteDocumentRepository::open`
+  recreates the old shape once (`ensure_body_order_rows_shape`), and the store-version bump
+  re-ingests every book into the new shape.
+- The v2 `read` walk resolves a section key to a section id, and a section id to a key, through
+  `document_sections_v1` (`section_by_key` / `section_by_id`) rather than the text-unit layout
+  table: both stores number sections by the same depth-first key, and the section rows are the
+  smaller table. A section's title is memoized with its position, so the banner never repeats the
+  row read.
 
 ## Migration and store version
 

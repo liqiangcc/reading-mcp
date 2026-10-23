@@ -85,42 +85,6 @@ jobs:
                 || echo "::warning::read probe failed: $label"
             done
           done
-      - name: Trace v2 read SQL at 20k
-        if: always()
-        run: |
-          mkdir -p trace
-          python3 scripts/doc-read-probe.py \
-            --binary target/release/reading-mcp \
-            --document "$RUNNER_TEMP/sections/sections-nested-20000.epub" \
-            --label trace-20000 --side branch --calls 2 --start-fraction 0.5 \
-            --env READING_MCP_TOOLS=both --env READING_MCP_TRACE_SQL=1 \
-            --out trace/trace.json || true
-          echo "=== last 120 SQL statements ==="
-          grep -a "^SQL " .tmp/doc-read-server-trace-20000.log | tail -120
-      - name: Diagnose stored identity
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import glob
-          import sqlite3
-          for db in sorted(glob.glob(".tmp/doc-read-state-*/*.sqlite")):
-              try:
-                  c = sqlite3.connect(db)
-                  doc = c.execute(
-                      "SELECT normalized_document_hash IS NULL, length(document_json),"
-                      " json_extract(document_json,'$.section_tree_store') FROM documents"
-                  ).fetchone()
-                  hdr = c.execute(
-                      "SELECT normalized_document_hash IS NULL, section_count"
-                      " FROM document_header_v1"
-                  ).fetchone()
-                  order = c.execute(
-                      "SELECT COUNT(*) FROM document_body_order_rows_v1"
-                  ).fetchone()
-                  print(db, "doc", doc, "hdr", hdr, "order", order)
-              except Exception as error:  # noqa: BLE001
-                  print(db, "err", error)
-          PY
       - name: Read scale table and flatness gate
         if: always()
         run: |

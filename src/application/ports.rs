@@ -146,9 +146,16 @@ impl std::fmt::Display for OcrRequiredDetail {
         match (self.pages, self.characters) {
             (Some(pages), Some(characters)) => write!(
                 formatter,
-                "this PDF has no text layer ({pages} pages, {characters} characters); it needs OCR"
+                "this PDF has no text layer ({pages} page{}, {characters} character{}); it needs OCR",
+                if pages == 1 { "" } else { "s" },
+                if characters == 1 { "" } else { "s" },
             ),
-            _ => formatter.write_str("this PDF has no text layer; it needs OCR"),
+            // The layout backend's worker path measures neither count, and its
+            // failure is a text layer it cannot read rather than a missing one,
+            // so it keeps the message it had before PDF-4a.
+            _ => formatter.write_str(
+                "source contains image-only pages requiring inspection; enable local OCR or provide a usable text layer",
+            ),
         }
     }
 }

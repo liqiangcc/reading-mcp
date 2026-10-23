@@ -12,7 +12,11 @@ use crate::domain::{
 use super::blocking::run_blocking;
 use super::common::{content_hash, document_id, slugify, title_from_metadata};
 
-pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v1";
+/// Changes whenever the default PDF backend publishes something different for the same bytes. PDF-4a
+/// makes an image-only PDF fail with `ocr_required` instead of publishing a few watermark characters,
+/// so a stored `ok` from an older build must not shadow the rule on reopen: this bump invalidates the
+/// parsed cache and the stored open results for PDFs.
+pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v2";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";
@@ -1423,7 +1427,7 @@ mod tests {
         let error = parse_bytes(bytes).expect_err("an image-only page must not open");
         assert!(matches!(error, ApplicationError::OcrRequired(_)));
         assert!(
-            error.to_string().contains("(1 pages, 0 characters)"),
+            error.to_string().contains("(1 page, 0 characters)"),
             "{error}"
         );
     }
@@ -1443,7 +1447,7 @@ mod tests {
         let error = parse_bytes(bytes).expect_err("a watermarked scan must not open");
         assert!(matches!(error, ApplicationError::OcrRequired(_)));
         assert!(
-            error.to_string().contains("(1 pages, 9 characters)"),
+            error.to_string().contains("(1 page, 9 characters)"),
             "{error}"
         );
     }

@@ -1456,8 +1456,8 @@ mod tests {
     #[tokio::test]
     async fn an_image_only_fixture_reports_the_same_ocr_required_on_both_surfaces() {
         for (fixture, expected_counts) in [
-            ("F12.pdf", "(1 pages, 4 characters)"),
-            ("F02.pdf", "(1 pages, 0 characters)"),
+            ("F12.pdf", "(1 page, 4 characters)"),
+            ("F02.pdf", "(1 page, 0 characters)"),
         ] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/scanned_pdf/pdf")

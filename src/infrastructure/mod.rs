@@ -36,6 +36,7 @@ pub use ocr_identity::build_ocr_runtime_identity;
 pub(crate) use ocr_identity::{OCR_INTERPRETER_ARGS, OCR_PROCESS_ENV};
 pub(crate) use ocr_identity_process::dependency_output;
 pub use sqlite::{
-    ScanOptions, ScanTimings, SqliteDocumentRepository, SqliteOpenResultStore, SqliteTextUnitIndex,
+    PruneReport, STARTUP_PRUNE_DOCUMENT_LIMIT, ScanOptions, ScanTimings, SqliteDocumentRepository,
+    SqliteOpenResultStore, SqliteTextUnitIndex,
 };
 pub use sqlite_search_index::SqliteSearchIndex;

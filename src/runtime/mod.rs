@@ -364,6 +364,13 @@ fn build_state_components(
     let database = state_dir.join("reading-mcp.sqlite");
     let repository = Arc::new(SqliteDocumentRepository::open(&database)?);
     let text_unit_index = Arc::new(SqliteTextUnitIndex::open(&database)?);
+    let open_results = Arc::new(SqliteOpenResultStore::open(&database)?);
+    // One bounded sweep per start: stale open results of another store version, then the
+    // documents they made unreachable. A state directory that is never re-saved still converges.
+    // It is best effort: a prune failure must not take the server down.
+    if let Err(error) = open_results.prune_at_startup() {
+        eprintln!("warning: failed to prune stale reading state: {error}");
+    }
     Ok((
         RuntimeComponents {
             raw_cache: Arc::new(FileRawResourceCache::new(&cache_root)),
@@ -374,7 +381,7 @@ fn build_state_components(
             )),
             repository,
             text_unit_index,
-            open_results: Arc::new(SqliteOpenResultStore::open(&database)?),
+            open_results,
         },
         ephemeral_state,
     ))

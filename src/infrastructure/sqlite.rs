@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use super::lexical::{
@@ -20,6 +20,7 @@ use super::lexical::{
 };
 use super::observability::{
     DocumentDecodePhases, emit_document_decode_miss, emit_scan_prewarm, emit_scan_prewarm_start,
+    emit_storage_prune,
 };
 use super::section_layout::{
     CHUNK_CHARS, LAYOUT_CHUNK_BYTES, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
@@ -38,7 +39,7 @@ use crate::application::ports::{
 use crate::application::section_rows;
 use crate::application::text_unit_stream::{
     ParagraphCoverageDesc, ParagraphDesc, SectionCoverageDesc, SectionStreamCounts, SentenceDesc,
-    UnitRef, walk_section_stream,
+    TEXT_UNIT_STORE_VERSION, UnitRef, walk_section_stream,
 };
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSegmentation, DocumentSource, Location, MediaType,
@@ -3140,6 +3141,30 @@ fn ensure_body_order_error_column(connection: &Connection) -> Result<(), Applica
     Ok(())
 }
 
+/// How many stale open results and unreachable documents one startup sweep removes.
+pub const STARTUP_PRUNE_DOCUMENT_LIMIT: usize = 64;
+
+/// What one prune removed. `rows_removed` counts every deleted row, including the open-result and
+/// `documents` rows themselves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub open_results_removed: usize,
+    pub documents_removed: usize,
+    pub rows_removed: usize,
+}
+
+impl PruneReport {
+    fn add(&mut self, other: Self) {
+        self.open_results_removed += other.open_results_removed;
+        self.documents_removed += other.documents_removed;
+        self.rows_removed += other.rows_removed;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.open_results_removed == 0 && self.documents_removed == 0 && self.rows_removed == 0
+    }
+}
+
 /// Stores the open result of each document, keyed by document id and checked against a fingerprint on read.
 pub struct SqliteOpenResultStore {
     connection: Arc<Mutex<Connection>>,
@@ -3161,6 +3186,194 @@ impl SqliteOpenResultStore {
             connection: Arc::new(Mutex::new(connection)),
         })
     }
+
+    /// The bounded sweep `build_state_components` runs once per start: stale open results, then the
+    /// documents they made unreachable.
+    pub fn prune_at_startup(&self) -> Result<PruneReport, ApplicationError> {
+        self.prune_stale_and_unreachable(STARTUP_PRUNE_DOCUMENT_LIMIT)
+    }
+
+    /// Deletes at most `limit` open results of another store version and at most `limit` documents
+    /// that no open result references, together with every row of those documents. One immediate
+    /// transaction, so a crash leaves the old state or the new state, never a document without its
+    /// rows. Running it twice deletes nothing the second time.
+    pub fn prune_stale_and_unreachable(
+        &self,
+        limit: usize,
+    ) -> Result<PruneReport, ApplicationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ApplicationError::RepositoryFailed("SQLite lock poisoned".into()))?;
+        let report = prune_open_results_and_documents(&mut connection, limit)?;
+        if telemetry_enabled() {
+            emit_storage_prune(
+                "startup",
+                Some(limit),
+                report.open_results_removed,
+                report.documents_removed,
+                report.rows_removed,
+            );
+        }
+        Ok(report)
+    }
+}
+
+/// One immediate transaction: stale open results first, then the documents no remaining open
+/// result references. The two halves share the transaction so a crash never leaves a document
+/// whose rows were already deleted.
+fn prune_open_results_and_documents(
+    connection: &mut Connection,
+    limit: usize,
+) -> Result<PruneReport, ApplicationError> {
+    if limit == 0 {
+        return Ok(PruneReport::default());
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(repository_error)?;
+    let stale = delete_stale_open_results(&transaction, limit)?;
+    let mut report = PruneReport {
+        open_results_removed: stale,
+        rows_removed: stale,
+        ..PruneReport::default()
+    };
+    if has_table(&transaction, "documents")? {
+        for document_id in unreachable_document_ids(&transaction, limit)? {
+            report.add(delete_unreachable_document(&transaction, &document_id)?);
+        }
+    }
+    transaction.commit().map_err(repository_error)?;
+    Ok(report)
+}
+
+/// Deletes at most `limit` open-result rows whose fingerprint does not end in the current
+/// `TEXT_UNIT_STORE_VERSION`. Such a row can never hit, so deleting it changes no read.
+fn delete_stale_open_results(
+    transaction: &rusqlite::Transaction<'_>,
+    limit: usize,
+) -> Result<usize, ApplicationError> {
+    let pattern = format!("%|{TEXT_UNIT_STORE_VERSION}");
+    let document_ids: Vec<String> = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT DISTINCT document_id FROM open_results_v1
+                  WHERE fingerprint NOT LIKE ?1
+                  ORDER BY document_id LIMIT ?2",
+            )
+            .map_err(repository_error)?;
+        statement
+            .query_map(params![pattern, usize_to_i64(limit)?], |row| row.get(0))
+            .map_err(repository_error)?
+            .collect::<Result<_, _>>()
+            .map_err(repository_error)?
+    };
+    let mut removed = 0;
+    for document_id in document_ids {
+        removed += transaction
+            .execute(
+                "DELETE FROM open_results_v1 WHERE document_id = ?1 AND fingerprint NOT LIKE ?2",
+                params![document_id, pattern],
+            )
+            .map_err(repository_error)?;
+    }
+    Ok(removed)
+}
+
+/// The ids of at most `limit` documents no open result references, in id order so a bounded sweep
+/// makes deterministic progress over starts.
+fn unreachable_document_ids(
+    transaction: &rusqlite::Transaction<'_>,
+    limit: usize,
+) -> Result<Vec<String>, ApplicationError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT d.id FROM documents d
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM open_results_v1 o WHERE o.document_id = d.id
+              )
+              ORDER BY d.id LIMIT ?1",
+        )
+        .map_err(repository_error)?;
+    statement
+        .query_map(params![usize_to_i64(limit)?], |row| row.get(0))
+        .map_err(repository_error)?
+        .collect::<Result<_, _>>()
+        .map_err(repository_error)
+}
+
+/// Deletes one document and every row keyed by its id or its `doc_key`, unless an open result
+/// references it. A document without a `document_header_v1` row is not an orphan: it was saved
+/// before SEC-1 and is still readable through the port defaults, so only the open result decides.
+fn delete_unreachable_document(
+    transaction: &rusqlite::Transaction<'_>,
+    document_id: &str,
+) -> Result<PruneReport, ApplicationError> {
+    let referenced: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM open_results_v1 WHERE document_id = ?1)",
+            params![document_id],
+            |row| row.get(0),
+        )
+        .map_err(repository_error)?;
+    if referenced {
+        return Ok(PruneReport::default());
+    }
+    let mut report = PruneReport::default();
+    let doc_key: Option<i64> = if has_table(transaction, "text_unit_documents_v2")? {
+        transaction
+            .query_row(
+                "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+                params![document_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(repository_error)?
+    } else {
+        None
+    };
+    if let Some(doc_key) = doc_key {
+        for table in [
+            "section_text_v3",
+            "section_layout_v2",
+            "section_layout_chunk_v2",
+        ] {
+            if has_table(transaction, table)? {
+                report.rows_removed += transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE doc_key = ?1"),
+                        params![doc_key],
+                    )
+                    .map_err(repository_error)?;
+            }
+        }
+    }
+    for table in [
+        "text_unit_documents_v2",
+        "text_units",
+        "document_header_v1",
+        "document_sections_v1",
+        "document_body_order_rows_v1",
+        "document_meta_v1",
+        "document_meta_v2",
+    ] {
+        if has_table(transaction, table)? {
+            report.rows_removed += transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE document_id = ?1"),
+                    params![document_id],
+                )
+                .map_err(repository_error)?;
+        }
+    }
+    let deleted = transaction
+        .execute("DELETE FROM documents WHERE id = ?1", params![document_id])
+        .map_err(repository_error)?;
+    report.rows_removed += deleted;
+    if deleted > 0 {
+        report.documents_removed = 1;
+    }
+    Ok(report)
 }
 
 #[async_trait]
@@ -3209,16 +3422,51 @@ impl OpenResultStore for SqliteOpenResultStore {
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
-                connection
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(repository_error)?;
+                let stale = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM open_results_v1
+                          WHERE document_id = ?1 AND fingerprint <> ?2",
+                        params![id, fingerprint],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(repository_error)?;
+                let stale = usize::try_from(stale).unwrap_or(usize::MAX);
+                // Every row of the document is replaced, whatever the table shape of an older
+                // database, so the document keeps exactly one open result: this one.
+                transaction
+                    .execute(
+                        "DELETE FROM open_results_v1 WHERE document_id = ?1",
+                        params![id],
+                    )
+                    .map_err(repository_error)?;
+                transaction
                     .execute(
                         "INSERT INTO open_results_v1(document_id, fingerprint, result_json)
-                         VALUES (?1, ?2, ?3)
-                         ON CONFLICT(document_id) DO UPDATE SET
-                            fingerprint = excluded.fingerprint,
-                            result_json = excluded.result_json",
+                         VALUES (?1, ?2, ?3)",
                         params![id, fingerprint, json],
                     )
                     .map_err(repository_error)?;
+                let mut report = PruneReport {
+                    open_results_removed: stale,
+                    rows_removed: stale,
+                    ..PruneReport::default()
+                };
+                // The new row references `id`, so this is normally a no-op; it keeps the
+                // invariant if a later writer ever replaces a row of another document.
+                report.add(delete_unreachable_document(&transaction, &id)?);
+                transaction.commit().map_err(repository_error)?;
+                if telemetry_enabled() && !report.is_empty() {
+                    emit_storage_prune(
+                        "put",
+                        None,
+                        report.open_results_removed,
+                        report.documents_removed,
+                        report.rows_removed,
+                    );
+                }
                 Ok(())
             },
         )

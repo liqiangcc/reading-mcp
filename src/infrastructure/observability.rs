@@ -917,6 +917,28 @@ pub fn emit_scan_prewarm(
     }));
 }
 
+/// Emits one `storage_prune` event: how many stale open results, unreachable documents and rows a
+/// prune removed. `trigger` is `put` (the transaction that wrote a new open result) or `startup`
+/// (the bounded sweep), and `limit` is the startup bound. Only a runtime with
+/// `READING_MCP_TELEMETRY` on emits it.
+#[doc(hidden)]
+pub fn emit_storage_prune(
+    trigger: &str,
+    limit: Option<usize>,
+    open_results_removed: usize,
+    documents_removed: usize,
+    rows_removed: usize,
+) {
+    emit(json!({
+        "event": "storage_prune",
+        "trigger": trigger,
+        "limit": limit,
+        "open_results_removed": open_results_removed,
+        "documents_removed": documents_removed,
+        "rows_removed": rows_removed,
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

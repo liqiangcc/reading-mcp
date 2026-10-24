@@ -3205,7 +3205,7 @@ impl SqliteOpenResultStore {
             .connection
             .lock()
             .map_err(|_| ApplicationError::RepositoryFailed("SQLite lock poisoned".into()))?;
-        let report = prune_open_results_and_documents(&mut *connection, limit)?;
+        let report = prune_open_results_and_documents(&mut connection, limit)?;
         if telemetry_enabled() {
             emit_storage_prune(
                 "startup",

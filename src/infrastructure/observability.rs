@@ -879,16 +879,41 @@ pub fn emit_document_decode_miss(document: &Document, phases: DocumentDecodePhas
     }));
 }
 
-/// Emits one `scan_prewarm` event: how many section texts the background warm of the scan text cache
-/// stored and how long it took. Only a runtime with `READING_MCP_TELEMETRY` on emits it.
+/// Emits one `scan_prewarm_start` event when the bounded warm starts, so a harness can tell a warm
+/// that is running from one that has not started, and time the warm separately from a read. Only a
+/// runtime with `READING_MCP_TELEMETRY` on emits it.
 #[doc(hidden)]
-pub fn emit_scan_prewarm(document_id: &DocumentId, sections: usize, duration_ms: u64, ok: bool) {
+pub fn emit_scan_prewarm_start(document_id: &DocumentId, budget_ms: u64) {
+    emit(json!({
+        "event": "scan_prewarm_start",
+        "document_id": document_id.0,
+        "budget_ms": budget_ms,
+    }));
+}
+
+/// Emits one `scan_prewarm` event: how many section texts the bounded background warm of the scan
+/// text cache stored, how long it took, the rows it read, the document's sections with text, and
+/// why it warmed nothing when it did not (`skipped`). Only a runtime with `READING_MCP_TELEMETRY`
+/// on emits it.
+#[doc(hidden)]
+pub fn emit_scan_prewarm(
+    document_id: &DocumentId,
+    sections: usize,
+    duration_ms: u64,
+    ok: bool,
+    rows_read: usize,
+    sections_total: usize,
+    skipped: Option<&str>,
+) {
     emit(json!({
         "event": "scan_prewarm",
         "document_id": document_id.0,
         "sections": sections,
+        "sections_total": sections_total,
         "duration_ms": duration_ms,
+        "rows_read": rows_read,
         "success": ok,
+        "skipped": skipped,
     }));
 }
 

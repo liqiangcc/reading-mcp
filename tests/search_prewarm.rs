@@ -350,3 +350,172 @@ fn the_observed_search_index_forwards_prewarm_to_its_inner_index() {
         "a no-op forward here would silently disable the warm in the runtime"
     );
 }
+
+/// The bounded warm stops at its time budget: a 10 ms budget reads fewer sections than the document
+/// has, and the store holds exactly what the budget allowed. This drives the same plan and loop as
+/// the background warm, with the deadline handed in instead of read from the environment.
+#[tokio::test]
+async fn a_bounded_warm_stops_at_its_budget() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("prewarm-budget.sqlite");
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
+    let index = SqliteSearchIndex::open(&database).expect("index");
+    let document = large_multi_section_document().await;
+    store_and_index(&repository, &index, &document).await;
+
+    let sections = sections_with_text(&document);
+    assert!(
+        sections > 1,
+        "the fixture holds {sections} sections with text"
+    );
+    let warmed = index
+        .prewarm_blocking_budgeted(
+            &document.id,
+            &document.normalized_document_hash(),
+            10,
+            usize::MAX,
+        )
+        .expect("bounded warm");
+    assert!(
+        warmed < sections,
+        "a 10 ms warm warmed {warmed} of {sections} sections"
+    );
+    match index.scan_text_cache_state() {
+        Some((held, over_cap)) => {
+            assert_eq!(
+                held, warmed,
+                "the store holds exactly the sections the budget warmed"
+            );
+            assert!(!over_cap, "a small document must not be over the cap");
+        }
+        // The budget may already be spent by the plan itself; then nothing was installed.
+        None => assert_eq!(
+            warmed, 0,
+            "a store is installed exactly when a section was warmed"
+        ),
+    }
+
+    // The rest stays cold, and a second warm with the same budget resumes where the first stopped.
+    let resumed = index
+        .prewarm_blocking_budgeted(
+            &document.id,
+            &document.normalized_document_hash(),
+            10,
+            usize::MAX,
+        )
+        .expect("second bounded warm");
+    assert!(
+        resumed <= sections - warmed,
+        "a resumed warm warms only the cold sections, got {resumed} after {warmed} of {sections}"
+    );
+}
+
+/// A budget of 0 is off: the warm does not start and the store is left exactly as it was.
+#[tokio::test]
+async fn a_zero_budget_does_not_start_the_warm() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("prewarm-budget-off.sqlite");
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
+    let index = SqliteSearchIndex::open(&database).expect("index");
+    let document = multi_section_document().await;
+    store_and_index(&repository, &index, &document).await;
+
+    assert_eq!(
+        index
+            .prewarm_blocking_budgeted(
+                &document.id,
+                &document.normalized_document_hash(),
+                0,
+                usize::MAX,
+            )
+            .expect("zero-budget warm"),
+        0
+    );
+    assert_eq!(
+        index.scan_text_cache_state(),
+        None,
+        "a zero budget warms nothing and installs no store"
+    );
+}
+
+/// The warm yields: while a foreground request is waiting on the store, it warms nothing and stops
+/// before its first section; once the foreground is done, the next warm fills the rest. The guard is
+/// the same signal the index's read methods set, so this is the test double for that flag.
+#[tokio::test]
+async fn the_warm_yields_to_a_foreground_request() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("prewarm-yield.sqlite");
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
+    let index = SqliteSearchIndex::open(&database).expect("index");
+    let document = large_multi_section_document().await;
+    store_and_index(&repository, &index, &document).await;
+
+    let sections = sections_with_text(&document);
+    let foreground = index.hold_foreground();
+    assert_eq!(
+        index
+            .prewarm_blocking(
+                &document.id,
+                &document.normalized_document_hash(),
+                usize::MAX,
+            )
+            .expect("yielding warm"),
+        0,
+        "a warm with a foreground request waiting must not read a section"
+    );
+    assert_eq!(
+        index.scan_text_cache_state(),
+        None,
+        "a warm that yielded before its first section installed no store"
+    );
+    drop(foreground);
+
+    assert_eq!(
+        index
+            .prewarm_blocking(
+                &document.id,
+                &document.normalized_document_hash(),
+                usize::MAX,
+            )
+            .expect("warm after the foreground finished"),
+        sections,
+        "the warm fills every cold section once the foreground is done"
+    );
+    assert_eq!(index.scan_text_cache_state(), Some((sections, false)));
+}
+
+/// The skip rule: a document whose largest section is over the warm's per-section bound (8 MiB) is
+/// left alone entirely, because reading that one section is a whole-document read in miniature and
+/// the old whole-book warm never covered such a section anyway.
+#[tokio::test]
+async fn a_document_with_a_section_over_the_warm_bound_is_not_warmed() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("prewarm-largest-section.sqlite");
+    let repository = SqliteDocumentRepository::open(&database).expect("repository");
+    let index = SqliteSearchIndex::open(&database).expect("index");
+
+    // One section of 9 MiB of ASCII: over the 8 MiB bound in chars, so the plan skips it before
+    // measuring or reading any of it.
+    let mut text = String::from("# 大\n\n");
+    text.push_str(&"a".repeat(9 * 1024 * 1024));
+    let document = markdown_document("memory:prewarm-largest-section.md", &text).await;
+    store_and_index(&repository, &index, &document).await;
+    assert_eq!(sections_with_text(&document), 1);
+
+    assert_eq!(
+        index
+            .prewarm_blocking(
+                &document.id,
+                &document.normalized_document_hash(),
+                usize::MAX,
+            )
+            .expect("warm"),
+        0,
+        "a section over the warm bound is not warmed"
+    );
+    assert_eq!(
+        index.scan_text_cache_state(),
+        None,
+        "the skipped warm installed no store"
+    );
+}

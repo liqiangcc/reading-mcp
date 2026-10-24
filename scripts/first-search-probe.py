@@ -168,7 +168,10 @@ def run_once(probe, args: argparse.Namespace, binary: str, document: str) -> dic
         record["warm"] = [
             {
                 "sections": event.get("sections"),
+                "sections_total": event.get("sections_total"),
                 "duration_ms": event.get("duration_ms"),
+                "rows_read": event.get("rows_read"),
+                "skipped": event.get("skipped"),
                 "success": event.get("success"),
             }
             for event in server.log_since(0)

@@ -4,10 +4,14 @@ name: Section scale
 # synthetic EPUBs whose section count is the variable (N = 500, 2,000, 8,000, 20,000, in a
 # three-level nest and flat) and reports what one open costs: open seconds, state-directory bytes
 # and the number of rows in `document_header_v1`, `document_sections_v1` and
-# `document_body_order_rows_v1`. It also measures what one read costs (SEC-2): `v2 read` sentence
-# steps, `get_text_units` and `get_context`, 200 calls each at 50% of the book, mean ms and
+# `document_body_order_rows_v1`. It also measures what one read costs (SEC-2, PREWARM-2): `v2 read`
+# sentence steps, `get_text_units` and `get_context`, 200 calls each at 50% of the book, mean ms and
 # rchar/call per N. The read gate is flatness: at N = 20,000 each tool's mean is at most 1.3x its
-# N = 500 mean, its absolute mean is at most 5 ms, and rchar/call does not grow.
+# N = 500 mean, its absolute mean is at most 5 ms, and rchar/call does not grow. It runs the read
+# probe three ways: with the bounded warm on and the probe waiting for it to end (the gate: reads
+# after the warm), with `READING_MCP_SEARCH_PREWARM_BUDGET_MS=0` (the gate: SEC-2's numbers), and
+# with the warm on but the timed loop overlapping it (reported, not gated: rchar is non-flat there
+# by design).
 #
 # `workflow_dispatch` only fires for a workflow that already exists on the default branch, so a
 # `section-scale-*` push is how this gate runs on the branch that introduces it.
@@ -63,26 +67,39 @@ jobs:
             --telemetry \
             --documents "sections-nested-500=$INPUTS/sections-nested-500.epub,sections-nested-2000=$INPUTS/sections-nested-2000.epub,sections-nested-8000=$INPUTS/sections-nested-8000.epub,sections-nested-20000=$INPUTS/sections-nested-20000.epub" \
             2>&1 | tee phases/phases.txt || echo "::warning::the phase breakdown failed"
-      - name: Measure the read tools at every N
+      - name: Measure the read tools at every N, with the warm on, off and unwaited
         if: always()
         run: |
           set -uo pipefail
           INPUTS="$RUNNER_TEMP/sections"
           mkdir -p read-measure
+          # warm: the gate. The probe waits for the bounded warm to end before the timed loop, so
+          # the per-call rchar measures the read path and not the warm; the wait is reported.
+          # warm-off: READING_MCP_SEARCH_PREWARM_BUDGET_MS=0, which must reproduce SEC-2's numbers.
+          # warm-nowait: warm on and the timed loop overlaps it, reported but not gated: it is the
+          # honest "rchar while the warm runs" number.
           for sections in 500 2000 8000 20000; do
             for layout in nested flat; do
               label="sections-$layout-$sections"
-              python3 scripts/doc-read-probe.py \
-                --binary target/release/reading-mcp \
-                --document "$INPUTS/$label.epub" \
-                --label "$label" \
-                --side branch \
-                --calls 200 \
-                --start-fraction 0.5 \
-                --io-bytes \
-                --env READING_MCP_TOOLS=both \
-                --out "read-measure/$label.json" \
-                || echo "::warning::read probe failed: $label"
+              for side in warm warm-off warm-nowait; do
+                extra=()
+                case "$side" in
+                  warm) extra=(--wait-for-warm) ;;
+                  warm-off) extra=(--env READING_MCP_SEARCH_PREWARM_BUDGET_MS=0) ;;
+                esac
+                python3 scripts/doc-read-probe.py \
+                  --binary target/release/reading-mcp \
+                  --document "$INPUTS/$label.epub" \
+                  --label "$label" \
+                  --side "$side" \
+                  --calls 200 \
+                  --start-fraction 0.5 \
+                  --io-bytes \
+                  --env READING_MCP_TOOLS=both \
+                  "${extra[@]}" \
+                  --out "read-measure/$label-$side.json" \
+                  || echo "::warning::read probe failed: $label $side"
+              done
             done
           done
       - name: Read scale table and flatness gate
@@ -95,86 +112,131 @@ jobs:
           import sys
 
           TOOLS = ("v2_read", "get_text_units", "get_context")
+          # The warm and warm-off sides are gated; warm-nowait is reported only, because the warm
+          # runs inside those timed calls by design and rchar is expected to be non-flat there.
+          GATED_SIDES = ("warm", "warm-off")
+          REPORT_SIDES = ("warm-nowait",)
+          SIDES = GATED_SIDES + REPORT_SIDES
           results = {}
           for path in sorted(glob.glob("read-measure/*.json")):
               with open(path, encoding="utf-8") as handle:
                   result = json.load(handle)
-              results[result["label"]] = result
+              results[(result["label"], result["side"])] = result
+
+          def warm_wait(result):
+              for item in result.get("warm_waits") or []:
+                  if item.get("after") == "open_document":
+                      return item
+              return None
+
+          def label_key(label):
+              parts = label.split("-")
+              return (parts[1], int(parts[-1]))
 
           lines = [
-              "| input | layout | sections | tool | calls | mean ms | median ms | p95 ms "
-              "| rchar/call |",
-              "|---|---|---:|---|---:|---:|---:|---:|---:|",
+              "| input | side | layout | sections | tool | calls | mean ms | median ms | p95 ms "
+              "| rchar/call | warm wait s | warm timed out | warm sections | warm rows |",
+              "|---|---|---|---:|---|---:|---:|---:|---:|---:|---|---:|---:|",
           ]
-          for label in sorted(results, key=lambda name: (name.split("-")[1], int(name.split("-")[-1]))):
-              result = results[label]
+          for label in sorted({label for label, _ in results}, key=label_key):
               parts = label.split("-")
               layout = parts[1]
               sections = parts[-1]
-              for tool in TOOLS:
-                  summary = result.get("shapes", {}).get(tool)
-                  if summary is None:
-                      lines.append(
-                          f"| {label} | {layout} | {sections} | {tool} | - | - | - | - | - |"
-                      )
+              for side in SIDES:
+                  result = results.get((label, side))
+                  if result is None:
                       continue
-                  lines.append(
-                      "| {label} | {layout} | {sections} | {tool} | {calls} | {mean:.3f} "
-                      "| {median:.3f} | {p95:.3f} | {rchar:.0f} |".format(
-                          label=label,
-                          layout=layout,
-                          sections=sections,
-                          tool=tool,
-                          calls=result.get("calls", "-"),
-                          mean=summary.get("mean_ms", 0.0),
-                          median=summary.get("median_ms", 0.0),
-                          p95=summary.get("p95_ms", 0.0),
-                          rchar=summary.get("io_rchar_mean", 0.0),
+                  wait = warm_wait(result)
+                  event = (wait or {}).get("event") or {}
+                  for tool in TOOLS:
+                      summary = result.get("shapes", {}).get(tool)
+                      if summary is None:
+                          lines.append(
+                              f"| {label} | {side} | {layout} | {sections} | {tool} "
+                              "| - | - | - | - | - | - | - | - | - |"
+                          )
+                          continue
+                      lines.append(
+                          "| {label} | {side} | {layout} | {sections} | {tool} | {calls} "
+                          "| {mean:.3f} | {median:.3f} | {p95:.3f} | {rchar:.0f} "
+                          "| {wait} | {timed_out} | {warm_sections} | {warm_rows} |".format(
+                              label=label,
+                              side=side,
+                              layout=layout,
+                              sections=sections,
+                              tool=tool,
+                              calls=result.get("calls", "-"),
+                              mean=summary.get("mean_ms", 0.0),
+                              median=summary.get("median_ms", 0.0),
+                              p95=summary.get("p95_ms", 0.0),
+                              rchar=summary.get("io_rchar_mean", 0.0),
+                              wait="-" if wait is None else wait.get("seconds"),
+                              timed_out="-" if wait is None else wait.get("timed_out"),
+                              warm_sections=event.get("sections", "-"),
+                              warm_rows=event.get("rows_read", "-"),
+                          )
                       )
-                  )
           table = "\n".join(lines) + "\n"
           with open("read-measure/table.md", "w", encoding="utf-8") as handle:
               handle.write(table)
           print(table)
 
           failures = []
-          for layout in ("nested", "flat"):
-              small = results.get(f"sections-{layout}-500")
-              large = results.get(f"sections-{layout}-20000")
-              if small is None or large is None:
-                  failures.append(f"{layout}: missing the N=500 or N=20000 probe")
-                  continue
-              for tool in TOOLS:
-                  small_summary = small.get("shapes", {}).get(tool)
-                  large_summary = large.get("shapes", {}).get(tool)
-                  if small_summary is None or large_summary is None:
-                      failures.append(f"{layout}/{tool}: no measurement")
+          for side in SIDES:
+              for layout in ("nested", "flat"):
+                  small = results.get((f"sections-{layout}-500", side))
+                  large = results.get((f"sections-{layout}-20000", side))
+                  if small is None or large is None:
+                      if side in GATED_SIDES:
+                          failures.append(
+                              f"{side}/{layout}: missing the N=500 or N=20000 probe"
+                          )
                       continue
-                  small_ms = small_summary.get("mean_ms", 0.0)
-                  large_ms = large_summary.get("mean_ms", 0.0)
-                  ratio = large_ms / small_ms if small_ms > 0 else float("inf")
-                  small_rchar = small_summary.get("io_rchar_mean", 0.0)
-                  large_rchar = large_summary.get("io_rchar_mean", 0.0)
-                  rchar_ratio = large_rchar / small_rchar if small_rchar > 0 else float("inf")
-                  print(
-                      f"{layout}/{tool}: mean_ms 500={small_ms:.3f} 20000={large_ms:.3f} "
-                      f"flatness={ratio:.2f} rchar/call 500={small_rchar:.0f} "
-                      f"20000={large_rchar:.0f} rchar_flatness={rchar_ratio:.2f}"
-                  )
-                  if ratio > 1.3:
-                      failures.append(
-                          f"{layout}/{tool}: N=20000 mean {large_ms:.3f} ms is {ratio:.2f}x "
-                          f"the N=500 mean {small_ms:.3f} ms (gate 1.3x)"
+                  if side in GATED_SIDES:
+                      wait = warm_wait(large)
+                      if side == "warm" and wait is not None and wait.get("timed_out"):
+                          failures.append(
+                              f"{side}/{layout}: the probe gave up waiting for the warm after "
+                              f"{wait.get('seconds')} s, so its per-call rchar is not the read path"
+                          )
+                  for tool in TOOLS:
+                      small_summary = small.get("shapes", {}).get(tool)
+                      large_summary = large.get("shapes", {}).get(tool)
+                      if small_summary is None or large_summary is None:
+                          if side in GATED_SIDES:
+                              failures.append(f"{side}/{layout}/{tool}: no measurement")
+                          continue
+                      small_ms = small_summary.get("mean_ms", 0.0)
+                      large_ms = large_summary.get("mean_ms", 0.0)
+                      ratio = large_ms / small_ms if small_ms > 0 else float("inf")
+                      small_rchar = small_summary.get("io_rchar_mean", 0.0)
+                      large_rchar = large_summary.get("io_rchar_mean", 0.0)
+                      rchar_ratio = (
+                          large_rchar / small_rchar if small_rchar > 0 else float("inf")
                       )
-                  if large_ms > 5.0:
-                      failures.append(
-                          f"{layout}/{tool}: N=20000 mean {large_ms:.3f} ms exceeds 5 ms"
+                      gate = "gated" if side in GATED_SIDES else "reported"
+                      print(
+                          f"{side}/{layout}/{tool} ({gate}): mean_ms 500={small_ms:.3f} "
+                          f"20000={large_ms:.3f} flatness={ratio:.2f} rchar/call "
+                          f"500={small_rchar:.0f} 20000={large_rchar:.0f} "
+                          f"rchar_flatness={rchar_ratio:.2f}"
                       )
-                  if rchar_ratio > 1.3:
-                      failures.append(
-                          f"{layout}/{tool}: rchar/call grew {rchar_ratio:.2f}x from N=500 to "
-                          f"N=20000"
-                      )
+                      if side not in GATED_SIDES:
+                          continue
+                      if ratio > 1.3:
+                          failures.append(
+                              f"{side}/{layout}/{tool}: N=20000 mean {large_ms:.3f} ms is "
+                              f"{ratio:.2f}x the N=500 mean {small_ms:.3f} ms (gate 1.3x)"
+                          )
+                      if large_ms > 5.0:
+                          failures.append(
+                              f"{side}/{layout}/{tool}: N=20000 mean {large_ms:.3f} ms exceeds 5 ms"
+                          )
+                      if rchar_ratio > 1.3:
+                          failures.append(
+                              f"{side}/{layout}/{tool}: rchar/call grew {rchar_ratio:.2f}x from "
+                              f"N=500 to N=20000"
+                          )
 
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:

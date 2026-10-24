@@ -2258,12 +2258,13 @@ async fn reading_open_tally(roots: usize, per_root: usize) -> Vec<(String, usize
     tally.summary()
 }
 
+/// One tally's `(call, calls, rows)` lines.
+type TallyRows = Vec<(String, usize, usize)>;
+
 /// The rows of one v2 reading `open` split into the foreground calls and the background warm
 /// (`search.prewarm`, which is the whole-book read a warm is allowed to make on its own time).
-fn split_reading_open_rows(
-    tally: &[(String, usize, usize)],
-) -> (Vec<(String, usize, usize)>, Vec<(String, usize, usize)>) {
-    let (warm, foreground): (Vec<_>, Vec<_>) = tally
+fn split_reading_open_rows(tally: &[(String, usize, usize)]) -> (TallyRows, TallyRows) {
+    let (warm, foreground): (TallyRows, TallyRows) = tally
         .iter()
         .cloned()
         .partition(|(call, _, _)| call.as_str() == "search.prewarm");

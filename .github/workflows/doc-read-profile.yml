@@ -72,6 +72,11 @@ jobs:
               echo "::warning::missing input for $label: $doc"
               return 0
             fi
+            # The branch has the bounded search warm and the probe waits for it to end before the
+            # timed loop, so the per-call rchar is the read path. The base has no warm, so it must
+            # not wait for an event that never comes.
+            local wait=()
+            [ "$side" = "branch" ] && wait=(--wait-for-warm)
             python3 scripts/doc-read-probe.py \
               --binary "$binary" \
               --document "$doc" \
@@ -81,6 +86,7 @@ jobs:
               --start-fraction 0.5 \
               --io-bytes \
               --env READING_MCP_TOOLS=both \
+              "${wait[@]}" \
               --out "measure/$label-$side.json" \
               || echo "::warning::probe failed: $label $side"
           }

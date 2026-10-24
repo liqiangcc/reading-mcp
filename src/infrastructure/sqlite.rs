@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use flate2::Compression;
@@ -17,7 +18,9 @@ use super::lexical::{
     LexicalQuery, ParagraphPrefilters, candidate_kind_order, lowercase_fast,
     score_lowered_with_phrase,
 };
-use super::observability::{DocumentDecodePhases, emit_document_decode_miss, emit_scan_prewarm};
+use super::observability::{
+    DocumentDecodePhases, emit_document_decode_miss, emit_scan_prewarm, emit_scan_prewarm_start,
+};
 use super::section_layout::{
     CHUNK_CHARS, LAYOUT_CHUNK_BYTES, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
 };
@@ -290,42 +293,190 @@ fn scan_text_store_for_warm(
     }
 }
 
-/// The warm's plan: the store to fill, the document's `doc_key`, the sections a scan would read with
-/// the bytes each holds, and the bytes the warm may still read. `None` when there is nothing to warm:
-/// the knob is off, the cache is off or its cap is 0, the document's units are not stored for this
-/// hash, another document holds the cache slot, or the document's text is larger than the cap.
+/// The largest section text, in bytes, the warm will read: 8 MiB. A section bigger than this turns
+/// the warm's per-section read into a whole-document read in miniature, and the old whole-book warm
+/// never covered cjk-64mib's only 64 MiB section at all (`warm sections = 0`): it only cost I/O.
+const MAX_WARM_SECTION_BYTES: usize = 8 * 1024 * 1024;
+
+/// The default time budget of the warm, in milliseconds. The old whole-book warm took 134-230 ms on
+/// 宋史 and turned a 173.8 ms first search into a 27.5 ms one, so a quarter of a second buys that win
+/// on a medium book and stops there on a bigger one.
+const DEFAULT_WARM_BUDGET_MS: u64 = 250;
+
+/// The time budget of the warm, from `READING_MCP_SEARCH_PREWARM_BUDGET_MS`: 250 ms by default and
+/// `None` (no warm at all) for 0, which restores the behaviour of a server without a warm exactly.
+/// A value that is not a number falls back to the default here; `RuntimeConfig` rejects it at
+/// startup instead.
+fn scan_prewarm_budget() -> Option<Duration> {
+    if !scan_prewarm_enabled() || scan_text_cache_bytes() == 0 {
+        return None;
+    }
+    let ms = match std::env::var("READING_MCP_SEARCH_PREWARM_BUDGET_MS") {
+        Ok(value) => value.trim().parse().unwrap_or(DEFAULT_WARM_BUDGET_MS),
+        Err(_) => DEFAULT_WARM_BUDGET_MS,
+    };
+    (ms > 0).then(|| Duration::from_millis(ms))
+}
+
+/// The foreground work in flight on one store. Every read of the store enters a guard for the
+/// duration of its SQLite work; the background warm checks the counter before each section and stops
+/// where it is, so a foreground request never queues behind one section read after another. The
+/// counter is per store, not global: another store, another server or another test's reads never
+/// stop this warm.
+#[derive(Default)]
+struct ForegroundSignal {
+    in_flight: AtomicUsize,
+}
+
+/// One foreground operation in flight until dropped.
+struct ForegroundGuard<'a> {
+    signal: &'a ForegroundSignal,
+}
+
+impl Drop for ForegroundGuard<'_> {
+    fn drop(&mut self) {
+        self.signal.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl ForegroundSignal {
+    fn enter(&self) -> ForegroundGuard<'_> {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        ForegroundGuard { signal: self }
+    }
+
+    /// Whether a foreground operation on this store is running or waiting for it.
+    fn busy(&self) -> bool {
+        self.in_flight.load(Ordering::Relaxed) > 0
+    }
+}
+
+/// What the warm's plan decided: the work, the rows the plan read, the document's sections with
+/// text, and why there is no work when there is none.
+#[derive(Default)]
+struct WarmPlanOutcome {
+    plan: Option<WarmPlan>,
+    rows_read: usize,
+    sections_total: usize,
+    skipped: Option<&'static str>,
+}
+
+/// The warm's plan: the store to fill, the document's `doc_key`, the sections still cold with the
+/// bytes each holds, and the bytes the warm may still read. `skipped` says why there is no plan: the
+/// knob or the cache is off, the document's units are not stored for this hash, another document
+/// holds the cache slot, the store already holds every section, the largest section is over
+/// [`MAX_WARM_SECTION_BYTES`], the document is larger than the cache cap, a foreground request is
+/// waiting, or the time budget is already spent.
 fn scan_warm_plan(
     connection: &Mutex<Connection>,
     cache: &Mutex<Option<Arc<ScanTextStore>>>,
+    foreground: &ForegroundSignal,
     document_id: &DocumentId,
     expected_hash: &NormalizedDocumentHash,
-) -> Result<Option<WarmPlan>, ApplicationError> {
-    if !scan_prewarm_enabled() || scan_text_cache_bytes() == 0 {
-        return Ok(None);
-    }
+    deadline: Option<Instant>,
+) -> Result<WarmPlanOutcome, ApplicationError> {
+    let mut outcome = WarmPlanOutcome::default();
     let cap = scan_text_cache_bytes();
+    if !scan_prewarm_enabled() || cap == 0 {
+        outcome.skipped = Some("disabled");
+        return Ok(outcome);
+    }
+    if foreground.busy() {
+        outcome.skipped = Some("foreground");
+        return Ok(outcome);
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        outcome.skipped = Some("budget");
+        return Ok(outcome);
+    }
     let lock = || {
         connection
             .lock()
             .map_err(|_| ApplicationError::TextUnitIndexFailed("SQLite lock poisoned".into()))
     };
-    let (meta, sections) = {
+    let (meta, all_sections) = {
         let connection = lock()?;
         let Some(meta) = load_stored_document(&connection, document_id)? else {
-            return Ok(None);
+            outcome.skipped = Some("not-stored");
+            return Ok(outcome);
         };
         if meta.segmentation_version != TEXT_SEGMENTATION_VERSION
             || meta.normalized_document_hash != *expected_hash
         {
-            return Ok(None);
+            outcome.skipped = Some("not-stored");
+            return Ok(outcome);
         }
-        let sections = stored_sections(&connection, meta.doc_key)?
-            .into_iter()
-            .filter(|(_, _, char_len)| *char_len > 0)
-            .map(|(section_key, _, char_len)| (section_key, char_len))
-            .collect::<Vec<_>>();
+        let sections = stored_sections(&connection, meta.doc_key)?;
         (meta, sections)
     };
+    outcome.rows_read = all_sections.len();
+    outcome.sections_total = all_sections
+        .iter()
+        .filter(|(_, _, char_len)| *char_len > 0)
+        .count();
+    // The cached store, when it holds this very document. Another document's cached text is left
+    // alone: a warm never takes the slot from it.
+    let held = match cache.lock() {
+        Ok(cached) => match cached.as_ref() {
+            Some(store) if store.matches(&meta) => Some(Arc::clone(store)),
+            Some(_) => {
+                outcome.skipped = Some("cache-slot-held");
+                return Ok(outcome);
+            }
+            None => None,
+        },
+        Err(_) => {
+            outcome.skipped = Some("cache-poisoned");
+            return Ok(outcome);
+        }
+    };
+    // A section the store already holds is not read again, so a second warm after a search, or the
+    // warm of a reopen, only fills what is still cold and resumes a budget-limited warm.
+    let sections = all_sections
+        .into_iter()
+        .filter(|(section_key, _, char_len)| {
+            *char_len > 0
+                && held
+                    .as_ref()
+                    .is_none_or(|store| store.get(*section_key).is_none())
+        })
+        .map(|(section_key, _, char_len)| (section_key, char_len))
+        .collect::<Vec<_>>();
+    if sections.is_empty() {
+        outcome.skipped = Some("cached");
+        return Ok(outcome);
+    }
+    if foreground.busy() {
+        outcome.skipped = Some("foreground");
+        return Ok(outcome);
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        outcome.skipped = Some("budget");
+        return Ok(outcome);
+    }
+    // The skip rule: a section over the warm's per-section bound is left alone with its document.
+    let (largest_key, largest_chars) = sections
+        .iter()
+        .copied()
+        .max_by_key(|(_, char_len)| *char_len)
+        .expect("a non-empty section list has a largest section");
+    if largest_chars > MAX_WARM_SECTION_BYTES {
+        outcome.skipped = Some("largest-section");
+        return Ok(outcome);
+    }
+    // A UTF-8 char is at most four bytes, so only a section that could outgrow the bound in bytes
+    // needs its stored size measured; the measure reads the chunk lengths, not the text.
+    if largest_chars.saturating_mul(4) > MAX_WARM_SECTION_BYTES {
+        let bytes = {
+            let connection = lock()?;
+            stored_section_text_bytes(&connection, meta.doc_key, largest_key)?
+        };
+        outcome.rows_read += 1;
+        if bytes > MAX_WARM_SECTION_BYTES {
+            outcome.skipped = Some("largest-section");
+            return Ok(outcome);
+        }
+    }
     let chars: usize = sections.iter().map(|(_, char_len)| *char_len).sum();
     // A UTF-8 char is at most four bytes, so a document of at most `cap / 4` chars certainly fits in
     // `cap` bytes and the warm needs no byte sizes at all.
@@ -333,20 +484,23 @@ fn scan_warm_plan(
         // The store a scan would fill when the cache is free or already holds this document; another
         // document's cached text is left alone.
         let Some(store) = scan_text_store_for_warm(cache, &meta) else {
-            return Ok(None);
+            outcome.skipped = Some("cache-slot-held");
+            return Ok(outcome);
         };
-        return Ok(Some(WarmPlan {
+        outcome.plan = Some(WarmPlan {
             store,
             doc_key: meta.doc_key,
             sections,
             budget: usize::MAX,
-        }));
+        });
+        return Ok(outcome);
     }
     // A section of more than `cap / 4` chars may alone be larger than the cap, and measuring it would
     // read that much for nothing: such a document is left alone entirely, and its first search does
     // exactly what it does without a warm.
     if sections.iter().any(|(_, char_len)| *char_len > cap / 4) {
-        return Ok(None);
+        outcome.skipped = Some("over-cap");
+        return Ok(outcome);
     }
     // The document may or may not fit, and no section is large. Measure the stored text bytes of one
     // section at a time, each under its own short connection lock, and give up as soon as the total
@@ -355,29 +509,42 @@ fn scan_warm_plan(
     let mut measured = Vec::with_capacity(sections.len());
     let mut total = 0usize;
     for (section_key, _) in &sections {
+        if foreground.busy() {
+            outcome.skipped = Some("foreground");
+            return Ok(outcome);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            outcome.skipped = Some("budget");
+            return Ok(outcome);
+        }
         let bytes = {
             let connection = lock()?;
             stored_section_text_bytes(&connection, meta.doc_key, *section_key)?
         };
+        outcome.rows_read += 1;
         total += bytes;
         if total > cap {
             let Some(store) = scan_text_store_for_warm(cache, &meta) else {
-                return Ok(None);
+                outcome.skipped = Some("cache-slot-held");
+                return Ok(outcome);
             };
             store.mark_over_cap();
-            return Ok(None);
+            outcome.skipped = Some("over-cap");
+            return Ok(outcome);
         }
         measured.push((*section_key, bytes));
     }
     let Some(store) = scan_text_store_for_warm(cache, &meta) else {
-        return Ok(None);
+        outcome.skipped = Some("cache-slot-held");
+        return Ok(outcome);
     };
-    Ok(Some(WarmPlan {
+    outcome.plan = Some(WarmPlan {
         store,
         doc_key: meta.doc_key,
         sections: measured,
         budget: cap,
-    }))
+    });
+    Ok(outcome)
 }
 
 /// What one warm will do: the store to fill, the document, the sections to read with the bytes each
@@ -385,45 +552,85 @@ fn scan_warm_plan(
 struct WarmPlan {
     store: Arc<ScanTextStore>,
     doc_key: i64,
-    /// `(section_key, bytes)` in section order. The sections whose text a scan would read.
+    /// `(section_key, bytes)` in section order. The sections that are still cold.
     sections: Vec<(i64, usize)>,
     /// The bytes the warm may read in total: `usize::MAX` when the document certainly fits.
     budget: usize,
 }
 
+/// What one warm did: the section texts it stored and the rows it read (the plan's section rows plus
+/// every section text chunk).
+#[derive(Default)]
+struct WarmReport {
+    sections: usize,
+    rows_read: usize,
+}
+
+/// The limits of one warm: a deadline checked before each section and a section cap for tests.
+struct WarmLimits {
+    deadline: Option<Instant>,
+    steps: usize,
+}
+
+impl WarmLimits {
+    fn unbounded(steps: usize) -> Self {
+        Self {
+            deadline: None,
+            steps,
+        }
+    }
+}
+
 /// Fills `plan.store` with the text of its sections, one section at a time, in the order a scan reads
 /// them and with the loader a scan uses, so the entries are exactly what a first scan would store.
 ///
-/// Stops at once when the document outgrew the cap (`over_cap`), when the cache no longer holds the
-/// store (the document was replaced, or another document took the slot), when the next section does
-/// not fit the remaining byte budget, and after `steps` sections. The connection lock is held for one
+/// Stops at once when a foreground request is running or waiting on this store, when the time budget
+/// is spent, when the document outgrew the cap (`over_cap`), when the cache no longer holds the store
+/// (the document was replaced, or another document took the slot), when the next section does not fit
+/// the remaining byte budget, and after `steps` sections. The connection lock is held for one
 /// section's read only and dropped before the text is lowered and inserted, so foreground reads
 /// interleave with the warm.
 fn warm_scan_text(
     connection: &Mutex<Connection>,
     cache: &Mutex<Option<Arc<ScanTextStore>>>,
+    foreground: &ForegroundSignal,
     plan: &WarmPlan,
-    steps: usize,
-) -> Result<usize, ApplicationError> {
-    let mut warmed = 0;
+    limits: WarmLimits,
+) -> Result<WarmReport, ApplicationError> {
+    let mut report = WarmReport::default();
     let mut budget = plan.budget;
-    for (section_key, bytes) in plan.sections.iter().take(steps) {
+    for (section_key, bytes) in plan.sections.iter().take(limits.steps) {
+        // Yield first: a foreground request that is running or queued on this store must not wait
+        // behind another section read. The warm stops here and the rest stays cold for the next one.
+        if foreground.busy() {
+            break;
+        }
+        if limits
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            break;
+        }
         if plan.store.over_cap() || !scan_text_cache_holds(cache, &plan.store) {
             break;
+        }
+        if plan.store.get(*section_key).is_some() {
+            continue;
         }
         if *bytes > budget {
             break;
         }
-        let text = {
+        let (text, chunks) = {
             let connection = connection.lock().map_err(|_| {
                 ApplicationError::TextUnitIndexFailed("SQLite lock poisoned".into())
             })?;
-            load_section_text_unchecked(&connection, plan.doc_key, *section_key)?
+            load_section_text_counted(&connection, plan.doc_key, *section_key)?
         };
+        report.rows_read += chunks;
         plan.store
             .insert(*section_key, Arc::new(ScanSectionText::new(text)));
         budget = budget.saturating_sub(*bytes);
-        warmed += 1;
+        report.sections += 1;
         // The warm takes the connection lock once per section, and the scan's foreground reads take
         // the same lock. Nothing is locked here, so yielding gives a waiting foreground read the CPU
         // and the lock before the warm asks for it again: without it a foreground read queues behind
@@ -431,20 +638,47 @@ fn warm_scan_text(
         // foreground calls, which measured worse.
         std::thread::yield_now();
     }
-    Ok(warmed)
+    Ok(report)
 }
 
 /// The whole warm of one document: the plan, then every section it names.
 fn warm_scan_document(
     connection: &Mutex<Connection>,
     cache: &Mutex<Option<Arc<ScanTextStore>>>,
+    foreground: &ForegroundSignal,
     document_id: &DocumentId,
     expected_hash: &NormalizedDocumentHash,
-) -> Result<usize, ApplicationError> {
-    let Some(plan) = scan_warm_plan(connection, cache, document_id, expected_hash)? else {
-        return Ok(0);
+    deadline: Option<Instant>,
+) -> Result<(WarmReport, WarmPlanOutcome), ApplicationError> {
+    let outcome = scan_warm_plan(
+        connection,
+        cache,
+        foreground,
+        document_id,
+        expected_hash,
+        deadline,
+    )?;
+    let Some(plan) = outcome.plan.as_ref() else {
+        return Ok((
+            WarmReport {
+                rows_read: outcome.rows_read,
+                ..Default::default()
+            },
+            outcome,
+        ));
     };
-    warm_scan_text(connection, cache, &plan, usize::MAX)
+    let mut report = warm_scan_text(
+        connection,
+        cache,
+        foreground,
+        plan,
+        WarmLimits {
+            deadline,
+            steps: usize::MAX,
+        },
+    )?;
+    report.rows_read += outcome.rows_read;
+    Ok((report, outcome))
 }
 
 /// The stored text bytes of one section of `doc_key`: what a warm would read for it, which is the
@@ -3021,6 +3255,9 @@ pub struct SqliteTextUnitIndex {
     /// The documents a background warm is filling the scan text store for, so a second `prewarm`
     /// request for a document already being warmed returns at once.
     prewarming: Arc<Mutex<HashSet<DocumentId>>>,
+    /// The foreground reads in flight on this store. The warm yields to them; it is per store so two
+    /// servers, or two tests in one process, never stop each other's warm.
+    foreground: Arc<ForegroundSignal>,
 }
 
 impl SqliteTextUnitIndex {
@@ -3174,6 +3411,7 @@ impl SqliteTextUnitIndex {
             connection: Arc::new(Mutex::new(connection)),
             scan_text: Arc::new(Mutex::new(None)),
             prewarming: Arc::new(Mutex::new(HashSet::new())),
+            foreground: Arc::new(ForegroundSignal::default()),
         })
     }
 
@@ -3185,14 +3423,18 @@ impl SqliteTextUnitIndex {
     /// open finds the section texts cached instead of reading every one of them. Returns at once:
     /// the work runs on the blocking pool (or on its own small thread when there is no runtime) and
     /// never reports anything to the caller.
+    ///
+    /// The warm is bounded by `READING_MCP_SEARCH_PREWARM_BUDGET_MS` (250 ms by default, 0 = off), it
+    /// yields to a foreground request on the store before each section, and it does not start at all
+    /// for a document with a section over [`MAX_WARM_SECTION_BYTES`].
     pub(crate) fn prewarm_scan_text(
         &self,
         document_id: &DocumentId,
         expected_hash: &NormalizedDocumentHash,
     ) {
-        if !scan_prewarm_enabled() || scan_text_cache_bytes() == 0 {
+        let Some(budget) = scan_prewarm_budget() else {
             return;
-        }
+        };
         // One warm per document at a time: a second request returns immediately.
         match self.prewarming.lock() {
             Ok(mut warming) => {
@@ -3204,26 +3446,42 @@ impl SqliteTextUnitIndex {
         }
         let connection = Arc::clone(&self.connection);
         let cache = Arc::clone(&self.scan_text);
+        let foreground = Arc::clone(&self.foreground);
         let prewarming = Arc::clone(&self.prewarming);
         let document_id = document_id.clone();
         let expected_hash = expected_hash.clone();
+        let budget_ms = budget.as_millis() as u64;
         let work = move || {
             let started = Instant::now();
+            let deadline = started + budget;
+            if telemetry_enabled() {
+                emit_scan_prewarm_start(&document_id, budget_ms);
+            }
             // A failure or a panic in the warm is the caller's business only through the timing of
             // its next search, so nothing here may propagate.
             let warmed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                warm_scan_document(&connection, &cache, &document_id, &expected_hash)
+                warm_scan_document(
+                    &connection,
+                    &cache,
+                    &foreground,
+                    &document_id,
+                    &expected_hash,
+                    Some(deadline),
+                )
             }));
-            let (sections, ok) = match warmed {
-                Ok(Ok(sections)) => (sections, true),
-                Ok(Err(_)) | Err(_) => (0, false),
+            let (report, outcome) = match warmed {
+                Ok(Ok((report, outcome))) => (report, Some(outcome)),
+                Ok(Err(_)) | Err(_) => (WarmReport::default(), None),
             };
             if telemetry_enabled() {
                 emit_scan_prewarm(
                     &document_id,
-                    sections,
+                    report.sections,
                     started.elapsed().as_millis() as u64,
-                    ok,
+                    outcome.is_some(),
+                    report.rows_read,
+                    outcome.as_ref().map_or(0, |outcome| outcome.sections_total),
+                    outcome.as_ref().and_then(|outcome| outcome.skipped),
                 );
             }
             if let Ok(mut warming) = prewarming.lock() {
@@ -3262,16 +3520,70 @@ impl SqliteTextUnitIndex {
         expected_hash: &NormalizedDocumentHash,
         steps: usize,
     ) -> Result<usize, ApplicationError> {
-        let Some(plan) = scan_warm_plan(
+        let outcome = scan_warm_plan(
             &self.connection,
             &self.scan_text,
+            &self.foreground,
             document_id,
             expected_hash,
-        )?
-        else {
+            None,
+        )?;
+        let Some(plan) = outcome.plan else {
             return Ok(0);
         };
-        warm_scan_text(&self.connection, &self.scan_text, &plan, steps)
+        Ok(warm_scan_text(
+            &self.connection,
+            &self.scan_text,
+            &self.foreground,
+            &plan,
+            WarmLimits::unbounded(steps),
+        )?
+        .sections)
+    }
+
+    /// Test only: the same warm, bounded by `budget_ms` like the background one, and stopping where
+    /// its time budget is spent. `0` means off and warms nothing.
+    #[doc(hidden)]
+    pub fn prewarm_scan_text_bounded_blocking(
+        &self,
+        document_id: &DocumentId,
+        expected_hash: &NormalizedDocumentHash,
+        budget_ms: u64,
+        steps: usize,
+    ) -> Result<usize, ApplicationError> {
+        if budget_ms == 0 {
+            return Ok(0);
+        }
+        let deadline = Instant::now() + Duration::from_millis(budget_ms);
+        let outcome = scan_warm_plan(
+            &self.connection,
+            &self.scan_text,
+            &self.foreground,
+            document_id,
+            expected_hash,
+            Some(deadline),
+        )?;
+        let Some(plan) = outcome.plan else {
+            return Ok(0);
+        };
+        Ok(warm_scan_text(
+            &self.connection,
+            &self.scan_text,
+            &self.foreground,
+            &plan,
+            WarmLimits {
+                deadline: Some(deadline),
+                steps,
+            },
+        )?
+        .sections)
+    }
+
+    /// Test only: holds the foreground signal while the guard lives, so a test can prove that the
+    /// warm yields to a request that is waiting on the store.
+    #[doc(hidden)]
+    pub fn hold_foreground(&self) -> impl Drop + '_ {
+        self.foreground.enter()
     }
 
     /// The normalized hash this document's units are stored for, if they are stored for the current
@@ -3367,6 +3679,7 @@ impl SqliteTextUnitIndex {
         limit: usize,
         options: ScanOptions,
     ) -> Result<Option<(Vec<SectionId>, Vec<ScannedUnitHit>)>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         let expected_hash = expected_hash.clone();
         let cache = Arc::clone(&self.scan_text);
@@ -5360,6 +5673,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         &self,
         document_id: &DocumentId,
     ) -> Result<Vec<TextUnit>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         run_sqlite(
             &self.connection,
@@ -5466,6 +5780,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         document_id: &DocumentId,
         section_id: &SectionId,
     ) -> Result<Option<SectionTextUnits>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         let section_id = section_id.clone();
         run_sqlite(
@@ -5575,6 +5890,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         paragraph_index: usize,
         sentence_index: Option<usize>,
     ) -> Result<Option<OwnedStreamUnit>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         let section_id = section_id.clone();
         run_sqlite(
@@ -5671,6 +5987,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         &self,
         key: TextUnitStreamKey<'_>,
     ) -> Result<Option<TextUnitStreamSummary>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = key.document_id.clone();
         let section_id = key.section_id.clone();
         let kind = key.kind;
@@ -5734,6 +6051,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         position: usize,
         limit: usize,
     ) -> Result<Vec<StoredStreamItem>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = key.document_id.clone();
         let section_id = key.section_id.clone();
         let kind = key.kind;
@@ -5799,6 +6117,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         paragraph_index: usize,
         sentence_index: Option<usize>,
     ) -> Result<Option<usize>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = key.document_id.clone();
         let section_id = key.section_id.clone();
         let kind = key.kind;
@@ -5928,6 +6247,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         &self,
         document_id: &DocumentId,
     ) -> Result<Option<i64>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         run_sqlite(
             &self.connection,
@@ -5941,6 +6261,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         &self,
         doc_key: i64,
     ) -> Result<Option<DocumentId>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
@@ -5954,6 +6275,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         document_id: &DocumentId,
         section_id: &SectionId,
     ) -> Result<Option<i64>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         let section_id = section_id.clone();
         run_sqlite(
@@ -5969,6 +6291,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         document_id: &DocumentId,
         section_key: i64,
     ) -> Result<Option<SectionId>, ApplicationError> {
+        let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         run_sqlite(
             &self.connection,
@@ -6598,6 +6921,16 @@ fn load_section_text_unchecked(
     doc_key: i64,
     section_key: i64,
 ) -> Result<String, ApplicationError> {
+    Ok(load_section_text_counted(connection, doc_key, section_key)?.0)
+}
+
+/// [`load_section_text_unchecked`], plus the number of `section_text_v3` rows it read, so the warm
+/// can report the rows it read as well as the sections it warmed.
+fn load_section_text_counted(
+    connection: &Connection,
+    doc_key: i64,
+    section_key: i64,
+) -> Result<(String, usize), ApplicationError> {
     let mut statement = connection
         .prepare_cached(
             "SELECT chunk_no, encoding, data
@@ -6616,6 +6949,7 @@ fn load_section_text_unchecked(
         })
         .map_err(text_unit_index_error)?;
     let mut text = String::new();
+    let mut chunks = 0usize;
     for (expected_chunk, row) in rows.enumerate() {
         let (chunk_no, encoding, data) = row.map_err(text_unit_index_error)?;
         let chunk_no = i64_to_usize(chunk_no, "chunk_no")?;
@@ -6630,8 +6964,9 @@ fn load_section_text_unchecked(
             ))
         })?;
         text.push_str(&chunk);
+        chunks += 1;
     }
-    Ok(text)
+    Ok((text, chunks))
 }
 
 fn load_text_slice(

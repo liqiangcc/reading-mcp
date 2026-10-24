@@ -360,6 +360,29 @@ impl SqliteSearchIndex {
         self.units.scan_text_cache_state()
     }
 
+    /// Test only: the warm bounded by `budget_ms` like the background one (`0` warms nothing).
+    #[doc(hidden)]
+    pub fn prewarm_blocking_budgeted(
+        &self,
+        document_id: &DocumentId,
+        normalized_document_hash: &NormalizedDocumentHash,
+        budget_ms: u64,
+        steps: usize,
+    ) -> Result<usize, ApplicationError> {
+        self.units.prewarm_scan_text_bounded_blocking(
+            document_id,
+            normalized_document_hash,
+            budget_ms,
+            steps,
+        )
+    }
+
+    /// Test only: holds the store's foreground signal, so a test can prove the warm yields.
+    #[doc(hidden)]
+    pub fn hold_foreground(&self) -> impl Drop + '_ {
+        self.units.hold_foreground()
+    }
+
     /// [`SearchIndex::search_lexical`] with the scan's cache, thread count and pruning spelled out.
     /// The plain options — no cache, one thread, no pruning — are the scan of R2c step 3, so tests
     /// can prove the fast scan equal to it.

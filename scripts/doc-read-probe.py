@@ -21,6 +21,13 @@ The probe speaks newline-delimited JSON-RPC MCP over stdio against a release bin
 `--io-bytes` records the `/proc/<pid>/io` `rchar`/`read_bytes` deltas around every timed call.
 `--side` names the binary in the report (`main` or `branch`); there is no document-cache dimension.
 
+`--wait-for-warm` makes the probe wait for the bounded background search warm to end before the
+timed loop, using its `scan_prewarm` telemetry event. The per-call `rchar` then measures the read
+path after the warm, which is what the flatness gate is for; the warm's own cost is reported
+separately (`warm_wait`). The wait has a timeout (`--warm-timeout-seconds`) that is reported too,
+and it is skipped when the environment turns the warm off (`READING_MCP_SCAN_PREWARM=0` or
+`READING_MCP_SEARCH_PREWARM_BUDGET_MS=0`).
+
 Standard library only. This script never builds anything: pass an existing release binary.
 """
 
@@ -253,6 +260,45 @@ class Server:
             if isinstance(value, dict):
                 events.append(value)
         return events
+
+
+def warm_disabled(env_overrides: list[str]) -> bool:
+    """Whether the environment handed to the server turns the background warm off."""
+    values = {}
+    for item in env_overrides:
+        key, _, value = item.partition("=")
+        values[key] = value.strip().lower()
+    if values.get("READING_MCP_SCAN_PREWARM") in {"0", "false", "no", "off"}:
+        return True
+    return values.get("READING_MCP_SEARCH_PREWARM_BUDGET_MS") == "0"
+
+
+def wait_for_warm(
+    server: Server, offset: int, timeout: float, after: str
+) -> dict:
+    """Waits for the warm's `scan_prewarm` end event after log `offset`.
+
+    Returns the wait in seconds, whether it timed out (reported, never hidden), and the event.
+    """
+    started = time.monotonic()
+    while True:
+        for event in server.log_since(offset):
+            if event.get("event") == "scan_prewarm":
+                return {
+                    "after": after,
+                    "seconds": round(time.monotonic() - started, 4),
+                    "timed_out": False,
+                    "event": event,
+                }
+        waited = time.monotonic() - started
+        if waited >= timeout:
+            return {
+                "after": after,
+                "seconds": round(waited, 4),
+                "timed_out": True,
+                "event": None,
+            }
+        time.sleep(0.002)
 
 
 def flatten_structure(structure_result: dict) -> list[dict]:
@@ -536,12 +582,15 @@ def probe(args: argparse.Namespace) -> int:
     sampler.__enter__()
     shapes: dict[str, dict] = {}
     skipped: list[dict] = []
+    warm_waits: list[dict] = []
+    warm_off = warm_disabled(args.env)
     open_seconds = None
     rss_after_open = None
     rss_after_calls = None
     try:
         server.initialize()
         tool_names = server.tool_names()
+        open_log_offset = server.log_offset()
         opened = time.monotonic()
         payload = tool_payload(server.tool("open_document", {"source": document}))
         open_seconds = time.monotonic() - opened
@@ -549,6 +598,14 @@ def probe(args: argparse.Namespace) -> int:
         if not isinstance(payload, dict) or not isinstance(payload.get("document_id"), str):
             raise ProbeError("open_document did not return a document_id")
         document_id = payload["document_id"]
+        # The warm starts after the open returns. Wait for its end event before any timed call, so
+        # the per-call rchar measures the read path and not the warm; the wait itself is reported.
+        if args.wait_for_warm and not warm_off:
+            warm_waits.append(
+                wait_for_warm(
+                    server, open_log_offset, args.warm_timeout_seconds, "open_document"
+                )
+            )
         sections = read_structure(server, document_id)
         if not sections:
             raise ProbeError("document has no sections")
@@ -640,7 +697,16 @@ def probe(args: argparse.Namespace) -> int:
         shapes["get_document_structure"] = {**summarize(seconds), **summarize_io(io_per_call)}
 
         if "open" in tool_names and "read" in tool_names:
+            v2_open_log_offset = server.log_offset()
             opened_v2 = tool_payload(server.tool("open", {"source": document}))
+            # The v2 open triggers its own warm too; wait for it before timing `v2_read`, so the
+            # timed calls do not overlap it.
+            if args.wait_for_warm and not warm_off:
+                warm_waits.append(
+                    wait_for_warm(
+                        server, v2_open_log_offset, args.warm_timeout_seconds, "open"
+                    )
+                )
             handle = opened_v2.get("doc") if isinstance(opened_v2, dict) else None
             if not isinstance(handle, str):
                 skipped.append({"shape": "v2_read", "reason": "v2 open returned no handle"})
@@ -691,6 +757,9 @@ def probe(args: argparse.Namespace) -> int:
         "rss_after_calls_kib": rss_after_calls,
         "peak_rss_kib": sampler.peak,
         "io_bytes": args.io_bytes,
+        "warm_wait_enabled": args.wait_for_warm and not warm_off,
+        "warm_wait_disabled": warm_off,
+        "warm_waits": warm_waits,
         "shapes": shapes,
         "skipped": skipped,
     }
@@ -717,7 +786,8 @@ def probe(args: argparse.Namespace) -> int:
     print(
         f"{args.label} side={args.side}: open_s={open_seconds} "
         f"rss_after_open_kib={rss_after_open} rss_after_calls_kib={rss_after_calls} "
-        f"peak_rss_kib={sampler.peak}",
+        f"peak_rss_kib={sampler.peak} "
+        f"warm_waits={[(item['after'], item['seconds'], item['timed_out']) for item in warm_waits]}",
         flush=True,
     )
     return 0
@@ -752,6 +822,17 @@ def main() -> int:
         "--io-bytes",
         action="store_true",
         help="record /proc/<pid>/io read-byte deltas around every timed call",
+    )
+    parser.add_argument(
+        "--wait-for-warm",
+        action="store_true",
+        help="wait for the bounded search warm to end before the timed loop, and report the wait",
+    )
+    parser.add_argument(
+        "--warm-timeout-seconds",
+        type=float,
+        default=10.0,
+        help="give up waiting for the warm after this long (the timeout is reported)",
     )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", required=True, help="JSON result path")

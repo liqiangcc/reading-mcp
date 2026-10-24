@@ -159,6 +159,14 @@ impl RuntimeConfig {
         // The scan text cache warm reads this knob itself, per open; validating it here makes a
         // value that is neither a true nor a false form a startup error, like the other knobs.
         let _ = parse_scan_prewarm(std::env::var("READING_MCP_SCAN_PREWARM").ok().as_deref())?;
+        // The warm's time budget, in milliseconds; 0 turns the warm off. The warm reads it itself at
+        // every open, and this parse makes a bad value a startup error instead of a silent default.
+        if let Ok(value) = std::env::var("READING_MCP_SEARCH_PREWARM_BUDGET_MS") {
+            value.trim().parse::<u64>().map_err(|_| {
+                "READING_MCP_SEARCH_PREWARM_BUDGET_MS must be a non-negative integer of milliseconds"
+                    .to_string()
+            })?;
+        }
         if let Ok(value) = std::env::var("READING_MCP_TOOLS")
             && !value.trim().is_empty()
         {

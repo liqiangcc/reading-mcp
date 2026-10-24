@@ -180,6 +180,11 @@ impl OpenDocumentUseCase {
             let id = DocumentId::derive(&resource.final_source, &content_hash);
             let fingerprint = self.open_result_fingerprint(ingest_fingerprint);
             if let Some(result) = store.get(&id, &fingerprint).await? {
+                // A hit after a process restart is exactly the case where the in-memory scan text
+                // cache is empty, so the bounded warm runs here too. It runs after the result exists,
+                // never delays it, and stops at its own budget.
+                self.search_index
+                    .prewarm(&result.document_id, &result.normalized_document_hash);
                 return Ok(result);
             }
         }
@@ -279,6 +284,10 @@ impl OpenDocumentUseCase {
             let fingerprint = self.open_result_fingerprint(ingest_fingerprint);
             store.put(&result, &fingerprint).await?;
         }
+        // The result is complete, so the bounded warm may start: it runs in the background, never
+        // touches this response, yields to a foreground request and stops at its time budget.
+        self.search_index
+            .prewarm(&result.document_id, &result.normalized_document_hash);
         Ok(result)
     }
 }

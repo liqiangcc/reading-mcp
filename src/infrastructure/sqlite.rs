@@ -567,14 +567,16 @@ impl SqliteDocumentRepository {
                     parent_key INTEGER,
                     level INTEGER NOT NULL,
                     title TEXT NOT NULL,
-                    location_json TEXT NOT NULL,
+                    location_json BLOB NOT NULL,
                     subtree_end_key INTEGER NOT NULL,
+                    id_hash INTEGER NOT NULL,
+                    doc_hash INTEGER NOT NULL,
                     UNIQUE(document_id, section_key)
                  );
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_sections_v1_id
-                    ON document_sections_v1(document_id, section_id);
+                 CREATE INDEX IF NOT EXISTS idx_document_sections_v1_id
+                    ON document_sections_v1(doc_hash, id_hash);
                  CREATE INDEX IF NOT EXISTS idx_document_sections_v1_parent
-                    ON document_sections_v1(document_id, parent_key, section_key);
+                    ON document_sections_v1(doc_hash, parent_key, section_key);
                  CREATE TABLE IF NOT EXISTS document_body_order_rows_v1 (
                     document_id TEXT NOT NULL,
                     ord INTEGER NOT NULL,
@@ -588,6 +590,7 @@ impl SqliteDocumentRepository {
         ensure_normalized_document_hash_column(&connection)?;
         ensure_body_order_error_column(&connection)?;
         ensure_body_order_rows_shape(&connection)?;
+        ensure_section_rows_shape(&connection)?;
         Ok(Self {
             path,
             connection: Arc::new(Mutex::new(connection)),
@@ -1561,14 +1564,15 @@ fn store_section_rows(
                     level,
                     title,
                     location_json,
-                    subtree_end_key
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    subtree_end_key,
+                    id_hash,
+                    doc_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )
             .map_err(repository_error)?;
+        let doc_hash = section_row_hash(&document.id.0);
         for row in &rows {
-            let location_json =
-                serde_json::to_string(&StoredLocation::from_location(&row.location))
-                    .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
+            let location = encode_section_location(&row.location, &row.title);
             statement
                 .execute(params![
                     document.id.0,
@@ -1577,8 +1581,10 @@ fn store_section_rows(
                     row.parent_key,
                     i64::from(row.level),
                     row.title,
-                    location_json,
+                    location,
                     row.subtree_end_key,
+                    section_row_hash(&row.id.0),
+                    doc_hash,
                 ])
                 .map_err(repository_error)?;
         }
@@ -1632,6 +1638,263 @@ fn section_row_usize(value: i64, field: &str) -> Result<usize, ApplicationError>
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// The compact section row (SEC-3c).
+//
+// The location is a positional blob instead of the verbatim `StoredLocation` JSON: one flag byte
+// says which optional fields are present, then the fields follow in a fixed order, strings as a
+// varint length and their UTF-8 bytes, numbers as varints. A path that is exactly `[title]` is not
+// written at all — in 宋史 403 of 543 rows repeat their long title in the path — and the decoder
+// rebuilds it from the title. The section id is kept in full (it is an output value); the id and
+// parent lookups index 64-bit hashes of the document id and the section id instead of the 71-byte
+// document id and the 261-byte average section id, which is what made the two indexes larger than
+// the rows they served. The full ids are still compared after the lookup, so a collision answers
+// nothing wrong.
+// ---------------------------------------------------------------------------------------------
+
+/// The flag byte of an encoded [`Location`]: one bit per optional field, plus the bit that says
+/// `section_path` is the title in a one-element path and was not written.
+const LOCATION_FLAG_PAGE: u8 = 1 << 0;
+const LOCATION_FLAG_CHAPTER: u8 = 1 << 1;
+const LOCATION_FLAG_ANCHOR: u8 = 1 << 2;
+const LOCATION_FLAG_PARAGRAPH: u8 = 1 << 3;
+const LOCATION_FLAG_CHAR_START: u8 = 1 << 4;
+const LOCATION_FLAG_CHAR_END: u8 = 1 << 5;
+const LOCATION_FLAG_NATIVE_LOCATION: u8 = 1 << 6;
+const LOCATION_FLAG_SECTION_PATH_IS_TITLE: u8 = 1 << 7;
+
+/// The stored bytes of one section location: the flag byte and the fields it names, in the fixed
+/// order [`decode_section_location`] reads them.
+fn encode_section_location(location: &Location, title: &str) -> Vec<u8> {
+    let path_is_title = location.section_path.len() == 1 && location.section_path[0] == title;
+    let mut flags = 0u8;
+    if location.page.is_some() {
+        flags |= LOCATION_FLAG_PAGE;
+    }
+    if location.chapter.is_some() {
+        flags |= LOCATION_FLAG_CHAPTER;
+    }
+    if location.anchor.is_some() {
+        flags |= LOCATION_FLAG_ANCHOR;
+    }
+    if location.paragraph.is_some() {
+        flags |= LOCATION_FLAG_PARAGRAPH;
+    }
+    if location.char_start.is_some() {
+        flags |= LOCATION_FLAG_CHAR_START;
+    }
+    if location.char_end.is_some() {
+        flags |= LOCATION_FLAG_CHAR_END;
+    }
+    if location.native_location.is_some() {
+        flags |= LOCATION_FLAG_NATIVE_LOCATION;
+    }
+    if path_is_title {
+        flags |= LOCATION_FLAG_SECTION_PATH_IS_TITLE;
+    }
+    let mut stored = vec![flags];
+    if let Some(page) = location.page {
+        put_varint(&mut stored, u64::from(page));
+    }
+    if let Some(chapter) = &location.chapter {
+        put_section_string(&mut stored, chapter);
+    }
+    if !path_is_title {
+        put_varint(&mut stored, location.section_path.len() as u64);
+        for segment in &location.section_path {
+            put_section_string(&mut stored, segment);
+        }
+    }
+    if let Some(anchor) = &location.anchor {
+        put_section_string(&mut stored, anchor);
+    }
+    if let Some(paragraph) = location.paragraph {
+        put_varint(&mut stored, u64::from(paragraph));
+    }
+    if let Some(char_start) = location.char_start {
+        put_varint(&mut stored, char_start as u64);
+    }
+    if let Some(char_end) = location.char_end {
+        put_varint(&mut stored, char_end as u64);
+    }
+    if let Some(native_location) = &location.native_location {
+        put_section_string(&mut stored, native_location);
+    }
+    stored
+}
+
+/// The exact [`Location`] a stored section location blob holds. `title` is the row's decoded title,
+/// which rebuilds a `section_path` the encoder found equal to `[title]`.
+fn decode_section_location(stored: &[u8], title: &str) -> Result<Location, ApplicationError> {
+    let mut reader = SectionBytes::new(stored);
+    let flags = reader.byte()?;
+    let page = if flags & LOCATION_FLAG_PAGE != 0 {
+        Some(reader.u32()?)
+    } else {
+        None
+    };
+    let chapter = if flags & LOCATION_FLAG_CHAPTER != 0 {
+        Some(reader.string()?)
+    } else {
+        None
+    };
+    let section_path = if flags & LOCATION_FLAG_SECTION_PATH_IS_TITLE != 0 {
+        vec![title.to_string()]
+    } else {
+        let count = reader.usize()?;
+        let mut path = Vec::with_capacity(count.min(reader.remaining()));
+        for _ in 0..count {
+            path.push(reader.string()?);
+        }
+        path
+    };
+    let anchor = if flags & LOCATION_FLAG_ANCHOR != 0 {
+        Some(reader.string()?)
+    } else {
+        None
+    };
+    let paragraph = if flags & LOCATION_FLAG_PARAGRAPH != 0 {
+        Some(reader.u32()?)
+    } else {
+        None
+    };
+    let char_start = if flags & LOCATION_FLAG_CHAR_START != 0 {
+        Some(reader.usize()?)
+    } else {
+        None
+    };
+    let char_end = if flags & LOCATION_FLAG_CHAR_END != 0 {
+        Some(reader.usize()?)
+    } else {
+        None
+    };
+    let native_location = if flags & LOCATION_FLAG_NATIVE_LOCATION != 0 {
+        Some(reader.string()?)
+    } else {
+        None
+    };
+    if reader.remaining() != 0 {
+        return Err(section_row_error(&format!(
+            "its location has {} trailing bytes",
+            reader.remaining()
+        )));
+    }
+    Ok(Location {
+        page,
+        chapter,
+        section_path,
+        anchor,
+        paragraph,
+        char_start,
+        char_end,
+        native_location,
+    })
+}
+
+/// Appends `value` as an unsigned LEB128 varint.
+fn put_varint(stored: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            stored.push(byte);
+            return;
+        }
+        stored.push(byte | 0x80);
+    }
+}
+
+/// Appends one string as its varint byte length and its UTF-8 bytes.
+fn put_section_string(stored: &mut Vec<u8>, value: &str) {
+    put_varint(stored, value.len() as u64);
+    stored.extend_from_slice(value.as_bytes());
+}
+
+/// A cursor over one stored section location blob. Every read is bounds-checked and reports a
+/// corrupt row instead of panicking.
+struct SectionBytes<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> SectionBytes<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.position)
+    }
+
+    fn byte(&mut self) -> Result<u8, ApplicationError> {
+        let byte = self
+            .bytes
+            .get(self.position)
+            .copied()
+            .ok_or_else(|| section_row_error("its location ends early"))?;
+        self.position += 1;
+        Ok(byte)
+    }
+
+    fn varint(&mut self) -> Result<u64, ApplicationError> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = self.byte()?;
+            let part = u64::from(byte & 0x7f);
+            if shift == 63 && part > 1 {
+                return Err(section_row_error("its location holds an oversized number"));
+            }
+            value |= part << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(section_row_error("its location holds an oversized number"))
+    }
+
+    fn usize(&mut self) -> Result<usize, ApplicationError> {
+        usize::try_from(self.varint()?)
+            .map_err(|_| section_row_error("its location holds a number outside the usize range"))
+    }
+
+    fn u32(&mut self) -> Result<u32, ApplicationError> {
+        u32::try_from(self.varint()?)
+            .map_err(|_| section_row_error("its location holds a number outside the u32 range"))
+    }
+
+    fn string(&mut self) -> Result<String, ApplicationError> {
+        let length = self.usize()?;
+        let end = self
+            .position
+            .checked_add(length)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or_else(|| section_row_error("its location ends inside a string"))?;
+        let value =
+            String::from_utf8(self.bytes[self.position..end].to_vec()).map_err(|error| {
+                section_row_error(&format!("its location holds invalid UTF-8: {error}"))
+            })?;
+        self.position = end;
+        Ok(value)
+    }
+}
+
+/// The error of a section row that cannot be decoded: the row needs a reopen, but the message says
+/// what is broken first.
+fn section_row_error(reason: &str) -> ApplicationError {
+    ApplicationError::RepositoryFailed(format!("stored section row cannot be read: {reason}"))
+}
+
+/// FNV-1a (64-bit) of a section id or a document id, as the `INTEGER` the section indexes store.
+/// A stable hash written into the row: `std`'s `DefaultHasher` is not a persisted contract.
+fn section_row_hash(value: &str) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as i64
+}
+
 /// Whether `document_id` has a `document_header_v1` row, i.e. was saved with section rows.
 fn document_has_section_rows(
     connection: &Connection,
@@ -1652,14 +1915,14 @@ fn document_has_section_rows(
 const SECTION_ROW_COLUMNS: &str =
     "section_key, section_id, parent_key, level, title, location_json, subtree_end_key";
 
-/// One `document_sections_v1` row, with its location still as the stored JSON text.
+/// One `document_sections_v1` row, with its location still as the stored blob.
 struct StoredSectionRow {
     section_key: i64,
     section_id: String,
     parent_key: Option<i64>,
     level: i64,
     title: String,
-    location_json: String,
+    location: Vec<u8>,
     subtree_end_key: i64,
 }
 
@@ -1671,15 +1934,14 @@ impl StoredSectionRow {
             parent_key: row.get(2)?,
             level: row.get(3)?,
             title: row.get(4)?,
-            location_json: row.get(5)?,
+            location: row.get(5)?,
             subtree_end_key: row.get(6)?,
         })
     }
 
     fn into_section_row(self) -> Result<SectionRow, ApplicationError> {
-        let location = serde_json::from_str::<StoredLocation>(&self.location_json)
-            .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?
-            .into_location();
+        let title = self.title;
+        let location = decode_section_location(&self.location, &title)?;
         Ok(SectionRow {
             section_key: self.section_key,
             id: SectionId(self.section_id),
@@ -1690,7 +1952,7 @@ impl StoredSectionRow {
                     self.section_key, self.level
                 ))
             })?,
-            title: self.title,
+            title,
             location,
             subtree_end_key: self.subtree_end_key,
         })
@@ -1740,23 +2002,35 @@ fn load_document_header(
 }
 
 /// One `document_sections_v1` row, by section id.
+///
+/// The id is not an index key any more: the 261-byte average id made the `(document_id, section_id)`
+/// index 315,392 B for 543 rows. The row carries 64-bit hashes of the document id and the section id
+/// and the index is `(doc_hash, id_hash)`; the bucket is read and the full id compared, so a
+/// collision (or two ids that hash alike) still answers the exact row and never a wrong one.
 fn load_section_row_by_id(
     connection: &Connection,
     document_id: &DocumentId,
     section_id: &SectionId,
 ) -> Result<Option<SectionRow>, ApplicationError> {
-    let row = connection
-        .query_row(
-            &format!(
-                "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
-                  WHERE document_id = ?1 AND section_id = ?2"
-            ),
-            params![&document_id.0, &section_id.0],
-            StoredSectionRow::read,
-        )
-        .optional()
+    let mut statement = connection
+        .prepare_cached(&format!(
+            "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
+              WHERE doc_hash = ?1 AND id_hash = ?2"
+        ))
         .map_err(repository_error)?;
-    row.map(StoredSectionRow::into_section_row).transpose()
+    let mut rows = statement
+        .query(params![
+            section_row_hash(&document_id.0),
+            section_row_hash(&section_id.0)
+        ])
+        .map_err(repository_error)?;
+    while let Some(row) = rows.next().map_err(repository_error)? {
+        let stored = StoredSectionRow::read(row).map_err(repository_error)?;
+        if stored.section_id == section_id.0 {
+            return stored.into_section_row().map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// One `document_sections_v1` row, by section key.
@@ -1819,31 +2093,41 @@ fn load_section_children(
     parent_key: Option<i64>,
     limit: usize,
 ) -> Result<Vec<SectionRow>, ApplicationError> {
-    // Two statements, so the `(document_id, parent_key, section_key)` index answers both the root
-    // question and the child question without scanning the document's sections.
+    // Two statements, so the `(doc_hash, parent_key, section_key)` index answers both the root
+    // question and the child question without scanning the document's sections. The `document_id`
+    // term is the exact check a hash collision would need; the index still seeks by `doc_hash`.
     let mut statement = match parent_key {
         None => connection
             .prepare_cached(&format!(
                 "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
-                  WHERE document_id = ?1 AND parent_key IS NULL
-                  ORDER BY section_key LIMIT ?2"
+                  WHERE doc_hash = ?1 AND document_id = ?2 AND parent_key IS NULL
+                  ORDER BY section_key LIMIT ?3"
             ))
             .map_err(repository_error)?,
         Some(_) => connection
             .prepare_cached(&format!(
                 "SELECT {SECTION_ROW_COLUMNS} FROM document_sections_v1
-                  WHERE document_id = ?1 AND parent_key = ?2
-                  ORDER BY section_key LIMIT ?3"
+                  WHERE doc_hash = ?1 AND document_id = ?2 AND parent_key = ?3
+                  ORDER BY section_key LIMIT ?4"
             ))
             .map_err(repository_error)?,
     };
     let rows = match parent_key {
         None => statement.query_map(
-            params![&document_id.0, section_row_limit(limit)],
+            params![
+                section_row_hash(&document_id.0),
+                &document_id.0,
+                section_row_limit(limit)
+            ],
             StoredSectionRow::read,
         ),
         Some(parent_key) => statement.query_map(
-            params![&document_id.0, parent_key, section_row_limit(limit)],
+            params![
+                section_row_hash(&document_id.0),
+                &document_id.0,
+                parent_key,
+                section_row_limit(limit)
+            ],
             StoredSectionRow::read,
         ),
     }
@@ -2542,6 +2826,53 @@ fn ensure_body_order_rows_shape(connection: &Connection) -> Result<(), Applicati
                  ) WITHOUT ROWID;
                  CREATE UNIQUE INDEX IF NOT EXISTS idx_document_body_order_rows_v1_key
                     ON document_body_order_rows_v1(document_id, section_key);",
+            )
+            .map_err(repository_error)?;
+    }
+    Ok(())
+}
+
+/// Drops and recreates a `document_sections_v1` written before the compact location (SEC-3c): the
+/// old shape has no `doc_hash` column and its `location_json` is the old verbatim JSON text. The
+/// store-version bump makes every document re-ingest once, so no row of the old shape is read; the
+/// header that remains makes a stale document an explicit `StaleDocument`, never an empty book.
+fn ensure_section_rows_shape(connection: &Connection) -> Result<(), ApplicationError> {
+    let has_doc_hash = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(document_sections_v1)")
+            .map_err(repository_error)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(repository_error)?;
+        let mut has_doc_hash = false;
+        for column in columns {
+            if column.map_err(repository_error)? == "doc_hash" {
+                has_doc_hash = true;
+            }
+        }
+        has_doc_hash
+    };
+    if !has_doc_hash {
+        connection
+            .execute_batch(
+                "DROP TABLE IF EXISTS document_sections_v1;
+                 CREATE TABLE document_sections_v1 (
+                    document_id TEXT NOT NULL,
+                    section_key INTEGER NOT NULL,
+                    section_id TEXT NOT NULL,
+                    parent_key INTEGER,
+                    level INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    location_json BLOB NOT NULL,
+                    subtree_end_key INTEGER NOT NULL,
+                    id_hash INTEGER NOT NULL,
+                    doc_hash INTEGER NOT NULL,
+                    UNIQUE(document_id, section_key)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_document_sections_v1_id
+                    ON document_sections_v1(doc_hash, id_hash);
+                 CREATE INDEX IF NOT EXISTS idx_document_sections_v1_parent
+                    ON document_sections_v1(doc_hash, parent_key, section_key);",
             )
             .map_err(repository_error)?;
     }

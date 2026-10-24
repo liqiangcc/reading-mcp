@@ -20,7 +20,10 @@ pub const TEXT_UNIT_STREAM_VERSION: &str = "text-unit-stream/v1";
 
 /// Version of the whole stored TextUnit index (documents, sections, items, coverage, streams, summaries).
 /// Bump it when the store layout or its meaning changes so documents are re-ingested on reopen.
-pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v10";
+///
+/// v11 (SEC-3c) changes the `document_sections_v1` row shape: the location is a compact positional
+/// blob, the title a tagged raw/zlib blob, and the id lookup index is `(document_id, id_hash)`.
+pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v11";
 
 /// A borrowed unit of a section stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

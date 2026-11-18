@@ -996,12 +996,17 @@ def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
 # Peak resident set of the whole process tree (PDF-7a)
 # --------------------------------------------------------------------------------------------
 
-def process_tree(root_pid: int) -> list[int]:
-    """Every live process below `root_pid`, the root included.
+def children_of(pid: int) -> list[int] | None:
+    """The direct children of one process, or None when this kernel does not expose them."""
+    try:
+        with open(os.path.join(PROC, str(pid), "task", str(pid), "children"), "rb") as handle:
+            return [int(value) for value in handle.read().split()]
+    except (OSError, ValueError):
+        return None
 
-    `ru_maxrss` of the direct child is the server alone. The layout backend's text lives in a
-    Python worker child, so the cost of an open is a property of the tree, not of one process.
-    """
+
+def process_tree_by_scan(root_pid: int) -> list[int]:
+    """Every live process below `root_pid` by reading every `/proc/<pid>/stat`."""
     children: dict[int, list[int]] = {}
     try:
         names = os.listdir(PROC)
@@ -1037,6 +1042,32 @@ def process_tree(root_pid: int) -> list[int]:
         seen.add(pid)
         found.append(pid)
         stack.extend(children.get(pid, ()))
+    return found
+
+
+def process_tree(root_pid: int) -> list[int]:
+    """Every live process below `root_pid`, the root included.
+
+    `ru_maxrss` of the direct child is the server alone. The layout backend's text lives in a
+    Python worker child, so the cost of an open is a property of the tree, not of one process.
+
+    `/proc/<pid>/task/<pid>/children` costs microseconds, while reading every `/proc/<pid>/stat`
+    costs 115 ms on a machine that lists 9,000 of them - enough that a sampler built on the scan
+    takes one sample per document instead of forty. The scan stays as the fallback for a kernel
+    that does not expose `children` (`CONFIG_PROC_CHILDREN`).
+    """
+    if children_of(root_pid) is None:
+        return process_tree_by_scan(root_pid)
+    found: list[int] = []
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        found.append(pid)
+        stack.extend(children_of(pid) or ())
     return found
 
 
@@ -1096,12 +1127,14 @@ def cgroup_procs(path: str) -> set[int] | None:
 class TreePeak(threading.Thread):
     """The peak resident set of the whole server tree, sampled while the server runs.
 
-    Two sources, and the larger wins. The sampler sums `VmRSS` over the tree every 50 ms, which
-    can miss a worker that lives between two samples. `systemd-run --scope` also puts the
-    command in a cgroup whose `memory.peak` is exact and includes processes that already exited,
-    and whose `memory.events` counts the OOM kills the 600 MB cap makes; the cgroup is only
-    accepted when its `cgroup.procs` is a subset of this tree, so the shell's own session scope
-    (which holds the `sudo` wrapper) is never mistaken for the server's.
+    Two sources. The sampler sums `VmRSS` over the tree every 50 ms, which can miss a worker
+    that lives between two samples. `systemd-run --scope` also puts the command in a cgroup
+    whose `memory.peak` is exact and includes processes that already exited, and whose
+    `memory.events` counts the OOM kills the 600 MB cap makes; the cgroup is only accepted when
+    its `cgroup.procs` is a subset of this tree, so the shell's own session scope (which holds
+    the `sudo` wrapper) is never mistaken for the server's. The cgroup wins when it could be
+    identified: it is exactly what the cap governs, while the sampled sum also carries the
+    wrapper the harness starts the server under.
     """
 
     def __init__(self, root_pid: int, interval: float = TREE_SAMPLE_SECONDS) -> None:
@@ -1124,9 +1157,23 @@ class TreePeak(threading.Thread):
                 pass
 
     def sample(self) -> None:
+        self.samples += 1
+        self.measure()
+
+    def snapshot(self) -> None:
+        """Measure now, without counting a sample.
+
+        `memory.peak` is monotonic for the life of the scope, so one read at the end of the open
+        is exact even when the peak happened 10 ms into it and the sampler never saw it.
+        """
+        try:
+            self.measure()
+        except Exception:  # noqa: BLE001 - measuring must never end a document
+            pass
+
+    def measure(self) -> None:
         pids = process_tree(self.root_pid)
         tree = set(pids)
-        self.samples += 1
         self.sampled_kib = max(self.sampled_kib, sum(resident_kib(pid) for pid in pids))
         if self.cgroup_path is None:
             best: tuple[str, int] | None = None
@@ -1155,6 +1202,7 @@ class TreePeak(threading.Thread):
     def stop(self) -> dict:
         self.halt.set()
         self.join(timeout=10.0)
+        self.snapshot()
         # The scope is exactly the server and the worker the cap governs; the sampled sum also
         # carries the `sudo`/`systemd-run` wrapper the harness starts the server under, so the
         # cgroup is preferred when it could be identified.
@@ -1514,6 +1562,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     read: dict = {}
     try:
         server.initialize()
+        peak.snapshot()
         record["phase"] = "open"
         open_started = time.perf_counter()
         try:
@@ -1523,6 +1572,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
             record["error_code"] = exc.code
             result = None
         record["open_s"] = round(time.perf_counter() - open_started, 3)
+        peak.snapshot()
         if result is not None:
             document_id = (PROBE.payload(result) or {}).get("document_id")
         if document_id:
@@ -1541,6 +1591,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
             record["read"] = {key: read[key] for key in
                               ("calls", "chars", "truncated", "error", "seconds")}
             record["outcome"] = "ok"
+            peak.snapshot()
     finally:
         server.close(grace=30.0)
         # Stop the sampler after the server is gone so a worker outliving the server is still

@@ -428,24 +428,29 @@ def classify_short(unit: str, page: int | None, page_count: int,
 # Running headers and footers (H5)
 # --------------------------------------------------------------------------------------------
 
-def header_candidates(lines_per_page: list[list[str]], page_count: int) -> list[dict]:
-    """Lines repeated on >= 80% of the pages, and page-number lines on >= 50%."""
+def header_candidates(lines_per_page: list[list[str]], page_count: int,
+                      line_share: float = HEADER_PAGE_SHARE,
+                      page_share: float = PAGENUM_PAGE_SHARE) -> list[dict]:
+    """Lines repeated on >= `line_share` of the pages, and page-number lines on >= `page_share`."""
     counts: collections.Counter = collections.Counter()
     for lines in lines_per_page:
         for line in set(lines):
             counts[line] += 1
     found: list[dict] = []
+    seen = set()
+    # A page-number line is its own class, so it is tested first: at a loose line threshold a
+    # digit-only line would otherwise be counted as a running header.
     for line, count in counts.items():
-        if count < MIN_REPEAT_PAGES or count < HEADER_PAGE_SHARE * page_count:
-            continue
-        found.append({"line": line, "pages": count, "kind": "repeated_line"})
-    page_numbers = []
-    for line, count in counts.items():
-        if count < MIN_REPEAT_PAGES or count < PAGENUM_PAGE_SHARE * page_count:
+        if count < MIN_REPEAT_PAGES or count < page_share * page_count:
             continue
         if any(pattern.match(line) for pattern in PAGE_NUMBER_LINE_RES):
-            page_numbers.append({"line": line, "pages": count, "kind": "page_number"})
-    found.extend(page_numbers)
+            found.append({"line": line, "pages": count, "kind": "page_number"})
+            seen.add(line)
+    for line, count in counts.items():
+        if count < MIN_REPEAT_PAGES or line in seen:
+            continue
+        if count >= line_share * page_count:
+            found.append({"line": line, "pages": count, "kind": "repeated_line"})
     found.sort(key=lambda item: (-item["pages"], -len(item["line"])))
     return found
 
@@ -939,8 +944,13 @@ def measure_units(units: list[dict], reference: dict, pages: list[int | None],
     }
 
 
+HEADER_TIERS = (("spec", HEADER_PAGE_SHARE, PAGENUM_PAGE_SHARE),
+                ("loose", 0.3, 0.3))
+
+
 def header_measurement(reference: dict, units: list[dict]) -> dict:
-    candidates = header_candidates(reference["lines"], reference["pages"])
+    """Both the thresholds the task fixes (80% / 50%) and PDF-5a's 30% proxy, because the
+    interesting question is which tier the real running headers land in."""
     counts: collections.Counter = collections.Counter()
     for lines in reference["lines"]:
         for line in set(lines):
@@ -949,19 +959,25 @@ def header_measurement(reference: dict, units: list[dict]) -> dict:
                   "share": round(count / reference["pages"], 3) if reference["pages"] else None}
                  for line, count in counts.most_common(5)]
     unit_texts = [normalize(unit["text"]) for unit in units]
-    results = []
-    totals: collections.Counter = collections.Counter()
-    positions: collections.Counter = collections.Counter()
-    for candidate in candidates:
-        placement = header_placement(candidate, reference["lines"], unit_texts)
-        totals.update(placement["cases"])
-        positions.update(placement["positions"])
-        results.append({"line": clipped(candidate["line"], 120),
-                        "kind": candidate["kind"], "pages": candidate["pages"],
-                        "cases": placement["cases"],
-                        "positions": placement["positions"]})
-    return {"candidates": results, "cases": dict(totals), "positions": dict(positions),
-            "top_lines": top_lines, "lines_total": sum(len(lines) for lines in reference["lines"])}
+    tiers = {}
+    for name, line_share, page_share in HEADER_TIERS:
+        candidates = header_candidates(reference["lines"], reference["pages"],
+                                       line_share, page_share)
+        results = []
+        totals: collections.Counter = collections.Counter()
+        positions: collections.Counter = collections.Counter()
+        for candidate in candidates:
+            placement = header_placement(candidate, reference["lines"], unit_texts)
+            totals.update(placement["cases"])
+            positions.update(placement["positions"])
+            results.append({"line": clipped(candidate["line"], 120),
+                            "kind": candidate["kind"], "pages": candidate["pages"],
+                            "cases": placement["cases"],
+                            "positions": placement["positions"]})
+        tiers[name] = {"candidates": results, "cases": dict(totals),
+                       "positions": dict(positions)}
+    return {"tiers": tiers, "top_lines": top_lines,
+            "lines_total": sum(len(lines) for lines in reference["lines"])}
 
 
 def loss_measurement(path: str, reference: dict, units: list[dict],
@@ -1399,27 +1415,51 @@ def aggregate_mode(args) -> int:
                   f"{unmatched}."]
 
     # 4. Running headers and footers
-    case_totals: collections.Counter = collections.Counter()
-    position_totals: collections.Counter = collections.Counter()
-    candidate_rows = []
+    header_docs: dict[str, set] = {name: set() for name, _, _ in HEADER_TIERS}
+    tier_cases: dict[str, collections.Counter] = {name: collections.Counter()
+                                                 for name, _, _ in HEADER_TIERS}
+    tier_positions: dict[str, collections.Counter] = {name: collections.Counter()
+                                                      for name, _, _ in HEADER_TIERS}
+    tier_rows: dict[str, list] = {name: [] for name, _, _ in HEADER_TIERS}
     for doc in docs:
         headers = doc.get("headers") or {}
-        for candidate in headers.get("candidates") or []:
-            candidate_rows.append((doc["id"], candidate))
-            case_totals.update(candidate.get("cases") or {})
-            position_totals.update(candidate.get("positions") or {})
-    header_docs = {doc["id"] for doc in docs
-                   if (doc.get("headers") or {}).get("candidates")}
+        for name, _line_share, _page_share in HEADER_TIERS:
+            tier = (headers.get("tiers") or {}).get(name) or {}
+            for candidate in tier.get("candidates") or []:
+                tier_rows[name].append((doc["id"], candidate))
+                tier_cases[name].update(candidate.get("cases") or {})
+                tier_positions[name].update(candidate.get("positions") or {})
+                header_docs[name].add(doc["id"])
     lines += ["", "## 4. Running headers and footers (H5)", "",
-              f"Documents with a repeated line (>= 80% of pages) or a page-number line "
-              f"(>= 50%): {len(header_docs)}; candidate lines: {len(candidate_rows)}.", "",
-              "| Where the line lands | Occurrences |", "| --- | --- |"]
-    for case in HEADER_CASES:
-        lines.append(f"| `{case}` | {case_totals.get(case, 0)} |")
-    lines += ["", "| Where the line sits on its page | Occurrences |", "| --- | --- |"]
-    for position in PAGE_POSITIONS:
-        lines.append(f"| `{position}` | {position_totals.get(position, 0)} |")
-    lines += ["", "| Id | Lines | Most repeated line (pages, share of pages) |",
+              "Two populations, because the threshold decides the answer: the task's tier "
+              "(a line on >= 80% of the pages, a page-number line on >= 50%) and PDF-5a's "
+              "looser 30% proxy, which is where most real running headers sit.", ""]
+    for name, line_share, page_share in HEADER_TIERS:
+        label = (f">= {int(line_share * 100)}% / >= {int(page_share * 100)}%"
+                 if name == "spec" else f">= {int(line_share * 100)}% (PDF-5a's proxy)")
+        lines += [f"### Tier `{name}` ({label})", "",
+                  f"Documents: {len(header_docs[name])}; candidate lines: "
+                  f"{len(tier_rows[name])}.", "",
+                  "| Where the line lands | Occurrences |", "| --- | --- |"]
+        for case in HEADER_CASES:
+            lines.append(f"| `{case}` | {tier_cases[name].get(case, 0)} |")
+        lines += ["", "| Where the line sits on its page | Occurrences |", "| --- | --- |"]
+        for position in PAGE_POSITIONS:
+            lines.append(f"| `{position}` | {tier_positions[name].get(position, 0)} |")
+        lines += ["", "| Id | Line | Kind | Pages | Cases | Position |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for identifier, candidate in sorted(tier_rows[name],
+                                            key=lambda item: -item[1]["pages"])[:15]:
+            cases = ", ".join(f"{key}={value}" for key, value in sorted(
+                (candidate.get("cases") or {}).items()))
+            positions = ", ".join(f"{key}={value}" for key, value in sorted(
+                (candidate.get("positions") or {}).items()))
+            lines.append(f"| {identifier} | `{(candidate.get('line') or '')[:60]}` | "
+                         f"{candidate.get('kind')} | {candidate.get('pages')} | {cases} | "
+                         f"{positions} |")
+        lines.append("")
+    lines += ["### The most repeated line of every document", "",
+              "| Id | Lines | Most repeated line (pages, share of pages) |",
               "| --- | --- | --- |"]
     for doc in docs:
         headers = doc.get("headers") or {}
@@ -1427,16 +1467,6 @@ def aggregate_mode(args) -> int:
         lines.append(f"| {doc['id']} | {headers.get('lines_total')} | "
                      f"`{(top.get('line') or '')[:60]}` ({top.get('pages')}, "
                      f"{fmt(top.get('share'), 3)}) |")
-    lines += ["", "| Id | Line | Kind | Pages | Cases | Position |", "| --- | --- | --- | "
-                  "--- | --- | --- |"]
-    for identifier, candidate in sorted(candidate_rows, key=lambda item: -item[1]["pages"])[:20]:
-        cases = ", ".join(f"{key}={value}" for key, value in sorted(
-            (candidate.get("cases") or {}).items()))
-        positions = ", ".join(f"{key}={value}" for key, value in sorted(
-            (candidate.get("positions") or {}).items()))
-        lines.append(f"| {identifier} | `{(candidate.get('line') or '')[:60]}` | "
-                     f"{candidate.get('kind')} | {candidate.get('pages')} | {cases} | "
-                     f"{positions} |")
 
     # 5. Silent loss and bad characters
     loss_docs = [doc for doc in docs if doc.get("loss")]
@@ -1501,9 +1531,11 @@ def aggregate_mode(args) -> int:
             "short_by_cause": {cause: len([unit for unit in short_units
                                            if unit.get("cause") == cause])
                                for cause in SHORT_CAUSES},
-            "header_cases": dict(case_totals),
-            "header_positions": dict(position_totals),
-            "header_documents": sorted(header_docs),
+            "header_cases": {name: dict(tier_cases[name]) for name, _, _ in HEADER_TIERS},
+            "header_positions": {name: dict(tier_positions[name])
+                                 for name, _, _ in HEADER_TIERS},
+            "header_documents": {name: sorted(header_docs[name])
+                                 for name, _, _ in HEADER_TIERS},
             "missed_boundary_tokens": missed_tokens.most_common(10),
             "loss_documents": [doc["id"] for doc in loss_docs],
         })

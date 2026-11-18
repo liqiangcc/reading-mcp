@@ -16,7 +16,13 @@ use super::common::{content_hash, document_id, slugify, title_from_metadata};
 /// makes an image-only PDF fail with `ocr_required` instead of publishing a few watermark characters,
 /// so a stored `ok` from an older build must not shadow the rule on reopen: this bump invalidates the
 /// parsed cache and the stored open results for PDFs.
-pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v2";
+///
+/// PDF-6d narrows the #139 fallback guard for PDF prose only (`FallbackGuardProfile`), so the same
+/// bytes now segment into different text units: v2 -> v3 makes a stored PDF re-ingest instead of
+/// serving the coarse paragraphs the older rule produced. It keys the parsed cache
+/// (`CachingParser::cache_key`) and, through `ingest_fingerprint`, the stored open results, so no
+/// stored PDF can keep the old units.
+pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v3";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";

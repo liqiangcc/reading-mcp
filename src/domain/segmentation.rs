@@ -397,11 +397,15 @@ impl Document {
         let mut sections = Vec::new();
         let mut paragraph_source_order = 0usize;
         let mut sentence_source_order = 0usize;
+        // The document already carries the one field that decides the fallback guard's profile:
+        // its media type. No parser-facing API is needed for it.
+        let guard = FallbackGuardProfile::for_media_type(&self.media_type);
 
         for section in &self.root_sections {
             collect_section_segmentation(
                 block_map,
                 section,
+                guard,
                 &mut sections,
                 &mut paragraph_source_order,
                 &mut sentence_source_order,
@@ -433,6 +437,7 @@ pub struct ParagraphCandidate {
 fn collect_section_segmentation(
     block_map: Option<&NormalizedBlockMap>,
     section: &Section,
+    guard: FallbackGuardProfile,
     out: &mut Vec<SectionSegmentation>,
     paragraph_source_order: &mut usize,
     sentence_source_order: &mut usize,
@@ -524,7 +529,7 @@ fn collect_section_segmentation(
         if eligibility == SentenceEligibility::Eligible
             && content_class == ParagraphContentClass::ProseOrUnknown
             && fallback_guard_can_fire(text)
-            && looks_like_unreliable_fallback_text(text)
+            && looks_like_unreliable_fallback_text(text, guard)
         {
             eligibility = SentenceEligibility::CoarseParagraphOnly;
         }
@@ -595,6 +600,7 @@ fn collect_section_segmentation(
         collect_section_segmentation(
             block_map,
             child,
+            guard,
             out,
             paragraph_source_order,
             sentence_source_order,
@@ -1006,28 +1012,55 @@ pub fn fallback_guard_can_fire(text: &str) -> bool {
 /// The pre-R5b guard verdict, kept for the differential and real-book comparisons.
 #[doc(hidden)]
 pub fn looks_like_unreliable_fallback_text_unguarded(text: &str) -> bool {
-    looks_like_unreliable_fallback_text(text)
+    looks_like_unreliable_fallback_text(text, FallbackGuardProfile::AllFormats)
+}
+
+/// Which source a segmentation is running for, as far as the #139 fallback guard is concerned.
+///
+/// The guard serves every format. A digit directly before a single capital, though, is ordinary
+/// text in a PDF paragraph - a model size (`7B`), a dimension (`3D`), a unit (`4K,`), a panel
+/// label (`Fig. 3A`) - and the junction cannot be told from glue by shape alone. Only PDF prose
+/// may stop counting it; every other format keeps the guard byte for byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FallbackGuardProfile {
+    /// Every format but PDF: the guard exactly as #139 wrote it.
+    AllFormats,
+    /// PDF fallback paragraphs: a digit before one capital that ends its token is not glue.
+    PdfProse,
+}
+
+impl FallbackGuardProfile {
+    fn for_media_type(media_type: &super::MediaType) -> Self {
+        if media_type.is_pdf() {
+            Self::PdfProse
+        } else {
+            Self::AllFormats
+        }
+    }
 }
 
 /// A fallback paragraph that merges heterogeneous fragments (masthead, title, byline,
 /// bibliographic metadata) or carries extraction corruption (missing spaces, doubled
 /// characters) cannot be trusted to produce honest sentences from terminal punctuation.
 /// Detection is limited to objective, document-agnostic evidence.
-fn looks_like_unreliable_fallback_text(text: &str) -> bool {
+fn looks_like_unreliable_fallback_text(text: &str, guard: FallbackGuardProfile) -> bool {
     contains_doubled_character_token(text)
-        || missing_space_glue_events(text) >= MIN_MISSING_SPACE_GLUE_EVENTS
+        || missing_space_glue_events(text, guard) >= MIN_MISSING_SPACE_GLUE_EVENTS
         || has_bibliographic_metadata_run(text)
 }
 
 /// Missing-space concatenation evidence: `StrongInference`, `JohnR.Platt`,
 /// `3642SCIENCE`, `,NewSeries`, `others.John`, `)provided`.
-fn missing_space_glue_events(text: &str) -> usize {
+fn missing_space_glue_events(text: &str, guard: FallbackGuardProfile) -> usize {
     let chars = text.chars().collect::<Vec<_>>();
     let mut events = 0usize;
     for index in 1..chars.len() {
         let previous = chars[index - 1];
         let current = chars[index];
-        let glued = (previous.is_ascii_digit() && current.is_uppercase())
+        let glued = (previous.is_ascii_digit()
+            && current.is_uppercase()
+            && !(guard == FallbackGuardProfile::PdfProse
+                && is_terminal_single_capital(&chars, index)))
             || (matches!(previous, ',' | ';' | ':' | '.' | '!' | '?') && current.is_uppercase())
             || (previous == ')' && current.is_alphabetic())
             // An all-caps run of 3+ immediately continued by a lowercase tail inside
@@ -1046,6 +1079,19 @@ fn missing_space_glue_events(text: &str) -> usize {
         events += usize::from(glued);
     }
     events
+}
+
+/// A digit directly before **one** capital that ends its token: a size (`7B`), a dimension
+/// (`3D`), a unit (`4K,`), a panel label (`Fig. 3A`). The two shapes that carry real glue keep
+/// counting: a run of two or more capitals (`3642SCIENCE`, `10GUO-DONGHONG`, an author list,
+/// and a unit written that way, `474GB`) and a capital continued by lowercase (`7Binstruct`,
+/// `5Gnetwork`).
+fn is_terminal_single_capital(chars: &[char], index: usize) -> bool {
+    // chars[index] is the uppercase side of the junction.
+    chars[index].is_uppercase()
+        && !chars
+            .get(index + 1)
+            .is_some_and(|next| next.is_alphabetic())
 }
 
 fn is_surname_junction(chars: &[char], index: usize) -> bool {
@@ -1731,5 +1777,103 @@ mod tests {
                 value: usize::MAX,
             })
         );
+    }
+
+    /// PDF-6d: the four shapes that a PDF paragraph uses for a size, a dimension, a unit and a
+    /// panel label stop counting, and only for PDF prose.
+    #[test]
+    fn a_terminal_single_capital_after_a_digit_is_not_glue_in_pdf_prose() {
+        for text in [
+            "the 7B model",
+            "an 13B-parameter model",
+            "a 3D scene",
+            "see Fig. 3A for details",
+            "2D and 4K and 5G",
+        ] {
+            assert_eq!(
+                missing_space_glue_events(text, FallbackGuardProfile::PdfProse),
+                0,
+                "{text}"
+            );
+            // Every other format keeps the junction exactly as #139 wrote it.
+            assert_eq!(
+                missing_space_glue_events(text, FallbackGuardProfile::AllFormats),
+                text.chars()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .filter(|pair| pair[0].is_ascii_digit() && pair[1].is_uppercase())
+                    .count(),
+                "{text}"
+            );
+            assert!(
+                missing_space_glue_events(text, FallbackGuardProfile::AllFormats) > 0,
+                "{text}"
+            );
+        }
+    }
+
+    /// PDF-6d: the two shapes that carry real glue keep counting in a PDF paragraph too.
+    #[test]
+    fn glue_shapes_after_a_digit_still_count_in_pdf_prose() {
+        for (text, expected) in [
+            // An uppercase run of three or more: the #139 masthead shape.
+            ("Number 3642SCIENCE Strong Inference", 1),
+            // An author list and a running header glued to a page number.
+            ("10GUO-DONGHONGANDZILILIM", 1),
+            // A single capital continued by lowercase: two words merged. The `:A` before it is a
+            // second event of its own kind, so the pair counts two.
+            ("Birbal:Anefficient7Binstruct-model", 2),
+            ("the 5Gnetwork layer", 1),
+            // A capital run of two, which is a unit but not the shape the exemption names.
+            ("474GB of memory", 1),
+        ] {
+            assert_eq!(
+                missing_space_glue_events(text, FallbackGuardProfile::PdfProse),
+                expected,
+                "{text}"
+            );
+            assert_eq!(
+                missing_space_glue_events(text, FallbackGuardProfile::AllFormats),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    /// PDF-6d: the other five junction kinds are untouched in PDF prose, so the shapes the #139
+    /// tests pin keep the same count they have today.
+    #[test]
+    fn every_other_glue_kind_counts_the_same_in_pdf_prose() {
+        for text in [
+            "StrongInference",
+            "JohnR.Platt",
+            "others.John",
+            ",NewSeries",
+            ")provided",
+            "Strong InferenceCertain systematic methods",
+        ] {
+            let expected = missing_space_glue_events(text, FallbackGuardProfile::AllFormats);
+            assert!(expected > 0, "{text}");
+            assert_eq!(
+                missing_space_glue_events(text, FallbackGuardProfile::PdfProse),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    /// PDF-6d: a paragraph of three model-size junctions is not "unreliable" in a PDF and stays
+    /// unreliable for every other format.
+    #[test]
+    fn three_model_sizes_only_stop_being_evidence_for_pdf() {
+        let text = "We compare the 7B model with the 13B model and the 3D baseline.";
+        assert!(!looks_like_unreliable_fallback_text(
+            text,
+            FallbackGuardProfile::PdfProse
+        ));
+        assert!(looks_like_unreliable_fallback_text(
+            text,
+            FallbackGuardProfile::AllFormats
+        ));
     }
 }

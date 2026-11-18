@@ -40,12 +40,19 @@ pub(super) enum BuiltinEncoding {
     Codes(BTreeMap<u8, Vec<u8>>),
 }
 
-/// Whether any object is a simple Type 1 font with an embedded program and no
-/// `/ToUnicode`: the shape this repair targets.
-pub(super) fn has_candidate(pdf: &LopdfDocument) -> bool {
-    pdf.objects
-        .values()
-        .any(|object| object.as_dict().is_ok_and(|font| is_candidate(pdf, font)))
+/// Whether the repair would change any font of this document.
+///
+/// `prepare_text_extraction` copies the whole document before repairing it, so
+/// this asks the cheap question - would a font actually be rewritten? - on the
+/// original: a Type 1 font whose program declares an empty encoding (a
+/// Ghostscript conversion) or a code set identical to today's decoding is not
+/// worth a copy of a 490-page file.
+pub(super) fn has_rewritable_font(pdf: &LopdfDocument) -> bool {
+    pdf.objects.iter().any(|(id, object)| {
+        object
+            .as_dict()
+            .is_ok_and(|font| is_candidate(pdf, font) && font_entries(pdf, *id).is_some())
+    })
 }
 
 fn is_candidate(doc: &LopdfDocument, font: &Dictionary) -> bool {

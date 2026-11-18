@@ -34,7 +34,7 @@ pub(super) fn prepare_text_extraction(pdf: &LopdfDocument) -> Option<LopdfDocume
             .as_dict()
             .is_ok_and(|font| font_has_uni_differences(pdf, font))
     });
-    let has_type1_builtin = super::pdf_type1_builtin::has_candidate(pdf);
+    let has_type1_builtin = super::pdf_type1_builtin::has_rewritable_font(pdf);
     let has_text_form = pdf.objects.values().any(|object| {
         object
             .as_stream()

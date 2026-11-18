@@ -865,6 +865,22 @@ def probe(args: argparse.Namespace) -> int:
                     **summarize_io(io_per_call),
                     "restarts": restarts,
                 }
+        elif args.tools == "v2":
+            seconds, io_per_call, restarts = run_cursor_series(
+                server,
+                "read",
+                {"from": anchor_handle},
+                "from",
+                "next",
+                None,
+                args.calls,
+                args.io_bytes,
+            )
+            shapes["v2_read"] = {
+                **summarize(seconds),
+                **summarize_io(io_per_call),
+                "restarts": restarts,
+            }
         else:
             skipped.append(
                 {

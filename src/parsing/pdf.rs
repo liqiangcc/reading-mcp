@@ -2011,8 +2011,9 @@ mod tests {
             dictionary! { "Font" => dictionary! { "F1" => font_id } },
         );
 
-        // The existing CMap wins; the program's `/a` and `/ff` are not consulted.
-        assert_eq!(page_texts(&document)[0].text, "Z");
+        // The existing CMap wins: code 0x0B, which the program names `/ff`,
+        // stays unmapped and decodes to the replacement character as before.
+        assert_eq!(page_texts(&document)[0].text, "Z\u{fffd}");
         assert_eq!(page_texts(&document), old_page_texts(&document));
     }
 

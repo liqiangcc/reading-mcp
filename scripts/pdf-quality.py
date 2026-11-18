@@ -2379,73 +2379,91 @@ def measures_for(documents: list[dict], long_units: list[dict], short_units: lis
     }
 
 
+def paired_measure_table(base: dict, run: dict, label: str) -> list[str]:
+    """One measure table, both columns measured on the same papers."""
+    lines = ["| Measure | default | " + label + " |", "| --- | --- | --- |"]
+    for key, name in PAIRED_MEASURES:
+        digits = 4 if key in ("long_share", "header_own_unit_share") else (
+            3 if key in ("whitespace_ratio", "containment_median", "containment_p05")
+            else 2)
+        lines.append(f"| {name} | {fmt(base.get(key), digits)} | {fmt(run.get(key), digits)} |")
+    return lines
+
+
+def outcome_table(loaded: dict, labels: list[str]) -> list[str]:
+    every = sorted({doc.get("outcome") or "?" for label in labels for doc in loaded[label]})
+    lines = ["| Outcome | " + " | ".join(labels) + " |",
+             "| --- | " + " | ".join("---" for _ in labels) + " |"]
+    for outcome in every:
+        cells = [str(sum(1 for doc in loaded[label] if (doc.get("outcome") or "?") == outcome))
+                 for label in labels]
+        lines.append(f"| `{outcome}` | " + " | ".join(cells) + " |")
+    return lines
+
+
 def paired_mode(args) -> int:
-    """Pair runs by arXiv id against the baseline and print the same measures side by side."""
+    """Pair runs by arXiv id against the baseline and print the same measures side by side.
+
+    Each run is paired with the baseline on its own population - the papers that run opened `ok`
+    and the baseline opened `ok` - so the two columns of a table always describe the same papers.
+    The last table repeats the measures on the papers that every run opened, which is the only
+    population where all the columns are comparable to each other.
+    """
     if not args.baseline_jsonl_dir or not args.compare:
         print("::error::--paired needs --baseline-jsonl-dir and at least one --compare")
         return 1
     base_documents, base_long, base_short, _ = load_records(args.baseline_jsonl_dir)
     base_ok = {doc["id"] for doc in base_documents if doc.get("outcome") == "ok"}
-    loaded = {}
-    runs = [("default", args.baseline_jsonl_dir,
-             measures_for(base_documents, base_long, base_short, base_ok))]
-    loaded["default"] = base_documents
-    common = set(base_ok)
+    loaded = {"default": base_documents}
+    runs = []
+    common: set[str] | None = None
     for item in args.compare:
         label, _, directory = item.partition("=")
         if not directory:
             print(f"::error::--compare {item} needs LABEL=DIR")
             return 1
+        if label in loaded:
+            print(f"::error::--compare label {label} is used twice")
+            return 1
         documents, longs, shorts, _ = load_records(directory)
         loaded[label] = documents
         ok = {doc["id"] for doc in documents if doc.get("outcome") == "ok"}
         population = base_ok & ok
-        common &= population
-        runs.append((label, directory, measures_for(documents, longs, shorts, population)))
-    shared = measures_for(base_documents, base_long, base_short, common)
+        common = population if common is None else common & population
+        runs.append((label, directory, population, longs, shorts, ok))
+
     lines = ["# PDF-7a paired comparison", "",
-             "Paired by arXiv id against the default backend. A paper enters a column only when "
-             "both the default backend and that run opened it `ok`, so every column is measured "
-             "on the same text, and the last table repeats the measures on the papers that "
-             "**every** run opened.", "",
-             "| Measure | " + " | ".join(label for label, _, _ in runs) + " |",
-             "| --- | " + " | ".join("---" for _ in runs) + " |"]
-    for key, label in PAIRED_MEASURES:
-        cells = []
-        for _label, _directory, measures in runs:
-            value = measures.get(key)
+             "Paired by arXiv id. The default side is "
+             f"`{args.baseline_jsonl_dir}`, {len(base_ok)} papers opened `ok`. A paper enters a "
+             "table only when the default side and that run both opened it `ok`, so the two "
+             "columns of a table always measure the same text.", ""]
+    for label, directory, population, longs, shorts, ok in runs:
+        lines += [f"## `{label}`", "",
+                  f"`{directory}` opened {len(ok)} of the corpus `ok`; paired population "
+                  f"**{len(population)}** papers.", ""]
+        base_measures = measures_for(base_documents, base_long, base_short, population)
+        run_measures = measures_for(loaded[label], longs, shorts, population)
+        lines += paired_measure_table(base_measures, run_measures, label)
+        lines += ["", f"Outcomes over `{label}`'s whole population:", ""]
+        lines += outcome_table(loaded, ["default", label])
+        lines.append("")
+    if len(runs) > 1 and common:
+        labels = ["default"] + [label for label, _d, _p, _l, _s, _o in runs]
+        lines += ["## The papers every run opened", "",
+                  f"Population: {len(common)} papers.", ""]
+        header = ["| Measure | " + " | ".join(labels) + " |",
+                  "| --- | " + " | ".join("---" for _ in labels) + " |"]
+        lines += header
+        every = {"default": measures_for(base_documents, base_long, base_short, common)}
+        for label, _directory, _population, longs, shorts, _ok in runs:
+            every[label] = measures_for(loaded[label], longs, shorts, common)
+        for key, name in PAIRED_MEASURES:
             digits = 4 if key in ("long_share", "header_own_unit_share") else (
                 3 if key in ("whitespace_ratio", "containment_median", "containment_p05")
                 else 2)
-            cells.append(fmt(value, digits))
-        lines.append(f"| {label} | " + " | ".join(cells) + " |")
-    lines += ["", "### The papers every run opened", "",
-              f"Population: {len(common)} papers.", "",
-              "| Measure | " + " | ".join(label for label, _, _ in runs) + " |",
-              "| --- | " + " | ".join("---" for _ in runs) + " |"]
-    common_runs = [("default", shared)]
-    for label, directory, _measures in runs[1:]:
-        documents, longs, shorts, _ = load_records(directory)
-        common_runs.append((label, measures_for(documents, longs, shorts, common)))
-    for key, label in PAIRED_MEASURES:
-        cells = []
-        for _label, measures in common_runs:
-            value = measures.get(key)
-            digits = 4 if key in ("long_share", "header_own_unit_share") else (
-                3 if key in ("whitespace_ratio", "containment_median", "containment_p05")
-                else 2)
-            cells.append(fmt(value, digits))
-        lines.append(f"| {label} | " + " | ".join(cells) + " |")
-    lines += ["", "Outcomes over each run's whole population:", "",
-              "| Outcome | " + " | ".join(label for label, _, _ in runs) + " |",
-              "| --- | " + " | ".join("---" for _ in runs) + " |"]
-    every_outcome = sorted({doc.get("outcome") or "?" for docs in loaded.values()
-                            for doc in docs})
-    for outcome in every_outcome:
-        cells = [str(sum(1 for doc in loaded[label]
-                         if (doc.get("outcome") or "?") == outcome))
-                 for label, _, _ in runs]
-        lines.append(f"| `{outcome}` | " + " | ".join(cells) + " |")
+            cells = [fmt(every[label].get(key), digits) for label in labels]
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+        lines.append("")
     text = "\n".join(lines)
     print(text)
     if args.markdown:
@@ -2454,10 +2472,6 @@ def paired_mode(args) -> int:
             handle.write(text + "\n")
     return 0
 
-
-# --------------------------------------------------------------------------------------------
-# Entry point
-# --------------------------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(

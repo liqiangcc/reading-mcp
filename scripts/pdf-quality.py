@@ -1596,7 +1596,11 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         try:
             result = server.tool("open_document", {"source": path}, timeout=OPEN_TIMEOUT_S)
         except PROBE.ProbeError as exc:
-            record["error"] = str(exc)[:400]
+            # A worker that dies prints its whole traceback into the server's message, and the
+            # Python layout worker's onnxruntime warnings come first, so the reason a document
+            # failed is at the end of the string, not at the start.
+            text = str(exc)
+            record["error"] = text if len(text) <= 800 else f"{text[:400]} ... {text[-400:]}"
             record["error_code"] = exc.code
             result = None
         record["open_s"] = round(time.perf_counter() - open_started, 3)

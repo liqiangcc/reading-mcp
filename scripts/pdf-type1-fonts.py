@@ -141,6 +141,13 @@ def font_facts(path: str) -> dict:
                     encoding = font[5] if len(font) > 5 else None
                     kind, to_unicode = document.xref_get_key(xref, "ToUnicode")
                     encoding_kind, encoding_value = document.xref_get_key(xref, "Encoding")
+                    encoding_resolved = ""
+                    if encoding_kind == "xref":
+                        try:
+                            encoding_resolved = document.xref_object(
+                                int(str(encoding_value).split()[0])).strip()[:120]
+                        except Exception:  # noqa: BLE001 - an unreadable object is data
+                            encoding_resolved = "unreadable"
                     entry = {
                         "xref": xref,
                         "basefont": basefont,
@@ -151,6 +158,7 @@ def font_facts(path: str) -> dict:
                         "type_key": "Type" in document.xref_get_keys(xref),
                         "encoding_kind": encoding_kind,
                         "encoding_value": str(encoding_value)[:80],
+                        "encoding_resolved": encoding_resolved,
                         "pages": 1,
                         "population": subtype == "Type1" and ext not in ("n/a", None)
                         and kind == "null" and encoding in ("", "Builtin", None),
@@ -358,7 +366,10 @@ def main() -> int:
             if not font.get("population") or font["targeted"]:
                 continue
             key = (font["program_kind"] or "none", font["builtin"] or "-",
-                   "yes" if font.get("type_key") else "no", font.get("encoding_kind") or "-")
+                   "yes" if font.get("type_key") else "no",
+                   (font.get("encoding_kind") or "-")
+                   + (":" + font["encoding_resolved"].replace("|", "/")[:60]
+                      if font.get("encoding_resolved") else ""))
             bucket = reasons.setdefault(key, {"fonts": 0, "documents": set(), "probe": ""})
             bucket["fonts"] += 1
             bucket["documents"].add(row["id"])

@@ -1143,6 +1143,7 @@ class TreePeak(threading.Thread):
         self.interval = interval
         self.halt = threading.Event()
         self.sampled_kib = 0
+        self.single_kib = 0
         self.cgroup_kib = 0
         self.oom_kill = 0
         self.samples = 0
@@ -1174,7 +1175,10 @@ class TreePeak(threading.Thread):
     def measure(self) -> None:
         pids = process_tree(self.root_pid)
         tree = set(pids)
-        self.sampled_kib = max(self.sampled_kib, sum(resident_kib(pid) for pid in pids))
+        sizes = [(resident_kib(pid), pid) for pid in pids]
+        self.sampled_kib = max(self.sampled_kib, sum(size for size, _ in sizes))
+        if sizes:
+            self.single_kib = max(self.single_kib, max(size for size, _ in sizes))
         if self.cgroup_path is None:
             best: tuple[str, int] | None = None
             for pid in pids:
@@ -1213,7 +1217,9 @@ class TreePeak(threading.Thread):
         return {
             "peak_tree_kib": peak,
             "peak_sampled_kib": self.sampled_kib,
+            "peak_single_kib": self.single_kib,
             "peak_cgroup_kib": self.cgroup_kib or None,
+            "peak_cgroup_path": self.cgroup_path,
             "peak_source": source,
             "tree_samples": self.samples,
             "oom_kill": self.oom_kill,

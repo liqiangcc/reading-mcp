@@ -93,6 +93,49 @@ jobs:
           else
             echo "::warning::systemd-run MemoryMax scope is not available; runs would be uncapped"
           fi
+      - name: Calibrate the tree sampler on this runner
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import importlib.util, json, os, subprocess, sys, time
+
+          spec = importlib.util.spec_from_file_location("pdf_quality", "scripts/pdf-quality.py")
+          quality = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(quality)
+
+          # The sampler is calibrated against an allocation it cannot miss: a child that holds
+          # 200 MiB inside the same `systemd-run --scope` the measurement uses.
+          code = "import time\nb=bytearray(200*1024*1024)\nb[::4096]=b'x'*(len(b)//4096)\ntime.sleep(1.5)"
+          command = ["sudo", "systemd-run", "--scope", "--quiet", "-p", "MemoryMax=600M",
+                     "-p", "MemorySwapMax=0", "--uid=%d" % os.getuid(),
+                     "--gid=%d" % os.getgid(), "--", sys.executable, "-c", code]
+          process = subprocess.Popen(command)
+          peak = quality.TreePeak(process.pid)
+          peak.start()
+          time.sleep(0.2)
+          peak.snapshot()
+          time.sleep(1.6)
+          peak.snapshot()
+          tree = quality.process_tree(process.pid)
+          by_cgroup = {}
+          for pid in tree:
+              by_cgroup.setdefault(quality.cgroup_dir(pid), []).append(
+                  (pid, quality.resident_kib(pid)))
+          process.wait()
+          time.sleep(0.1)
+          facts = peak.stop()
+          print("### Tree sampler calibration")
+          print()
+          print("```")
+          print("tree at 1.8 s:", [(pid, rss) for pids in by_cgroup.values() for pid, rss in pids])
+          for path, pids in by_cgroup.items():
+              peak_bytes = quality.read_int_file(os.path.join(path, "memory.peak")) if path else None
+              print("cgroup", path, "pids", pids,
+                    "memory.peak MiB", None if peak_bytes is None else round(peak_bytes / 1024 / 1024, 1))
+          print("facts", json.dumps(facts, sort_keys=True))
+          print("```")
+          if facts["peak_tree_kib"] < 190 * 1024:
+              print("::warning::the tree sampler missed a known 200 MiB allocation")
+          PY
       - name: Restrict the corpus list to the requested ids
         if: github.event.inputs.only_ids != '' || vars.PDF6A_ONLY_IDS != ''
         env:

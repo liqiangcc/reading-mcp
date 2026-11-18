@@ -46,7 +46,7 @@ jobs:
           mkdir -p "$STRESS"
           download() {
             local url="$1" out="$2"
-            if curl -fsSL --retry 3 -o "$out" "$url"; then
+            if bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$out" "$url"; then
               echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
             else
               echo "::warning::failed to download $url"

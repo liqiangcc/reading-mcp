@@ -41,7 +41,7 @@ jobs:
           IN="$RUNNER_TEMP/inputs"
           mkdir -p "$IN"
           download() {
-            if curl -fsSL --retry 3 -o "$2" "$1"; then
+            if bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$2" "$1"; then
               echo "$2: $(stat -c%s "$2") bytes"
             else
               echo "::warning::failed to download $1"

@@ -26,7 +26,7 @@ jobs:
           mkdir -p "$BOOKS"
           download() {
             local url="$1" out="$2"
-            if curl -fsSL --retry 3 -o "$out" "$url"; then
+            if bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$out" "$url"; then
               echo "$out: $(stat -c%s "$out") bytes sha256=$(sha256sum "$out" | cut -d' ' -f1)"
             else
               echo "::warning::failed to download $url"
@@ -204,7 +204,7 @@ jobs:
               "zh-classic=https://www.gutenberg.org/cache/epub/24264/pg24264-images.epub"; do
             name="${pair%%=*}"
             url="${pair#*=}"
-            curl -fsSL --retry 3 -o "$BOOKS/$name.epub" "$url" \
+            bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$BOOKS/$name.epub" "$url" \
               || echo "::warning::failed to download $url"
           done
           ls -l "$BOOKS"

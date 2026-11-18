@@ -64,7 +64,7 @@ jobs:
           IN="$RUNNER_TEMP/inputs"
           mkdir -p "$IN"
           for id in 2401.14345 2403.19144 2403.18575 2510.07408 2603.17845 2305.18793; do
-            if curl -fsSL --retry 3 -o "$IN/$id.pdf" "https://arxiv.org/pdf/$id"; then
+            if bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$IN/$id.pdf" "https://arxiv.org/pdf/$id"; then
               echo "$id: $(stat -c%s "$IN/$id.pdf") bytes"
             else
               echo "::error::failed to download $id"
@@ -83,8 +83,8 @@ jobs:
           set -o pipefail
           IN="$RUNNER_TEMP/inputs"
           mkdir -p "$IN"
-          curl -fsSL --retry 3 -o "$IN/war-and-peace.txt" "https://www.gutenberg.org/cache/epub/2600/pg2600.txt"
-          curl -fsSL --retry 3 -o "$IN/song-shi.epub" "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"
+          bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$IN/war-and-peace.txt" "https://www.gutenberg.org/cache/epub/2600/pg2600.txt"
+          bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$IN/song-shi.epub" "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"
           export IN
           python3 -c 'import importlib.util, os; spec = importlib.util.spec_from_file_location("gen", "scripts/pdf-gen-inputs.py"); gen = importlib.util.module_from_spec(spec); spec.loader.exec_module(gen); target = os.environ["IN"]; war = gen.read_plain_text(os.path.join(target, "war-and-peace.txt")); song = gen.extract_epub_text(os.path.join(target, "song-shi.epub")); assert war is not None; assert song is not None; [gen.build_long_text(target, "text-long-en-%d" % p, war, cjk=False, font_path="helv", pages=p) for p in (100, 300)]; [gen.build_long_text(target, "text-long-cjk-%d" % p, song, cjk=True, font_path=gen.CJK_FONT, pages=p) for p in (100, 300)]; print("generated")' 2>&1 | tail -3
           ls -l "$IN"/*.pdf

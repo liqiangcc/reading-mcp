@@ -13,6 +13,12 @@
 # A www.gutenberg.org URL that still fails is tried on the gutenberg.pglaf.org mirror, which
 # serves the same /cache/epub paths. On failure the partial file is removed and the exit is 1,
 # so the caller keeps deciding whether a missing input is a warning or an error.
+#
+# Download cache: a file this script fetched is also kept in $FETCH_CACHE_DIR (default
+# ~/.cache/reading-mcp-fetch), under a name derived from the original URL. When that file is
+# already there and non-empty it is copied instead of downloaded. `fetch-cache.yml` fills the
+# directory on `main` and saves it as the Actions cache `fetch-books-v1`; the workflows restore
+# that cache before downloading, so a Gutenberg outage no longer reaches the gates.
 set -u
 if [ "$#" -ne 2 ]; then
   echo "usage: fetch-url.sh <out> <url>" >&2
@@ -20,6 +26,18 @@ if [ "$#" -ne 2 ]; then
 fi
 out=$1
 url=$2
+cache_dir=${FETCH_CACHE_DIR:-$HOME/.cache/reading-mcp-fetch}
+cache_file="$cache_dir/$(printf '%s' "$url" | sha256sum | cut -c1-16)-$(basename "${url%%\?*}")"
+
+if [ -s "$cache_file" ] && cp "$cache_file" "$out"; then
+  echo "fetch-url: cache hit for $url" >&2
+  exit 0
+fi
+
+remember() {
+  mkdir -p "$cache_dir" 2>/dev/null && cp "$out" "$cache_file" 2>/dev/null
+  return 0
+}
 
 fetch() {
   local src=$1 attempt
@@ -38,6 +56,7 @@ fetch() {
 }
 
 if fetch "$url"; then
+  remember
   exit 0
 fi
 case "$url" in
@@ -45,6 +64,7 @@ case "$url" in
     mirror="https://gutenberg.pglaf.org/${url#https://*gutenberg.org/}"
     echo "::warning::$url failed; trying the mirror $mirror" >&2
     if fetch "$mirror"; then
+      remember
       exit 0
     fi
     ;;

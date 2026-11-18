@@ -58,6 +58,11 @@ jobs:
         run: |
           pip install pymupdf==1.28.2 2>&1 | tail -3
           sudo apt-get update && sudo apt-get install -y heaptrack
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
       - name: Download the heaviest corpus documents
         run: |
           set -o pipefail

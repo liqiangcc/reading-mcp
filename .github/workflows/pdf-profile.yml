@@ -35,6 +35,11 @@ jobs:
           python-version: '3.12'
       - name: Install PDF tooling
         run: pip install pymupdf==1.28.2
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
       - name: Download public-domain sources
         run: |
           set -o pipefail

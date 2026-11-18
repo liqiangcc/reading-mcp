@@ -25,6 +25,11 @@ jobs:
           mkdir -p heap
           python3 scripts/memory-profile.py --binary target/release/reading-mcp --sizes-mb 4 \
             --states memory,dir --wrapper "heaptrack -o heap/{label}" --out heap/runs.json
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
       - name: Download zh-large (宋史)
         run: |
           BOOKS="$RUNNER_TEMP/books"

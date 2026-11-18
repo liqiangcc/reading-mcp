@@ -49,6 +49,10 @@ pub struct ReadingError {
     pub detail: String,
     /// The character count of the first item, for `too_long`.
     pub chars: Option<usize>,
+    /// The page count of an `ocr_required` answer, when the parser measured it.
+    pub pages: Option<usize>,
+    /// The character count an `ocr_required` answer found, when the parser measured it.
+    pub characters: Option<usize>,
 }
 
 impl ReadingError {
@@ -58,6 +62,8 @@ impl ReadingError {
             field: None,
             detail: detail.into(),
             chars: None,
+            pages: None,
+            characters: None,
         }
     }
 
@@ -97,6 +103,12 @@ impl ReadingError {
 impl From<ApplicationError> for ReadingError {
     fn from(error: ApplicationError) -> Self {
         let detail = error.to_string();
+        // `ocr_required` keeps the parser's evidence, so the v2 hint can say what the source lacks.
+        // The layout backend's worker path measures neither count and stays unmeasured.
+        let (pages, characters) = match &error {
+            ApplicationError::OcrRequired(evidence) => (evidence.pages, evidence.characters),
+            _ => (None, None),
+        };
         // No wildcard arm: a new `ApplicationError` variant must pick its v2 code here.
         let code = match &error {
             ApplicationError::DocumentNotFound => ReadingErrorCode::NotOpened,
@@ -132,7 +144,11 @@ impl From<ApplicationError> for ReadingError {
             | ApplicationError::TextUnitIndexFailed(_)
             | ApplicationError::SourceViewFailed(_) => ReadingErrorCode::Internal,
         };
-        Self::new(code, detail)
+        Self {
+            pages,
+            characters,
+            ..Self::new(code, detail)
+        }
     }
 }
 

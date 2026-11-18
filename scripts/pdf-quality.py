@@ -1647,8 +1647,9 @@ def aggregate_mode(args) -> int:
 
     # 5. Silent loss and bad characters
     loss_docs = [doc for doc in docs if doc.get("loss")]
-    containments = [doc["loss"]["containment_first20"] for doc in docs
-                    if doc.get("loss") and doc["loss"].get("containment_first20") is not None]
+    containments = [value for value in
+                    ((doc.get("quality") or {}).get("containment_first20") for doc in docs)
+                    if value is not None]
     bad = [(doc.get("quality") or {}).get("replacement_share", 0)
            + (doc.get("quality") or {}).get("private_use_share", 0) for doc in docs]
     lines += ["", "## 5. Silent loss and bad characters (H6)", "",
@@ -1657,7 +1658,8 @@ def aggregate_mode(args) -> int:
               f"documents:", "",
               "| Measure | Median | p05 | p25 | p75 | p95 | Min | Max | Documents below 0.9 |",
               "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
-    for label, values, threshold in (("containment of the first 20 sentences", containments, 0.9),
+    for label, values, threshold in (("5-gram containment of the first 20 sentences "
+                                      "(whitespace-insensitive)", containments, 0.9),
                                      ("U+FFFD + private-use share", bad, None)):
         if not values:
             continue

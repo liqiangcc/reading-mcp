@@ -291,11 +291,14 @@ Taken from the data, and the only one:
 
 > **A digit->uppercase junction does not count when the uppercase run is exactly one capital and
 > that capital ends its token** - the next character is not alphabetic. So `7B`, `7B,`,
-> `13B-parameter`, `3D`, `4K,`, `Fig. 3A`, `474GB` no longer count; `3642SCIENCE`, `4GUO`,
-> `4JESSICA...`, `7Binstruct` and `5Gnetwork` still do.
+> `13B-parameter`, `3D`, `4K,`, `Fig. 3A` no longer count; `3642SCIENCE`, `4GUO`,
+> `4JESSICA...`, `7Binstruct`, `5Gnetwork` and `474GB` (a two-capital run) still do.
 
 It is PDF-only, it applies to nothing else in the guard, and it removes 221 of the 355
-digit->uppercase events measured, keeping all four real glue events in the hand sample.
+digit->uppercase events measured, keeping all four real glue events in the hand sample. It does
+not remove every false positive - `474GB` (event 27) is a unit and still counts, because a
+two-capital run is also the shape of `10GUO-DONGHONG`. That is the price of not weakening the
+rule past what the sample proves.
 
 ### Why it keeps #139's promise
 

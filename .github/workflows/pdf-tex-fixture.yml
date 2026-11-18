@@ -1,0 +1,44 @@
+name: PDF TeX fixture
+run-name: PDF TeX fixture (PDF-6b)
+# PDF-6b: compiles the committed tests/fixtures/pdf_tex/*.tex with pdfTeX
+# defaults (no \pdfgentounicode) and uploads the PDF plus its `pdffonts` output.
+# The PDF is committed next to the .tex, so CI never needs TeX to run the tests.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['measure/pdf6b-**']
+
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install TeX and poppler
+        run: |
+          set -o pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            texlive-latex-base texlive-fonts-recommended poppler-utils 2>&1 | tail -5
+      - name: Compile the fixture with pdfTeX defaults
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/fixture"
+          pdflatex -interaction=nonstopmode -halt-on-error \
+            -output-directory "$RUNNER_TEMP/fixture" \
+            tests/fixtures/pdf_tex/type1-builtin.tex 2>&1 | tail -30
+          ls -l "$RUNNER_TEMP/fixture"
+      - name: pdffonts
+        run: |
+          set -o pipefail
+          pdffonts "$RUNNER_TEMP/fixture/type1-builtin.pdf" \
+            | tee "$RUNNER_TEMP/fixture/pdffonts.txt"
+          { echo '## pdffonts'; echo '```'; cat "$RUNNER_TEMP/fixture/pdffonts.txt"; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the PDF and the font table
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-tex-fixture
+          path: ${{ runner.temp }}/fixture/
+          if-no-files-found: error
+          retention-days: 14

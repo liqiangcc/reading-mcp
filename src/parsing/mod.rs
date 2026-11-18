@@ -19,6 +19,8 @@ mod pdf_front_matter;
 mod pdf_layout;
 mod pdf_raster;
 mod pdf_text_repair;
+mod pdf_type1_builtin;
+mod pdf_type1_glyphs;
 mod pdf_v8;
 mod reliability;
 mod router;

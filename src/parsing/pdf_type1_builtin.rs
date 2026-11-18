@@ -22,7 +22,7 @@ use lopdf::{Dictionary, Document as LopdfDocument, Object, ObjectId, Stream};
 use super::pdf_text_repair::{
     build_to_unicode_cmap, encoding_differences, unicode_from_glyph_name,
 };
-use super::pdf_type1_glyphs::{glyph_name_unicode, glyph_name_units};
+use super::pdf_type1_glyphs::glyph_name_unicode;
 
 /// The cleartext part of a Type 1 program is a few kilobytes (`/Length1` of
 /// the corpus fonts is under 12 KiB); 64 KiB bounds a crafted one.

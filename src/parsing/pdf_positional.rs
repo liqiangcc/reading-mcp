@@ -176,7 +176,10 @@ enum WidthTable {
     /// `FontMatrix[0] * 1000` so a non-standard Type 3 matrix is exact.
     Simple { first_char: u32, widths: Vec<f32> },
     /// CID font: `(first, last)` ranges from `/W`, plus the `/DW` default.
-    Cid { ranges: Vec<(u32, u32, f32)>, default: f32 },
+    Cid {
+        ranges: Vec<(u32, u32, f32)>,
+        default: f32,
+    },
 }
 
 impl WidthTable {
@@ -193,8 +196,7 @@ impl WidthTable {
                 ranges
                     .iter()
                     .find_map(|(first, last, width)| {
-                        (code >= u64::from(*first) && code <= u64::from(*last))
-                            .then_some(*width)
+                        (code >= u64::from(*first) && code <= u64::from(*last)).then_some(*width)
                     })
                     .unwrap_or(*default),
             ),
@@ -210,7 +212,10 @@ struct FontMetrics {
 }
 
 fn font_metrics<'a>(pdf: &'a LopdfDocument, font: &'a Dictionary) -> Option<FontMetrics> {
-    let subtype = font.get(b"Subtype").and_then(Object::as_name).unwrap_or(b"");
+    let subtype = font
+        .get(b"Subtype")
+        .and_then(Object::as_name)
+        .unwrap_or(b"");
     if subtype == b"Type0" {
         let encoding_name = font
             .get(b"Encoding")
@@ -299,10 +304,7 @@ fn font_metrics<'a>(pdf: &'a LopdfDocument, font: &'a Dictionary) -> Option<Font
         }
     }
     Some(FontMetrics {
-        widths: WidthTable::Simple {
-            first_char,
-            widths,
-        },
+        widths: WidthTable::Simple { first_char, widths },
         vertical: false,
     })
 }
@@ -447,9 +449,7 @@ impl<'a> PageWalker<'a> {
                     {
                         self.text.font_resource = Some(name.to_vec());
                     }
-                    if let Some(size) =
-                        operation.operands.get(1).and_then(|value| number(value))
-                    {
+                    if let Some(size) = operation.operands.get(1).and_then(|value| number(value)) {
                         self.text.font_size = size;
                     }
                 }
@@ -569,16 +569,10 @@ impl<'a> PageWalker<'a> {
     }
 
     fn move_to_next_line(&mut self) {
-        self.text.tm = multiply(
-            [1.0, 0.0, 0.0, 1.0, 0.0, -self.text.leading],
-            self.text.tm,
-        );
+        self.text.tm = multiply([1.0, 0.0, 0.0, 1.0, 0.0, -self.text.leading], self.text.tm);
     }
 
-    fn current_font(
-        &self,
-        fonts: &BTreeMap<Vec<u8>, &'a Dictionary>,
-    ) -> Option<&'a Dictionary> {
+    fn current_font(&self, fonts: &BTreeMap<Vec<u8>, &'a Dictionary>) -> Option<&'a Dictionary> {
         fonts.get(self.text.font_resource.as_deref()?).copied()
     }
 
@@ -611,7 +605,11 @@ impl<'a> PageWalker<'a> {
     /// Decoded text per code. The code length is one byte for a simple
     /// encoding; for a `ToUnicode` CMap it is the first length in 1..=4 the
     /// CMap accepts, which is exact for Identity and fixed-length CMaps.
-    fn decode_codes(&mut self, font: Option<&'a Dictionary>, bytes: &[u8]) -> Vec<(Vec<u8>, String)> {
+    fn decode_codes(
+        &mut self,
+        font: Option<&'a Dictionary>,
+        bytes: &[u8],
+    ) -> Vec<(Vec<u8>, String)> {
         let mut codes = Vec::new();
         match font.and_then(|font| self.memo.resolve(self.pdf, font, self.max_decompressed)) {
             Some(encoding @ Encoding::UnicodeMapEncoding(_)) => {
@@ -785,9 +783,7 @@ impl<'a> PageWalker<'a> {
     }
 
     fn tj_adjust(&mut self, adjust: f64, piece: &mut String) {
-        if adjust < TJ_SPACE_THRESHOLD
-            && !piece.is_empty()
-            && !piece.ends_with(char::is_whitespace)
+        if adjust < TJ_SPACE_THRESHOLD && !piece.is_empty() && !piece.ends_with(char::is_whitespace)
         {
             piece.push(' ');
         }
@@ -816,13 +812,7 @@ impl<'a> PageWalker<'a> {
         let Some((id, stream)) = lookup_xobject(self.pdf, resources, name) else {
             return;
         };
-        if stream
-            .dict
-            .get(b"Subtype")
-            .and_then(Object::as_name)
-            .ok()
-            != Some(&b"Form"[..])
-        {
+        if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(&b"Form"[..]) {
             return;
         }
         if let Some(id) = id
@@ -926,7 +916,11 @@ fn form_fonts<'a>(
             out.insert(name.clone(), dictionary);
         }
     }
-    if out.is_empty() { inherited.clone() } else { out }
+    if out.is_empty() {
+        inherited.clone()
+    } else {
+        out
+    }
 }
 
 fn form_resources(
@@ -1052,8 +1046,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
                 return true;
             }
             let in_margin = |y: f32| y < body_lo || y > body_hi;
-            gap > MARGIN_GAP_RATIO * leading
-                && (in_margin(baseline) || in_margin(line.baseline))
+            gap > MARGIN_GAP_RATIO * leading && (in_margin(baseline) || in_margin(line.baseline))
         });
         if starts_new {
             block += 1;
@@ -1135,12 +1128,14 @@ fn modal_leading(lines: &[Line]) -> f32 {
         .map(|(bucket, _)| bucket as f32);
     match best {
         Some(lead) => lead.max(1.0),
-        None => lines
-            .iter()
-            .map(|line| line.size)
-            .max_by(|a, b| a.total_cmp(b))
-            .unwrap_or(12.0)
-            * 1.2,
+        None => {
+            lines
+                .iter()
+                .map(|line| line.size)
+                .max_by(|a, b| a.total_cmp(b))
+                .unwrap_or(12.0)
+                * 1.2
+        }
     }
 }
 
@@ -1186,8 +1181,8 @@ fn walk_page<'a>(
     pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'a>,
-    metrics: &mut FontMetricsMemo<'a>,
+    memo: &'a mut FontEncodingMemo<'a>,
+    metrics: &'a mut FontMetricsMemo<'a>,
 ) -> WalkedPage {
     let content_bytes = match pdf.get_page_content_with_limit(page_id, max_decompressed) {
         Ok(bytes) => bytes,
@@ -1247,8 +1242,8 @@ fn walk_page_guarded<'a>(
     pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'a>,
-    metrics: &mut FontMetricsMemo<'a>,
+    memo: &'a mut FontEncodingMemo<'a>,
+    metrics: &'a mut FontMetricsMemo<'a>,
 ) -> WalkedPage {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         walk_page(pdf, page_id, max_decompressed, memo, metrics)
@@ -1268,8 +1263,8 @@ pub(super) fn extract_positional_page<'a>(
     pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'a>,
-    metrics: &mut FontMetricsMemo<'a>,
+    memo: &'a mut FontEncodingMemo<'a>,
+    metrics: &'a mut FontMetricsMemo<'a>,
 ) -> PositionalPage {
     let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
     if walked.bail.is_some() {
@@ -1294,8 +1289,8 @@ pub(super) fn probe_positional_page<'a>(
     pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'a>,
-    metrics: &mut FontMetricsMemo<'a>,
+    memo: &'a mut FontEncodingMemo<'a>,
+    metrics: &'a mut FontMetricsMemo<'a>,
 ) -> (Vec<ProbeLine>, usize, Option<&'static str>) {
     let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
     let lines = walked
@@ -1551,7 +1546,14 @@ mod tests {
                 op("Tj", vec![lit("body")]),
                 op(
                     "Tm",
-                    vec![0.into(), 1.into(), (-1).into(), 0.into(), 60.into(), 400.into()],
+                    vec![
+                        0.into(),
+                        1.into(),
+                        (-1).into(),
+                        0.into(),
+                        60.into(),
+                        400.into(),
+                    ],
                 ),
                 op("Tj", vec![lit("side")]),
                 op("ET", vec![]),
@@ -1563,7 +1565,10 @@ mod tests {
         // The rotated line sorts before bucket 0 (rotation 90 < 0? no: the
         // sort puts rotation buckets in numeric order: 90 before 0 is
         // false; bucket order is 0 then 90). Find it by text.
-        let side = lines.iter().find(|line| line.text == "side").expect("side line");
+        let side = lines
+            .iter()
+            .find(|line| line.text == "side")
+            .expect("side line");
         // A 90-degree text matrix: the device baseline y is the Tm f
         // component 400, and x stays at Tm e = 60.
         assert!((side.x0 - 60.0).abs() < 0.01);
@@ -1607,28 +1612,20 @@ mod tests {
             .filter(|path| path.extension().is_some_and(|ext| ext == "pdf"))
             .collect::<Vec<_>>();
         entries.sort();
-        let out_dir =
-            std::env::var("PDF7B_PROBE_OUT").unwrap_or_else(|_| dir.clone());
+        let out_dir = std::env::var("PDF7B_PROBE_OUT").unwrap_or_else(|_| dir.clone());
         let mut out = String::new();
         for path in entries {
             let id = path.file_stem().expect("file name").to_string_lossy();
             let bytes = std::fs::read(&path).expect("pdf unreadable");
             let Ok(document) = LopdfDocument::load_mem(&bytes) else {
-                println!(
-                    "{{\"id\":\"{id}\",\"error\":\"load\"}}"
-                );
+                println!("{{\"id\":\"{id}\",\"error\":\"load\"}}");
                 continue;
             };
             let mut memo = FontEncodingMemo::new();
             let mut metrics = FontMetricsMemo::new(&document);
             for (number, page_id) in document.get_pages() {
-                let (lines, glyphs, bail) = probe_positional_page(
-                    &document,
-                    page_id,
-                    LIMIT,
-                    &mut memo,
-                    &mut metrics,
-                );
+                let (lines, glyphs, bail) =
+                    probe_positional_page(&document, page_id, LIMIT, &mut memo, &mut metrics);
                 let mut line_json = String::new();
                 for line in &lines {
                     if !line_json.is_empty() {

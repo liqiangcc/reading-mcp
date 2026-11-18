@@ -323,7 +323,11 @@ impl Parser for PdfParser {
 fn extract_page_texts(
     pdf: &LopdfDocument,
     page_numbers: &[u32],
-) -> (Vec<PageText>, Vec<String>, super::pdf_positional::BailCounts) {
+) -> (
+    Vec<PageText>,
+    Vec<String>,
+    super::pdf_positional::BailCounts,
+) {
     let prepared = super::pdf_text_repair::prepare_text_extraction(pdf);
     extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), page_numbers)
 }
@@ -344,7 +348,11 @@ fn extract_page_texts(
 fn extract_page_texts_raw(
     pdf: &LopdfDocument,
     page_numbers: &[u32],
-) -> (Vec<PageText>, Vec<String>, super::pdf_positional::BailCounts) {
+) -> (
+    Vec<PageText>,
+    Vec<String>,
+    super::pdf_positional::BailCounts,
+) {
     let mut pages = Vec::with_capacity(page_numbers.len());
     let mut errors = Vec::new();
     let mut bailouts = super::pdf_positional::BailCounts::default();

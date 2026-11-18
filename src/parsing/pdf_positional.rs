@@ -82,8 +82,6 @@ pub(super) struct PositionalPage {
     pub chunks: Vec<String>,
     /// Why the page could not be positioned, when it could not.
     pub bail: Option<&'static str>,
-    /// Shown codes walked (even when the page bailed).
-    pub glyphs: usize,
 }
 
 /// Why pages fell back to the chunk path, counted over the document.
@@ -242,7 +240,7 @@ fn font_metrics<'a>(pdf: &'a LopdfDocument, font: &'a Dictionary) -> Option<Font
         let default = descendant
             .get_deref(b"DW", pdf)
             .ok()
-            .and_then(|object| number(object))
+            .and_then(number)
             .map(|value| value as f32);
         // A CID font with neither /W nor /DW gives every glyph the same
         // width: positions would be a guess, so the page keeps the old
@@ -270,7 +268,7 @@ fn font_metrics<'a>(pdf: &'a LopdfDocument, font: &'a Dictionary) -> Option<Font
     let first_char = font
         .get_deref(b"FirstChar", pdf)
         .ok()
-        .and_then(|object| number(object))
+        .and_then(number)
         .unwrap_or(0.0) as u32;
     let widths = font
         .get_deref(b"Widths", pdf)
@@ -287,7 +285,7 @@ fn font_metrics<'a>(pdf: &'a LopdfDocument, font: &'a Dictionary) -> Option<Font
         .ok()
         .and_then(|object| object.as_dict().ok())
         .and_then(|descriptor| descriptor.get_deref(b"MissingWidth", pdf).ok())
-        .and_then(|object| number(object))
+        .and_then(number)
         .map(|value| value as f32);
     let mut widths = widths?;
     if let Some(missing) = missing {
@@ -458,7 +456,7 @@ where
                     {
                         self.text.font_resource = Some(name.to_vec());
                     }
-                    if let Some(size) = operation.operands.get(1).and_then(|value| number(value)) {
+                    if let Some(size) = operation.operands.get(1).and_then(number) {
                         self.text.font_size = size;
                     }
                 }
@@ -468,56 +466,31 @@ where
                     }
                 }
                 "Td" | "TD" => {
-                    let tx = operation
-                        .operands
-                        .first()
-                        .and_then(|value| number(value))
-                        .unwrap_or(0.0);
-                    let ty = operation
-                        .operands
-                        .get(1)
-                        .and_then(|value| number(value))
-                        .unwrap_or(0.0);
+                    let tx = operation.operands.first().and_then(number).unwrap_or(0.0);
+                    let ty = operation.operands.get(1).and_then(number).unwrap_or(0.0);
                     if operation.operator == "TD" {
                         self.text.leading = -ty;
                     }
                     self.text.tm = multiply([1.0, 0.0, 0.0, 1.0, tx, ty], self.text.tm);
                 }
                 "TL" => {
-                    self.text.leading = operation
-                        .operands
-                        .first()
-                        .and_then(|value| number(value))
-                        .unwrap_or(0.0);
+                    self.text.leading = operation.operands.first().and_then(number).unwrap_or(0.0);
                 }
                 "T*" => self.move_to_next_line(),
                 "Tc" => {
-                    self.text.char_spacing = operation
-                        .operands
-                        .first()
-                        .and_then(|value| number(value))
-                        .unwrap_or(0.0);
+                    self.text.char_spacing =
+                        operation.operands.first().and_then(number).unwrap_or(0.0);
                 }
                 "Tw" => {
-                    self.text.word_spacing = operation
-                        .operands
-                        .first()
-                        .and_then(|value| number(value))
-                        .unwrap_or(0.0);
+                    self.text.word_spacing =
+                        operation.operands.first().and_then(number).unwrap_or(0.0);
                 }
                 "Tz" => {
-                    self.text.horizontal_scaling = operation
-                        .operands
-                        .first()
-                        .and_then(|value| number(value))
-                        .unwrap_or(100.0);
+                    self.text.horizontal_scaling =
+                        operation.operands.first().and_then(number).unwrap_or(100.0);
                 }
                 "Ts" => {
-                    self.text.rise = operation
-                        .operands
-                        .first()
-                        .and_then(|value| number(value))
-                        .unwrap_or(0.0);
+                    self.text.rise = operation.operands.first().and_then(number).unwrap_or(0.0);
                 }
                 "Tj" => {
                     if let Some(bytes) = operation
@@ -1107,6 +1080,7 @@ fn render_lines(lines: &[Line]) -> (String, Vec<String>) {
 }
 
 /// One line of the layout, exposed to tests and the CI probe's JSON dump.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(super) struct ProbeLine {
     pub text: String,
@@ -1182,6 +1156,8 @@ fn body_band(lines: &[Line], leading: f32) -> (f32, f32) {
 /// The shared walk: positioned lines, or a bail reason.
 struct WalkedPage {
     lines: Vec<Line>,
+    /// Shown codes walked; only the test-time probe reports it.
+    #[allow(dead_code)]
     glyphs: usize,
     bail: Option<&'static str>,
 }
@@ -1263,7 +1239,6 @@ where
     if walked.bail.is_some() {
         return PositionalPage {
             bail: walked.bail,
-            glyphs: walked.glyphs,
             ..PositionalPage::default()
         };
     }
@@ -1272,12 +1247,12 @@ where
         text,
         chunks,
         bail: None,
-        glyphs: walked.glyphs,
     }
 }
 
 /// The same walk for the CI probe: the laid-out lines themselves, for the
 /// line-by-line comparison against PyMuPDF.
+#[cfg(test)]
 pub(super) fn probe_positional_page<'d, 'w>(
     pdf: &'d LopdfDocument,
     page_id: ObjectId,

@@ -32,7 +32,7 @@ paragraph's own count. The next section says what that costs.
 
 ## The replica
 
-`scripts/pdf-guard-events.py` re-implements all three rules of the guard - the six
+`scripts/pdf-guard-events.py` re-implements all three rules of the guard - the five
 missing-space junction kinds, the pairwise-doubled token and the bibliographic marker window - and
 records, per event, its rule kind and 12 characters of context on each side. It also carries the
 five candidate exemptions below, so the same paragraph can be re-counted under each.
@@ -41,7 +41,7 @@ Two checks, both in `--agreement`:
 
 | Check | Population | Result |
 | --- | --- | --- |
-| Fidelity | the six fixture strings of `tests/fallback_sentence_degradation.rs` and `tests/segmentation_speedups.rs` | the replica's verdict matches the assertion in all six: masthead, doubled, missing-space, bibliographic blob fire; clean prose and citation prose do not |
+| Fidelity | the six fixture strings of `tests/fallback_sentence_degradation.rs` | the replica's verdict matches the assertion in all six: the masthead, doubled, missing-space and bibliographic blobs fire; clean prose and citation prose do not |
 | Precision | the 204 long units the guard **let through** (`degradation` absent) | the replica fires on **0** of them - no false positive in 204 |
 | Recall | the 2,468 coarse paragraphs | the replica fires on **1,365** (0.5531) of their stored samples |
 
@@ -155,10 +155,12 @@ and the evidence is in the part of the paragraph the artifact does not keep):
 | `caps_tail` + `digit_upper` + `lower_upper` + `paren_alpha` | 1 |
 | `caps_tail` + `lower_upper` + `paren_alpha` | 1 |
 
-**14 paragraphs are coarse because of digit->uppercase events alone.** 126 more contain at least one
-digit->uppercase event alongside other evidence. Removing the junction therefore moves at most a
-few dozen paragraphs - a small payoff compared with the 1,103 the guard refuses for other reasons.
-That is the honest size of PDF-6a's fix 2 as this task scopes it.
+**14 paragraphs are coarse because of digit->uppercase events alone**, and 166 more carry at least
+one alongside other evidence that also reaches the threshold; the remaining 71 of the 251 with a
+digit->uppercase event have one or two in the sample and no third, so this table cannot list them.
+Removing the junction therefore moves a few dozen paragraphs - a small payoff compared with the
+1,103 the guard refuses for reasons the sample cannot even show. That is the honest size of
+PDF-6a's fix 2 as this task scopes it.
 
 ## 4. What each candidate exemption frees
 
@@ -181,8 +183,9 @@ Five shapes were counted, on the stored samples of all 2,468 coarse paragraphs:
 | C5 uppercase-run<=2 | 43 | 1,322 | 33 | 36 |
 
 "Freed" counts paragraphs that fire today and do not fire under the candidate, on the stored
-sample. 28 paragraphs in 17 papers, the largest single one being 2407.10296 (22 -> 13, the 3D
-printing paper).
+sample: 28 paragraphs in 17 papers, the largest contributor being 2407.10296 (9 of the 28 - 22 of
+its 98 coarse paragraphs fire in their stored sample today, 13 under C1; it is the 3D-printing
+paper).
 
 ## 5. A seeded sample of 50 digit->uppercase events, hand-labelled
 

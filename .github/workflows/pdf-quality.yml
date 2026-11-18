@@ -1,11 +1,16 @@
 name: PDF quality probe
-run-name: PDF quality probe (PDF-6a)
+run-name: PDF quality probe (PDF-6a) ${{ inputs.backend || 'default' }}
 on:
   workflow_dispatch:
     inputs:
       only_ids:
         description: 'Comma-separated arXiv ids to measure instead of the whole corpus (empty = all)'
         default: ''
+      backend:
+        description: 'PDF backend: default (unchanged since PDF-6a) or layout (PyMuPDF layout)'
+        type: choice
+        options: [default, layout]
+        default: default
   # Before this workflow exists on the default branch, GitHub cannot dispatch it on a branch
   # (a workflow_dispatch run needs the file on `main`), so a push to the PDF-6a branch whose
   # commit message contains `[quality-run]` starts it instead - the same pattern PDF-5a used
@@ -39,7 +44,10 @@ jobs:
   probe:
     needs: [build]
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # The layout backend spends 4-10 s per open where the default backend spends under 0.1 s, and
+    # a refused paper is measured twice (the open and the reason probe), so the layout shards get
+    # a longer shard deadline. `default` keeps PDF-6a's 68 minutes exactly.
+    timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +60,27 @@ jobs:
           python-version: '3.12'
       - name: Install the reference tooling
         run: pip install pymupdf==1.28.2
+      - name: Restore pip cache for the layout environment
+        if: inputs.backend == 'layout'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pdf-layout-${{ hashFiles('scripts/pdf-layout/requirements.txt') }}
+      - name: Create the pinned layout environment
+        if: inputs.backend == 'layout'
+        env:
+          PDF_LAYOUT_VENV: ${{ github.workspace }}/.pdf-layout-venv
+          PYTHON: python3
+        run: |
+          bash scripts/pdf-layout/setup-pdf-layout.sh 2>&1 | tail -20
+          {
+            echo "### Layout environment"
+            echo
+            echo '```'
+            du -sh "$PDF_LAYOUT_VENV"
+            "$PDF_LAYOUT_VENV/bin/python" -I -c 'import importlib.metadata as m; print(" ".join(f"{n}=={m.version(n)}" for n in ("pymupdf", "pymupdf4llm", "pymupdf-layout", "onnxruntime")))'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/download-artifact@v4
         with:
           name: pdf-quality-bin
@@ -85,19 +114,29 @@ jobs:
           print(f'kept {len(kept)} lines for {len(wanted)} ids')
           PY
       - name: Run the quality shard ${{ matrix.shard }}
+        env:
+          BACKEND: ${{ inputs.backend || 'default' }}
+          # `default` keeps PDF-6a's 68 minutes; `layout` opens 50-100x slower and probes every
+          # refusal a second time.
+          DEADLINE: ${{ inputs.backend == 'layout' && '100' || '68' }}
         run: |
           set -o pipefail
           chmod +x "$RUNNER_TEMP/bin/reading-mcp"
           mkdir -p "$RUNNER_TEMP/results" "$RUNNER_TEMP/work"
-          python3 scripts/pdf-quality.py \
-            --ids scripts/pdf-sweep-ids.txt \
-            --shard ${{ matrix.shard }} --shards 8 \
-            --binary "$RUNNER_TEMP/bin/reading-mcp" \
-            --work-dir "$RUNNER_TEMP/work" \
-            --state-root "$RUNNER_TEMP/state" \
-            --out "$RUNNER_TEMP/results/quality-${{ matrix.shard }}.jsonl" \
-            --deadline-minutes 68 \
-            --per-document-minutes 6 | tail -200
+          args=(--ids scripts/pdf-sweep-ids.txt
+                --shard ${{ matrix.shard }} --shards 8
+                --binary "$RUNNER_TEMP/bin/reading-mcp"
+                --work-dir "$RUNNER_TEMP/work"
+                --state-root "$RUNNER_TEMP/state"
+                --out "$RUNNER_TEMP/results/quality-${{ matrix.shard }}.jsonl"
+                --deadline-minutes "$DEADLINE"
+                --per-document-minutes 6
+                --backend "$BACKEND")
+          if [ "$BACKEND" = "layout" ]; then
+            args+=(--layout-python "$GITHUB_WORKSPACE/.pdf-layout-venv/bin/python"
+                   --venv-path "$GITHUB_WORKSPACE/.pdf-layout-venv")
+          fi
+          python3 scripts/pdf-quality.py "${args[@]}" | tail -200
       - name: Upload the shard's per-unit records
         if: always()
         uses: actions/upload-artifact@v4
@@ -124,7 +163,7 @@ jobs:
           pattern: pdf-quality-shard-*
           merge-multiple: true
           path: ${{ runner.temp }}/all
-      - name: Merge every shard into the PDF-6a tables
+      - name: Merge every shard into the PDF-6a and PDF-7a tables
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/final"

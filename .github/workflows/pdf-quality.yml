@@ -11,6 +11,11 @@ on:
         type: choice
         options: [default, layout]
         default: default
+      keep_coarse_text:
+        description: 'Also record the full text of every coarse paragraph, at any length (PDF-6e; default off)'
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
   # Before this workflow exists on the default branch, GitHub cannot dispatch it on a branch
   # (a workflow_dispatch run needs the file on `main`), so a push to the PDF-6a branch whose
   # commit message contains `[quality-run]` starts it instead - the same pattern PDF-5a used
@@ -178,6 +183,9 @@ jobs:
           if [ "$BACKEND" = "layout" ]; then
             args+=(--layout-python "$GITHUB_WORKSPACE/.pdf-layout-venv/bin/python"
                    --venv-path "$GITHUB_WORKSPACE/.pdf-layout-venv")
+          fi
+          if [ "${{ github.event.inputs.keep_coarse_text }}" = "true" ]; then
+            args+=(--keep-coarse-text)
           fi
           python3 scripts/pdf-quality.py "${args[@]}" | tail -200
       - name: Upload the shard's per-unit records

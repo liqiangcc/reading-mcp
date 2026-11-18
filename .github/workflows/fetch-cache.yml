@@ -11,7 +11,7 @@ on:
   schedule:
     - cron: '17 3 * * 1'
   push:
-    branches: [main, ci/fetch-cache]  # TEMP: proves the cache on the PR branch; removed before merge
+    branches: [main]
     paths:
       - scripts/fetch-url.sh
       - .github/workflows/fetch-cache.yml

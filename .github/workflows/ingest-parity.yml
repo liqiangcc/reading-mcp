@@ -137,12 +137,20 @@ jobs:
           done < <(find tests/fixtures -type f \
                      \( -name '*.pdf' -o -name '*.txt' -o -name '*.md' \
                         -o -name '*.html' -o -name '*.htm' -o -name '*.epub' \) | sort)
+          # pipefail: without it the pipeline's status is tee's, so a DIFF row (the script exits 1)
+          # left the job green. The table still goes to the step summary before the step fails.
+          set -o pipefail
+          status=0
           python3 scripts/ingest-parity.py \
             --binary-a base-target/release/reading-mcp \
             --binary-b target/release/reading-mcp \
             --inputs "$inputs" \
-            --out parity | tee parity-table.md
+            --out parity | tee parity-table.md || status=$?
           cat parity-table.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::ingest parity exited $status: a DIFF row or an input that failed on one side; the table and the ingest-parity artifact say which"
+          fi
+          exit "$status"
       - name: Upload parity data
         if: always()
         uses: actions/upload-artifact@v4

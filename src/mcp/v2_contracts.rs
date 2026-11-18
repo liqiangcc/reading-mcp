@@ -395,9 +395,7 @@ fn hint(error: &ReadingError) -> String {
             "获取来源失败，请等待 {} 秒后用相同参数重试。",
             FETCH_RETRY_WAIT_SECONDS
         ),
-        ReadingErrorCode::OcrRequired => {
-            "该来源需要本地 OCR 才能读取，请启用 OCR 后重新 open。".to_owned()
-        }
+        ReadingErrorCode::OcrRequired => ocr_required_hint(error),
         ReadingErrorCode::Unreadable => {
             "来源无法解析或文本编码不受支持，请确认文件格式与编码后重新 open。".to_owned()
         }
@@ -409,6 +407,22 @@ fn hint(error: &ReadingError) -> String {
 
 /// How long a `fetch_failed` hint asks the caller to wait.
 pub const FETCH_RETRY_WAIT_SECONDS: u64 = 30;
+
+/// The two routes that work when a source has no usable text layer: a copy that has one, or a
+/// server that runs OCR. Enabling OCR locally is not among them, because a reader cannot.
+const OCR_REQUIRED_ROUTES: &str =
+    "请改用带文字层的版本（例如离线 OCR 后的 PDF 或文本），或在支持 OCR 的服务上重新 open。";
+
+/// `ocr_required` says what was found when the parser measured it, and offers the same two routes
+/// either way.
+fn ocr_required_hint(error: &ReadingError) -> String {
+    match (error.pages, error.characters) {
+        (Some(pages), Some(characters)) => format!(
+            "该 PDF 没有可用的文字层（{pages} 页只取到 {characters} 个字符），需要 OCR：{OCR_REQUIRED_ROUTES}"
+        ),
+        _ => format!("该来源没有可用的文字层，需要 OCR：{OCR_REQUIRED_ROUTES}"),
+    }
+}
 
 fn too_long_hint(error: &ReadingError) -> String {
     let Some(chars) = error.chars else {
@@ -611,6 +625,43 @@ mod tests {
             compact(&ErrorView::new(&ReadingError::not_opened(), None)),
             r#"{"error":"not_opened","hint":"该文档尚未在本服务中打开，请先用 open 打开文件。"}"#
         );
+    }
+
+    #[test]
+    fn ocr_required_hint_carries_the_measured_counts_and_both_routes() {
+        let measured = ReadingError::from(ApplicationError::OcrRequired(
+            OcrRequiredDetail::measured(4, 156),
+        ));
+        assert_eq!((measured.pages, measured.characters), (Some(4), Some(156)));
+        let hint = compact(&ErrorView::new(&measured, None));
+        assert_eq!(
+            hint,
+            r#"{"error":"ocr_required","hint":"该 PDF 没有可用的文字层（4 页只取到 156 个字符），需要 OCR：请改用带文字层的版本（例如离线 OCR 后的 PDF 或文本），或在支持 OCR 的服务上重新 open。"}"#
+        );
+        let hint = super::hint(&measured);
+        assert!(hint.contains('4') && hint.contains("156"), "{hint}");
+        assert!(hint.contains("离线 OCR 后的 PDF 或文本"), "{hint}");
+        assert!(hint.contains("在支持 OCR 的服务上重新 open"), "{hint}");
+        assert!(!hint.contains('/'), "a hint never carries a path: {hint}");
+    }
+
+    #[test]
+    fn ocr_required_hint_without_evidence_keeps_both_routes_and_no_number() {
+        for error in [
+            ApplicationError::OcrRequired(OcrRequiredDetail::unmeasured()),
+            ApplicationError::OcrNoSupportedProjection,
+            ApplicationError::OcrFailed,
+            ApplicationError::OcrUnavailable,
+        ] {
+            let mapped = ReadingError::from(error);
+            assert_eq!(mapped.code.as_str(), "ocr_required");
+            assert_eq!((mapped.pages, mapped.characters), (None, None));
+            let hint = super::hint(&mapped);
+            assert!(!hint.chars().any(|c| c.is_ascii_digit()), "{hint}");
+            assert!(hint.contains("离线 OCR 后的 PDF 或文本"), "{hint}");
+            assert!(hint.contains("在支持 OCR 的服务上重新 open"), "{hint}");
+            assert!(!hint.contains('/'), "a hint never carries a path: {hint}");
+        }
     }
 
     #[test]

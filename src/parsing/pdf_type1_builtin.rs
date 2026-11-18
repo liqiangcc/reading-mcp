@@ -371,8 +371,9 @@ fn glyph_name_units(name: &[u8]) -> Option<Vec<u16>> {
 }
 
 /// TeX's names for the slots that matter to a reader: the OT1 ligatures as
-/// plain letters (so search and quoting see `ffi`, not U+FB03), and the symbols
-/// whose Adobe Glyph List entry would otherwise be missed or wrong.
+/// plain letters (so search and quoting see `ffi`, not U+FB03), the symbols
+/// whose Adobe Glyph List entry names a different glyph than TeX draws, and the
+/// names the list does not have at all (TeX Gyre's math and text fonts).
 fn tex_glyph_name(name: &[u8]) -> Option<&'static str> {
     Some(match name {
         b"ff" | b"f_f" => "ff",
@@ -384,6 +385,29 @@ fn tex_glyph_name(name: &[u8]) -> Option<&'static str> {
         b"periodcentered" => "\u{00b7}",
         b"dotlessi" => "\u{0131}",
         b"dotlessj" => "\u{0237}",
+        // TeX's triangles point the other way round from the list's small ones.
+        b"triangleleft" => "\u{25c1}",
+        b"triangleright" => "\u{25b7}",
+        b"coproduct" => "\u{2210}",
+        b"negationslash" => "\u{0338}",
+        b"phi1" => "\u{03d5}",
+        b"angbracketleft" => "\u{27e8}",
+        b"angbracketright" => "\u{27e9}",
+        b"arrowhookleft" => "\u{21a9}",
+        b"arrowhookright" => "\u{21aa}",
+        b"mapsto" => "\u{21a6}",
+        // Oldstyle figures are still the digit a reader searches for; the list
+        // puts them in the private use area.
+        b"zerooldstyle" => "0",
+        b"oneoldstyle" => "1",
+        b"twooldstyle" => "2",
+        b"threeoldstyle" => "3",
+        b"fouroldstyle" => "4",
+        b"fiveoldstyle" => "5",
+        b"sixoldstyle" => "6",
+        b"sevenoldstyle" => "7",
+        b"eightoldstyle" => "8",
+        b"nineoldstyle" => "9",
         _ => return None,
     })
 }
@@ -480,6 +504,22 @@ mod tests {
         assert_eq!(glyph_name_units(b"alpha").as_deref(), Some(&[0x3b1][..]));
         assert_eq!(glyph_name_units(b"Gamma").as_deref(), Some(&[0x393][..]));
         assert_eq!(glyph_name_units(b"uni4E2D").as_deref(), Some(&[0x4e2d][..]));
+        // TeX Gyre's names: the list's small triangles point the other way, its
+        // oldstyle figures sit in the private use area, and `coproduct` is a
+        // different glyph from the one TeX draws.
+        assert_eq!(
+            glyph_name_units(b"triangleleft").as_deref(),
+            Some(&[0x25c1][..])
+        );
+        assert_eq!(
+            glyph_name_units(b"threeoldstyle").as_deref(),
+            Some(&[0x33][..])
+        );
+        assert_eq!(
+            glyph_name_units(b"coproduct").as_deref(),
+            Some(&[0x2210][..])
+        );
+        assert_eq!(glyph_name_units(b"mapsto").as_deref(), Some(&[0x21a6][..]));
         assert_eq!(glyph_name_units(b"notaglyphname"), None);
     }
 

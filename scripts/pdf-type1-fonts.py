@@ -366,10 +366,7 @@ def main() -> int:
             if not font.get("population") or font["targeted"]:
                 continue
             key = (font["program_kind"] or "none", font["builtin"] or "-",
-                   "yes" if font.get("type_key") else "no",
-                   (font.get("encoding_kind") or "-")
-                   + (":" + font["encoding_resolved"].replace("|", "/")[:60]
-                      if font.get("encoding_resolved") else ""))
+                   "yes" if font.get("type_key") else "no", font.get("encoding_kind") or "-")
             bucket = reasons.setdefault(key, {"fonts": 0, "documents": set(), "probe": ""})
             bucket["fonts"] += 1
             bucket["documents"].add(row["id"])

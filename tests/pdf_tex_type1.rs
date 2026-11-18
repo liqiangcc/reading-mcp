@@ -40,23 +40,30 @@ async fn the_pdftex_fixture_decodes_its_builtin_type1_encoding() {
         .expect("the TeX fixture parses");
     let mut text = String::new();
     section_text(&document.root_sections, &mut text);
-    // Inter-word spaces and superscript layout are later PDF-6 tasks; this test
-    // only cares about the characters, so whitespace runs collapse to one space.
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lowered = flat.to_lowercase();
+    // Inter-word spaces, superscript layout and the line breaks lopdf inserts at
+    // every text object are later PDF-6 tasks, so this test only asserts the
+    // characters: whitespace is dropped before matching.
+    let compact = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let lowered = compact.to_lowercase();
 
     for word in ["efficient", "finance", "first", "fluffy", "affluent"] {
         assert!(lowered.contains(word), "{word:?} missing from {text:?}");
     }
     // CMMI's `period` at 0x3A used to decode as `:`.
-    assert!(flat.contains("0.5%"), "0.5% missing from {text:?}");
-    assert!(!flat.contains("0:5"), "0:5 is still there in {text:?}");
+    assert!(compact.contains("0.5%"), "0.5% missing from {text:?}");
+    assert!(!compact.contains("0:5"), "0:5 is still there in {text:?}");
     // CMSY's `minus` at 0x00 used to be dropped.
-    assert!(flat.contains('\u{2212}'), "no U+2212 in {text:?}");
-    assert!(flat.contains("\u{2212}12"), "no -12 in {text:?}");
-    assert!(flat.contains('\u{3b1}'), "no alpha in {text:?}");
+    assert!(compact.contains('\u{2212}'), "no U+2212 in {text:?}");
+    assert!(compact.contains("\u{2212}12"), "no -12 in {text:?}");
+    assert!(compact.contains('\u{3b1}'), "no alpha in {text:?}");
+    // The ligatures are plain letters, not the U+FB00 block.
+    assert!(!text.contains('\u{fb00}'), "U+FB00 in {text:?}");
+    assert!(!text.contains('\u{fb03}'), "U+FB03 in {text:?}");
     assert!(
-        flat.contains("plain text"),
+        compact.contains("plaintext"),
         "plain text missing from {text:?}"
     );
 }

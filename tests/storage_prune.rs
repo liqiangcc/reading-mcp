@@ -109,14 +109,14 @@ fn seed_orphan_rows(connection: &Connection, orphan: &Document) {
     connection
         .execute(
             "INSERT INTO section_layout_v2(
-                doc_key, section_key, section_id, char_len, paragraph_coverage_json, plan_error,
-                paragraph_count, sentence_count, chunk_count, sorted_flags,
+                doc_key, section_key, section_id, id_hash, char_len, paragraph_coverage,
+                plan_error, paragraph_count, sentence_count, chunk_count, sorted_flags,
                 total_items_paragraph_preserve, total_items_paragraph_eligible,
                 total_items_sentence_preserve, total_items_sentence_eligible,
-                coverage_paragraph_preserve_json, coverage_paragraph_eligible_json,
-                coverage_sentence_preserve_json, coverage_sentence_eligible_json)
-             VALUES (?1, 0, 'section://orphan/root', 0, NULL, NULL, 0, 0, 0, 0,
-                     0, 0, 0, 0, '[]', '[]', '[]', '[]')",
+                coverage_paragraph_preserve, coverage_paragraph_eligible,
+                coverage_sentence_preserve, coverage_sentence_eligible)
+             VALUES (?1, 0, 'section://orphan/root', 0, 0, NULL, NULL, 0, 0, 0, 0,
+                     0, 0, 0, 0, x'01', x'01', x'01', x'01')",
             params![ORPHAN_DOC_KEY],
         )
         .expect("section layout row should be inserted");

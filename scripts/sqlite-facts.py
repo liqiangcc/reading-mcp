@@ -177,28 +177,28 @@ def metadata_table_facts(connection, table: str) -> tuple[int, int]:
 
 LAYOUT_TABLES = ("section_layout_v2", "section_layout_chunk_v2")
 
-# The `section_layout_v2` columns whose bytes are reported one by one.
-HEADER_COLUMNS = (
-    "section_id",
-    "paragraph_coverage_json",
-    "plan_error",
-    "coverage_paragraph_preserve_json",
-    "coverage_paragraph_eligible_json",
-    "coverage_sentence_preserve_json",
-    "coverage_sentence_eligible_json",
+# The four stream coverages of `section_layout_v2`, named without the suffix the side's schema uses:
+# v11 keeps them as `..._json` text, LAYOUT-1 keeps them as blobs under the bare name. The probe
+# reports whichever columns the database has, so one run describes both sides.
+STREAM_COVERAGES = (
+    "coverage_paragraph_preserve",
+    "coverage_paragraph_eligible",
+    "coverage_sentence_preserve",
+    "coverage_sentence_eligible",
 )
 
 # Every statement `src/infrastructure/sqlite.rs` runs against either layout table, in the order the
-# file defines them, with the placeholder values bound from the stored document. `?1` and `?2` of a
-# lookup are the document key and a section key; `?3` is whatever the statement ranges over.
-HEADER_HEADER_SELECT = (
-    "SELECT section_key, char_len, paragraph_coverage_json, plan_error,"
+# file defines them, with the placeholder values bound from the stored document. The two id lookups
+# are the ones LAYOUT-1 changed, so they are spelled for whichever schema the database has: v11 finds
+# a section by its id text, v12 by a 64-bit hash of that id.
+HEADER_SELECT = (
+    "SELECT section_key, char_len, {paragraph_coverage}, plan_error,"
     " paragraph_count, sentence_count, chunk_count,"
     " total_items_paragraph_preserve, total_items_paragraph_eligible,"
     " total_items_sentence_preserve, total_items_sentence_eligible,"
-    " coverage_paragraph_preserve_json, coverage_paragraph_eligible_json,"
-    " coverage_sentence_preserve_json, coverage_sentence_eligible_json"
-    " FROM section_layout_v2 WHERE doc_key = ?1 AND section_id = ?2"
+    " {coverage_paragraph_preserve}, {coverage_paragraph_eligible},"
+    " {coverage_sentence_preserve}, {coverage_sentence_eligible}"
+    " FROM section_layout_v2"
 )
 CHUNK_SELECT = (
     "SELECT chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot,"
@@ -207,116 +207,167 @@ CHUNK_SELECT = (
     " FROM section_layout_chunk_v2"
 )
 
-LAYOUT_QUERIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    (
-        "header_char_len_by_key",
-        "SELECT char_len FROM section_layout_v2 WHERE doc_key = ?1 AND section_key = ?2",
-        ("doc_key", "section_key"),
-    ),
-    (
-        "header_char_lens_by_doc",
-        "SELECT char_len FROM section_layout_v2 WHERE doc_key = ?1 ORDER BY section_key",
-        ("doc_key",),
-    ),
-    (
-        "header_section_keys",
-        "SELECT l.section_id, l.section_key FROM section_layout_v2 l"
-        " WHERE l.doc_key = ?1 ORDER BY l.section_key",
-        ("doc_key",),
-    ),
-    (
-        "header_sections",
-        "SELECT section_key, section_id, char_len FROM section_layout_v2"
-        " WHERE doc_key = ?1 ORDER BY section_key ASC",
-        ("doc_key",),
-    ),
-    (
-        "document_exists_with_layout",
-        "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1"
-        " AND EXISTS (SELECT 1 FROM section_layout_v2"
-        " WHERE section_layout_v2.doc_key = text_unit_documents_v2.doc_key)",
-        ("document_id",),
-    ),
-    ("header_by_section_id", HEADER_HEADER_SELECT, ("doc_key", "section_id")),
-    (
-        "header_keys_and_ids",
-        "SELECT section_key, section_id FROM section_layout_v2"
-        " WHERE doc_key = ?1 ORDER BY section_key ASC",
-        ("doc_key",),
-    ),
-    (
-        "section_key_of_id",
-        "SELECT l.section_key FROM section_layout_v2 l"
-        " JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key"
-        " WHERE d.document_id = ?1 AND l.section_id = ?2",
-        ("document_id", "section_id"),
-    ),
-    (
-        "section_id_of_key",
-        "SELECT l.section_id FROM section_layout_v2 l"
-        " JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key"
-        " WHERE d.document_id = ?1 AND l.section_key = ?2",
-        ("document_id", "section_key"),
-    ),
-    (
-        "chunk_at_paragraph",
-        CHUNK_SELECT
-        + " WHERE doc_key = ?1 AND section_key = ?2"
-        " AND first_paragraph_index <= ?3 AND paragraph_count > 0"
-        " ORDER BY first_paragraph_index DESC, chunk_no DESC LIMIT 1",
-        ("doc_key", "section_key", "paragraph_index"),
-    ),
-    (
-        "chunk_at_sentence",
-        CHUNK_SELECT
-        + " WHERE doc_key = ?1 AND section_key = ?2 AND first_paragraph_index <= ?3"
-        " AND (first_paragraph_index < ?3 OR first_sentence_index <= ?4)"
-        " ORDER BY first_paragraph_index DESC, first_sentence_index DESC, chunk_no DESC LIMIT 1",
-        ("doc_key", "section_key", "paragraph_index", "sentence_index"),
-    ),
-    (
-        "chunks_from",
-        CHUNK_SELECT
-        + " WHERE doc_key = ?1 AND section_key = ?2 AND chunk_no >= ?3 ORDER BY chunk_no ASC",
-        ("doc_key", "section_key", "chunk_no"),
-    ),
-    (
-        "chunk_at_no",
-        CHUNK_SELECT + " WHERE doc_key = ?1 AND section_key = ?2 AND chunk_no = ?3",
-        ("doc_key", "section_key", "chunk_no"),
-    ),
-    (
-        "stream_position_paragraph_preserve",
-        CHUNK_SELECT
-        + " WHERE doc_key = ?1 AND section_key = ?2 AND paragraph_entry <= ?3"
-        " AND paragraph_count > 0 ORDER BY paragraph_entry DESC, chunk_no DESC LIMIT 1",
-        ("doc_key", "section_key", "position"),
-    ),
-    (
-        "stream_position_paragraph_eligible",
-        CHUNK_SELECT
-        + " WHERE doc_key = ?1 AND section_key = ?2 AND eligible_paragraph_entry <= ?3"
-        " AND paragraph_count > 0"
-        " ORDER BY eligible_paragraph_entry DESC, chunk_no DESC LIMIT 1",
-        ("doc_key", "section_key", "position"),
-    ),
-    (
-        "stream_position_sentence_preserve",
-        CHUNK_SELECT
-        + " WHERE doc_key = ?1 AND section_key = ?2 AND sentence_entry <= ?3"
-        " AND (sentence_count > 0 OR paragraph_count > 0)"
-        " ORDER BY sentence_entry DESC, chunk_no DESC LIMIT 1",
-        ("doc_key", "section_key", "position"),
-    ),
-    (
-        "stream_position_sentence_eligible",
-        CHUNK_SELECT
-        + " WHERE doc_key = ?1 AND section_key = ?2 AND eligible_sentence_entry <= ?3"
-        " AND (sentence_count > 0 OR paragraph_count > 0)"
-        " ORDER BY eligible_sentence_entry DESC, chunk_no DESC LIMIT 1",
-        ("doc_key", "section_key", "position"),
-    ),
-)
+
+def layout_queries(compact: bool) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Every layout statement, with the id lookup the database's schema uses."""
+    paragraph_coverage = "paragraph_coverage" if compact else "paragraph_coverage_json"
+    coverage = {
+        name: name if compact else f"{name}_json" for name in STREAM_COVERAGES
+    }
+    header_select = HEADER_SELECT.format(paragraph_coverage=paragraph_coverage, **coverage)
+    if compact:
+        header_lookup = header_select + " WHERE doc_key = ?1 AND id_hash = ?2"
+        key_of_id = (
+            "SELECT section_id, section_key FROM section_layout_v2"
+            " WHERE doc_key = ?1 AND id_hash = ?2"
+        )
+        id_lookup_parameters = ("doc_key", "id_hash")
+        key_lookup_parameters = ("doc_key", "id_hash")
+    else:
+        header_lookup = header_select + " WHERE doc_key = ?1 AND section_id = ?2"
+        key_of_id = (
+            "SELECT l.section_key FROM section_layout_v2 l"
+            " JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key"
+            " WHERE d.document_id = ?1 AND l.section_id = ?2"
+        )
+        id_lookup_parameters = ("doc_key", "section_id")
+        key_lookup_parameters = ("document_id", "section_id")
+    return [
+        (
+            "header_char_len_by_key",
+            "SELECT char_len FROM section_layout_v2 WHERE doc_key = ?1 AND section_key = ?2",
+            ("doc_key", "section_key"),
+        ),
+        (
+            "header_char_lens_by_doc",
+            "SELECT char_len FROM section_layout_v2 WHERE doc_key = ?1 ORDER BY section_key",
+            ("doc_key",),
+        ),
+        (
+            "header_section_keys",
+            "SELECT l.section_id, l.section_key FROM section_layout_v2 l"
+            " WHERE l.doc_key = ?1 ORDER BY l.section_key",
+            ("doc_key",),
+        ),
+        (
+            "header_sections",
+            "SELECT section_key, section_id, char_len FROM section_layout_v2"
+            " WHERE doc_key = ?1 ORDER BY section_key ASC",
+            ("doc_key",),
+        ),
+        (
+            "document_exists_with_layout",
+            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1"
+            " AND EXISTS (SELECT 1 FROM section_layout_v2"
+            " WHERE section_layout_v2.doc_key = text_unit_documents_v2.doc_key)",
+            ("document_id",),
+        ),
+        ("header_by_section_id", header_lookup, id_lookup_parameters),
+        (
+            "header_keys_and_ids",
+            "SELECT section_key, section_id FROM section_layout_v2"
+            " WHERE doc_key = ?1 ORDER BY section_key ASC",
+            ("doc_key",),
+        ),
+        ("section_key_of_id", key_of_id, key_lookup_parameters),
+        (
+            "doc_key_of_document_id",
+            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+            ("document_id",),
+        ),
+        (
+            "section_id_of_key",
+            "SELECT l.section_id FROM section_layout_v2 l"
+            " JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key"
+            " WHERE d.document_id = ?1 AND l.section_key = ?2",
+            ("document_id", "section_key"),
+        ) if not compact else (
+            "section_id_of_key",
+            "SELECT section_id FROM section_layout_v2"
+            " WHERE doc_key = ?1 AND section_key = ?2",
+            ("doc_key", "section_key"),
+        ),
+        (
+            "chunk_at_paragraph",
+            CHUNK_SELECT
+            + " WHERE doc_key = ?1 AND section_key = ?2"
+            " AND first_paragraph_index <= ?3 AND paragraph_count > 0"
+            " ORDER BY first_paragraph_index DESC, chunk_no DESC LIMIT 1",
+            ("doc_key", "section_key", "paragraph_index"),
+        ),
+        (
+            "chunk_at_sentence",
+            CHUNK_SELECT
+            + " WHERE doc_key = ?1 AND section_key = ?2 AND first_paragraph_index <= ?3"
+            " AND (first_paragraph_index < ?3 OR first_sentence_index <= ?4)"
+            " ORDER BY first_paragraph_index DESC, first_sentence_index DESC, chunk_no DESC LIMIT 1",
+            ("doc_key", "section_key", "paragraph_index", "sentence_index"),
+        ),
+        (
+            "chunks_from",
+            CHUNK_SELECT
+            + " WHERE doc_key = ?1 AND section_key = ?2 AND chunk_no >= ?3 ORDER BY chunk_no ASC",
+            ("doc_key", "section_key", "chunk_no"),
+        ),
+        (
+            "chunk_at_no",
+            CHUNK_SELECT + " WHERE doc_key = ?1 AND section_key = ?2 AND chunk_no = ?3",
+            ("doc_key", "section_key", "chunk_no"),
+        ),
+        (
+            "stream_position_paragraph_preserve",
+            CHUNK_SELECT
+            + " WHERE doc_key = ?1 AND section_key = ?2 AND paragraph_entry <= ?3"
+            " AND paragraph_count > 0 ORDER BY paragraph_entry DESC, chunk_no DESC LIMIT 1",
+            ("doc_key", "section_key", "position"),
+        ),
+        (
+            "stream_position_paragraph_eligible",
+            CHUNK_SELECT
+            + " WHERE doc_key = ?1 AND section_key = ?2 AND eligible_paragraph_entry <= ?3"
+            " AND paragraph_count > 0"
+            " ORDER BY eligible_paragraph_entry DESC, chunk_no DESC LIMIT 1",
+            ("doc_key", "section_key", "position"),
+        ),
+        (
+            "stream_position_sentence_preserve",
+            CHUNK_SELECT
+            + " WHERE doc_key = ?1 AND section_key = ?2 AND sentence_entry <= ?3"
+            " AND (sentence_count > 0 OR paragraph_count > 0)"
+            " ORDER BY sentence_entry DESC, chunk_no DESC LIMIT 1",
+            ("doc_key", "section_key", "position"),
+        ),
+        (
+            "stream_position_sentence_eligible",
+            CHUNK_SELECT
+            + " WHERE doc_key = ?1 AND section_key = ?2 AND eligible_sentence_entry <= ?3"
+            " AND (sentence_count > 0 OR paragraph_count > 0)"
+            " ORDER BY eligible_sentence_entry DESC, chunk_no DESC LIMIT 1",
+            ("doc_key", "section_key", "position"),
+        ),
+    ]
+
+
+def table_exists(connection, table: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        is not None
+    )
+
+
+def table_columns(connection, table: str) -> list[str]:
+    return [str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")]
+
+
+def section_row_hash(value: str) -> int:
+    """The FNV-1a 64 of a section id, as `section_row_hash` in the store computes it."""
+    hash_value = 0xCBF29CE484222325
+    for byte in value.encode("utf-8"):
+        hash_value ^= byte
+        hash_value = (hash_value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return hash_value - (1 << 64) if hash_value >= (1 << 63) else hash_value
 
 
 def layout_bindings(connection) -> dict[str, object] | None:
@@ -349,20 +400,12 @@ def layout_bindings(connection) -> dict[str, object] | None:
         "document_id": document_id,
         "section_key": section_key,
         "section_id": section_id,
+        "id_hash": section_row_hash(str(section_id)),
         "chunk_no": chunk_no,
         "paragraph_index": int(first_paragraph_index) + int(paragraph_count),
         "sentence_index": int(first_sentence_index) + 1,
         "position": 0,
     }
-
-
-def table_exists(connection, table: str) -> bool:
-    return (
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
-        ).fetchone()
-        is not None
-    )
 
 
 def layout_detail_lines(connection, label: str, store_bytes: int) -> list[str]:
@@ -371,7 +414,7 @@ def layout_detail_lines(connection, label: str, store_bytes: int) -> list[str]:
         return [f"layout-missing input={label} tables={'+'.join(LAYOUT_TABLES)}"]
     lines: list[str] = []
 
-    objects = {}
+    objects: dict[str, int] = {}
     try:
         objects = {
             str(name): int(size or 0)
@@ -398,7 +441,8 @@ def layout_detail_lines(connection, label: str, store_bytes: int) -> list[str]:
     )
 
     header_rows = connection.execute("SELECT COUNT(*) FROM section_layout_v2").fetchone()[0]
-    for column in HEADER_COLUMNS:
+    header_columns = table_columns(connection, "section_layout_v2")
+    for column in header_columns:
         total, present = connection.execute(
             f"SELECT COALESCE(SUM(length(CAST({column} AS BLOB))), 0),"
             f" COALESCE(SUM({column} IS NOT NULL), 0) FROM section_layout_v2"
@@ -408,12 +452,10 @@ def layout_detail_lines(connection, label: str, store_bytes: int) -> list[str]:
             f" bytes={int(total)} present_rows={int(present)} rows={int(header_rows)}"
         )
 
-    coverage_columns = (
-        "coverage_paragraph_preserve_json",
-        "coverage_paragraph_eligible_json",
-        "coverage_sentence_preserve_json",
-        "coverage_sentence_eligible_json",
-    )
+    compact = "id_hash" in header_columns
+    suffix = "" if compact else "_json"
+    coverage_columns = [f"{name}{suffix}" for name in STREAM_COVERAGES]
+    paragraph_coverage = "paragraph_coverage" if compact else "paragraph_coverage_json"
     all_equal, preserve_equal, sentence_equal, empty = connection.execute(
         "SELECT"
         f" COALESCE(SUM({coverage_columns[0]} = {coverage_columns[1]}"
@@ -425,7 +467,7 @@ def layout_detail_lines(connection, label: str, store_bytes: int) -> list[str]:
         " FROM section_layout_v2"
     ).fetchone()
     null_paragraph_coverage = connection.execute(
-        "SELECT COUNT(*) FROM section_layout_v2 WHERE paragraph_coverage_json IS NULL"
+        f"SELECT COUNT(*) FROM section_layout_v2 WHERE {paragraph_coverage} IS NULL"
     ).fetchone()[0]
     lines.append(
         f"layout-coverage input={label} rows={int(header_rows)}"
@@ -462,7 +504,7 @@ def layout_detail_lines(connection, label: str, store_bytes: int) -> list[str]:
     bindings = layout_bindings(connection)
     if bindings is None:
         return lines
-    for name, sql, names in LAYOUT_QUERIES:
+    for name, sql, names in layout_queries(compact):
         values = tuple(bindings[placeholder] for placeholder in names)
         try:
             plan = connection.execute("EXPLAIN QUERY PLAN " + sql, values).fetchall()

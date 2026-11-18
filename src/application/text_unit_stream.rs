@@ -23,7 +23,11 @@ pub const TEXT_UNIT_STREAM_VERSION: &str = "text-unit-stream/v1";
 ///
 /// v11 (SEC-3c) changes the `document_sections_v1` row shape: the location is a compact positional
 /// blob, the title a tagged raw/zlib blob, and the id lookup index is `(document_id, id_hash)`.
-pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v11";
+///
+/// v12 (LAYOUT-1) changes the `section_layout_v2` row shape: the paragraph coverage and the four
+/// stream coverages are varint blobs instead of JSON text, the paragraph coverage no longer repeats
+/// the section id it is stored under, and the section id lookup index is `(doc_key, id_hash)`.
+pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v12";
 
 /// A borrowed unit of a section stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

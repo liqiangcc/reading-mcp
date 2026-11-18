@@ -522,9 +522,12 @@ jobs:
           import re
 
           FIELDS = re.compile(r"(\w+)=(\S+)")
+          # Both sides' objects are shown, in this order first, then anything else seen: the base
+          # has the `UNIQUE(doc_key, section_id)` autoindex and the branch has `idx_..._id`.
           LAYOUT_OBJECTS = (
               "section_layout_v2",
               "sqlite_autoindex_section_layout_v2_1",
+              "idx_section_layout_v2_id",
               "idx_section_layout_v2_section_key",
               "section_layout_chunk_v2",
               "sqlite_autoindex_section_layout_chunk_v2_1",
@@ -534,13 +537,17 @@ jobs:
               "idx_section_layout_chunk_v2_eligible_sentence_entry",
               "idx_section_layout_chunk_v2_first",
           )
+          # The branch renamed `..._json` to a blob of the same value, so the suffix is stripped and
+          # both sides line up in one column per value.
           LAYOUT_COLUMNS = (
               "section_id",
-              "paragraph_coverage_json",
-              "coverage_paragraph_preserve_json",
-              "coverage_paragraph_eligible_json",
-              "coverage_sentence_preserve_json",
-              "coverage_sentence_eligible_json",
+              "id_hash",
+              "paragraph_coverage",
+              "plan_error",
+              "coverage_paragraph_preserve",
+              "coverage_paragraph_eligible",
+              "coverage_sentence_preserve",
+              "coverage_sentence_eligible",
           )
 
 
@@ -598,6 +605,14 @@ jobs:
           labels = sorted(
               {label for side in sides for label in (shares[side] or {}) if label is not None}
             )
+          seen_objects = {
+              entry.get("object")
+              for side in sides
+              for entries in dbstat[side].values()
+              for entry in entries
+          }
+          objects_order = [name for name in LAYOUT_OBJECTS if name in seen_objects]
+          objects_order += sorted(seen_objects - set(objects_order))
           for label in labels:
               for side in ("base", "head"):
                   share = (shares[side].get(label) or [{}])[0]
@@ -608,8 +623,13 @@ jobs:
                   cells = [label, side, share.get("store_bytes", "-"),
                            share.get("layout_bytes", "-"),
                            share.get("layout_share_pct", "-")]
-                  cells += [str(objects.get(name, 0)) for name in LAYOUT_OBJECTS]
+                  cells += [str(objects.get(name, 0)) for name in objects_order]
                   rows.append("| " + " | ".join(cells) + " |")
+          rows[0] = (
+              "| input | side | store bytes | layout bytes | layout share | "
+              + " | ".join(objects_order) + " |"
+          )
+          rows[1] = "|---|---|---:|---:|---:|" + "---:|" * len(objects_order)
           table = "\n".join(rows) + "\n"
 
           # 2. The header table's column bytes.
@@ -618,17 +638,29 @@ jobs:
               "| input | side | " + " | ".join(LAYOUT_COLUMNS) + " |",
               "|---|---|" + "---:|" * len(LAYOUT_COLUMNS),
           ]
+          seen_columns = {
+              str(entry.get("column") or "").removesuffix("_json")
+              for side in sides
+              for entries in columns[side].values()
+              for entry in entries
+          }
+          columns_order = [name for name in LAYOUT_COLUMNS if name in seen_columns]
+          columns_order += sorted(seen_columns - set(columns_order))
+          rows[0] = "| input | side | " + " | ".join(columns_order) + " |"
+          rows[1] = "|---|---|" + "---:|" * len(columns_order)
           for label in labels:
               for side in ("base", "head"):
                   by_column = {
-                      entry.get("column"): number(entry.get("bytes"))
+                      str(entry.get("column") or "").removesuffix("_json"): number(
+                          entry.get("bytes")
+                      )
                       for entry in columns[side].get(label, [])
                   }
                   if not by_column:
                       continue
                   rows.append(
                       "| " + " | ".join(
-                          [label, side] + [str(by_column.get(name, 0)) for name in LAYOUT_COLUMNS]
+                          [label, side] + [str(by_column.get(name, 0)) for name in columns_order]
                       ) + " |"
                   )
           table += "\n" + "\n".join(rows) + "\n"

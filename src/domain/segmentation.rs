@@ -1820,8 +1820,9 @@ mod tests {
             ("Number 3642SCIENCE Strong Inference", 1),
             // An author list and a running header glued to a page number.
             ("10GUO-DONGHONGANDZILILIM", 1),
-            // A single capital continued by lowercase: two words merged.
-            ("Birbal:Anefficient7Binstruct-model", 1),
+            // A single capital continued by lowercase: two words merged. The `:A` before it is a
+            // second event of its own kind, so the pair counts two.
+            ("Birbal:Anefficient7Binstruct-model", 2),
             ("the 5Gnetwork layer", 1),
             // A capital run of two, which is a unit but not the shape the exemption names.
             ("474GB of memory", 1),

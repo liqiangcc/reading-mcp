@@ -1661,12 +1661,13 @@ def aggregate_mode(args) -> int:
                                      ("U+FFFD + private-use share", bad, None)):
         if not values:
             continue
-        below = (sum(1 for value in values if value is not None and value < threshold)
-                 if threshold is not None else "-")
+        below_threshold = (sum(1 for value in values if value is not None and value < threshold)
+                           if threshold is not None else "-")
         lines.append(f"| {label} | {fmt(statistics.median(values), 4)} | "
                      f"{fmt(percentile(values, 0.05), 4)} | {fmt(percentile(values, 0.25), 4)} | "
                      f"{fmt(percentile(values, 0.75), 4)} | {fmt(percentile(values, 0.95), 4)} | "
-                     f"{fmt(min(values), 4)} | {fmt(max(values), 4)} | {below} |")
+                     f"{fmt(min(values), 4)} | {fmt(max(values), 4)} | "
+                     f"{below_threshold} |")
     lines += ["", "| Id | Pages | Containment | Backend chars | Reference chars | Char ratio | "
               "U+FFFD | Private use | Worst page | Page reference chars | Page backend chars | "
               "Page content KiB | Page text ops | Form text ops on the page |",

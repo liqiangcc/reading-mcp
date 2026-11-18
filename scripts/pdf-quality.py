@@ -941,6 +941,13 @@ def measure_units(units: list[dict], reference: dict, pages: list[int | None],
 
 def header_measurement(reference: dict, units: list[dict]) -> dict:
     candidates = header_candidates(reference["lines"], reference["pages"])
+    counts: collections.Counter = collections.Counter()
+    for lines in reference["lines"]:
+        for line in set(lines):
+            counts[line] += 1
+    top_lines = [{"line": clipped(line, 120), "pages": count,
+                  "share": round(count / reference["pages"], 3) if reference["pages"] else None}
+                 for line, count in counts.most_common(5)]
     unit_texts = [normalize(unit["text"]) for unit in units]
     results = []
     totals: collections.Counter = collections.Counter()
@@ -953,7 +960,8 @@ def header_measurement(reference: dict, units: list[dict]) -> dict:
                         "kind": candidate["kind"], "pages": candidate["pages"],
                         "cases": placement["cases"],
                         "positions": placement["positions"]})
-    return {"candidates": results, "cases": dict(totals), "positions": dict(positions)}
+    return {"candidates": results, "cases": dict(totals), "positions": dict(positions),
+            "top_lines": top_lines, "lines_total": sum(len(lines) for lines in reference["lines"])}
 
 
 def loss_measurement(path: str, reference: dict, units: list[dict],
@@ -1411,6 +1419,14 @@ def aggregate_mode(args) -> int:
     lines += ["", "| Where the line sits on its page | Occurrences |", "| --- | --- |"]
     for position in PAGE_POSITIONS:
         lines.append(f"| `{position}` | {position_totals.get(position, 0)} |")
+    lines += ["", "| Id | Lines | Most repeated line (pages, share of pages) |",
+              "| --- | --- | --- |"]
+    for doc in docs:
+        headers = doc.get("headers") or {}
+        top = (headers.get("top_lines") or [{}])[0]
+        lines.append(f"| {doc['id']} | {headers.get('lines_total')} | "
+                     f"`{(top.get('line') or '')[:60]}` ({top.get('pages')}, "
+                     f"{fmt(top.get('share'), 3)}) |")
     lines += ["", "| Id | Line | Kind | Pages | Cases | Position |", "| --- | --- | --- | "
                   "--- | --- | --- |"]
     for identifier, candidate in sorted(candidate_rows, key=lambda item: -item[1]["pages"])[:20]:

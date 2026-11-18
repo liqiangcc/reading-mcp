@@ -432,7 +432,8 @@ pub(crate) fn walk_section_stream(
     })
 }
 
-fn coarse_degradation(class: ParagraphContentClass) -> &'static str {
+/// The v1 degradation code of a paragraph sentence mode cannot split into sentences.
+pub(crate) fn coarse_degradation(class: ParagraphContentClass) -> &'static str {
     match class {
         ParagraphContentClass::BlockQuote | ParagraphContentClass::ListItem => {
             "flat_native_container_no_nested_textunit_evidence"
@@ -462,6 +463,17 @@ pub(crate) fn content_class(class: ParagraphContentClass) -> (TextUnitContentCla
 pub(crate) fn item_kind(class: ParagraphContentClass) -> Option<&'static str> {
     (is_non_prose_class(class) || is_coarse_structural_class(class)).then_some(class.as_str())
 }
+
+/// The v2 `kind` of a whole paragraph returned in sentence mode: its content class when it has
+/// one, and `paragraph` for a coarse prose paragraph that has none of its own. Sentence mode only
+/// returns a paragraph when the paragraph guard kept it whole, so the caller must be told the unit
+/// it got is a paragraph and not a sentence (#232).
+pub(crate) fn whole_paragraph_kind(class: ParagraphContentClass) -> &'static str {
+    item_kind(class).unwrap_or(PARAGRAPH_KIND)
+}
+
+/// The `kind` of a whole prose paragraph: the v1 `effective_kind` string of a paragraph unit.
+pub const PARAGRAPH_KIND: &str = "paragraph";
 
 fn is_non_prose_class(class: ParagraphContentClass) -> bool {
     matches!(

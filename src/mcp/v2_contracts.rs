@@ -145,7 +145,7 @@ pub struct FlatReadView {
     /// The section, only when the item is position 0 of its section stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section: Option<SectionRef>,
-    /// The lowercase snake-case content class of a coarse or non-prose item.
+    /// The lowercase snake-case `kind` of a whole paragraph returned in sentence mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,7 +176,7 @@ impl FlatReadView {
         let (at, kind, text) = match item {
             Some(item) => (
                 (item.handle != from).then_some(item.handle),
-                item.content_class,
+                item.kind,
                 Some(item.text),
             ),
             None => (None, None, None),
@@ -232,8 +232,8 @@ impl From<ReadReadingResult> for ReadView {
 
 fn item_value(item: ReadReadingItem) -> Value {
     let mut parts = vec![Value::String(item.handle), Value::String(item.text)];
-    if let Some(content_class) = item.content_class {
-        parts.push(Value::String(content_class));
+    if let Some(kind) = item.kind {
+        parts.push(Value::String(kind));
     }
     Value::Array(parts)
 }
@@ -307,6 +307,15 @@ fn cite_value(item: CiteReadingItem) -> Value {
     citation.insert("at".into(), Value::String(item.at));
     if let Some(locator) = item.locator {
         citation.insert("locator".into(), locator_value(&locator));
+    }
+    if let Some(effective_kind) = item.effective_kind {
+        citation.insert(
+            "effective_kind".into(),
+            Value::String(effective_kind.into()),
+        );
+    }
+    if let Some(degradation) = item.degradation {
+        citation.insert("degradation".into(), Value::String(degradation.into()));
     }
     if let Some(source_position) = item.source_position {
         citation.insert("src".into(), Value::String(source_position));
@@ -572,12 +581,12 @@ mod tests {
                 ReadReadingItem {
                     handle: "d3~9f2c.s12.p4.2".into(),
                     text: "…text…".into(),
-                    content_class: None,
+                    kind: None,
                 },
                 ReadReadingItem {
                     handle: "d3~9f2c.s12.p5".into(),
                     text: "…table text…".into(),
-                    content_class: Some("table".into()),
+                    kind: Some("table".into()),
                 },
             ],
             sections: vec![ReadReadingSection {
@@ -600,7 +609,7 @@ mod tests {
             items: vec![item_value(ReadReadingItem {
                 handle: "d3~9f2c.s0.p1.1".into(),
                 text: "a".into(),
-                content_class: None,
+                kind: None,
             })],
             sections: Vec::<SectionView>::new(),
             next: None,
@@ -681,11 +690,11 @@ mod tests {
         assert!(too_long_retry(&request, &ReadingError::too_long(20_000)).is_none());
     }
 
-    fn item(handle: &str, text: &str, content_class: Option<&str>) -> ReadReadingItem {
+    fn item(handle: &str, text: &str, kind: Option<&str>) -> ReadReadingItem {
         ReadReadingItem {
             handle: handle.into(),
             text: text.into(),
-            content_class: content_class.map(str::to_owned),
+            kind: kind.map(str::to_owned),
         }
     }
 
@@ -920,6 +929,8 @@ mod tests {
             items: vec![CiteReadingItem {
                 at: "d3~9f2c".into(),
                 locator: None,
+                effective_kind: None,
+                degradation: None,
                 source_position: None,
                 page: None,
                 document_id: "doc:alpha".into(),

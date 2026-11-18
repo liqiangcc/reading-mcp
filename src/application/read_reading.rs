@@ -19,7 +19,7 @@ use crate::application::short_handle::{
     CursorUnit, DocumentHandle, ReadingCursor, ReadingFrom, ReadingHandle, SectionHandle,
     handle_checksum, paragraph_handle, parse_from, sentence_handle,
 };
-use crate::application::text_unit_stream::item_kind;
+use crate::application::text_unit_stream::whole_paragraph_kind;
 use crate::domain::{DocumentId, SectionId};
 
 /// The largest `max_chars` a batch read accepts.
@@ -46,8 +46,9 @@ pub struct ReadReadingCommand {
 pub struct ReadReadingItem {
     pub handle: String,
     pub text: String,
-    /// The v1 content class of a coarse or non-prose item, in lowercase snake case.
-    pub content_class: Option<String>,
+    /// The v2 `kind` of a whole paragraph returned in sentence mode: the content class of a table,
+    /// code or container paragraph, or `paragraph` for a coarse prose one. `None` for a sentence.
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -900,11 +901,11 @@ async fn render(
     };
     Ok(ReadReadingItem {
         handle: item_handle(&handle, row),
-        // Only the sentence stream returns a whole paragraph; then the item carries the v1 content
-        // class when it is coarse or non-prose, so the caller can tell a table from prose.
-        content_class: match (unit, &row.unit) {
+        // Only the sentence stream returns a whole paragraph; then the item carries its `kind`, so
+        // the caller can tell a paragraph the guard kept whole from the sentence it asked for.
+        kind: match (unit, &row.unit) {
             (RequestedTextUnitKind::Sentence, OwnedStreamUnit::Paragraph(_)) => {
-                item_kind(row.content_class).map(str::to_owned)
+                Some(whole_paragraph_kind(row.content_class).to_owned())
             }
             _ => None,
         },

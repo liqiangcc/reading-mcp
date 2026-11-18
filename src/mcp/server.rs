@@ -769,7 +769,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Read in order; from is a document, section, paragraph or sentence handle, or next. One sentence per call unless max_chars or back is given; back returns an anchor. Follow next."
+        description = "Read in order; from is a document, section, paragraph or sentence handle, or next. One sentence per call unless max_chars or back is given; back returns an anchor. A paragraph it cannot split comes back whole, with kind=paragraph. Follow next."
     )]
     async fn read(
         &self,
@@ -921,7 +921,7 @@ impl ReadingMcpServer {
     }
 
     #[tool(
-        description = "Return the full locator of one or more handles: exact source position and document identity. Only cite returns them; use it for provenance."
+        description = "Return the full locator of one or more handles: exact source position and document identity. Only cite returns them; use it for provenance. An unsplit paragraph adds effective_kind and degradation."
     )]
     async fn cite(
         &self,

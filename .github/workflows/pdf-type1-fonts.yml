@@ -1,0 +1,66 @@
+name: PDF Type 1 font facts
+run-name: PDF Type 1 font facts (PDF-6b)
+# PDF-6b: which corpus documents use embedded Type 1 fonts with a built-in encoding and no
+# /ToUnicode (PyMuPDF font facts), and how their containment moves between two `PDF wide sweep`
+# runs. Measurement only: no product code is built or run here.
+on:
+  workflow_dispatch:
+    inputs:
+      before_run:
+        description: 'PDF wide sweep run id for the before side (empty: survey only)'
+        type: string
+        default: ''
+      after_run:
+        description: 'PDF wide sweep run id for the after side (empty: survey only)'
+        type: string
+        default: ''
+
+jobs:
+  facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf==1.28.2 2>&1 | tail -3
+      - name: Fetch the before sweep results
+        if: inputs.before_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/before"
+          gh run download "${{ inputs.before_run }}" -R "$GITHUB_REPOSITORY" \
+            -n pdf-sweep-final -D "$RUNNER_TEMP/before" 2>&1 | tail -5
+          find "$RUNNER_TEMP/before" -name '*.jsonl' | wc -l
+      - name: Fetch the after sweep results
+        if: inputs.after_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/after"
+          gh run download "${{ inputs.after_run }}" -R "$GITHUB_REPOSITORY" \
+            -n pdf-sweep-final -D "$RUNNER_TEMP/after" 2>&1 | tail -5
+          find "$RUNNER_TEMP/after" -name '*.jsonl' | wc -l
+      - name: Measure the font facts of the corpus
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/work" "$RUNNER_TEMP/type1"
+          python3 scripts/pdf-type1-fonts.py \
+            --ids scripts/pdf-sweep-ids.txt \
+            --work-dir "$RUNNER_TEMP/work" \
+            --before "$RUNNER_TEMP/before" \
+            --after "$RUNNER_TEMP/after" \
+            --out "$RUNNER_TEMP/type1/type1-fonts.jsonl" \
+            --markdown "$RUNNER_TEMP/type1/type1-fonts.md" 2>&1 | tail -200
+          cat "$RUNNER_TEMP/type1/type1-fonts.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-type1-fonts
+          path: ${{ runner.temp }}/type1/
+          if-no-files-found: warn
+          retention-days: 14

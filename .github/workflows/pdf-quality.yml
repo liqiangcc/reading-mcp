@@ -109,7 +109,9 @@ jobs:
 
   aggregate:
     needs: [probe]
-    if: always() && needs.probe.result != 'cancelled'
+    # A push without the `[quality-run]` marker skips build and probe; the aggregate must not
+    # then run against artifacts that do not exist.
+    if: always() && needs.probe.result != 'cancelled' && needs.probe.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

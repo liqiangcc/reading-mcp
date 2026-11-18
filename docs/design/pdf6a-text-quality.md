@@ -34,8 +34,9 @@ never committed.
 | quality probe, the numbers below | [`44234764166`](https://github.com/liqiangcc/reading-mcp/actions/runs/44234764166) | `b90b412` | 121 of 121 documents measured, 0 failed, 0 skipped |
 | plain `PDF wide sweep` on the same head | [`44234766502`](https://github.com/liqiangcc/reading-mcp/actions/runs/44234766502) | `b90b412` | 121 of 121 `ok`, 0 not run; outcome table identical to PDF-5a's (96 ordinary, 8 long, 17 hard) and the same 2 suspect documents |
 
-Both runs are on `b90b412`, which differs from the last commit of this branch only in this
-file's wording. Every intermediate run, including the ones that fixed the harness, is in the
+Both runs are on `b90b412`. Every commit after it touches only this note's wording or the
+workflow's job conditions, never the harness, so the numbers are the ones this branch's code
+produces. Every intermediate run, including the ones that fixed the harness, is in the
 branch's history and in the Actions list.
 
 ## What the measurement found, in one paragraph

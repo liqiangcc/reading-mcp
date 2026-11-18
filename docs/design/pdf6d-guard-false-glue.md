@@ -72,21 +72,38 @@ which is why PDF-6a named it.
 
 ## 2. The 30 most frequent `digit-run + uppercase-run` shapes
 
-| Shape | Events | | Shape | Events | | Shape | Events |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `3D` | 79 | | `2C` | 3 | | `1Q` | 2 |
-| `7B` | 25 | | `95HD` | 3 | | `14P` | 2 |
-| `2D` | 19 | | `14B` | 3 | | `6C` | 2 |
-| `8Ð` | 10 | | `1D` | 3 | | `10D` | 2 |
-| `2F` | 7 | | `43Ł` | 3 | | `2X` | 2 |
-| `2A` | 6 | | `25Ł` | 3 | | `10M` | 2 |
-| `1M` | 6 | | `3M` | 3 | | `3T` | 2 |
-| `2H` | 5 | | `4GUO` | 2 | | | |
-| `2L` | 5 | | `443X` | 2 | | | |
-| `59E` | 4 | | `4JESSICAJAYANDBENJAMINLEES` | 2 | | | |
-| `29E` | 4 | | | | | | |
-| `2B` | 4 | | | | | | |
-| `2S` | 3 | | | | | | |
+| Shape | Events |
+| --- | --- |
+| `3D` | 79 |
+| `7B` | 25 |
+| `2D` | 19 |
+| `8Ð` | 10 |
+| `2F` | 7 |
+| `2A` | 6 |
+| `1M` | 6 |
+| `2H` | 5 |
+| `2L` | 5 |
+| `59E` | 4 |
+| `29E` | 4 |
+| `2B` | 4 |
+| `2S` | 3 |
+| `2C` | 3 |
+| `95HD` | 3 |
+| `14B` | 3 |
+| `1D` | 3 |
+| `43Ł` | 3 |
+| `25Ł` | 3 |
+| `3M` | 3 |
+| `4GUO` | 2 |
+| `443X` | 2 |
+| `4JESSICAJAYANDBENJAMINLEES` | 2 |
+| `1Q` | 2 |
+| `14P` | 2 |
+| `6C` | 2 |
+| `10D` | 2 |
+| `2X` | 2 |
+| `10M` | 2 |
+| `3T` | 2 |
 
 Three families sit in that table. Model sizes and dimensions (`3D` 79, `7B` 25, `2D` 19, `2F` 7,
 `2A` 6, `1M` 6, `2H` 5, `2L` 5, `14B`, `1D`, `3M`) are undamaged text. Wrong code points (`8Ð`,

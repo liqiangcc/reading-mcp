@@ -1854,6 +1854,165 @@ mod tests {
         bytes
     }
 
+    /// A Type 1 font whose encoding lives in its program: a `/FontFile` with a
+    /// cleartext header and no `/ToUnicode` unless `to_unicode` is given.
+    fn type1_builtin_font(
+        document: &mut LopdfDocument,
+        clear: &[u8],
+        differences: Option<Vec<Object>>,
+        to_unicode: Option<&[u8]>,
+    ) -> ObjectId {
+        let program = document.add_object(Stream::new(
+            dictionary! { "Length1" => clear.len() as i64 },
+            clear.to_vec(),
+        ));
+        let descriptor = document.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "CMR10",
+            "Flags" => 4_i64,
+            "FontBBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            "ItalicAngle" => 0_i64,
+            "Ascent" => 700_i64,
+            "Descent" => -200_i64,
+            "CapHeight" => 700_i64,
+            "StemV" => 80_i64,
+            "FontFile" => program,
+        });
+        let mut font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "CMR10",
+            "FirstChar" => 0_i64,
+            "LastChar" => 255_i64,
+            "FontDescriptor" => descriptor,
+        };
+        if let Some(differences) = differences {
+            font.set(
+                "Encoding",
+                dictionary! {
+                    "Type" => "Encoding",
+                    "Differences" => differences,
+                },
+            );
+        }
+        if let Some(to_unicode) = to_unicode {
+            let stream = document.add_object(Stream::new(Dictionary::new(), to_unicode.to_vec()));
+            font.set("ToUnicode", stream);
+        }
+        document.add_object(font)
+    }
+
+    const CMR10_HEADER: &[u8] = b"%!PS-AdobeFont-1.0: CMR10 003.002\n\
+        /FontName /CMR10 def\n\
+        /Encoding 256 array\n\
+        0 1 255 {1 index exch /.notdef put} for\n\
+        dup 11 /ff put\n\
+        dup 12 /fi put\n\
+        dup 14 /ffi put\n\
+        dup 58 /period put\n\
+        dup 65 /a put\n\
+        readonly def\n";
+
+    /// PDF-6b: the OT1 ligature slots and the symbols whose StandardEncoding
+    /// meaning is wrong come from the program's own encoding.
+    #[test]
+    fn type1_builtin_font_decodes_ligatures_and_symbols() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = type1_builtin_font(&mut document, CMR10_HEADER, None, None);
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[14, 58, 11]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "ffi.ff");
+        assert_eq!(old_page_texts(&document)[0].text, ":");
+    }
+
+    #[test]
+    fn type1_builtin_font_keeps_the_codes_its_encoding_does_not_name() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = type1_builtin_font(&mut document, CMR10_HEADER, None, None);
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[66, 65]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // 66 is not named by the program: StandardEncoding's "B" stays.
+        assert_eq!(page_texts(&document)[0].text, "Ba");
+    }
+
+    #[test]
+    fn type1_builtin_font_follows_the_differences_on_top_of_it() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = type1_builtin_font(
+            &mut document,
+            CMR10_HEADER,
+            Some(vec![
+                Object::Integer(65),
+                Object::Name(b"minus".to_vec()),
+                Object::Name(b"alpha".to_vec()),
+            ]),
+            None,
+        );
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "\u{2212}\u{3b1}");
+    }
+
+    #[test]
+    fn a_malformed_type1_program_leaves_the_font_unchanged() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let broken = b"%!PS-AdobeFont-1.0: CMR10\n\
+            /Encoding 256 array\n\
+            dup 11 /ff\n\
+            readonly def\n";
+        let font_id = type1_builtin_font(&mut document, broken, None, None);
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 11]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(page_texts(&document), old_page_texts(&document));
+        assert_eq!(page_texts(&document)[0].text, "A");
+    }
+
+    #[test]
+    fn a_type1_builtin_font_with_to_unicode_is_untouched() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let to_unicode = b"/CIDInit /ProcSet findresource begin\n\
+            12 dict begin\n\
+            begincmap\n\
+            /CMapName /Adobe-Identity-UCS def\n\
+            /CMapType 2 def\n\
+            1 begincodespacerange\n\
+            <00> <FF>\n\
+            endcodespacerange\n\
+            1 beginbfchar\n\
+            <41> <005A>\n\
+            endbfchar\n\
+            endcmap\n\
+            CMapName currentdict /CMap defineresource pop\n\
+            end\n\
+            end\n";
+        let font_id = type1_builtin_font(&mut document, CMR10_HEADER, None, Some(to_unicode));
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 11]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // The existing CMap wins; the program's `/a` and `/ff` are not consulted.
+        assert_eq!(page_texts(&document)[0].text, "Z");
+        assert_eq!(page_texts(&document), old_page_texts(&document));
+    }
+
     fn push_section_golden(out: &mut String, section: &Section) {
         out.push_str(&format!(
             "section id={} parent={} level={} title={:?} page={:?} native={:?} path={:?}\n",

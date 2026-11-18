@@ -10,6 +10,9 @@
 //!   glyph names are decoded by lopdf again: the shadowing `/Encoding` is
 //!   removed and, when the font has no `/ToUnicode`, a synthesised CMap is
 //!   attached.
+//! * Simple Type 1 fonts with an embedded program and no `/ToUnicode` get a
+//!   synthesised CMap from the program's own encoding (PDF-6b, see
+//!   `pdf_type1_builtin`).
 //!
 //! Every repair is best effort.  Any error leaves the affected page or font
 //! exactly as lopdf saw it before, so the old result is never made worse.
@@ -23,25 +26,30 @@ const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_XOBJECT_DEPTH: usize = 8;
 
 /// Return a document copy with the text repairs applied, or `None` when the
-/// document has neither a text-bearing Form XObject nor a `uniXXXX` font.
+/// document has none of the shapes the repairs target: a text-bearing Form
+/// XObject, a `uniXXXX` font, or a Type 1 font with a built-in encoding.
 pub(super) fn prepare_text_extraction(pdf: &LopdfDocument) -> Option<LopdfDocument> {
     let has_uni_font = pdf.objects.values().any(|object| {
         object
             .as_dict()
             .is_ok_and(|font| font_has_uni_differences(pdf, font))
     });
+    let has_type1_builtin = super::pdf_type1_builtin::has_candidate(pdf);
     let has_text_form = pdf.objects.values().any(|object| {
         object
             .as_stream()
             .is_ok_and(|stream| form_stream_has_cjk(pdf, stream))
     });
-    if !has_uni_font && !has_text_form {
+    if !has_uni_font && !has_text_form && !has_type1_builtin {
         return None;
     }
 
     let mut working = pdf.clone();
     if has_uni_font {
         rewrite_uni_fonts(&mut working);
+    }
+    if has_type1_builtin {
+        super::pdf_type1_builtin::rewrite_type1_builtin_fonts(&mut working);
     }
     if has_text_form {
         inline_page_text_xobjects(&mut working);
@@ -66,7 +74,7 @@ fn font_has_uni_differences(doc: &LopdfDocument, font: &Dictionary) -> bool {
         .unwrap_or(false)
 }
 
-fn encoding_differences<'a>(
+pub(super) fn encoding_differences<'a>(
     doc: &'a LopdfDocument,
     font: &'a Dictionary,
 ) -> Option<&'a Vec<Object>> {
@@ -96,7 +104,7 @@ fn uni_differences(differences: &[Object]) -> Option<Vec<(u8, char)>> {
 }
 
 /// `uniXXXX` or `uXXXX`/`uXXXXXX` (hex) glyph names.
-fn unicode_from_glyph_name(name: &[u8]) -> Option<char> {
+pub(super) fn unicode_from_glyph_name(name: &[u8]) -> Option<char> {
     let hex = if let Some(hex) = name.strip_prefix(b"uni") {
         if hex.len() != 4 {
             return None;
@@ -263,7 +271,7 @@ fn filtered_differences(differences: &[Object]) -> Option<Vec<Object>> {
     Some(filtered)
 }
 
-fn build_to_unicode_cmap(entries: &BTreeMap<u8, Vec<u16>>) -> Vec<u8> {
+pub(super) fn build_to_unicode_cmap(entries: &BTreeMap<u8, Vec<u16>>) -> Vec<u8> {
     let mut cmap = String::from(
         "/CIDInit /ProcSet findresource begin\n\
          12 dict begin\n\

@@ -1,10 +1,13 @@
-% PDF-6b fixture. Compiled with pdfTeX defaults and without \pdfgentounicode, so
-% every Computer Modern font in the PDF is a Type 1 program with a built-in
-% encoding and no /ToUnicode (see README.md and the committed PDF).
+% PDF-6b fixture. Compiled with pdfTeX and without a ToUnicode CMap, so every
+% Computer Modern font in the PDF is a Type 1 program with a built-in encoding
+% and no /ToUnicode - the shape pdfTeX-1.40.18 produced for NBER WP 24458
+% (issue #232). TeX Live 2025's LaTeX format turns ToUnicode on by default, so
+% the fixture switches it off explicitly; nothing else is non-default.
 \documentclass[11pt]{article}
+\pdfgentounicode=0
 \begin{document}
 Efficient finance is the first topic here: fluffy affluent firms do well.
-The tail probability is 0.5\% at a scale of $10^{-12}$ in this model.
+The tail probability is $0.5\%$ at a scale of $10^{-12}$ in this model.
 Greek letters stay readable too: $\alpha + \beta = \gamma$ and $\Gamma$.
 This last sentence is plain text with no math and no ligature at all.
 \end{document}

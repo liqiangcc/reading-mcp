@@ -166,3 +166,38 @@ fn a_pdf_paragraph_with_an_exempt_name_and_real_glue_stays_coarse() {
         SentenceEligibility::CoarseParagraphOnly
     );
 }
+
+/// #139's own shapes, unchanged in a PDF: `JohnR` (two fragments merged), `3642SCIENCE` (a digit
+/// run and a capital run), `others.John` (a dot with no space after it), `thecaseofRedPajama` (a
+/// merged word that repeats but carries no two-capital run).
+#[test]
+fn the_139_glue_shapes_still_count_in_a_pdf() {
+    let document = document_with_media_type(
+        "JohnR.Platt and 3642SCIENCE and others.John and thecaseofRedPajama appear here.",
+        "application/pdf",
+    );
+    let set = document.sentence_text_units();
+
+    assert!(set.units.is_empty());
+    assert_eq!(
+        set.coverage[0].eligibility,
+        SentenceEligibility::CoarseParagraphOnly
+    );
+}
+
+/// A 2403.02247-like line: every word boundary is lost, so the paragraph stays coarse.
+#[test]
+fn a_pdf_paragraph_of_lost_word_boundaries_stays_coarse() {
+    let document = document_with_media_type(
+        "DatasetCurationvsGeneration: ThesuccessofrecentLLM-generateddatasets \
+         likeStanfordAlpaca is promising.",
+        "application/pdf",
+    );
+    let set = document.sentence_text_units();
+
+    assert!(set.units.is_empty());
+    assert_eq!(
+        set.coverage[0].eligibility,
+        SentenceEligibility::CoarseParagraphOnly
+    );
+}

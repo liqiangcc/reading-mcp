@@ -34,6 +34,24 @@ Two modes:
   per-unit data goes into the run artifact, never into git).
 - `--aggregate --jsonl-dir DIR`: merge the shards into the tables of
   `docs/design/pdf6a-text-quality.md` and print them.
+- `--paired --baseline-jsonl-dir DIR --compare LABEL=DIR`: pair two or more runs by arXiv id
+  against the baseline run and print the same measures side by side (PDF-7a).
+
+PDF-7a adds a second backend and the cost of running either one:
+
+- `--backend default|layout` selects the backend the way the server selects it
+  (`READING_MCP_PDF_LAYOUT_PYTHON` set to `--layout-python` for `layout`, unset for `default`),
+  reusing `server_env`/`cap_command` from `scripts/pdf-probe.py` rather than a copy of them.
+  `default` is the only setting that existed before PDF-7a and it is unchanged.
+- Every document records the **peak resident set of the whole process tree** (the server and the
+  Python worker it spawns) and the number of cgroup OOM kills, not only the server's
+  `ru_maxrss`: PDF-1a measured the server alone and said so. A document the 600 MB cap kills is
+  its own outcome (`cap_killed`) whether the kill hit the server or the worker.
+- A `layout` refusal is reported by the server as a bare `OCR_REQUIRED`, so for those documents
+  the harness runs the same worker source the binary embeds (`--worker-source`, default
+  `src/parsing/pdf_layout_worker.py`) under the pinned interpreter with the arguments
+  `layout_pdf.rs` passes, and records which of the four refusal reasons fired and on which
+  pages. That probe is outside the cap: it is measurement, not the server.
 
 Standard library only, plus PyMuPDF for the reference text and the PDF-level facts.
 """
@@ -49,10 +67,15 @@ import os
 import re
 import shutil
 import statistics
+import subprocess
 import sys
+import threading
 import time
 
 MIB = 1024 * 1024
+PROC = "/proc"
+CGROUP_ROOT = "/sys/fs/cgroup"
+TREE_SAMPLE_SECONDS = 0.05   # how often the process tree's resident set is sampled
 
 # --- measurement thresholds (also written into docs/design/pdf6a-text-quality.md) -----------
 LONG_CHARS = 800          # a unit longer than this is "long" (PDF-5a's threshold)
@@ -80,6 +103,19 @@ GRAM = 5
 QUALITY_BATCH_ITEMS = 256
 TEXT_BUDGET_CHARS = 1500000
 OPEN_TIMEOUT_S = 120.0
+
+# The arguments `layout_pdf.rs` passes to the embedded worker with OCR disabled: page budget,
+# byte budget, normalized-character budget, then an empty OCR config and identity, then the
+# worker path (which the probe passes as `sys.argv[6]`, the worker's own `WORKER_SOURCE`).
+# PDF-1a reproduced the refusals with the same triple.
+WORKER_PAGE_BUDGET = 2000
+WORKER_BYTE_BUDGET = 134217728
+WORKER_CHAR_BUDGET = 200000000
+REFUSAL_TIMEOUT_S = 900.0
+
+# The outcome PDF-7a adds: the 600 MB cap, whether it hit the server or the worker. The
+# sweep's own vocabulary (`ocr_required`, `parse_failed`, `timeout`, ...) is kept.
+CAP_KILLED = "cap_killed"
 
 LONG_CAUSES = ("glued_terminal", "glued_words", "bibliography", "math_table",
                "missed_boundary", "genuine")
@@ -957,6 +993,338 @@ def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
 
 
 # --------------------------------------------------------------------------------------------
+# Peak resident set of the whole process tree (PDF-7a)
+# --------------------------------------------------------------------------------------------
+
+def children_of(pid: int) -> list[int] | None:
+    """The direct children of one process, or None when this kernel does not expose them."""
+    try:
+        with open(os.path.join(PROC, str(pid), "task", str(pid), "children"), "rb") as handle:
+            return [int(value) for value in handle.read().split()]
+    except (OSError, ValueError):
+        return None
+
+
+def process_tree_by_scan(root_pid: int) -> list[int]:
+    """Every live process below `root_pid` by reading every `/proc/<pid>/stat`."""
+    children: dict[int, list[int]] = {}
+    try:
+        names = os.listdir(PROC)
+    except OSError:
+        return [root_pid]
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(PROC, name, "stat"), "rb") as handle:
+                data = handle.read()
+        except OSError:
+            continue
+        # `comm` may contain spaces and parentheses, so split after the last `)`.
+        end = data.rfind(b")")
+        if end < 0:
+            continue
+        fields = data[end + 2:].split()
+        if len(fields) < 2:
+            continue
+        try:
+            parent = int(fields[1])
+        except ValueError:
+            continue
+        children.setdefault(parent, []).append(int(name))
+    found: list[int] = []
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        found.append(pid)
+        stack.extend(children.get(pid, ()))
+    return found
+
+
+def process_tree(root_pid: int) -> list[int]:
+    """Every live process below `root_pid`, the root included.
+
+    `ru_maxrss` of the direct child is the server alone. The layout backend's text lives in a
+    Python worker child, so the cost of an open is a property of the tree, not of one process.
+
+    `/proc/<pid>/task/<pid>/children` costs microseconds, while reading every `/proc/<pid>/stat`
+    costs 115 ms on a machine that lists 9,000 of them - enough that a sampler built on the scan
+    takes one sample per document instead of forty. The scan stays as the fallback for a kernel
+    that does not expose `children` (`CONFIG_PROC_CHILDREN`).
+    """
+    if children_of(root_pid) is None:
+        return process_tree_by_scan(root_pid)
+    found: list[int] = []
+    seen: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        found.append(pid)
+        stack.extend(children_of(pid) or ())
+    return found
+
+
+def resident_kib(pid: int) -> int:
+    try:
+        with open(os.path.join(PROC, str(pid), "statm"), "rb") as handle:
+            fields = handle.read().split()
+    except OSError:
+        return 0
+    try:
+        return int(fields[1]) * (os.sysconf("SC_PAGE_SIZE") // 1024)
+    except (IndexError, ValueError, OSError):
+        return 0
+
+
+def cgroup_dir(pid: int) -> str | None:
+    """The cgroup v2 path of one process, or None."""
+    try:
+        with open(os.path.join(PROC, str(pid), "cgroup"), encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("0::"):
+                    return CGROUP_ROOT + line[3:].strip()
+    except OSError:
+        return None
+    return None
+
+
+def read_int_file(path: str) -> int | None:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return int(handle.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def cgroup_events(path: str, key: str) -> int | None:
+    """One counter of a cgroup's `memory.events` (for example `oom_kill`), or None."""
+    try:
+        with open(os.path.join(path, "memory.events"), encoding="utf-8") as handle:
+            for line in handle:
+                name, _, value = line.partition(" ")
+                if name == key:
+                    return int(value)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def cgroup_procs(path: str) -> set[int] | None:
+    try:
+        with open(os.path.join(path, "cgroup.procs"), encoding="utf-8") as handle:
+            return {int(line) for line in handle if line.strip().isdigit()}
+    except (OSError, ValueError):
+        return None
+
+
+class TreePeak(threading.Thread):
+    """The peak resident set of the whole server tree, sampled while the server runs.
+
+    Two sources. The sampler sums `VmRSS` over the tree every 50 ms, which can miss a worker
+    that lives between two samples. `systemd-run --scope` also puts the command in a cgroup
+    whose `memory.peak` is exact and includes processes that already exited, and whose
+    `memory.events` counts the OOM kills the 600 MB cap makes; the cgroup is only accepted when
+    its `cgroup.procs` is a subset of this tree, so the shell's own session scope (which holds
+    the `sudo` wrapper) is never mistaken for the server's. The cgroup wins when it could be
+    identified: it is exactly what the cap governs, while the sampled sum also carries the
+    wrapper the harness starts the server under.
+    """
+
+    def __init__(self, root_pid: int, interval: float = TREE_SAMPLE_SECONDS) -> None:
+        super().__init__(daemon=True)
+        self.root_pid = root_pid
+        self.interval = interval
+        self.halt = threading.Event()
+        self.sampled_kib = 0
+        self.single_kib = 0
+        self.cgroup_kib = 0
+        self.oom_kill = 0
+        self.samples = 0
+        self.cgroup_path: str | None = None
+        self._root_cgroup = cgroup_dir(root_pid)
+
+    def run(self) -> None:
+        while not self.halt.wait(self.interval):
+            try:
+                self.sample()
+            except Exception:  # noqa: BLE001 - sampling must never end a document
+                pass
+
+    def sample(self) -> None:
+        self.samples += 1
+        self.measure()
+
+    def snapshot(self) -> None:
+        """Measure now, without counting a sample.
+
+        `memory.peak` is monotonic for the life of the scope, so one read at the end of the open
+        is exact even when the peak happened 10 ms into it and the sampler never saw it.
+        """
+        try:
+            self.measure()
+        except Exception:  # noqa: BLE001 - measuring must never end a document
+            pass
+
+    def measure(self) -> None:
+        pids = process_tree(self.root_pid)
+        tree = set(pids)
+        sizes = [(resident_kib(pid), pid) for pid in pids]
+        self.sampled_kib = max(self.sampled_kib, sum(size for size, _ in sizes))
+        if sizes:
+            self.single_kib = max(self.single_kib, max(size for size, _ in sizes))
+        if self.cgroup_path is None:
+            best: tuple[str, int] | None = None
+            for pid in pids:
+                path = cgroup_dir(pid)
+                if path is None or path == self._root_cgroup:
+                    continue
+                if read_int_file(os.path.join(path, "memory.peak")) is None:
+                    continue
+                members = cgroup_procs(path)
+                if not members or not members <= tree:
+                    continue
+                if best is None or len(members) < best[1]:
+                    best = (path, len(members))
+            if best is not None:
+                self.cgroup_path = best[0]
+        if self.cgroup_path is not None:
+            # `memory.peak` is bytes; the sampled sum is KiB.
+            peak_bytes = read_int_file(os.path.join(self.cgroup_path, "memory.peak"))
+            if peak_bytes is not None:
+                self.cgroup_kib = max(self.cgroup_kib, peak_bytes // 1024)
+            kills = cgroup_events(self.cgroup_path, "oom_kill")
+            if kills is not None:
+                self.oom_kill = max(self.oom_kill, kills)
+
+    def stop(self) -> dict:
+        self.halt.set()
+        self.join(timeout=10.0)
+        self.snapshot()
+        # The scope is exactly the server and the worker the cap governs; the sampled sum also
+        # carries the `sudo`/`systemd-run` wrapper the harness starts the server under, so the
+        # cgroup is preferred when it could be identified.
+        if self.cgroup_kib:
+            peak, source = self.cgroup_kib, "cgroup"
+        else:
+            peak, source = self.sampled_kib, "sampled"
+        return {
+            "peak_tree_kib": peak,
+            "peak_sampled_kib": self.sampled_kib,
+            "peak_single_kib": self.single_kib,
+            "peak_cgroup_kib": self.cgroup_kib or None,
+            "peak_cgroup_path": self.cgroup_path,
+            "peak_source": source,
+            "tree_samples": self.samples,
+            "oom_kill": self.oom_kill,
+        }
+
+
+def peak_kib(record: dict) -> int:
+    """The peak resident set of one open, in KiB.
+
+    The larger of what the sampler saw over the tree and the kernel's `ru_maxrss` for the process
+    the harness started. The second is the peak of the largest single process in that tree over
+    its whole life, so the tree's peak is never below it, and a transient shorter than the 50 ms
+    sampling interval shows up only there. Neither source can be trusted alone on every runner:
+    the scope's `memory.peak` missed a startup transient in every one of the 121 default-backend
+    documents, while `ru_maxrss` cannot see two processes peaking at once.
+    """
+    resources = record.get("resources") or {}
+    return max(resources.get("peak_tree_kib") or 0, record.get("peak_server_kib") or 0)
+
+
+def peak_source(record: dict) -> str:
+    """Which of the two sources `peak_kib` took."""
+    resources = record.get("resources") or {}
+    if (record.get("peak_server_kib") or 0) > (resources.get("peak_tree_kib") or 0):
+        return "ru_maxrss"
+    return resources.get("peak_source") or "?"
+
+
+# --------------------------------------------------------------------------------------------
+# Why the layout worker refused (PDF-7a)
+# --------------------------------------------------------------------------------------------
+
+# `layout_pdf.rs` maps the worker's `OCR_REQUIRED` to a message that does not carry the worker's
+# own reason (`OcrRequiredDetail::unmeasured`, kept by PDF-4a because the layout path measures
+# neither the page nor the character count). The reason decides whether the refusal is about a
+# text page's figure or about a scan, so the harness runs the worker source itself, unmodified,
+# with its coverage predicate wrapped: every `OcrRequired` records the page and the message.
+REFUSAL_PROBE = '''
+import json, os, sys
+worker_path = sys.argv[6]
+with open(worker_path, encoding="utf-8") as handle:
+    source = handle.read()
+namespace = {"__name__": "pdf_layout_worker", "__file__": worker_path}
+exec(compile(source, worker_path, "exec"), namespace)
+OcrRequired = namespace["OcrRequired"]
+original = namespace["require_disabled_page_coverage"]
+found = []
+checked = []
+def spy(page, page_layout):
+    try:
+        result = original(page, page_layout)
+    except OcrRequired as error:
+        found.append({"page": page.number + 1, "reason": str(error)})
+        raise
+    checked.append(page.number + 1)
+    return result
+namespace["require_disabled_page_coverage"] = spy
+saved = sys.stdout
+code = 0
+sys.stdout = open(os.devnull, "w")
+try:
+    namespace["main"]()
+except OcrRequired:
+    code = 1
+except Exception as error:
+    found.append({"page": None, "reason": "%s: %s" % (type(error).__name__, str(error)[:200])})
+    code = 2
+finally:
+    sys.stdout.close()
+    sys.stdout = saved
+print(json.dumps({"schema": "pdf7a-refusal/v1", "code": code,
+                  "pages_checked": len(checked), "refusals": found}))
+'''
+
+
+def refusal_reason(layout_python: str, worker_source: str, path: str) -> dict:
+    """Run the worker source the binary embeds and report why it refused this PDF."""
+    if not worker_source or not os.path.isfile(worker_source):
+        return {"error": f"worker source not found: {worker_source}"}
+    command = [layout_python, "-I", "-B", "-c", REFUSAL_PROBE,
+               str(WORKER_PAGE_BUDGET), str(WORKER_BYTE_BUDGET), str(WORKER_CHAR_BUDGET),
+               "", "", os.path.abspath(worker_source)]
+    try:
+        with open(path, "rb") as handle:
+            completed = subprocess.run(command, stdin=handle, capture_output=True,
+                                       timeout=REFUSAL_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"error": f"{type(error).__name__}: {str(error)[:200]}"}
+    stderr = completed.stderr.decode("utf-8", "replace").strip().splitlines()
+    for line in reversed(completed.stdout.decode("utf-8", "replace").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("schema") == "pdf7a-refusal/v1":
+            data["stderr_tail"] = stderr[-1][:200] if stderr else None
+            return data
+    return {"error": "no refusal record", "rc": completed.returncode,
+            "stderr_tail": stderr[-1][:200] if stderr else None}
+
+
+# --------------------------------------------------------------------------------------------
 # Reading the document through the server
 # --------------------------------------------------------------------------------------------
 
@@ -1191,6 +1559,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         "producer": entry.get("producer"), "creator": entry.get("creator"),
         "outcome": None, "error": None, "phase": "download",
         "sections": None, "structure_mode": None, "units": None,
+        "backend": args.backend,
     }
     started = time.perf_counter()
     path, status = SWEEP.download_pdf(entry, args.work_dir)
@@ -1207,24 +1576,35 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     state_dir = os.path.join(args.state_root, f"open-{entry['id'].replace('/', '_')}")
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
-    env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), "default", "")
+    env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), args.backend,
+                           args.layout_python)
     cap = SWEEP.CAP if args.cap_available else None
     command = PROBE.cap_command(args.binary, cap, env)
     server = PROBE.Server(command, env, os.path.join(state_dir, "server.log"),
                           PROBE.TOOL_TIMEOUT_S)
+    peak = TreePeak(server.pid)
+    peak.start()
     document_id = None
     units: list[dict] = []
     coverage: list[dict] = []
     read: dict = {}
     try:
         server.initialize()
+        peak.snapshot()
         record["phase"] = "open"
+        open_started = time.perf_counter()
         try:
             result = server.tool("open_document", {"source": path}, timeout=OPEN_TIMEOUT_S)
         except PROBE.ProbeError as exc:
-            record["error"] = str(exc)[:400]
+            # A worker that dies prints its whole traceback into the server's message, and the
+            # Python layout worker's onnxruntime warnings come first, so the reason a document
+            # failed is at the end of the string, not at the start.
+            text = str(exc)
+            record["error"] = text if len(text) <= 800 else f"{text[:400]} ... {text[-400:]}"
             record["error_code"] = exc.code
             result = None
+        record["open_s"] = round(time.perf_counter() - open_started, 3)
+        peak.snapshot()
         if result is not None:
             document_id = (PROBE.payload(result) or {}).get("document_id")
         if document_id:
@@ -1243,14 +1623,25 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
             record["read"] = {key: read[key] for key in
                               ("calls", "chars", "truncated", "error", "seconds")}
             record["outcome"] = "ok"
+            peak.snapshot()
     finally:
         server.close(grace=30.0)
+        # Stop the sampler after the server is gone so a worker outliving the server is still
+        # counted, but before the scope's cgroup disappears.
+        record["resources"] = peak.stop()
     record["server_rc"] = server.rc
     record["killed"] = server.rc in PROBE.KILLED_CODES
+    record["peak_server_kib"] = server.peak_kib()
     if record["outcome"] is None:
-        record["outcome"] = ("oom_killed" if record["killed"]
+        record["outcome"] = (CAP_KILLED if record["killed"]
                              else SWEEP.classify(record, "timed out" in str(record.get("error")),
                                                  str(record.get("error") or "")))
+    # The cap is on the whole scope, so it can kill the worker while the server survives and
+    # reports a parse failure. The cgroup's own OOM counter is the only exact witness.
+    if record["outcome"] != "ok" and (record["resources"].get("oom_kill") or 0) > 0:
+        record["outcome"] = CAP_KILLED
+    if (record["outcome"] == "ocr_required" and args.backend == "layout"):
+        record["refusal"] = refusal_reason(args.layout_python, args.worker_source, path)
     if not units:
         record["seconds"] = round(time.perf_counter() - started, 1)
         return record, []
@@ -1325,25 +1716,51 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     return record, detail
 
 
+def venv_facts(path: str) -> dict:
+    """The bytes of the pinned layout environment, as `du -sh` and `du -sb` report them."""
+    if not path:
+        return {"venv_path": None}
+    facts: dict = {"venv_path": path}
+    for flag, key in (("-sb", "venv_bytes"), ("-sh", "venv_du")):
+        try:
+            completed = subprocess.run(["du", flag, path], capture_output=True, timeout=300)
+            facts[key] = completed.stdout.decode("utf-8", "replace").split()[0] or None
+        except (OSError, subprocess.SubprocessError, IndexError):
+            facts[key] = None
+    try:
+        facts["venv_bytes"] = int(facts.get("venv_bytes") or 0) or None
+    except (TypeError, ValueError):
+        facts["venv_bytes"] = None
+    return facts
+
+
 def run_shard(args) -> int:
     entries = SWEEP.load_list(args.ids)
     if not entries:
         print("::error::the corpus list is empty")
         return 1
     shard = [entry for index, entry in enumerate(entries) if index % args.shards == args.shard]
-    print(f"shard {args.shard}/{args.shards}: {len(shard)} documents", flush=True)
+    print(f"shard {args.shard}/{args.shards}: {len(shard)} documents, backend {args.backend}",
+          flush=True)
     print("| id | pages | outcome | units | ws share | ref ws | ws ratio | long | long % | "
-          "short | short % | headers | s |", flush=True)
+          "short | short % | own unit | open s | peak tree MiB | oom kills | s |", flush=True)
     os.makedirs(args.state_root, exist_ok=True)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
+    environment = {"kind_record": "environment", "backend": args.backend,
+                   "layout_python": args.layout_python or None,
+                   "cap": SWEEP.CAP if args.cap_available else None}
+    environment.update(venv_facts(args.venv_path) if args.backend == "layout" else
+                       {"venv_path": None})
+    append_jsonl(args.out, environment)
     shard_deadline = time.monotonic() + args.deadline_minutes * 60
     for entry in shard:
         if time.monotonic() > shard_deadline:
             append_jsonl(args.out, {"kind_record": "document", "id": entry["id"],
                                     "group": entry["group"], "pages": entry.get("pages"),
-                                    "outcome": "not_run", "error": "shard deadline"})
+                                    "outcome": "not_run", "error": "shard deadline",
+                                    "backend": args.backend})
             print(f"| {entry['id']} | {entry.get('pages')} | not_run | - | - | - | - | - | - | "
-                  f"- | - | - | - |", flush=True)
+                  f"- | - | - | - | - | - | - |", flush=True)
             continue
         deadline = min(shard_deadline, time.monotonic() + args.per_document_minutes * 60)
         try:
@@ -1351,7 +1768,7 @@ def run_shard(args) -> int:
         except Exception as exc:  # noqa: BLE001 - one document must not end the shard
             record = {"kind_record": "document", "id": entry["id"],
                       "group": entry["group"], "pages": entry.get("pages"),
-                      "outcome": "measure_failed",
+                      "outcome": "measure_failed", "backend": args.backend,
                       "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
             detail = []
         append_jsonl(args.out, record)
@@ -1362,12 +1779,15 @@ def run_shard(args) -> int:
         short_stats = record.get("short") or {}
         headers = record.get("headers") or {}
         own = (headers.get("cases") or {}).get("own_unit", 0)
+        resources = record.get("resources") or {}
         print(f"| {entry['id']} | {record.get('pages')} | {record.get('outcome')} | "
               f"{fmt(record.get('units'))} | {fmt(whitespace.get('backend_share'), 4)} | "
               f"{fmt(whitespace.get('reference_share'), 4)} | {fmt(whitespace.get('ratio'), 3)} "
               f"| {fmt(long_stats.get('units'))} | {fmt(long_stats.get('share'), 4)} | "
               f"{fmt(short_stats.get('units'))} | {fmt(short_stats.get('share'), 4)} | "
-              f"{own} | {fmt(record.get('seconds'), 1)} |", flush=True)
+              f"{own} | {fmt(record.get('open_s'), 2)} | "
+              f"{fmt(peak_kib(record) / 1024, 1)} | "
+              f"{fmt(resources.get('oom_kill'))} | {fmt(record.get('seconds'), 1)} |", flush=True)
     return 0
 
 
@@ -1375,10 +1795,11 @@ def run_shard(args) -> int:
 # Aggregate
 # --------------------------------------------------------------------------------------------
 
-def load_records(root: str) -> tuple[list[dict], list[dict], list[dict]]:
+def load_records(root: str) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     documents: list[dict] = []
     long_units: list[dict] = []
     short_units: list[dict] = []
+    environment: list[dict] = []
     for base, _, names in os.walk(root):
         for name in sorted(names):
             if not name.endswith(".jsonl"):
@@ -1399,7 +1820,9 @@ def load_records(root: str) -> tuple[list[dict], list[dict], list[dict]]:
                         long_units.append(record)
                     elif kind == "short_unit":
                         short_units.append(record)
-    return documents, long_units, short_units
+                    elif kind == "environment":
+                        environment.append(record)
+    return documents, long_units, short_units, environment
 
 
 def sample_of(units: list[dict], key: str = "head", limit: int = 3) -> list[str]:
@@ -1417,7 +1840,7 @@ def sample_of(units: list[dict], key: str = "head", limit: int = 3) -> list[str]
 
 
 def aggregate_mode(args) -> int:
-    documents, long_units, short_units = load_records(args.jsonl_dir)
+    documents, long_units, short_units, environment = load_records(args.jsonl_dir)
     if not documents:
         print(f"::error::no document records under {args.jsonl_dir}")
         return 1
@@ -1738,6 +2161,85 @@ def aggregate_mode(args) -> int:
             lines.append(f"| {doc['id']} | {worst.get('page')} | {spans[:80] or '-'} | "
                          f"{'; '.join(used)[:200]} | {forms[:80] or '-'} |")
 
+    # 6. Backend, cost and outcomes (PDF-7a)
+    #
+    # Everything above measures the text of the documents that opened. This section measures what
+    # opening them cost and what happened to the rest, which is the question PDF-7a asks and
+    # PDF-6a could not answer. It is the only section PDF-6a did not have, so sections 1-5 stay
+    # byte-identical to the PDF-6a run they are compared against.
+    environments = {entry.get("backend") or "?": entry for entry in environment}
+    backend_names = sorted(environments) or sorted({doc.get("backend") or "?" for doc in documents})
+    outcome_counts: collections.Counter = collections.Counter(
+        (doc.get("backend") or "?", doc.get("outcome") or "?", doc.get("error_code") or "-")
+        for doc in documents)
+    reasons: collections.Counter = collections.Counter()
+    reason_pages: dict[str, set] = collections.defaultdict(set)
+    for doc in documents:
+        refusal = doc.get("refusal") or {}
+        for item in refusal.get("refusals") or []:
+            reason = item.get("reason") or "?"
+            reasons[reason] += 1
+            if item.get("page"):
+                reason_pages[reason].add((doc["id"], item["page"]))
+    lines += ["", "## 6. Backend, cost and outcomes (PDF-7a)", "",
+              "Peak resident set is the **whole process tree** (the server and the Python worker it "
+              "spawns), not the server's `ru_maxrss`: PDF-1a reported the server alone and said so. "
+              "The number is the larger of a 50 ms sampler's sum over the tree and the kernel's "
+              "`ru_maxrss` for the process the harness starts, which is the peak of the largest "
+              "single process in that tree over its whole life: a transient shorter than the "
+              "interval shows up only in the second, and two processes peaking at once only in the "
+              "first. Every open runs inside the same `MemoryMax=600M` scope, so a document whose "
+              "tree does not fit is killed by the cap and reported as its own outcome.", "",
+              "| Backend | Documents | ok | cap_killed | OCR_REQUIRED | PARSE_FAILED | timeout | "
+              "other |", "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for name in backend_names:
+        rows = {key: value for (backend, key, _code), value in outcome_counts.items()
+                if backend == name}
+        total = sum(rows.values())
+        other = total - sum(rows.get(key, 0) for key in
+                            ("ok", CAP_KILLED, "ocr_required", "parse_failed", "timeout"))
+        lines.append(f"| `{name}` | {total} | {rows.get('ok', 0)} | {rows.get(CAP_KILLED, 0)} | "
+                     f"{rows.get('ocr_required', 0)} | {rows.get('parse_failed', 0)} | "
+                     f"{rows.get('timeout', 0)} | {other} |")
+    failures = [((backend, outcome, code), count)
+                for (backend, outcome, code), count in sorted(outcome_counts.items())
+                if outcome != "ok"]
+    if failures:
+        lines += ["", "| Backend | Outcome | Error code | Documents |",
+                  "| --- | --- | --- | --- |"]
+        for (backend, outcome, code), count in failures:
+            lines.append(f"| `{backend}` | `{outcome}` | `{code}` | {count} |")
+    if reasons:
+        lines += ["", "Why the layout worker refused, read from the worker source the binary embeds "
+                  "(the server's own `OCR_REQUIRED` message does not carry it):", "",
+                  "| Reason | Refusing pages | Papers |", "| --- | --- | --- |"]
+        for reason, count in reasons.most_common():
+            ids = {identifier for identifier, _page in reason_pages.get(reason, set())}
+            lines.append(f"| `{reason}` | {count} | {len(ids)} |")
+    lines += ["", "| Backend | Opens | Open s median | Open s p95 | Open s max | Peak tree RSS "
+              "MiB median | p95 | max | Peak tree RSS source | cgroup OOM kills |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for name in backend_names:
+        rows = [doc for doc in documents if (doc.get("backend") or "?") == name]
+        opens = [doc["open_s"] for doc in rows if doc.get("open_s") is not None]
+        peaks = [peak_kib(doc) for doc in rows]
+        peaks = [value / 1024 for value in peaks if value]
+        sources = collections.Counter(peak_source(doc) for doc in rows)
+        kills = sum((doc.get("resources") or {}).get("oom_kill") or 0 for doc in rows)
+        lines.append(
+            f"| `{name}` | {len(opens)} | {fmt(statistics.median(opens), 2) if opens else '-'} | "
+            f"{fmt(percentile(opens, 0.95), 2)} | {fmt(max(opens), 2) if opens else '-'} | "
+            f"{fmt(statistics.median(peaks), 1) if peaks else '-'} | "
+            f"{fmt(percentile(peaks, 0.95), 1)} | {fmt(max(peaks), 1) if peaks else '-'} | "
+            f"{', '.join(f'{key} {value}' for key, value in sources.most_common()) or '-'} | "
+            f"{kills} |")
+    venv_sizes = [entry for entry in environment if entry.get("venv_bytes")]
+    if venv_sizes:
+        biggest = max(venv_sizes, key=lambda entry: entry["venv_bytes"])
+        lines += ["", f"Pinned layout environment: `{biggest.get('venv_du') or '-'}` "
+                  f"(`du -sh`), {biggest['venv_bytes']} bytes (`du -sb`), from "
+                  f"`{biggest.get('venv_path')}`."]
+
     text = "\n".join(lines)
     print(text)
     if args.markdown:
@@ -1770,18 +2272,224 @@ def aggregate_mode(args) -> int:
                                  for name, _, _ in HEADER_TIERS},
             "missed_boundary_tokens": missed_tokens.most_common(10),
             "loss_documents": [doc["id"] for doc in loss_docs],
+            "outcomes": {f"{backend}/{outcome}/{code}": count
+                         for (backend, outcome, code), count in sorted(outcome_counts.items())},
+            "refusal_reasons": reasons.most_common(),
+            "environment": environment,
         })
     return 0
 
 
 # --------------------------------------------------------------------------------------------
-# Entry point
+# Paired comparison (PDF-7a)
 # --------------------------------------------------------------------------------------------
+
+PAIRED_MEASURES = (
+    ("documents", "Documents opened `ok` on both sides"),
+    ("units", "Units"),
+    ("long_units", "Units > 800 chars"),
+    ("papers_over_5pct_long", "Papers above 5% long units"),
+    ("long_share", "Long units / all units"),
+    ("short_units", "Units < 5 chars"),
+    ("papers_over_10pct_short", "Papers above 10% short units"),
+    ("dot_units", "One-character `.` units"),
+    ("heading_number", "`heading_number` units"),
+    ("page_number", "`page_number` units"),
+    ("paragraphs_per_page", "Paragraphs per page (median)"),
+    ("header_occurrences", "Header/footer occurrences (80% / 50% tier)"),
+    ("header_own_unit", "Header/footer lines that are their own unit"),
+    ("header_own_unit_share", "Share of those that are their own unit"),
+    ("header_prefix", "Header/footer lines that prefix a body unit"),
+    ("header_inside", "Header/footer lines inside a body unit"),
+    ("header_glued", "Header/footer lines present only without spaces"),
+    ("whitespace_ratio", "Whitespace ratio, backend / reference (median)"),
+    ("papers_below_70pct_ws", "Papers below 0.7 of the reference whitespace"),
+    ("containment_median", "5-gram containment (median)"),
+    ("containment_p05", "5-gram containment (p05)"),
+    ("papers_below_0p9_containment", "Papers with containment below 0.9"),
+    ("open_s_median", "Open seconds (median)"),
+    ("open_s_p95", "Open seconds (p95)"),
+    ("peak_tree_mib_median", "Peak tree RSS MiB (median)"),
+    ("peak_tree_mib_p95", "Peak tree RSS MiB (p95)"),
+    ("peak_tree_mib_max", "Peak tree RSS MiB (max)"),
+)
+
+
+def measures_for(documents: list[dict], long_units: list[dict], short_units: list[dict],
+                 ids: set[str]) -> dict:
+    """The PDF-6a measures plus the PDF-7a resources, over one population of ids."""
+    by_id = {doc["id"]: doc for doc in documents if doc.get("id") in ids}
+    docs = [by_id[identifier] for identifier in sorted(ids) if by_id.get(identifier)]
+    opened = [doc for doc in docs if doc.get("outcome") == "ok"]
+    kept = {doc["id"] for doc in opened}
+    longs = [unit for unit in long_units if unit.get("id") in kept]
+    shorts = [unit for unit in short_units if unit.get("id") in kept]
+    total_units = sum(doc.get("units") or 0 for doc in opened)
+    long_total = sum((doc.get("long") or {}).get("units") or 0 for doc in opened)
+    short_total = sum((doc.get("short") or {}).get("units") or 0 for doc in opened)
+    cases: collections.Counter = collections.Counter()
+    for doc in opened:
+        tier = ((doc.get("headers") or {}).get("tiers") or {}).get("spec") or {}
+        cases.update(tier.get("cases") or {})
+    occurrences = sum(cases.values())
+    paragraphs = [(doc.get("paragraphs") or {}).get("per_page") for doc in opened]
+    paragraphs = [value for value in paragraphs if value is not None]
+    ratios = [(doc.get("whitespace") or {}).get("ratio") for doc in opened]
+    ratios = [value for value in ratios if value is not None]
+    containments = [(doc.get("quality") or {}).get("containment_first20") for doc in opened]
+    containments = [value for value in containments if value is not None]
+    opens = [doc["open_s"] for doc in opened if doc.get("open_s") is not None]
+    peaks = [peak_kib(doc) / 1024 for doc in opened]
+    peaks = [value for value in peaks if value]
+    short_causes = collections.Counter(unit.get("cause") for unit in shorts)
+    return {
+        "documents": len(opened),
+        "units": total_units,
+        "long_units": long_total,
+        "papers_over_5pct_long": sum(1 for doc in opened
+                                      if ((doc.get("long") or {}).get("share") or 0) > 0.05),
+        "long_share": round(long_total / total_units, 4) if total_units else None,
+        "short_units": short_total,
+        "papers_over_10pct_short": sum(1 for doc in opened
+                                        if ((doc.get("short") or {}).get("share") or 0) > 0.10),
+        "dot_units": sum(1 for unit in shorts if (unit.get("text") or "").strip() == "."),
+        "heading_number": short_causes.get("heading_number", 0),
+        "page_number": short_causes.get("page_number", 0),
+        "paragraphs_per_page": statistics.median(paragraphs) if paragraphs else None,
+        "header_occurrences": occurrences,
+        "header_own_unit": cases.get("own_unit", 0),
+        "header_own_unit_share": (round(cases.get("own_unit", 0) / occurrences, 4)
+                                  if occurrences else None),
+        "header_prefix": cases.get("prefix", 0),
+        "header_inside": cases.get("inside", 0),
+        "header_glued": cases.get("glued", 0),
+        "whitespace_ratio": statistics.median(ratios) if ratios else None,
+        "papers_below_70pct_ws": sum(1 for doc in opened
+                                     if (doc.get("whitespace") or {}).get("below_70pct")),
+        "containment_median": statistics.median(containments) if containments else None,
+        "containment_p05": percentile(containments, 0.05),
+        "papers_below_0p9_containment": sum(1 for value in containments if value < 0.9),
+        "open_s_median": statistics.median(opens) if opens else None,
+        "open_s_p95": percentile(opens, 0.95),
+        "peak_tree_mib_median": statistics.median(peaks) if peaks else None,
+        "peak_tree_mib_p95": percentile(peaks, 0.95),
+        "peak_tree_mib_max": max(peaks) if peaks else None,
+        "open_ok": len(opened),
+        "outcomes": dict(collections.Counter(doc.get("outcome") for doc in docs)),
+    }
+
+
+def paired_measure_table(base: dict, run: dict, label: str) -> list[str]:
+    """One measure table, both columns measured on the same papers."""
+    lines = ["| Measure | default | " + label + " |", "| --- | --- | --- |"]
+    for key, name in PAIRED_MEASURES:
+        digits = 4 if key in ("long_share", "header_own_unit_share") else (
+            3 if key in ("whitespace_ratio", "containment_median", "containment_p05")
+            else 2)
+        lines.append(f"| {name} | {fmt(base.get(key), digits)} | {fmt(run.get(key), digits)} |")
+    return lines
+
+
+def outcome_table(loaded: dict, labels: list[str]) -> list[str]:
+    every = sorted({doc.get("outcome") or "?" for label in labels for doc in loaded[label]})
+    lines = ["| Outcome | " + " | ".join(labels) + " |",
+             "| --- | " + " | ".join("---" for _ in labels) + " |"]
+    for outcome in every:
+        cells = [str(sum(1 for doc in loaded[label] if (doc.get("outcome") or "?") == outcome))
+                 for label in labels]
+        lines.append(f"| `{outcome}` | " + " | ".join(cells) + " |")
+    return lines
+
+
+def paired_mode(args) -> int:
+    """Pair runs by arXiv id against the baseline and print the same measures side by side.
+
+    Each run is paired with the baseline on its own population - the papers that run opened `ok`
+    and the baseline opened `ok` - so the two columns of a table always describe the same papers.
+    The last table repeats the measures on the papers that every run opened, which is the only
+    population where all the columns are comparable to each other.
+    """
+    if not args.baseline_jsonl_dir or not args.compare:
+        print("::error::--paired needs --baseline-jsonl-dir and at least one --compare")
+        return 1
+    base_documents, base_long, base_short, _ = load_records(args.baseline_jsonl_dir)
+    base_ok = {doc["id"] for doc in base_documents if doc.get("outcome") == "ok"}
+    loaded = {"default": base_documents}
+    runs = []
+    common: set[str] | None = None
+    for item in args.compare:
+        label, _, directory = item.partition("=")
+        if not directory:
+            print(f"::error::--compare {item} needs LABEL=DIR")
+            return 1
+        if label in loaded:
+            print(f"::error::--compare label {label} is used twice")
+            return 1
+        documents, longs, shorts, _ = load_records(directory)
+        loaded[label] = documents
+        ok = {doc["id"] for doc in documents if doc.get("outcome") == "ok"}
+        population = base_ok & ok
+        common = population if common is None else common & population
+        runs.append((label, directory, population, longs, shorts, ok))
+
+    lines = ["# PDF-7a paired comparison", "",
+             "Paired by arXiv id. The default side is "
+             f"`{args.baseline_jsonl_dir}`, {len(base_ok)} papers opened `ok`. A paper enters a "
+             "table only when the default side and that run both opened it `ok`, so the two "
+             "columns of a table always measure the same text.", ""]
+    for label, directory, population, longs, shorts, ok in runs:
+        lines += [f"## `{label}`", "",
+                  f"`{directory}` opened {len(ok)} of the corpus `ok`; paired population "
+                  f"**{len(population)}** papers.", ""]
+        base_measures = measures_for(base_documents, base_long, base_short, population)
+        run_measures = measures_for(loaded[label], longs, shorts, population)
+        lines += paired_measure_table(base_measures, run_measures, label)
+        lines += ["", f"Outcomes over `{label}`'s whole population:", ""]
+        lines += outcome_table(loaded, ["default", label])
+        lines.append("")
+    if len(runs) > 1 and common:
+        labels = ["default"] + [label for label, _d, _p, _l, _s, _o in runs]
+        lines += ["## The papers every run opened", "",
+                  f"Population: {len(common)} papers.", ""]
+        header = ["| Measure | " + " | ".join(labels) + " |",
+                  "| --- | " + " | ".join("---" for _ in labels) + " |"]
+        lines += header
+        every = {"default": measures_for(base_documents, base_long, base_short, common)}
+        for label, _directory, _population, longs, shorts, _ok in runs:
+            every[label] = measures_for(loaded[label], longs, shorts, common)
+        for key, name in PAIRED_MEASURES:
+            digits = 4 if key in ("long_share", "header_own_unit_share") else (
+                3 if key in ("whitespace_ratio", "containment_median", "containment_p05")
+                else 2)
+            cells = [fmt(every[label].get(key), digits) for label in labels]
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+        lines.append("")
+    text = "\n".join(lines)
+    print(text)
+    if args.markdown:
+        os.makedirs(os.path.dirname(os.path.abspath(args.markdown)) or ".", exist_ok=True)
+        with open(args.markdown, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+    return 0
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="PDF-6a text-quality measurement on the PDF-5a corpus.")
     parser.add_argument("--aggregate", action="store_true", help="merge shards into tables")
+    parser.add_argument("--paired", action="store_true",
+                        help="pair runs by arXiv id against --baseline-jsonl-dir")
+    parser.add_argument("--baseline-jsonl-dir", default="")
+    parser.add_argument("--compare", action="append", default=[],
+                        metavar="LABEL=DIR", help="one run to pair against the baseline")
+    parser.add_argument("--backend", choices=("default", "layout"), default="default",
+                        help="PDF backend the server selects")
+    parser.add_argument("--layout-python", default="",
+                        help="interpreter of the pinned layout environment (layout backend)")
+    parser.add_argument("--venv-path", default="",
+                        help="root of the pinned layout environment, for its `du -sh`")
+    parser.add_argument("--worker-source", default="",
+                        help="the worker source the binary embeds (layout refusals)")
     parser.add_argument("--ids", default="scripts/pdf-sweep-ids.txt")
     parser.add_argument("--out", default="")
     parser.add_argument("--markdown", default="")
@@ -1794,12 +2502,19 @@ def main() -> int:
     parser.add_argument("--deadline-minutes", type=float, default=42.0)
     parser.add_argument("--per-document-minutes", type=float, default=4.5)
     args = parser.parse_args()
+    if not args.worker_source:
+        args.worker_source = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "src", "parsing", "pdf_layout_worker.py")
+    if args.paired:
+        return paired_mode(args)
     if args.aggregate:
         if not args.jsonl_dir:
             parser.error("--aggregate needs --jsonl-dir")
         return aggregate_mode(args)
     if not args.binary or not args.out:
         parser.error("run mode needs --binary and --out")
+    if args.backend == "layout" and not args.layout_python:
+        parser.error("the layout backend needs --layout-python")
     args.cap_available = PROBE.cap_available()
     if not args.cap_available:
         print("::warning::systemd-run MemoryMax scope is not permitted; running without the cap",

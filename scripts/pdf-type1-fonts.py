@@ -72,15 +72,21 @@ def parse_builtin_encoding(clear: bytes) -> dict:
     return {"kind": "array" if entries else "none", "entries": entries}
 
 
-def font_program(doc, font_xref: int) -> tuple[bytes | None, int, int]:
-    """The Type 1 program's cleartext bytes (`/Length1` of `/FontFile`), with its sizes."""
+def font_program(doc, font_xref: int) -> tuple[bytes | None, int, int, str]:
+    """The Type 1 program's cleartext bytes (`/Length1` of `/FontFile`), with its sizes.
+
+    The fourth item says where the program is: `fontfile` (a Type 1 cleartext program, the only
+    shape this repair reads), `fontfile3` (CFF/Type1C, whose encoding is not in a cleartext
+    program), or `none` (no program reference at all).
+    """
     kind, value = doc.xref_get_key(font_xref, "FontDescriptor")
     if kind != "xref":
-        return None, 0, 0
+        return None, 0, 0, "none"
     descriptor = int(value.split()[0])
     kind, value = doc.xref_get_key(descriptor, "FontFile")
     if kind != "xref":
-        return None, 0, 0
+        kind3, _ = doc.xref_get_key(descriptor, "FontFile3")
+        return None, 0, 0, "fontfile3" if kind3 == "xref" else "none"
     program = int(value.split()[0])
     length1 = 0
     kind, value = doc.xref_get_key(program, "Length1")
@@ -89,12 +95,20 @@ def font_program(doc, font_xref: int) -> tuple[bytes | None, int, int]:
     try:
         data = doc.xref_stream(program)
     except Exception:  # noqa: BLE001 - an unreadable program is data, not a crash
-        return None, length1, 0
+        return None, length1, 0, "fontfile"
     if data is None:
-        return None, length1, 0
+        return None, length1, 0, "fontfile"
     if length1 <= 0 or length1 > len(data):
         length1 = min(len(data), 65536)
-    return data[:length1], length1, len(data)
+    return data[:length1], length1, len(data), "fontfile"
+
+
+def probe(clear: bytes) -> str:
+    """A short readable excerpt of a cleartext program, around `/Encoding` when it has one."""
+    at = clear.find(b"/Encoding")
+    start = max(0, at - 40) if at >= 0 else 0
+    excerpt = clear[start:start + 300]
+    return "".join(chr(byte) if 32 <= byte < 127 else "." for byte in excerpt)
 
 
 def font_facts(path: str) -> dict:
@@ -125,21 +139,28 @@ def font_facts(path: str) -> dict:
                         "encoding": encoding,
                         "to_unicode": kind != "null",
                         "pages": 1,
+                        "population": subtype == "Type1" and ext not in ("n/a", None)
+                        and kind == "null" and encoding in ("", "Builtin", None),
                         "targeted": False,
+                        "program_kind": None,
                         "builtin": None,
                         "length1": 0,
                         "program_bytes": 0,
+                        "probe": "",
                         "glyphs": [],
                     }
-                    if subtype == "Type1" and entry["embedded"] and not entry["to_unicode"]:
-                        clear, length1, total = font_program(document, xref)
+                    if entry["population"]:
+                        clear, length1, total, where = font_program(document, xref)
+                        entry["program_kind"] = where
                         entry["length1"] = length1
                         entry["program_bytes"] = total
                         if clear is not None:
                             parsed = parse_builtin_encoding(clear)
                             entry["builtin"] = parsed["kind"]
                             entry["glyphs"] = parsed["entries"]
-                            if parsed["kind"] != "none":
+                            if parsed["kind"] == "none":
+                                entry["probe"] = probe(clear)
+                            else:
                                 entry["targeted"] = True
                     seen[xref] = entry
     except Exception as exc:  # noqa: BLE001 - an unreadable reference is data, not a crash
@@ -148,6 +169,8 @@ def font_facts(path: str) -> dict:
     facts["fonts"] = inventory
     facts["targeted_fonts"] = sum(1 for item in inventory if item["targeted"])
     facts["targeted"] = facts["targeted_fonts"] > 0
+    facts["population_fonts"] = sum(1 for item in inventory if item["population"])
+    facts["population"] = facts["population_fonts"] > 0
     glyphs = []
     for item in inventory:
         if item["targeted"]:
@@ -257,7 +280,8 @@ def main() -> int:
         row = {"kind_record": "type1-fonts", "id": entry["id"], "group": entry.get("group"),
                "download": status["download"], "error": status.get("error")}
         if path is None:
-            row.update({"targeted": False, "targeted_fonts": 0, "fonts": []})
+            row.update({"targeted": False, "targeted_fonts": 0, "population": False,
+                        "population_fonts": 0, "fonts": [], "targeted_glyphs": []})
         else:
             row.update(font_facts(path))
         row["before"] = {"outcome": (before.get(entry["id"]) or {}).get("outcome"),
@@ -272,34 +296,66 @@ def main() -> int:
         print(f"[{index}/{len(entries)}] {entry['id']} targeted={row['targeted']} "
               f"fonts={row['targeted_fonts']} download={row['download']}", flush=True)
 
+    population = [row for row in rows if row.get("population")]
     targeted = [row for row in rows if row.get("targeted")]
     lines = ["## Type 1 built-in encoding without /ToUnicode", ""]
-    lines.append(f"Corpus: {len(rows)} documents, {len(targeted)} of them use at least one "
-                 "embedded Type 1 font with a built-in encoding and no `/ToUnicode` "
-                 "(PyMuPDF font facts).")
+    lines.append(f"Corpus: {len(rows)} documents. {len(population)} of them embed at least one "
+                 "Type 1 font with a built-in encoding and no `/ToUnicode` (PyMuPDF font facts: "
+                 "`Type1`, embedded, no `/ToUnicode`, `/Encoding` empty or `Builtin`); "
+                 f"{len(targeted)} of those carry the font as a `/FontFile` Type 1 program whose "
+                 "cleartext names its codes, which is the shape this repair reads.")
     lines.append("")
-    lines.append("| Id | Group | Targeted fonts | Basefonts | Containment before | after |")
+    lines.append("| Id | Group | Population fonts | Targeted fonts | Containment before | after |")
     lines.append("| --- | --- | --- | --- | --- | --- |")
-    for row in sorted(targeted, key=lambda item: item["id"]):
-        basefonts = "; ".join(sorted({font["basefont"] for font in row["fonts"]
-                                      if font["targeted"]})[:4])
-        lines.append(f"| {row['id']} | {row['group']} | {row['targeted_fonts']} | "
-                     f"{basefonts} | {rounded(row['before']['containment'])} | "
+    for row in sorted(population, key=lambda item: item["id"]):
+        lines.append(f"| {row['id']} | {row['group']} | {row['population_fonts']} | "
+                     f"{row['targeted_fonts']} | {rounded(row['before']['containment'])} | "
                      f"{rounded(row['after']['containment'])} |")
     lines.append("")
-    before_targeted = [row["before"]["containment"] for row in targeted
-                       if row["before"]["containment"] is not None]
-    after_targeted = [row["after"]["containment"] for row in targeted
-                      if row["after"]["containment"] is not None]
-    lines.append("| Targeted population | before | after |")
-    lines.append("| --- | --- | --- |")
-    lines.append(f"| documents | {len(targeted)} | {len(targeted)} |")
-    lines.append(f"| containment median | {rounded(percentile(before_targeted, 0.5))} | "
-                 f"{rounded(percentile(after_targeted, 0.5))} |")
-    lines.append(f"| containment below 0.9 | "
-                 f"{sum(1 for value in before_targeted if value < CONTAINMENT_SUSPECT)} | "
-                 f"{sum(1 for value in after_targeted if value < CONTAINMENT_SUSPECT)} |")
-    lines.append("")
+    for label, subset in (("Population", population), ("The documents this repair reads",
+                                                       targeted)):
+        before_values = [row["before"]["containment"] for row in subset
+                         if row["before"]["containment"] is not None]
+        after_values = [row["after"]["containment"] for row in subset
+                        if row["after"]["containment"] is not None]
+        lines.append(f"| {label} | before | after |")
+        lines.append("| --- | --- | --- |")
+        lines.append(f"| documents | {len(subset)} | {len(subset)} |")
+        lines.append(f"| containment median | {rounded(percentile(before_values, 0.5))} | "
+                     f"{rounded(percentile(after_values, 0.5))} |")
+        lines.append(f"| containment below 0.9 | "
+                     f"{sum(1 for value in before_values if value < CONTAINMENT_SUSPECT)} | "
+                     f"{sum(1 for value in after_values if value < CONTAINMENT_SUSPECT)} |")
+        lines.append("")
+
+    reasons: dict[tuple[str, str], dict] = {}
+    for row in population:
+        for font in row["fonts"]:
+            if not font.get("population") or font["targeted"]:
+                continue
+            key = (font["program_kind"] or "none", font["builtin"] or "-")
+            bucket = reasons.setdefault(key, {"fonts": 0, "documents": set(), "probe": ""})
+            bucket["fonts"] += 1
+            bucket["documents"].add(row["id"])
+            if font.get("probe") and not bucket["probe"]:
+                bucket["probe"] = font["probe"]
+    if reasons:
+        lines.append("### Why the other fonts are not read")
+        lines.append("")
+        lines.append("| Program | Cleartext `/Encoding` | Fonts | Documents |")
+        lines.append("| --- | --- | --- | --- |")
+        for (where, encoding), bucket in sorted(reasons.items()):
+            lines.append(f"| `{where}` | `{encoding}` | {bucket['fonts']} | "
+                         f"{len(bucket['documents'])} |")
+        lines.append("")
+        lines.append("`fontfile3` is a CFF/Type1C program: the encoding is not in cleartext, "
+                     "so it is the task's stretch goal. `fontfile` with `none` is a Type 1 "
+                     "program whose first `/Length1` bytes name no code; its excerpt:")
+        lines.append("")
+        for (where, encoding), bucket in sorted(reasons.items()):
+            if where == "fontfile" and bucket["probe"]:
+                lines.append(f"```\n{bucket['probe']}\n```")
+                lines.append("")
 
     if before and after:
         before_sample = sample_table(before)

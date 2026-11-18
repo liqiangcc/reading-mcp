@@ -80,7 +80,7 @@ fn base_encoding(doc: &LopdfDocument, font: &Dictionary) -> Option<Base> {
     };
     let (_, encoding) = doc.dereference(encoding).ok()?;
     match encoding {
-        Object::Name(name) if name == b"StandardEncoding" => Some(Base::Standard),
+        Object::Name(name) if name.as_slice() == b"StandardEncoding" => Some(Base::Standard),
         Object::Name(_) => None,
         Object::Dictionary(dictionary) => match dictionary.get(b"BaseEncoding") {
             Err(_) => Some(Base::Builtin),
@@ -129,15 +129,15 @@ pub(super) fn rewrite_type1_builtin_fonts(doc: &mut LopdfDocument) {
 /// The CMap entries for one font, or `None` when the repair would change nothing.
 fn font_entries(doc: &LopdfDocument, font_id: ObjectId) -> Option<BTreeMap<u8, Vec<u16>>> {
     let font = doc.get_dictionary(font_id).ok()?;
-    let builtin = match base_encoding(doc, &font)? {
+    let builtin = match base_encoding(doc, font)? {
         Base::Standard => BuiltinEncoding::Standard,
         Base::Builtin => {
-            let clear = program_cleartext(doc, &font)?;
+            let clear = program_cleartext(doc, font)?;
             parse_builtin_encoding(&clear)?
         }
     };
-    let differences = encoding_differences(doc, &font);
-    let old = current_decoding(doc, &font)?;
+    let differences = encoding_differences(doc, font);
+    let old = current_decoding(doc, font)?;
     let entries = synthesised_entries(&old, &builtin, differences.map(Vec::as_slice))?;
     changes_any_code(&old, &entries).then_some(entries)
 }

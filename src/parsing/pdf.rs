@@ -22,7 +22,10 @@ use super::common::{content_hash, document_id, slugify, title_from_metadata};
 /// serving the coarse paragraphs the older rule produced. It keys the parsed cache
 /// (`CachingParser::cache_key`) and, through `ingest_fingerprint`, the stored open results, so no
 /// stored PDF can keep the old units.
-pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v3";
+///
+/// PDF-6b decodes TeX Type 1 fonts that have no `/ToUnicode`, so a pdfTeX paper publishes different
+/// characters for the same bytes: v3 -> v4 applies the same invalidation to every stored PDF.
+pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v4";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";

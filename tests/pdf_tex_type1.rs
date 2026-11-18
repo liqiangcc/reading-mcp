@@ -40,20 +40,23 @@ async fn the_pdftex_fixture_decodes_its_builtin_type1_encoding() {
         .expect("the TeX fixture parses");
     let mut text = String::new();
     section_text(&document.root_sections, &mut text);
-    let lowered = text.to_lowercase();
+    // Inter-word spaces and superscript layout are later PDF-6 tasks; this test
+    // only cares about the characters, so whitespace runs collapse to one space.
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = flat.to_lowercase();
 
     for word in ["efficient", "finance", "first", "fluffy", "affluent"] {
         assert!(lowered.contains(word), "{word:?} missing from {text:?}");
     }
     // CMMI's `period` at 0x3A used to decode as `:`.
-    assert!(text.contains("0.5%"), "0.5% missing from {text:?}");
-    assert!(!text.contains("0:5"), "0:5 is still there in {text:?}");
+    assert!(flat.contains("0.5%"), "0.5% missing from {text:?}");
+    assert!(!flat.contains("0:5"), "0:5 is still there in {text:?}");
     // CMSY's `minus` at 0x00 used to be dropped.
-    assert!(text.contains('\u{2212}'), "no U+2212 in {text:?}");
-    assert!(text.contains("\u{2212}12"), "no -12 in {text:?}");
-    assert!(text.contains('\u{3b1}'), "no alpha in {text:?}");
+    assert!(flat.contains('\u{2212}'), "no U+2212 in {text:?}");
+    assert!(flat.contains("\u{2212}12"), "no -12 in {text:?}");
+    assert!(flat.contains('\u{3b1}'), "no alpha in {text:?}");
     assert!(
-        text.contains("plain text"),
+        flat.contains("plain text"),
         "plain text missing from {text:?}"
     );
 }

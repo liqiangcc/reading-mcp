@@ -14,6 +14,8 @@ on:
         description: 'PDF wide sweep run id for the after side (empty: survey only)'
         type: string
         default: ''
+  push:
+    branches: ['bench/pdf6b**']
 
 jobs:
   facts:

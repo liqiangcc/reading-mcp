@@ -59,7 +59,7 @@ jobs:
           path: ${{ runner.temp }}/bin
       - name: Run the positional probe on shard ${{ matrix.shard }}
         env:
-          COMPARE_IDS: ${{ inputs.compare_ids }}
+          COMPARE_IDS: ${{ inputs.compare_ids || env.DEFAULT_COMPARE_IDS }}
         run: |
           chmod +x "$RUNNER_TEMP/bin/reading-mcp-tests"
           mkdir -p "$RUNNER_TEMP/out" "$RUNNER_TEMP/work"
@@ -96,7 +96,7 @@ jobs:
           path: ${{ runner.temp }}/all
       - name: Merge the shards into the comparison table
         env:
-          COMPARE_IDS: ${{ inputs.compare_ids }}
+          COMPARE_IDS: ${{ inputs.compare_ids || env.DEFAULT_COMPARE_IDS }}
         run: |
           mkdir -p "$RUNNER_TEMP/final"
           python3 scripts/pdf7b-compare.py --aggregate \

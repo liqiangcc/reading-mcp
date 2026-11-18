@@ -81,7 +81,7 @@ OPEN_TIMEOUT_S = 120.0
 LONG_CAUSES = ("glued_terminal", "glued_words", "bibliography", "math_table",
                "missed_boundary", "genuine")
 SHORT_CAUSES = ("page_number", "marker", "heading_number", "math", "hyphen_fragment", "other")
-HEADER_CASES = ("own_unit", "prefix", "suffix", "inside", "not_found")
+HEADER_CASES = ("own_unit", "prefix", "suffix", "inside", "glued", "not_found")
 PAGE_POSITIONS = ("start", "end", "both", "middle")
 
 # `glued_terminal`: a terminal mark directly followed by a capitalised word. The lookahead form
@@ -456,8 +456,11 @@ def header_candidates(lines_per_page: list[list[str]], page_count: int,
 
 
 def header_placement(candidate: dict, lines_per_page: list[list[str]],
-                     unit_texts: list[str]) -> dict:
-    """Where the line lands in the reader's units, and where it sits on its page."""
+                     unit_texts: list[str], squashed_units: list[str]) -> dict:
+    """Where the line lands in the reader's units, and where it sits on its page.
+
+    `glued` means the line's characters are in the reader's text but without their spaces, so
+    the line cannot be removed until the missing whitespace is fixed."""
     line = candidate["line"]
     cases: collections.Counter = collections.Counter()
     positions: collections.Counter = collections.Counter()
@@ -490,7 +493,12 @@ def header_placement(candidate: dict, lines_per_page: list[list[str]],
         else:
             cases["inside"] += 1
     if not found:
-        cases["not_found"] = 1
+        squashed = CORPUS.squash(line)
+        glued = sum(1 for text in squashed_units if squashed and squashed in text)
+        if glued:
+            cases["glued"] = glued
+        else:
+            cases["not_found"] = 1
     return {"cases": dict(cases), "positions": dict(positions)}
 
 
@@ -959,6 +967,7 @@ def header_measurement(reference: dict, units: list[dict]) -> dict:
                   "share": round(count / reference["pages"], 3) if reference["pages"] else None}
                  for line, count in counts.most_common(5)]
     unit_texts = [normalize(unit["text"]) for unit in units]
+    squashed_units = [CORPUS.squash(unit["text"]) for unit in units]
     tiers = {}
     for name, line_share, page_share in HEADER_TIERS:
         candidates = header_candidates(reference["lines"], reference["pages"],
@@ -967,7 +976,8 @@ def header_measurement(reference: dict, units: list[dict]) -> dict:
         totals: collections.Counter = collections.Counter()
         positions: collections.Counter = collections.Counter()
         for candidate in candidates:
-            placement = header_placement(candidate, reference["lines"], unit_texts)
+            placement = header_placement(candidate, reference["lines"], unit_texts,
+                                        squashed_units)
             totals.update(placement["cases"])
             positions.update(placement["positions"])
             results.append({"line": clipped(candidate["line"], 120),

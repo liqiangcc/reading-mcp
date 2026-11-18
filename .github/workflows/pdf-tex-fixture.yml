@@ -6,7 +6,7 @@ run-name: PDF TeX fixture (PDF-6b)
 on:
   workflow_dispatch:
   push:
-    branches: ['bench/pdf6b**']
+    branches: ['measure/pdf6b-**']
 
 jobs:
   fixture:

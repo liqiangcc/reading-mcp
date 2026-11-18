@@ -238,9 +238,18 @@ fn font_metrics<'a>(pdf: &'a LopdfDocument, font: &'a Dictionary) -> Option<Font
             .get_deref(b"DW", pdf)
             .ok()
             .and_then(|object| number(object))
-            .unwrap_or(1000.0) as f32;
+            .map(|value| value as f32);
+        // A CID font with neither /W nor /DW gives every glyph the same
+        // width: positions would be a guess, so the page keeps the old
+        // path.
+        if ranges.is_empty() && default.is_none() {
+            return None;
+        }
         return Some(FontMetrics {
-            widths: WidthTable::Cid { ranges, default },
+            widths: WidthTable::Cid {
+                ranges,
+                default: default.unwrap_or(1000.0),
+            },
             vertical,
         });
     }
@@ -1235,6 +1244,28 @@ fn walk_page(
     }
 }
 
+/// `walk_page` behind `catch_unwind`: the walker is new code reading hostile
+/// input, and a panic must never reach the page-text pass - the page simply
+/// falls back to the old walk.
+fn walk_page_guarded(
+    pdf: &LopdfDocument,
+    page_id: ObjectId,
+    max_decompressed: usize,
+    memo: &mut FontEncodingMemo<'_>,
+    metrics: &mut FontMetricsMemo<'_>,
+) -> WalkedPage {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        walk_page(pdf, page_id, max_decompressed, memo, metrics)
+    })) {
+        Ok(walked) => walked,
+        Err(_) => WalkedPage {
+            lines: Vec::new(),
+            glyphs: 0,
+            bail: Some("undecodable"),
+        },
+    }
+}
+
 /// Walks one page and returns its positional text, or a bailed-out page that
 /// the caller sends through the old chunk path.
 pub(super) fn extract_positional_page(
@@ -1244,7 +1275,7 @@ pub(super) fn extract_positional_page(
     memo: &mut FontEncodingMemo<'_>,
     metrics: &mut FontMetricsMemo<'_>,
 ) -> PositionalPage {
-    let walked = walk_page(pdf, page_id, max_decompressed, memo, metrics);
+    let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
     if walked.bail.is_some() {
         return PositionalPage {
             bail: walked.bail,
@@ -1270,7 +1301,7 @@ pub(super) fn probe_positional_page(
     memo: &mut FontEncodingMemo<'_>,
     metrics: &mut FontMetricsMemo<'_>,
 ) -> (Vec<ProbeLine>, usize, Option<&'static str>) {
-    let walked = walk_page(pdf, page_id, max_decompressed, memo, metrics);
+    let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
     let lines = walked
         .lines
         .iter()

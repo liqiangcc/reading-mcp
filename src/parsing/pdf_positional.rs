@@ -399,11 +399,17 @@ impl TextSpace {
     }
 }
 
-struct PageWalker<'a> {
-    pdf: &'a LopdfDocument,
+/// `'d` is the document borrow the encodings and font dictionaries live in;
+/// `'w` is the shorter borrow of the memo objects themselves, so a caller can
+/// lend them out for one page at a time inside a loop.
+struct PageWalker<'d, 'w>
+where
+    'd: 'w,
+{
+    pdf: &'d LopdfDocument,
     max_decompressed: usize,
-    memo: &'a mut FontEncodingMemo<'a>,
-    metrics: &'a mut FontMetricsMemo<'a>,
+    memo: &'w mut FontEncodingMemo<'d>,
+    metrics: &'w mut FontMetricsMemo<'d>,
     ctm: Matrix,
     ctm_stack: Vec<Matrix>,
     text: TextSpace,
@@ -416,11 +422,14 @@ struct PageWalker<'a> {
     form_budget: usize,
 }
 
-impl<'a> PageWalker<'a> {
+impl<'d, 'w> PageWalker<'d, 'w>
+where
+    'd: 'w,
+{
     fn walk(
         &mut self,
         operations: &[Operation],
-        fonts: &BTreeMap<Vec<u8>, &'a Dictionary>,
+        fonts: &BTreeMap<Vec<u8>, &'d Dictionary>,
         resources: &[Dictionary],
         depth: usize,
     ) {
@@ -572,7 +581,7 @@ impl<'a> PageWalker<'a> {
         self.text.tm = multiply([1.0, 0.0, 0.0, 1.0, 0.0, -self.text.leading], self.text.tm);
     }
 
-    fn current_font(&self, fonts: &BTreeMap<Vec<u8>, &'a Dictionary>) -> Option<&'a Dictionary> {
+    fn current_font(&self, fonts: &BTreeMap<Vec<u8>, &'d Dictionary>) -> Option<&'d Dictionary> {
         fonts.get(self.text.font_resource.as_deref()?).copied()
     }
 
@@ -607,7 +616,7 @@ impl<'a> PageWalker<'a> {
     /// CMap accepts, which is exact for Identity and fixed-length CMaps.
     fn decode_codes(
         &mut self,
-        font: Option<&'a Dictionary>,
+        font: Option<&'d Dictionary>,
         bytes: &[u8],
     ) -> Vec<(Vec<u8>, String)> {
         let mut codes = Vec::new();
@@ -665,7 +674,7 @@ impl<'a> PageWalker<'a> {
     fn show_tj_pieces(
         &mut self,
         bytes: &[u8],
-        font: Option<&'a Dictionary>,
+        font: Option<&'d Dictionary>,
         mut collect: Option<&mut String>,
     ) {
         if let Some(font) = font {
@@ -748,7 +757,7 @@ impl<'a> PageWalker<'a> {
     /// One fragment per `TJ` array, matching lopdf's chunk boundary: the
     /// array's strings concatenate (with lopdf's -100/1000em space kept) and
     /// the numbers move the pen.
-    fn show_tj(&mut self, array: &[Object], font: Option<&'a Dictionary>) {
+    fn show_tj(&mut self, array: &[Object], font: Option<&'d Dictionary>) {
         let mut piece = String::new();
         let start = self.pen_device();
         for value in array {
@@ -795,7 +804,7 @@ impl<'a> PageWalker<'a> {
     fn walk_do(
         &mut self,
         operation: &Operation,
-        fonts: &BTreeMap<Vec<u8>, &'a Dictionary>,
+        fonts: &BTreeMap<Vec<u8>, &'d Dictionary>,
         resources: &[Dictionary],
         depth: usize,
     ) {
@@ -1177,13 +1186,16 @@ struct WalkedPage {
     bail: Option<&'static str>,
 }
 
-fn walk_page<'a>(
-    pdf: &'a LopdfDocument,
+fn walk_page<'d, 'w>(
+    pdf: &'d LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &'a mut FontEncodingMemo<'a>,
-    metrics: &'a mut FontMetricsMemo<'a>,
-) -> WalkedPage {
+    memo: &'w mut FontEncodingMemo<'d>,
+    metrics: &'w mut FontMetricsMemo<'d>,
+) -> WalkedPage
+where
+    'd: 'w,
+{
     let content_bytes = match pdf.get_page_content_with_limit(page_id, max_decompressed) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -1235,38 +1247,19 @@ fn walk_page<'a>(
     }
 }
 
-/// `walk_page` behind `catch_unwind`: the walker is new code reading hostile
-/// input, and a panic must never reach the page-text pass - the page simply
-/// falls back to the old walk.
-fn walk_page_guarded<'a>(
-    pdf: &'a LopdfDocument,
-    page_id: ObjectId,
-    max_decompressed: usize,
-    memo: &'a mut FontEncodingMemo<'a>,
-    metrics: &'a mut FontMetricsMemo<'a>,
-) -> WalkedPage {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        walk_page(pdf, page_id, max_decompressed, memo, metrics)
-    })) {
-        Ok(walked) => walked,
-        Err(_) => WalkedPage {
-            lines: Vec::new(),
-            glyphs: 0,
-            bail: Some("undecodable"),
-        },
-    }
-}
-
 /// Walks one page and returns its positional text, or a bailed-out page that
 /// the caller sends through the old chunk path.
-pub(super) fn extract_positional_page<'a>(
-    pdf: &'a LopdfDocument,
+pub(super) fn extract_positional_page<'d, 'w>(
+    pdf: &'d LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &'a mut FontEncodingMemo<'a>,
-    metrics: &'a mut FontMetricsMemo<'a>,
-) -> PositionalPage {
-    let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
+    memo: &'w mut FontEncodingMemo<'d>,
+    metrics: &'w mut FontMetricsMemo<'d>,
+) -> PositionalPage
+where
+    'd: 'w,
+{
+    let walked = walk_page(pdf, page_id, max_decompressed, memo, metrics);
     if walked.bail.is_some() {
         return PositionalPage {
             bail: walked.bail,
@@ -1285,14 +1278,17 @@ pub(super) fn extract_positional_page<'a>(
 
 /// The same walk for the CI probe: the laid-out lines themselves, for the
 /// line-by-line comparison against PyMuPDF.
-pub(super) fn probe_positional_page<'a>(
-    pdf: &'a LopdfDocument,
+pub(super) fn probe_positional_page<'d, 'w>(
+    pdf: &'d LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &'a mut FontEncodingMemo<'a>,
-    metrics: &'a mut FontMetricsMemo<'a>,
-) -> (Vec<ProbeLine>, usize, Option<&'static str>) {
-    let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
+    memo: &'w mut FontEncodingMemo<'d>,
+    metrics: &'w mut FontMetricsMemo<'d>,
+) -> (Vec<ProbeLine>, usize, Option<&'static str>)
+where
+    'd: 'w,
+{
+    let walked = walk_page(pdf, page_id, max_decompressed, memo, metrics);
     let lines = walked
         .lines
         .iter()

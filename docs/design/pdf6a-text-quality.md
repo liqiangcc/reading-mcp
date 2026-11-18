@@ -31,10 +31,12 @@ never committed.
 
 | What | Run | Head | Outcome |
 | --- | --- | --- | --- |
-| quality probe, the numbers below | [`44232508228`](https://github.com/liqiangcc/reading-mcp/actions/runs/44232508228) | `6fd7fbc` | 121 of 121 documents measured, 0 failed, 0 skipped |
-| plain `PDF wide sweep` on the same head | [`44233335488`](https://github.com/liqiangcc/reading-mcp/actions/runs/44233335488) | `6927414` | 121 of 121 `ok`, 0 not run; outcome table identical to PDF-5a's (96 ordinary, 8 long, 17 hard) and the same 2 suspect documents |
+| quality probe, the numbers below | [`44234764166`](https://github.com/liqiangcc/reading-mcp/actions/runs/44234764166) | `b90b412` | 121 of 121 documents measured, 0 failed, 0 skipped |
+| plain `PDF wide sweep` on the same head | [`44234766502`](https://github.com/liqiangcc/reading-mcp/actions/runs/44234766502) | `b90b412` | 121 of 121 `ok`, 0 not run; outcome table identical to PDF-5a's (96 ordinary, 8 long, 17 hard) and the same 2 suspect documents |
 
-Both runs are on code that differs from the last commit of this branch only in this file.
+Both runs are on `b90b412`, which differs from the last commit of this branch only in this
+file's wording. Every intermediate run, including the ones that fixed the harness, is in the
+branch's history and in the Actions list.
 
 ## What the measurement found, in one paragraph
 
@@ -634,9 +636,9 @@ measurement only.
    shape. It cannot make any other unit worse: a period that follows whitespace is a dot leader,
    an ellipsis dot or a maths punctuation mark, never a sentence end.
    *Risk to other formats*: `segmentation.rs` serves every format, but no EPUB, HTML, Markdown or
-   plain-text paragraph has a space before a full stop except inside a code block, so the rule is
-   format-neutral. If that is judged too strong, the guard can be `SourceKind::Pdf`-only at the
-   call site.
+   plain-text paragraph has a space before a full stop outside a code block, so the rule is
+   format-neutral. If that is judged too strong, the PDF extractor can normalise the spaced
+   period away before segmentation, which keeps the rule PDF-only.
 2. **Narrow `looks_like_unreliable_fallback_text` for PDF prose** (`:1016`). 2,468 of 2,672 long
    units are whole paragraphs the guard refused to split, in 110 papers. With the guard out of the
    way, the existing terminal rules plus the missed-boundary shapes take 32 of the 61 offending

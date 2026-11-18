@@ -388,10 +388,14 @@ def v2_normalized_payload(payload):
     """
     if not isinstance(payload, dict):
         return payload
+    normalized = dict(payload)
     items = payload.get("items")
     if not isinstance(items, list):
-        return payload
-    normalized = dict(payload)
+        text = payload.get("text")
+        normalized["items"] = [{"text": text}] if isinstance(text, str) else []
+        if isinstance(payload.get("next"), str) and "next_cursor" not in normalized:
+            normalized["next_cursor"] = payload["next"]
+        return normalized
     normalized["items"] = [
         {"text": item[1]}
         if isinstance(item, (list, tuple)) and len(item) > 1

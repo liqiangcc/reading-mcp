@@ -900,6 +900,10 @@ def read_mode(args) -> int:
                 data = payload(result) or {}
                 calls += 1
                 items = data.get("items") or []
+                if SERVER_TOOLS == "v2" and not items and isinstance(
+                    data.get("text"), str
+                ):
+                    items = [["", data["text"]]]
                 latencies.append(elapsed_ms)
                 if SERVER_TOOLS == "v2":
                     positions.append(

@@ -1,0 +1,146 @@
+name: PDF quality probe
+run-name: PDF quality probe (PDF-6a)
+on:
+  workflow_dispatch:
+    inputs:
+      only_ids:
+        description: 'Comma-separated arXiv ids to measure instead of the whole corpus (empty = all)'
+        default: ''
+  # Before this workflow exists on the default branch, GitHub cannot dispatch it on a branch
+  # (a workflow_dispatch run needs the file on `main`), so a push to the PDF-6a branch whose
+  # commit message contains `[quality-run]` starts it instead - the same pattern PDF-5a used
+  # with `bench/pdf5a-**`. Once merged, `workflow_dispatch` is the trigger that matters.
+  push:
+    branches: ['docs/pdf6a-**']
+concurrency:
+  group: pdf-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[quality-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked --bin reading-mcp 2>&1 | tail -20
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-quality-bin
+          path: target/release/reading-mcp
+
+  probe:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    name: quality shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the reference tooling
+        run: pip install pymupdf==1.28.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf-quality-bin
+          path: ${{ runner.temp }}/bin
+      - name: Is the 600 MB memory cap available on this runner?
+        run: |
+          if sudo systemd-run --scope --quiet -p MemoryMax=256M -p MemorySwapMax=0 \
+              -- /bin/true; then
+            echo "systemd-run MemoryMax scope: available"
+          else
+            echo "::warning::systemd-run MemoryMax scope is not available; runs would be uncapped"
+          fi
+      - name: Restrict the corpus list to the requested ids
+        if: github.event.inputs.only_ids != '' || vars.PDF6A_ONLY_IDS != ''
+        env:
+          ONLY_IDS: ${{ github.event.inputs.only_ids || vars.PDF6A_ONLY_IDS }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          wanted = {item.strip() for item in os.environ['ONLY_IDS'].split(',') if item.strip()}
+          kept = []
+          with open('scripts/pdf-sweep-ids.txt', encoding='utf-8') as handle:
+              for line in handle:
+                  if line.startswith('#'):
+                      kept.append(line)
+                      continue
+                  if line.strip() and json.loads(line)['id'] in wanted:
+                      kept.append(line)
+          with open('scripts/pdf-sweep-ids.txt', 'w', encoding='utf-8') as handle:
+              handle.writelines(kept)
+          print(f'kept {len(kept)} lines for {len(wanted)} ids')
+          PY
+      - name: Run the quality shard ${{ matrix.shard }}
+        run: |
+          set -o pipefail
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp"
+          mkdir -p "$RUNNER_TEMP/results" "$RUNNER_TEMP/work"
+          python3 scripts/pdf-quality.py \
+            --ids scripts/pdf-sweep-ids.txt \
+            --shard ${{ matrix.shard }} --shards 8 \
+            --binary "$RUNNER_TEMP/bin/reading-mcp" \
+            --work-dir "$RUNNER_TEMP/work" \
+            --state-root "$RUNNER_TEMP/state" \
+            --out "$RUNNER_TEMP/results/quality-${{ matrix.shard }}.jsonl" \
+            --deadline-minutes 68 \
+            --per-document-minutes 6 | tail -200
+      - name: Upload the shard's per-unit records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-quality-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    needs: [probe]
+    # A push without the `[quality-run]` marker skips build and probe; the aggregate must not
+    # then run against artifacts that do not exist.
+    if: always() && needs.probe.result != 'cancelled' && needs.probe.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pdf-quality-shard-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/all
+      - name: Merge every shard into the PDF-6a tables
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/final"
+          python3 scripts/pdf-quality.py --aggregate \
+            --jsonl-dir "$RUNNER_TEMP/all" \
+            --out "$RUNNER_TEMP/final/pdf-quality-summary.json" \
+            --markdown "$RUNNER_TEMP/final/pdf-quality.md" | tail -400
+          cat "$RUNNER_TEMP/final/pdf-quality.md" >> "$GITHUB_STEP_SUMMARY"
+          ls -l "$RUNNER_TEMP/final"
+      - name: Upload the merged tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-quality-final
+          path: |
+            ${{ runner.temp }}/final/
+            ${{ runner.temp }}/all/
+          if-no-files-found: warn
+          retention-days: 14

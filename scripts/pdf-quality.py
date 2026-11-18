@@ -195,7 +195,8 @@ def reference_pages(path: str) -> dict:
             lines = []
             for line in text.splitlines():
                 line = normalize(line)
-                if len(line) >= MIN_LINE_CHARS:
+                if len(line) >= MIN_LINE_CHARS or any(
+                        pattern.match(line) for pattern in PAGE_NUMBER_LINE_RES):
                     lines.append(line)
             lines_per_page.append(lines)
             for font in page.get_fonts(full=True):
@@ -265,7 +266,7 @@ def missed_boundary_tokens(text: str) -> list[str]:
     tokens = []
     for match in MISSED_BOUNDARY_RE.finditer(text):
         before = text[:match.start()]
-        found = re.search(r"([^\W\d_][\w.\-]*)$", before, re.U)
+        found = re.search(r"([\w.\-/]+)$", before, re.U)
         tokens.append(found.group(1) if found else "")
     return tokens
 
@@ -588,6 +589,7 @@ def operator_facts(data: bytes) -> dict:
     tokens = content_tokens(data)
     counts = {b"Tj": 0, b"TJ": 0, b"'": 0, b'"': 0}
     do_names: list[str] = []
+    font_names: list[str] = []
     for position, token in enumerate(tokens):
         if token in counts:
             counts[token] += 1
@@ -595,6 +597,10 @@ def operator_facts(data: bytes) -> dict:
             name = tokens[position - 1]
             if name.startswith(b"/"):
                 do_names.append(name[1:].decode("latin-1"))
+        elif token == b"Tf" and position:
+            name = tokens[position - 1]
+            if name.startswith(b"/"):
+                font_names.append(name[1:].decode("latin-1"))
     return {
         "Tj": counts[b"Tj"],
         "TJ": counts[b"TJ"],
@@ -603,6 +609,7 @@ def operator_facts(data: bytes) -> dict:
         "text_ops": sum(counts.values()),
         "do": len(do_names),
         "do_names": do_names,
+        "font_names": sorted(set(font_names)),
     }
 
 
@@ -735,7 +742,7 @@ def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
                 continue
             page = document.load_page(page_number - 1)
             own = {"Tj": 0, "TJ": 0, "quote": 0, "dquote": 0, "text_ops": 0, "do": 0,
-                   "do_names": []}
+                   "do_names": [], "font_names": []}
             for xref in page.get_contents() or []:
                 try:
                     facts = operator_facts(document.xref_stream(xref) or b"")
@@ -744,6 +751,8 @@ def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
                 for key in ("Tj", "TJ", "quote", "dquote", "text_ops", "do"):
                     own[key] += facts[key]
                 own["do_names"].extend(facts["do_names"])
+                own["font_names"].extend(facts["font_names"])
+            own["font_names"] = sorted(set(own["font_names"]))
             forms = []
             for name in own["do_names"]:
                 target = xobject_target(document, page.xref, name)
@@ -759,9 +768,12 @@ def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
                 facts["name"] = name
                 forms.append(facts)
             fonts = resource_fonts(document, page.xref)
+            resource_names = {font["name"] for font in fonts}
             results.append({
                 "page": page_number,
                 "own": own,
+                "tf_fonts_missing_from_resources": [name for name in own["font_names"]
+                                                   if name not in resource_names],
                 "forms": [{"name": form["name"], "text_ops": form["text_ops"],
                            "has_cjk_font": form["has_cjk_font"],
                            "fonts": form["fonts"],
@@ -1269,6 +1281,18 @@ def aggregate_mode(args) -> int:
     paragraph_ratios = [(doc["paragraphs"]["count"], doc["pages"], doc["id"]) for doc in docs
                         if (doc.get("paragraphs") or {}).get("count") is not None]
     fewer = [item for item in paragraph_ratios if item[0] < item[1]]
+    modes: collections.Counter = collections.Counter()
+    mode_paragraphs: dict[str, list[float]] = collections.defaultdict(list)
+    for doc in docs:
+        mode = doc.get("structure_mode") or "unknown"
+        modes[mode] += 1
+        if (doc.get("paragraphs") or {}).get("per_page") is not None:
+            mode_paragraphs[mode].append(doc["paragraphs"]["per_page"])
+    lines += ["", "| Structure | Documents | Median paragraphs/page |", "| --- | --- | --- |"]
+    for mode, count in modes.most_common():
+        values = mode_paragraphs.get(mode) or []
+        lines.append(f"| `{mode}` | {count} | "
+                     f"{fmt(statistics.median(values) if values else None, 2)} |")
     lines += ["", f"Paragraphs against pages (H2): {len(fewer)} of {len(paragraph_ratios)} "
                   f"documents have fewer paragraphs than pages "
                   f"({sum(1 for item in paragraph_ratios if item[0] <= item[1] / 2)} have at "
@@ -1355,6 +1379,12 @@ def aggregate_mode(args) -> int:
         units = [unit for unit in short_units if unit.get("cause") == cause]
         for sample in sample_of(units, "text"):
             lines.append(f"| `{cause}` | {sample} |")
+    other_texts = collections.Counter(unit.get("text") or ""
+                                      for unit in short_units
+                                      if unit.get("cause") == "other")
+    lines += ["", "Most common `other` short units: "
+                  + ", ".join(f"`{text}` {count}"
+                              for text, count in other_texts.most_common(10)) + "."]
     unmatched = sum(1 for unit in short_units
                     if unit.get("cause") == "page_number" and unit.get("page_matched") is False)
     lines += ["", f"Page-number units whose page could not be inferred from the reference: "
@@ -1413,8 +1443,8 @@ def aggregate_mode(args) -> int:
                      f"{(worst.get('pdf') or {}).get('own', {}).get('text_ops')} | "
                      f"{worst.get('pdf', {}).get('form_text_ops')} | "
                      f"{worst.get('pdf', {}).get('form_cjk_fonts')} |")
-    lines += ["", "| Id | Page | Fonts (subtype, /ToUnicode, CJK CMap) | Forms reached by Do |",
-              "| --- | --- | --- | --- |"]
+    lines += ["", "| Id | Page | Fonts (subtype, /ToUnicode, CJK CMap) | Forms reached by Do | "
+                  "Tf fonts missing from /Resources/Font |", "| --- | --- | --- | --- | --- |"]
     for doc in loss_docs:
         for worst in (doc["loss"].get("worst_pages") or [])[:2]:
             pdf = worst.get("pdf") or {}
@@ -1425,8 +1455,10 @@ def aggregate_mode(args) -> int:
             forms = "; ".join(f"{form['name']} ({form['text_ops']} ops, "
                               f"{'CJK font' if form['has_cjk_font'] else 'no CJK font'})"
                               for form in (pdf.get("forms") or [])[:4])
+            missing = (pdf.get("tf_fonts_missing_from_resources") or [])
             lines.append(f"| {doc['id']} | {worst.get('page')} | {fonts[:150]} | "
-                         f"{forms[:150] or '-'} |")
+                         f"{forms[:150] or '-'} | "
+                         f"{', '.join(missing)[:80] if missing else '-'} |")
 
     text = "\n".join(lines)
     print(text)

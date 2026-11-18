@@ -32,7 +32,7 @@ never committed.
 | What | Run | Head | Outcome |
 | --- | --- | --- | --- |
 | quality probe, the numbers below | [`44232508228`](https://github.com/liqiangcc/reading-mcp/actions/runs/44232508228) | `6fd7fbc` | 121 of 121 documents measured, 0 failed, 0 skipped |
-| plain `PDF wide sweep` on the same head | RUN_SWEEP | HEAD_SWEEP | SWEEP_OUTCOME |
+| plain `PDF wide sweep` on the same head | [`44233335488`](https://github.com/liqiangcc/reading-mcp/actions/runs/44233335488) | `6927414` | 121 of 121 `ok`, 0 not run; outcome table identical to PDF-5a's (96 ordinary, 8 long, 17 hard) and the same 2 suspect documents |
 
 Both runs are on code that differs from the last commit of this branch only in this file.
 
@@ -96,6 +96,41 @@ Sentence boundaries (`src/domain/segmentation.rs`):
   `degradation=requested_sentence_but_paragraph_is_coarse_only`
   (`src/application/text_unit_stream.rs:331-384`). PDF paragraphs are `ProseOrUnknown` (no
   parser-native block map), so this guard applies to them.
+
+## The rules and thresholds the harness applies
+
+Every number below is the output of these fixed rules, so a disagreement with them is a
+disagreement about the rule and not about a hidden choice. All of them are in
+`scripts/pdf-quality.py` at the top of the file.
+
+| Rule | Threshold and pattern | Where |
+| --- | --- | --- |
+| long unit | `> 800` characters after trimming | `LONG_CHARS` |
+| short unit | `< 5` characters after trimming | `SHORT_CHARS` |
+| `glued_terminal` | `>= 2` matches of `[a-z]{2,}[.?!]["')\]]?(?=[A-Z][a-z])` | `GLUED_TERMINAL_MIN`, `GLUED_TERMINAL_RE` |
+| `glued_words` | unit whitespace share `< 50%` of its page's reference share, **or** one token of `>= 30` letters that the reference text does not contain | `GLUED_TOKEN_LETTERS`, `LONG_TOKEN_RE` |
+| `bibliography` | `>= 6` markers: a year `(18|19|20)\d\d`, `et al`, `[n]`, `pp. n`, `vol. n`, `doi`, `arXiv:dddd.ddddd`, `ed`/`eds`/`edited by` | `BIB_MARKER_MIN`, `BIB_MARKER_RES` |
+| `math_table` | letters `< 50%` of the non-space characters | `LETTER_SHARE_MAX` |
+| `missed_boundary` | `>= 2` matches of `[.?!]["')\]]?\s+(?=[A-Z])` | `MISSED_BOUNDARY_MIN`, `MISSED_BOUNDARY_RE` |
+| `genuine` | none of the above — first match wins, in this order | `classify_long` |
+| short units, in order | `page_number`, `heading_number`, `marker`, `hyphen_fragment`, `math`, `other` | `classify_short` |
+| `page_number` | a digit run of `<= 4` digits, `1 <= n <= pages`, that is within 1 of the page the unit was matched to, or appears as a bare line at the page's start or end, or whose page could not be inferred | `unit_pages`, `edge_digits` |
+| `heading_number` | `^(?:\d+(?:\.\d+)+\.?|\d+\.|[A-Z]\.|\d+\))$` | `HEADING_NUMBER_RE` |
+| `marker` | `^(?:[\[(]\d{1,3}[\])]|\d{1,3}[\)\]]|[*†‡§¶#]+|[⁰¹²³⁴⁵⁶⁷⁸⁹]+)$`, or a stripped digit run of `<= 3` | `MARKER_RE` |
+| `hyphen_fragment` | ends with `-`, or joins its neighbour into a word the reference contains | `HYPHEN_END_RE`, `neighbour_word` |
+| `math` | `MATH_ONLY_RE`, a single letter, or any character of the reference's maths set | `MATH_ONLY_RE`, `SINGLE_LETTER_RE` |
+| header/footer, task tier | a line on `>= 80%` of pages, or a page-number line (`PAGE_NUMBER_LINE_RES`) on `>= 50%` | `HEADER_PAGE_SHARE`, `PAGENUM_PAGE_SHARE` |
+| header/footer, PDF-5a tier | the same at `>= 30%` (PDF-5a's own proxy) | `HEADER_TIERS` |
+| any candidate line | must repeat on `>= 3` pages | `MIN_REPEAT_PAGES` |
+| header placement | a repeated line shorter than `8` characters is counted as `skipped_short`; it is a table cell, and a 1-2 character line matches inside every number on the page | `MIN_HEADER_PLACEMENT_CHARS` |
+| whitespace floor | backend whitespace `< 70%` of the reference | `WS_REFERENCE_FLOOR` |
+| containment | 5-gram containment of the first 20 sentences' text against the whole backend text, whitespace removed on both sides | `GRAM` = 5, `CONTAINMENT_PAGES` = 20, `gram_containment` in `scripts/pdf-corpus.py` |
+| H6 population | containment `< 0.8`, or U+FFFD + private-use `> 1%` | `LOSS_CONTAINMENT`, `BAD_CHAR_SHARE` |
+| worst pages | the 5 pages with the largest absolute character deficit | `WORST_PAGES` |
+
+The what-if is approximate in one specific way: it splits a unit at the boundaries its own cause
+rule found and keeps everything else, so it measures "if this rule fired everywhere it could"
+and not "if this cause were fixed".
 
 ## 1. Whitespace (H1)
 
@@ -564,6 +599,12 @@ Per document, with the evidence that decides it:
 - **2306.05976** (containment 0.787, 0.68% U+FFFD) is the same shape: 231 Type1 + 35 Type0 fonts,
   180 Type1 without `/ToUnicode`, 4 text-bearing forms in 33 sampled pages and 0 with a CJK font.
 
+Two reading notes. The character ratio here is raw backend characters over raw reference
+characters; PDF-5a's sweep divides whitespace-stripped backend characters by raw reference
+characters, so its ratio for 2311.05131 reads 0.549 against the 0.805 here for the same 708,498
+characters. And this harness reads with a 1.5M-character budget, which no document in the corpus
+reaches (0 truncated), so the totals below are whole-document ones.
+
 One caveat that applies to every per-page number in this section: the backend characters of a page
 are attributed by matching each unit's opening characters against that page's reference text, so a
 page whose characters are all wrong (private-use glyphs) looks empty. The document totals are
@@ -592,25 +633,41 @@ measurement only.
    unit in the corpus — in 5 papers, and 903 of the missed-boundary tokens in §2 are the same
    shape. It cannot make any other unit worse: a period that follows whitespace is a dot leader,
    an ellipsis dot or a maths punctuation mark, never a sentence end.
+   *Risk to other formats*: `segmentation.rs` serves every format, but no EPUB, HTML, Markdown or
+   plain-text paragraph has a space before a full stop except inside a code block, so the rule is
+   format-neutral. If that is judged too strong, the guard can be `SourceKind::Pdf`-only at the
+   call site.
 2. **Narrow `looks_like_unreliable_fallback_text` for PDF prose** (`:1016`). 2,468 of 2,672 long
    units are whole paragraphs the guard refused to split, in 110 papers. With the guard out of the
    way, the existing terminal rules plus the missed-boundary shapes take 32 of the 61 offending
    papers below the 5% line. The guard exists for a reason (H1 is real in 3 papers), so the
    narrowing has to be measured against those three: it should keep firing where the glue density
-   is high and stop firing on a paragraph that is merely long.
+   is high and stop firing on a paragraph that is merely long. Note that one of the three glue
+   events the guard counts is *a digit directly followed by an uppercase letter*
+   (`missing_space_glue_events`, `:1030`), which is ordinary in maths and in numbered headings, so
+   the guard trips on text that is not damaged at all.
+   *Risk to other formats*: the guard fires for any paragraph whose block map is missing or
+   `ProseOrUnknown`, which includes Markdown and plain text, so the narrowing must be checked
+   against those fixtures (they are in `tests/`), or gated on the PDF source.
 3. **Keep the chunk separator** (H1): 860 long units are glued text in 16 papers, 75 header
    occurrences are only present without their spaces, and 74 short units are hyphen fragments.
    The 3 papers below 70% whitespace are where it shows; a separator between chunks of the same
    page would also give the line breaks H5 needs.
+   *Risk to other formats*: none — `src/parsing/pdf.rs` is PDF-only.
 4. **Merge a heading's number with its heading** (`heading_number`, 1,236 units in 53 papers).
    The number and the title are separate lines and so separate paragraphs; this is the same
    line-reconstruction fix as 3, not a sentence rule.
+   *Risk to other formats*: none if it is done in the PDF line reconstruction.
 5. **Split citation lists** (`bibliography`, 586 long units in 92 papers). High unit count, low
    document payoff: 7 of 61 papers fall below 5% with it alone. A line-per-entry splitter, not a
    sentence fix.
+   *Risk to other formats*: none if it is done on PDF lines; a shared segmentation rule would have
+   to keep `<p>`-based formats untouched.
 6. **Remove page furniture** (H5): 45 lines in 30 papers at the task's threshold. Last, because
    2.8% of the occurrences are units of their own today; it needs 3 (line breaks) and then 1
    (spaces) before it can work at paragraph level.
+   *Risk to other formats*: none — headers and footers are a PDF idea, and a line that repeats on
+   every page of an EPUB chapter is a bug elsewhere.
 
 ## What did not run, and why
 

@@ -317,20 +317,13 @@ fn extract_page_texts_raw(
     let mut errors = Vec::new();
 
     for page_number in page_numbers {
-        let mut text = String::new();
+        let mut fragments = Vec::new();
         let mut first_error = None;
-        let mut chunks = Vec::new();
         for fragment in
             pdf.extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
         {
             match fragment {
-                Ok(fragment) => {
-                    text.push_str(&fragment);
-                    let chunk = normalize_pdf_text(&fragment);
-                    if !chunk.is_empty() {
-                        chunks.push(chunk);
-                    }
-                }
+                Ok(fragment) => fragments.push(fragment),
                 // The whole page's text is the error, exactly as the concatenating variant
                 // returns it: the first failing fragment wins.
                 Err(error) => {
@@ -340,6 +333,10 @@ fn extract_page_texts_raw(
                 }
             }
         }
+        // A leader's periods sit in different chunks of the same page, so the runs are found on
+        // the page's text and the pieces are cut back out of it: the chunk boundaries, which the
+        // heading inference reads, stay where the backend put them.
+        let (text, chunks) = normalized_page_text(&fragments);
         let text = match first_error {
             Some(error) => {
                 errors.push(format!("page {page_number}: {error}"));
@@ -359,6 +356,135 @@ fn extract_page_texts_raw(
 
 fn normalize_pdf_text(value: &str) -> String {
     value.trim().to_string()
+}
+
+/// How many periods a run needs before it is a dot leader or a maths ellipsis.
+const SPACED_DOT_RUN_MIN_PERIODS: usize = 3;
+/// A run's whitespace gap may hold at most this much before it is page layout rather than the
+/// space, tab or single line break a leader or an ellipsis puts between two of its periods.
+const SPACED_DOT_RUN_MAX_GAP_BYTES: usize = 64;
+
+/// The normalised text of one page and the chunks the section builders read.
+///
+/// A table-of-contents dot leader and a maths ellipsis written as spaced periods reach the text as
+/// one period per lopdf chunk, separated by a space or by the newline `ET` appends. A period
+/// followed by whitespace is a sentence end (`ascii_terminal_is_terminal`), so a twenty-dot leader
+/// published twenty one-character sentences: 4,952 of the corpus's 10,841 short units are a lone
+/// `.` (PDF-6a §3).
+///
+/// Each run of `SPACED_DOT_RUN_MIN_PERIODS` or more periods whose gaps are only spaces, tabs or a
+/// single line break, with at least one such gap, becomes the same number of adjacent periods. The
+/// existing "a period followed by a period is not terminal" rule then keeps the whole run together
+/// with one sentence end at its last period. The `…` alternative (one U+2026, never terminal) was
+/// measured against it: it also drops the sentence end the leader's last period still owes the
+/// reader, so a table-of-contents page merges into one long unit.
+///
+/// A run of one or two periods, and a single period after whitespace — `… 1 / 2 . (17) Once again`
+/// — is a real sentence end and is copied through byte for byte. That case is why this lives in the
+/// PDF text path and not in `src/domain/segmentation.rs`: that module is shared with the formats
+/// that have no dot leaders, and its version bump would stale every stored EPUB handle.
+///
+/// The replacement is written into the chunk that holds the run's **first** period, and a chunk
+/// that starts inside a run loses the rest of it. A heading line after a leader therefore keeps
+/// its own text, and `PageText.text` (the pieces joined) and `PageText.chunks` (the same pieces,
+/// trimmed) cannot disagree.
+fn normalized_page_text(fragments: &[String]) -> (String, Vec<String>) {
+    let mut raw = String::new();
+    for fragment in fragments {
+        raw.push_str(fragment);
+    }
+    let runs = spaced_dot_run_ranges(&raw);
+
+    let mut text = String::with_capacity(raw.len());
+    let mut chunks = Vec::new();
+    let mut run_index = 0usize;
+    let mut fragment_start = 0usize;
+    for fragment in fragments {
+        let fragment_end = fragment_start + fragment.len();
+        let mut piece = String::with_capacity(fragment.len());
+        let mut cursor = fragment_start;
+        while let Some(&(run_start, run_end, periods)) = runs.get(run_index) {
+            if run_start >= fragment_end {
+                break;
+            }
+            if run_end <= fragment_start {
+                run_index += 1;
+                continue;
+            }
+            if run_start >= fragment_start {
+                piece.push_str(&raw[cursor..run_start]);
+                piece.push_str(&".".repeat(periods));
+            }
+            cursor = run_end.min(fragment_end);
+            if run_end > fragment_end {
+                break;
+            }
+            run_index += 1;
+        }
+        piece.push_str(&raw[cursor..fragment_end]);
+        text.push_str(&piece);
+        let chunk = normalize_pdf_text(&piece);
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+        fragment_start = fragment_end;
+    }
+    (text, chunks)
+}
+
+/// The byte ranges of the spaced period runs in `text`, with the number of periods each holds:
+/// `(start, end, periods)`, `end` being the byte just after the run's last period, so the
+/// whitespace that follows the run is never part of it.
+///
+/// A run needs `SPACED_DOT_RUN_MIN_PERIODS` periods and at least one whitespace gap between two of
+/// them; adjacent periods extend it without making it spaced, so a plain `...` is found and left
+/// as it is. Only spaces, tabs and a single line break may sit in a gap: a blank line, a table's
+/// column gap or any other character ends the run there.
+fn spaced_dot_run_ranges(text: &str) -> Vec<(usize, usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'.' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut periods = 1usize;
+        let mut end = index + 1;
+        let mut spaced = false;
+        let mut cursor = index + 1;
+        loop {
+            let gap_start = cursor;
+            while let Some(&byte) = bytes.get(cursor) {
+                if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
+                    cursor += 1;
+                } else {
+                    break;
+                }
+            }
+            let gap = &bytes[gap_start..cursor];
+            // At most one line break: a blank line is not a leader's gap.
+            let gap_ok = gap.len() <= SPACED_DOT_RUN_MAX_GAP_BYTES
+                && gap
+                    .iter()
+                    .filter(|&&byte| matches!(byte, b'\n' | b'\r'))
+                    .count()
+                    <= 1;
+            if !gap_ok || bytes.get(cursor) != Some(&b'.') {
+                break;
+            }
+            periods += 1;
+            spaced |= cursor > gap_start;
+            end = cursor + 1;
+            cursor += 1;
+        }
+        if periods >= SPACED_DOT_RUN_MIN_PERIODS && spaced {
+            ranges.push((start, end, periods));
+        }
+        index = end;
+    }
+    ranges
 }
 
 /// Hashes the raw bytes, loads the object tree and releases the file.
@@ -2012,6 +2138,247 @@ mod tests {
         // stays unmapped and decodes to the replacement character as before.
         assert_eq!(page_texts(&document)[0].text, "Z\u{fffd}");
         assert_eq!(page_texts(&document), old_page_texts(&document));
+    }
+
+    /// PDF-6c: the normaliser over one page of one chunk.
+    fn normalized_dot_runs(value: &str) -> String {
+        normalized_page_text(&[value.to_string()]).0
+    }
+
+    #[test]
+    fn a_space_separated_dot_leader_is_joined() {
+        assert_eq!(
+            normalized_dot_runs("Chapter 1 . . . . . 7"),
+            "Chapter 1 ..... 7"
+        );
+    }
+
+    #[test]
+    fn a_line_break_separated_dot_leader_is_joined() {
+        assert_eq!(
+            normalized_dot_runs("Chapter 1\n.\n.\n.\n.\n7"),
+            "Chapter 1\n....\n7"
+        );
+    }
+
+    #[test]
+    fn a_mixed_dot_leader_is_joined() {
+        assert_eq!(normalized_dot_runs(". \n.  .\t."), "....");
+    }
+
+    #[test]
+    fn a_maths_ellipsis_is_joined() {
+        assert_eq!(normalized_dot_runs("1 , . . . , N"), "1 , ... , N");
+    }
+
+    #[test]
+    fn runs_of_one_and_two_periods_stay_as_they_are() {
+        assert_eq!(normalized_dot_runs("1 / 2 . (17)"), "1 / 2 . (17)");
+        assert_eq!(normalized_dot_runs("a . . b"), "a . . b");
+        assert_eq!(normalized_dot_runs("a\n.\n.\nb"), "a\n.\n.\nb");
+        assert_eq!(normalized_dot_runs("..."), "...");
+    }
+
+    #[test]
+    fn a_blank_line_ends_the_run() {
+        assert_eq!(normalized_dot_runs(". .\n\n. . . b"), ". .\n\n... b");
+    }
+
+    #[test]
+    fn a_sentence_that_ends_with_a_spaced_period_stays() {
+        assert_eq!(
+            normalized_dot_runs("\u{2026} 1 / 2 . (17) Once again"),
+            "\u{2026} 1 / 2 . (17) Once again"
+        );
+    }
+
+    #[test]
+    fn a_leader_split_across_chunks_is_joined_once() {
+        let fragments = ["Chapter 1\n", ".\n", ".\n", ".\n", "7\n"]
+            .map(str::to_string)
+            .to_vec();
+        let (text, chunks) = normalized_page_text(&fragments);
+        assert_eq!(text, "Chapter 1\n...\n7\n");
+        assert_eq!(
+            chunks,
+            vec!["Chapter 1".to_string(), "...".to_string(), "7".to_string()],
+            "the replacement belongs to the chunk that holds the run's first period"
+        );
+        assert_eq!(
+            text,
+            normalized_dot_runs("Chapter 1\n.\n.\n.\n7\n"),
+            "the chunked run and the whole-page run must agree"
+        );
+    }
+
+    /// One `BT`/`Tf`/`Td`/`Tj`/`ET` block. lopdf closes a chunk at `ET` and appends the newline
+    /// that a real dot leader's whitespace comes from, so a leader built one glyph per block
+    /// arrives exactly as the corpus's leaders do: one period per chunk.
+    fn line_text_operations(font: &str, text: &str, y: i64) -> Vec<Operation> {
+        vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec![font.into(), 12.into()]),
+            Operation::new("Td", vec![72.into(), y.into()]),
+            Operation::new(
+                "Tj",
+                vec![Object::String(
+                    text.as_bytes().to_vec(),
+                    StringFormat::Literal,
+                )],
+            ),
+            Operation::new("ET", vec![]),
+        ]
+    }
+
+    /// Two pages: a table-of-contents line whose six-period leader is one glyph per chunk and
+    /// then its page number, and a body page.
+    fn dot_leader_pdf() -> Vec<u8> {
+        let mut document = LopdfDocument::with_version("1.5");
+        let resources = text_resources(&mut document);
+        let mut leader = line_text_operations("F1", "Chapter 1", 720);
+        for index in 0..6 {
+            leader.extend(line_text_operations("F1", ".", 700 - index * 14));
+        }
+        leader.extend(line_text_operations("F1", "7", 600));
+        let pages = vec![
+            (leader, resources.clone()),
+            (
+                byte_text_operations("F1", b"The second page carries the body text."),
+                resources,
+            ),
+        ];
+        let mut document = build_pdf(document, pages);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("pdf saves");
+        bytes
+    }
+
+    #[test]
+    fn a_dot_leader_line_publishes_no_one_character_unit() {
+        let document = parse_bytes(dot_leader_pdf()).expect("the dot-leader PDF opens");
+        let units = document.sentence_text_units();
+        let texts = units
+            .units
+            .iter()
+            .map(|unit| unit.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !units.units.iter().any(|unit| unit.text.trim() == "."),
+            "the leader still published a one-character unit: {texts:?}"
+        );
+        assert!(
+            units.units.iter().any(|unit| unit.text.contains("......")),
+            "the leader did not reach the reader as one run: {texts:?}"
+        );
+    }
+
+    fn section_content(sections: &[Section], id: &SectionId) -> Option<String> {
+        fn find(section: &Section, id: &SectionId) -> Option<String> {
+            if &section.id == id {
+                return Some(section.content.clone());
+            }
+            section.children.iter().find_map(|child| find(child, id))
+        }
+        sections.iter().find_map(|section| find(section, id))
+    }
+
+    /// The binding map must validate, and every binding's range must slice its owner's content to
+    /// the text of the page it names. `exact` is for the two builders that take the whole page
+    /// text; the heading path binds one fragment at a time, so its slice is part of the page.
+    fn assert_bindings_slice_their_pages(
+        builder: &str,
+        sections: &[Section],
+        bindings: &[OriginalSourceBinding],
+        pages: &[PageText],
+        exact: bool,
+    ) {
+        OriginalSourceBindingMap::new(bindings.to_vec())
+            .validate_against_section_lengths(|id| {
+                section_content(sections, id).map(|content| content.chars().count())
+            })
+            .unwrap_or_else(|error| panic!("{builder}: invalid binding map: {error}"));
+        assert!(!bindings.is_empty(), "{builder}: no bindings");
+        for binding in bindings {
+            let content = section_content(sections, &binding.owner_section_id)
+                .unwrap_or_else(|| panic!("{builder}: the binding's owner section is missing"));
+            let slice = binding
+                .normalized_range
+                .slice(&content)
+                .unwrap_or_else(|error| panic!("{builder}: the range does not slice: {error}"));
+            let page_number = match &binding.target {
+                OriginalSourceTarget::Page { page_number } => *page_number,
+            };
+            let page = pages
+                .iter()
+                .find(|page| page.number == page_number)
+                .unwrap_or_else(|| panic!("{builder}: the binding names page {page_number}"));
+            if exact {
+                assert_eq!(
+                    slice, page.text,
+                    "{builder}: the page {page_number} binding is not the page's text"
+                );
+            } else {
+                assert!(
+                    !slice.trim().is_empty() && page.text.contains(slice.trim()),
+                    "{builder}: the page {page_number} binding {slice:?} is not part of the \
+                     page's text"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_normalised_page_keeps_its_bindings_under_every_section_builder() {
+        let pdf = LopdfDocument::load_mem(&dot_leader_pdf()).expect("the dot-leader PDF loads");
+        let pages = page_texts(&pdf);
+        assert_eq!(pages.len(), 2);
+        assert!(
+            pages[0].text.contains("......"),
+            "the leader was not joined: {:?}",
+            pages[0].text
+        );
+
+        let (sections, bindings) = build_page_sections(pages.clone());
+        assert_bindings_slice_their_pages("page fallback", &sections, &bindings, &pages, true);
+
+        let entries = vec![
+            PdfTocEntry {
+                level: 1,
+                title: "Chapter 1".into(),
+                page: 1,
+            },
+            PdfTocEntry {
+                level: 1,
+                title: "Chapter 2".into(),
+                page: 2,
+            },
+        ];
+        let (sections, bindings) = build_toc_sections(&entries, &pages, 2);
+        assert_bindings_slice_their_pages("native TOC", &sections, &bindings, &pages, true);
+
+        let mut fragmented = pages.clone();
+        let fragments = source_fragments(&mut fragmented);
+        let second_page_fragment = fragments
+            .iter()
+            .find(|fragment| fragment.page == 2)
+            .expect("page 2 has a fragment")
+            .global_fragment;
+        let headings = vec![
+            PdfHeadingCandidate {
+                number_path: vec![1],
+                title: "1 Chapter".into(),
+                page: 1,
+                global_fragment: fragments[0].global_fragment,
+            },
+            PdfHeadingCandidate {
+                number_path: vec![2],
+                title: "2 Chapter".into(),
+                page: 2,
+                global_fragment: second_page_fragment,
+            },
+        ];
+        let (sections, bindings) = build_inferred_heading_sections(&headings, &fragments);
+        assert_bindings_slice_their_pages("inferred headings", &sections, &bindings, &pages, false);
     }
 
     fn push_section_golden(out: &mut String, section: &Section) {

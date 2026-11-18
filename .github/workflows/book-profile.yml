@@ -2,7 +2,7 @@ name: Book profile
 on:
   workflow_dispatch:
   push:
-    branches: ['bench/**']
+    branches: ['bench/book-profile-**']
 jobs:
   book:
     runs-on: ubuntu-latest

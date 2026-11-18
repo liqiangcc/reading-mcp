@@ -1226,6 +1226,28 @@ class TreePeak(threading.Thread):
         }
 
 
+def peak_kib(record: dict) -> int:
+    """The peak resident set of one open, in KiB.
+
+    The larger of what the sampler saw over the tree and the kernel's `ru_maxrss` for the process
+    the harness started. The second is the peak of the largest single process in that tree over
+    its whole life, so the tree's peak is never below it, and a transient shorter than the 50 ms
+    sampling interval shows up only there. Neither source can be trusted alone on every runner:
+    the scope's `memory.peak` missed a startup transient in every one of the 121 default-backend
+    documents, while `ru_maxrss` cannot see two processes peaking at once.
+    """
+    resources = record.get("resources") or {}
+    return max(resources.get("peak_tree_kib") or 0, record.get("peak_server_kib") or 0)
+
+
+def peak_source(record: dict) -> str:
+    """Which of the two sources `peak_kib` took."""
+    resources = record.get("resources") or {}
+    if (record.get("peak_server_kib") or 0) > (resources.get("peak_tree_kib") or 0):
+        return "ru_maxrss"
+    return resources.get("peak_source") or "?"
+
+
 # --------------------------------------------------------------------------------------------
 # Why the layout worker refused (PDF-7a)
 # --------------------------------------------------------------------------------------------
@@ -1760,7 +1782,7 @@ def run_shard(args) -> int:
               f"| {fmt(long_stats.get('units'))} | {fmt(long_stats.get('share'), 4)} | "
               f"{fmt(short_stats.get('units'))} | {fmt(short_stats.get('share'), 4)} | "
               f"{own} | {fmt(record.get('open_s'), 2)} | "
-              f"{fmt((resources.get('peak_tree_kib') or 0) / 1024, 1)} | "
+              f"{fmt(peak_kib(record) / 1024, 1)} | "
               f"{fmt(resources.get('oom_kill'))} | {fmt(record.get('seconds'), 1)} |", flush=True)
     return 0
 
@@ -2158,8 +2180,12 @@ def aggregate_mode(args) -> int:
     lines += ["", "## 6. Backend, cost and outcomes (PDF-7a)", "",
               "Peak resident set is the **whole process tree** (the server and the Python worker it "
               "spawns), not the server's `ru_maxrss`: PDF-1a reported the server alone and said so. "
-              "Every open runs inside the same `MemoryMax=600M` scope, so a document whose tree "
-              "does not fit is killed by the cap and reported as its own outcome.", "",
+              "The number is the larger of a 50 ms sampler's sum over the tree and the kernel's "
+              "`ru_maxrss` for the process the harness starts, which is the peak of the largest "
+              "single process in that tree over its whole life: a transient shorter than the "
+              "interval shows up only in the second, and two processes peaking at once only in the "
+              "first. Every open runs inside the same `MemoryMax=600M` scope, so a document whose "
+              "tree does not fit is killed by the cap and reported as its own outcome.", "",
               "| Backend | Documents | ok | cap_killed | OCR_REQUIRED | PARSE_FAILED | timeout | "
               "other |", "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for name in backend_names:
@@ -2192,11 +2218,9 @@ def aggregate_mode(args) -> int:
     for name in backend_names:
         rows = [doc for doc in documents if (doc.get("backend") or "?") == name]
         opens = [doc["open_s"] for doc in rows if doc.get("open_s") is not None]
-        peaks = [(doc.get("resources") or {}).get("peak_tree_kib") for doc in rows]
+        peaks = [peak_kib(doc) for doc in rows]
         peaks = [value / 1024 for value in peaks if value]
-        sources = collections.Counter((doc.get("resources") or {}).get("peak_source")
-                                      for doc in rows
-                                      if (doc.get("resources") or {}).get("peak_source"))
+        sources = collections.Counter(peak_source(doc) for doc in rows)
         kills = sum((doc.get("resources") or {}).get("oom_kill") or 0 for doc in rows)
         lines.append(
             f"| `{name}` | {len(opens)} | {fmt(statistics.median(opens), 2) if opens else '-'} | "
@@ -2311,7 +2335,7 @@ def measures_for(documents: list[dict], long_units: list[dict], short_units: lis
     containments = [(doc.get("quality") or {}).get("containment_first20") for doc in opened]
     containments = [value for value in containments if value is not None]
     opens = [doc["open_s"] for doc in opened if doc.get("open_s") is not None]
-    peaks = [((doc.get("resources") or {}).get("peak_tree_kib") or 0) / 1024 for doc in opened]
+    peaks = [peak_kib(doc) / 1024 for doc in opened]
     peaks = [value for value in peaks if value]
     short_causes = collections.Counter(unit.get("cause") for unit in shorts)
     return {

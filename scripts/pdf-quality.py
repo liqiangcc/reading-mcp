@@ -65,6 +65,9 @@ MISSED_BOUNDARY_MIN = 2   # `missed_boundary` needs at least 2 space-separated b
 HEADER_PAGE_SHARE = 0.8   # a line on >= 80% of the pages is a running header/footer
 PAGENUM_PAGE_SHARE = 0.5  # a page-number line on >= 50% of the pages is page furniture
 MIN_REPEAT_PAGES = 3
+# A repeated line shorter than this is a table cell or a heading word, not page furniture, and
+# a one- or two-character line would match inside every number on the page.
+MIN_HEADER_PLACEMENT_CHARS = 8
 MIN_LINE_CHARS = 4
 WS_REFERENCE_FLOOR = 0.7  # "backend whitespace below 70% of the reference"
 LOSS_CONTAINMENT = 0.8    # H6 population: containment below this
@@ -81,7 +84,8 @@ OPEN_TIMEOUT_S = 120.0
 LONG_CAUSES = ("glued_terminal", "glued_words", "bibliography", "math_table",
                "missed_boundary", "genuine")
 SHORT_CAUSES = ("page_number", "marker", "heading_number", "math", "hyphen_fragment", "other")
-HEADER_CASES = ("own_unit", "prefix", "suffix", "inside", "glued", "not_found")
+HEADER_CASES = ("own_unit", "prefix", "suffix", "inside", "glued", "not_found",
+                "skipped_short")
 PAGE_POSITIONS = ("start", "end", "both", "middle")
 
 # `glued_terminal`: a terminal mark directly followed by a capitalised word. The lookahead form
@@ -464,6 +468,15 @@ def header_placement(candidate: dict, lines_per_page: list[list[str]],
     line = candidate["line"]
     cases: collections.Counter = collections.Counter()
     positions: collections.Counter = collections.Counter()
+    if candidate["kind"] == "page_number":
+        # A page number is only interesting as a unit of its own: "1" occurs inside every
+        # number on the page, so a substring test would say nothing.
+        own = sum(1 for text in unit_texts if text.strip() == line)
+        cases["own_unit" if own else "not_found"] = own or 1
+        return {"cases": dict(cases), "positions": {}}
+    if len(line) < MIN_HEADER_PLACEMENT_CHARS:
+        cases["skipped_short"] = 1
+        return {"cases": dict(cases), "positions": {}}
     for lines in lines_per_page:
         if line not in lines:
             continue
@@ -744,6 +757,108 @@ def form_facts(doc, xref: int, depth: int = 0) -> dict:
     return facts
 
 
+def spans_by_font(page) -> dict:
+    """Reference characters per font on one page, keyed by the page's own resource name (so the
+    same names the `/Resources/Font` facts use), to attribute a lost page to a font."""
+    counts: collections.Counter = collections.Counter()
+    try:
+        data = page.get_text("dict")
+    except Exception:  # noqa: BLE001
+        return {}
+    resource_name = {}
+    try:
+        for font in page.get_fonts(full=True):
+            basefont = font[3] if len(font) > 3 else "?"
+            name = font[4] if len(font) > 4 else basefont
+            resource_name[basefont.split("+")[-1]] = name
+    except Exception:  # noqa: BLE001
+        pass
+    for block in data.get("blocks") or []:
+        for line in block.get("lines") or []:
+            for span in line.get("spans") or []:
+                basefont = (span.get("font") or "?").split("+")[-1]
+                counts[resource_name.get(basefont, basefont)] += len(span.get("text") or "")
+    return dict(counts.most_common(8))
+
+
+def font_census(path: str) -> dict:
+    """Every font object in the file: subtype, `/ToUnicode` presence, and the CJK hint."""
+    import pymupdf
+
+    subtypes: collections.Counter = collections.Counter()
+    no_to_unicode: collections.Counter = collections.Counter()
+    type3 = []
+    with pymupdf.open(path) as document:
+        for xref in range(1, document.xref_length()):
+            try:
+                if document.xref_get_key(xref, "Type")[1] != "/Font":
+                    continue
+                subtype = document.xref_get_key(xref, "Subtype")[1].lstrip("/")
+            except Exception:  # noqa: BLE001
+                continue
+            subtypes[subtype] += 1
+            has_to_unicode = xref_target(document, xref, "ToUnicode") is not None
+            if not has_to_unicode:
+                no_to_unicode[subtype] += 1
+            if subtype == "Type3":
+                type3.append({"xref": xref,
+                              "to_unicode": has_to_unicode,
+                              "encoding": document.xref_get_key(xref, "Encoding")[1][:40]})
+    return {"subtypes": dict(subtypes), "no_to_unicode": dict(no_to_unicode),
+            "type3": type3[:10], "type3_count": len(type3)}
+
+
+def form_census(path: str, sample: int = 30) -> dict:
+    """Text drawn inside Form XObjects over a page sample: the text PDF-1c only reaches when the
+    form carries a CJK font."""
+    import pymupdf
+
+    pages_with_text_forms = 0
+    text_ops_in_forms = 0
+    text_ops_in_cjk_forms = 0
+    text_ops_in_other_forms = 0
+    sampled = 0
+    with pymupdf.open(path) as document:
+        total = document.page_count
+        step = max(1, total // sample)
+        seen: set[int] = set()
+        for page_number in range(1, total + 1, step):
+            sampled += 1
+            page = document.load_page(page_number - 1)
+            own_do: list[str] = []
+            for xref in page.get_contents() or []:
+                try:
+                    own_do.extend(operator_facts(document.xref_stream(xref) or b"")["do_names"])
+                except Exception:  # noqa: BLE001
+                    continue
+            found_text = False
+            for name in own_do:
+                target = xobject_target(document, page.xref, name)
+                if target is None or target in seen:
+                    continue
+                seen.add(target)
+                try:
+                    if document.xref_get_key(target, "Subtype")[1] != "/Form":
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                facts = form_facts(document, target)
+                if not facts["text_ops"]:
+                    continue
+                found_text = True
+                text_ops_in_forms += facts["text_ops"]
+                if facts["has_cjk_font"]:
+                    text_ops_in_cjk_forms += facts["text_ops"]
+                else:
+                    text_ops_in_other_forms += facts["text_ops"]
+            if found_text:
+                pages_with_text_forms += 1
+    return {"pages_sampled": sampled, "pages_with_text_forms": pages_with_text_forms,
+            "forms_seen": len(seen), "text_ops_in_forms": text_ops_in_forms,
+            "text_ops_in_cjk_forms": text_ops_in_cjk_forms,
+            "text_ops_in_other_forms": text_ops_in_other_forms}
+
+
 def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
     """Per page: own content text operators, the forms `Do` reaches, and the fonts."""
     import pymupdf
@@ -782,9 +897,17 @@ def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
                 forms.append(facts)
             fonts = resource_fonts(document, page.xref)
             resource_names = {font["name"] for font in fonts}
+            content_bytes = 0
+            for xref in page.get_contents() or []:
+                try:
+                    content_bytes += len(document.xref_stream(xref) or b"")
+                except Exception:  # noqa: BLE001
+                    continue
             results.append({
                 "page": page_number,
                 "own": own,
+                "content_bytes": content_bytes,
+                "spans_by_font": spans_by_font(page),
                 "tf_fonts_missing_from_resources": [name for name in own["font_names"]
                                                    if name not in resource_names],
                 "forms": [{"name": form["name"], "text_ops": form["text_ops"],
@@ -940,6 +1063,9 @@ def measure_units(units: list[dict], reference: dict, pages: list[int | None],
                 "joined": verdict.get("joined"),
                 "page_matched": verdict.get("page_matched"),
                 "text": clipped(stripped, 60),
+                "before": (clipped(texts[index - 1], 40)[-40:] if index else ""),
+                "after": (clipped(texts[index + 1], 40)[:40]
+                          if index + 1 < len(texts) else ""),
             })
     return {
         "long": {"units": len(long_units), "by_cause": dict(long_by_cause),
@@ -1007,9 +1133,9 @@ def loss_measurement(path: str, reference: dict, units: list[dict],
             "backend_chars": backend_chars,
             "ratio": round(backend_chars / reference_chars, 3) if reference_chars else None,
         })
-    worst = sorted(deficits, key=lambda item: (item["ratio"] is None,
-                                               item["ratio"] if item["ratio"] is not None else 1.0,
-                                               -item["reference_chars"]))[:WORST_PAGES]
+    for item in deficits:
+        item["deficit"] = item["reference_chars"] - item["backend_chars"]
+    worst = sorted(deficits, key=lambda item: -item["deficit"])[:WORST_PAGES]
     pdf_facts = page_pdf_facts(path, [item["page"] for item in worst])
     for item, facts in zip(worst, pdf_facts):
         item["pdf"] = facts
@@ -1020,6 +1146,8 @@ def loss_measurement(path: str, reference: dict, units: list[dict],
         "pages": deficits,
         "worst_pages": worst,
         "fonts": reference["fonts"],
+        "font_census": font_census(path),
+        "form_census": form_census(path),
     }
 
 
@@ -1353,8 +1481,9 @@ def aggregate_mode(args) -> int:
         for doc in docs:
             stats = (doc.get("what_if") or {}).get(cause) or {}
             fixed += stats.get("fixed_units") or 0
-        # Approximate what-if: split only the units of this cause, keep every other unit.
-        for doc in docs:
+        # Approximate what-if: split only the units of this cause, keep every other unit, and
+        # count only the documents that are over the 5% line to begin with.
+        for doc in over_five:
             stats = (doc.get("what_if") or {}).get(cause) or {}
             fixed_units = stats.get("fixed_units") or 0
             if not fixed_units:
@@ -1418,7 +1547,12 @@ def aggregate_mode(args) -> int:
                                       if unit.get("cause") == "other")
     lines += ["", "Most common `other` short units: "
                   + ", ".join(f"`{text}` {count}"
-                              for text, count in other_texts.most_common(10)) + "."]
+                              for text, count in other_texts.most_common(10)) + ".", "",
+              "| Id | Unit | Before | After |", "| --- | --- | --- | --- |"]
+    for unit in [unit for unit in short_units if unit.get("cause") == "other"][:5]:
+        lines.append(f"| {unit['id']} | `{unit.get('text')}` | "
+                     f"`{clipped(unit.get('before') or '', 40)}` | "
+                     f"`{clipped(unit.get('after') or '', 40)}` |")
     unmatched = sum(1 for unit in short_units
                     if unit.get("cause") == "page_number" and unit.get("page_matched") is False)
     lines += ["", f"Page-number units whose page could not be inferred from the reference: "
@@ -1484,37 +1618,58 @@ def aggregate_mode(args) -> int:
               f"Documents measured here: {len(loss_docs)} (containment below "
               f"{LOSS_CONTAINMENT} or over 1% U+FFFD/private-use).", "",
               "| Id | Pages | Containment | Backend chars | Reference chars | Char ratio | "
-              "Worst page | Reference chars | Backend chars | Own text ops | Form text ops | "
-              "Forms with a CJK font |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- "
-              "--- | --- | --- | --- |"]
+              "Worst page | Page reference chars | Page backend chars | Page content KiB | "
+              "Page text ops | Form text ops on the page |", "| --- | --- | --- | --- | --- | "
+              "--- | --- | --- | --- | --- | --- | --- |"]
     for doc in loss_docs:
         loss = doc["loss"]
         worst = (loss.get("worst_pages") or [{}])[0]
+        pdf = worst.get("pdf") or {}
         lines.append(f"| {doc['id']} | {doc.get('pages')} | "
                      f"{fmt(loss.get('containment_first20'), 3)} | "
                      f"{loss.get('backend_chars')} | {loss.get('reference_chars')} | "
                      f"{fmt((doc.get('quality') or {}).get('char_ratio'), 3)} | "
                      f"{worst.get('page')} | {worst.get('reference_chars')} | "
                      f"{worst.get('backend_chars')} | "
-                     f"{(worst.get('pdf') or {}).get('own', {}).get('text_ops')} | "
-                     f"{worst.get('pdf', {}).get('form_text_ops')} | "
-                     f"{worst.get('pdf', {}).get('form_cjk_fonts')} |")
-    lines += ["", "| Id | Page | Fonts (subtype, /ToUnicode, CJK CMap) | Forms reached by Do | "
-                  "Tf fonts missing from /Resources/Font |", "| --- | --- | --- | --- | --- |"]
+                     f"{fmt((pdf.get('content_bytes') or 0) / 1024, 1)} | "
+                     f"{(pdf.get('own') or {}).get('text_ops')} | "
+                     f"{pdf.get('form_text_ops')} |")
+    lines += ["", "Font objects in the file, and the forms a page sample reaches:", "",
+              "| Id | Fonts by subtype | Fonts without /ToUnicode | Type3 fonts | Pages sampled | "
+              "Forms with text | Text ops in forms | ... with a CJK font (PDF-1c inlines those) |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for doc in loss_docs:
+        loss = doc["loss"]
+        census = loss.get("font_census") or {}
+        forms = loss.get("form_census") or {}
+        subtypes = ", ".join(f"{name} {count}"
+                             for name, count in (census.get("subtypes") or {}).items())
+        missing = ", ".join(f"{name} {count}"
+                            for name, count in (census.get("no_to_unicode") or {}).items())
+        lines.append(f"| {doc['id']} | {subtypes} | {missing or '-'} | "
+                     f"{census.get('type3_count')} | {forms.get('pages_sampled')} | "
+                     f"{forms.get('pages_with_text_forms')} | "
+                     f"{forms.get('text_ops_in_forms')} | "
+                     f"{forms.get('text_ops_in_cjk_forms')} |")
+    lines += ["", "| Id | Page | Where the page's reference text lives | Fonts (subtype, "
+                  "/ToUnicode, CJK CMap) | Forms reached by Do | Tf fonts missing from "
+                  "/Resources/Font |", "| --- | --- | --- | --- | --- | --- |"]
     for doc in loss_docs:
         for worst in (doc["loss"].get("worst_pages") or [])[:2]:
             pdf = worst.get("pdf") or {}
+            spans = ", ".join(f"{name} {count}"
+                              for name, count in list((pdf.get("spans_by_font") or {}).items())[:3])
             fonts = "; ".join(f"{font['name']} ({font['subtype']}, "
                               f"{'ToUnicode' if font['to_unicode'] else 'no ToUnicode'}"
                               f"{', CJK' if font['cjk_cmap'] else ''})"
-                              for font in (pdf.get("fonts") or [])[:4])
+                              for font in (pdf.get("fonts") or [])[:3])
             forms = "; ".join(f"{form['name']} ({form['text_ops']} ops, "
                               f"{'CJK font' if form['has_cjk_font'] else 'no CJK font'})"
-                              for form in (pdf.get("forms") or [])[:4])
+                              for form in (pdf.get("forms") or [])[:3])
             missing = (pdf.get("tf_fonts_missing_from_resources") or [])
-            lines.append(f"| {doc['id']} | {worst.get('page')} | {fonts[:150]} | "
-                         f"{forms[:150] or '-'} | "
-                         f"{', '.join(missing)[:80] if missing else '-'} |")
+            lines.append(f"| {doc['id']} | {worst.get('page')} | {spans[:110] or '-'} | "
+                         f"{fonts[:120]} | {forms[:80] or '-'} | "
+                         f"{', '.join(missing)[:60] if missing else '-'} |")
 
     text = "\n".join(lines)
     print(text)

@@ -1582,10 +1582,17 @@ def aggregate_mode(args) -> int:
                   + ", ".join(f"`{text}` {count}"
                               for text, count in other_texts.most_common(10)) + ".", "",
               "| Id | Unit | Before | After |", "| --- | --- | --- | --- |"]
-    for unit in [unit for unit in short_units if unit.get("cause") == "other"][:5]:
-        lines.append(f"| {unit['id']} | `{unit.get('text')}` | "
-                     f"`{clipped(unit.get('before') or '', 40)}` | "
+    shown = 0
+    for text, _count in other_texts.most_common(4):
+        unit = next((unit for unit in short_units
+                     if unit.get("cause") == "other" and unit.get("text") == text), None)
+        if unit is None:
+            continue
+        shown += 1
+        lines.append(f"| {unit['id']} | `{text}` | `{clipped(unit.get('before') or '', 40)}` | "
                      f"`{clipped(unit.get('after') or '', 40)}` |")
+    if not shown:
+        lines.append("| - | - | - | - |")
     unmatched = sum(1 for unit in short_units
                     if unit.get("cause") == "page_number" and unit.get("page_matched") is False)
     lines += ["", f"Page-number units whose page could not be inferred from the reference: "

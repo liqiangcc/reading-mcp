@@ -110,10 +110,10 @@ ever do:
 | `paren_alpha` | 30 | 2,619 | 38 |
 | `digit_upper` | 14 | 2,635 | 38 |
 
-No single kind decides more than a quarter of the verdicts: 328 paragraphs need all four of
-`caps_tail` + `lower_upper` + `paren_alpha` + `punct_upper` at once, and 230 need exactly
-`lower_upper` + `punct_upper`. An exemption has to be a narrowing of a kind, not the removal of
-one.
+The largest single kind decides just over a quarter of the verdicts (714 of 2,651): 328
+paragraphs need all four of `caps_tail` + `lower_upper` + `paren_alpha` + `punct_upper` at once,
+and 230 need exactly `lower_upper` + `punct_upper`. An exemption has to be a narrowing of a kind,
+not the removal of one.
 
 ## 3. The most frequent shapes
 

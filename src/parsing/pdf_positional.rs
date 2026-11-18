@@ -613,10 +613,8 @@ impl<'a> PageWalker<'a> {
     /// CMap accepts, which is exact for Identity and fixed-length CMaps.
     fn decode_codes(&mut self, font: Option<&'a Dictionary>, bytes: &[u8]) -> Vec<(Vec<u8>, String)> {
         let mut codes = Vec::new();
-        let encoding =
-            font.and_then(|font| self.memo.resolve(self.pdf, font, self.max_decompressed));
-        match encoding {
-            Some(Encoding::UnicodeMapEncoding(_)) => {
+        match font.and_then(|font| self.memo.resolve(self.pdf, font, self.max_decompressed)) {
+            Some(encoding @ Encoding::UnicodeMapEncoding(_)) => {
                 let mut index = 0;
                 while index < bytes.len() {
                     let mut matched = false;
@@ -764,12 +762,10 @@ impl<'a> PageWalker<'a> {
                     }
                 }
                 Object::Integer(adjust) => {
-                    let adjust = f64::from(*adjust);
-                    self.tj_adjust(adjust, &mut piece);
+                    self.tj_adjust(*adjust as f64, &mut piece);
                 }
                 Object::Real(adjust) => {
-                    let adjust = f64::from(*adjust);
-                    self.tj_adjust(adjust, &mut piece);
+                    self.tj_adjust(f64::from(*adjust), &mut piece);
                 }
                 _ => {}
             }
@@ -1077,6 +1073,7 @@ fn render_lines(lines: &[Line]) -> (String, Vec<String>) {
     let mut chunk = String::new();
     for line in lines {
         if current.is_some_and(|block| block != line.block) {
+            let chunk = std::mem::take(&mut chunk);
             let chunk = chunk.trim().to_string();
             if !chunk.is_empty() {
                 if !text.is_empty() {
@@ -1085,7 +1082,6 @@ fn render_lines(lines: &[Line]) -> (String, Vec<String>) {
                 text.push_str(&chunk);
                 chunks.push(chunk);
             }
-            chunk = String::new();
         }
         current = Some(line.block);
         let line_text = line.text();
@@ -1186,12 +1182,12 @@ struct WalkedPage {
     bail: Option<&'static str>,
 }
 
-fn walk_page(
-    pdf: &LopdfDocument,
+fn walk_page<'a>(
+    pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'_>,
-    metrics: &mut FontMetricsMemo<'_>,
+    memo: &mut FontEncodingMemo<'a>,
+    metrics: &mut FontMetricsMemo<'a>,
 ) -> WalkedPage {
     let content_bytes = match pdf.get_page_content_with_limit(page_id, max_decompressed) {
         Ok(bytes) => bytes,
@@ -1247,12 +1243,12 @@ fn walk_page(
 /// `walk_page` behind `catch_unwind`: the walker is new code reading hostile
 /// input, and a panic must never reach the page-text pass - the page simply
 /// falls back to the old walk.
-fn walk_page_guarded(
-    pdf: &LopdfDocument,
+fn walk_page_guarded<'a>(
+    pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'_>,
-    metrics: &mut FontMetricsMemo<'_>,
+    memo: &mut FontEncodingMemo<'a>,
+    metrics: &mut FontMetricsMemo<'a>,
 ) -> WalkedPage {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         walk_page(pdf, page_id, max_decompressed, memo, metrics)
@@ -1268,12 +1264,12 @@ fn walk_page_guarded(
 
 /// Walks one page and returns its positional text, or a bailed-out page that
 /// the caller sends through the old chunk path.
-pub(super) fn extract_positional_page(
-    pdf: &LopdfDocument,
+pub(super) fn extract_positional_page<'a>(
+    pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'_>,
-    metrics: &mut FontMetricsMemo<'_>,
+    memo: &mut FontEncodingMemo<'a>,
+    metrics: &mut FontMetricsMemo<'a>,
 ) -> PositionalPage {
     let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
     if walked.bail.is_some() {
@@ -1294,12 +1290,12 @@ pub(super) fn extract_positional_page(
 
 /// The same walk for the CI probe: the laid-out lines themselves, for the
 /// line-by-line comparison against PyMuPDF.
-pub(super) fn probe_positional_page(
-    pdf: &LopdfDocument,
+pub(super) fn probe_positional_page<'a>(
+    pdf: &'a LopdfDocument,
     page_id: ObjectId,
     max_decompressed: usize,
-    memo: &mut FontEncodingMemo<'_>,
-    metrics: &mut FontMetricsMemo<'_>,
+    memo: &mut FontEncodingMemo<'a>,
+    metrics: &mut FontMetricsMemo<'a>,
 ) -> (Vec<ProbeLine>, usize, Option<&'static str>) {
     let walked = walk_page_guarded(pdf, page_id, max_decompressed, memo, metrics);
     let lines = walked

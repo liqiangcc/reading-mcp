@@ -10,7 +10,7 @@ use std::sync::Arc;
 use reading_mcp::application::open_document::OpenDocumentUseCase;
 use reading_mcp::application::open_reading::{OpenReadingCommand, OpenReadingUseCase};
 use reading_mcp::application::ports::{
-    ApplicationError, OcrRequiredDetail, Parser, RetrievedResource,
+    ApplicationError, DocumentRepository, OcrRequiredDetail, Parser, RetrievedResource,
 };
 use reading_mcp::domain::{DocumentSource, MediaType};
 use reading_mcp::infrastructure::{
@@ -79,7 +79,8 @@ async fn an_image_only_pdf_answers_ocr_required_with_its_own_counts_and_the_same
             SqliteOpenResultStore::open(directory.path().join("state.sqlite"))
                 .expect("open result store"),
         );
-        let repository = Arc::new(InMemoryDocumentRepository::default());
+        let repository: Arc<dyn DocumentRepository> =
+            Arc::new(InMemoryDocumentRepository::default());
         let open_document = Arc::new(
             OpenDocumentUseCase::new(
                 Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),

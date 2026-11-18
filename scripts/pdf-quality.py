@@ -1410,8 +1410,13 @@ def unit_pages(units: list[dict], page_index: PageIndex) -> list[int | None]:
 
 
 def measure_units(units: list[dict], reference: dict, pages: list[int | None],
-                  page_count: int) -> dict:
-    """Classify the long and the short units and the what-if of every long cause."""
+                  page_count: int, keep_coarse_text: bool = False) -> dict:
+    """Classify the long and the short units and the what-if of every long cause.
+
+    With `keep_coarse_text`, every unit the server returned as a coarse paragraph - at any
+    length, not only the long ones - is also recorded with its text exactly as returned. The
+    long and short records are unchanged either way, so a run without the flag writes the same
+    bytes it always did."""
     reference_words = reference_tokens("\n".join(reference["texts"]))
     edges = edge_digits(reference["lines"])
     page_reference_shares: dict[int, float | None] = {
@@ -1420,6 +1425,7 @@ def measure_units(units: list[dict], reference: dict, pages: list[int | None],
     texts = [unit["text"] for unit in units]
     long_units: list[dict] = []
     short_units: list[dict] = []
+    coarse_units: list[dict] = []
     long_by_cause: collections.Counter = collections.Counter()
     long_by_kind: collections.Counter = collections.Counter()
     short_by_cause: collections.Counter = collections.Counter()
@@ -1431,6 +1437,15 @@ def measure_units(units: list[dict], reference: dict, pages: list[int | None],
         stripped = text.strip()
         length = len(stripped)
         page = pages[index] if index < len(pages) else None
+        if keep_coarse_text and unit.get("degradation"):
+            coarse_units.append({
+                "kind_record": "coarse_unit", "unit": index, "chars": length,
+                "page": page, "degradation": unit.get("degradation"),
+                "effective_kind": unit.get("effective_kind"),
+                "content_class": unit.get("content_class"),
+                "content_class_detail": unit.get("content_class_detail"),
+                "text": text,
+            })
         if length > LONG_CHARS:
             verdict = classify_long(stripped, whitespace_share(stripped),
                                     page_reference_shares.get(page) if page else None,
@@ -1475,6 +1490,7 @@ def measure_units(units: list[dict], reference: dict, pages: list[int | None],
         "what_if": what_if_totals,
         "long_units": long_units,
         "short_units": short_units,
+        "coarse_units": coarse_units,
         "total_units": len(units),
     }
 
@@ -1683,9 +1699,11 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     record["quality"] = quality
     pages = unit_pages(units, page_index)
     record["pages_matched"] = sum(1 for page in pages if page is not None)
-    measured = measure_units(units, reference, pages, reference["pages"])
+    measured = measure_units(units, reference, pages, reference["pages"],
+                             args.keep_coarse_text)
     long_units = measured.pop("long_units")
     short_units = measured.pop("short_units")
+    coarse_units = measured.pop("coarse_units")
     record["long"] = measured["long"]
     record["long"]["share"] = (round(measured["long"]["units"] / measured["total_units"], 4)
                                if measured["total_units"] else None)
@@ -1709,6 +1727,10 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         unit["doc_units"] = measured["total_units"]
         detail.append(unit)
     for unit in short_units:
+        unit["id"] = entry["id"]
+        unit["doc_units"] = measured["total_units"]
+        detail.append(unit)
+    for unit in coarse_units:
         unit["id"] = entry["id"]
         unit["doc_units"] = measured["total_units"]
         detail.append(unit)
@@ -2501,6 +2523,10 @@ def main() -> int:
     parser.add_argument("--shards", type=int, default=8)
     parser.add_argument("--deadline-minutes", type=float, default=42.0)
     parser.add_argument("--per-document-minutes", type=float, default=4.5)
+    parser.add_argument("--keep-coarse-text", action="store_true",
+                        help="also record the full text of every coarse paragraph, at any "
+                             "length (PDF-6e; off by default, and the default records are "
+                             "byte-identical)")
     args = parser.parse_args()
     if not args.worker_source:
         args.worker_source = os.path.join(os.path.dirname(os.path.dirname(

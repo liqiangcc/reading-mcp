@@ -373,8 +373,21 @@ def neighbour_word(text: str, direction: int) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def edge_digits(lines_per_page: list[list[str]]) -> collections.Counter:
+    """Digit lines that sit at the start or the end of a page: page numbers and equation
+    numbers. A unit whose text is one of these is page furniture, not prose."""
+    counts: collections.Counter = collections.Counter()
+    for lines in lines_per_page:
+        for line in set(lines[:2] + lines[-2:]):
+            stripped = line.strip()
+            if stripped.isdigit() and len(stripped) <= 4:
+                counts[stripped] += 1
+    return counts
+
+
 def classify_short(unit: str, page: int | None, page_count: int,
-                   before: str, after: str, reference_words: set[str]) -> dict:
+                   before: str, after: str, reference_words: set[str],
+                   edges: collections.Counter) -> dict:
     """The first matching rule wins: page_number, heading_number, marker, hyphen_fragment,
     math, other."""
     text = unit.strip()
@@ -382,10 +395,13 @@ def classify_short(unit: str, page: int | None, page_count: int,
     if text.isdigit() and len(text) <= 4:
         value = int(text)
         if 1 <= value <= page_count:
+            if page is not None and abs(value - page) <= 1:
+                return {"cause": "page_number", "page_matched": True}
+            if edges.get(text):
+                return {"cause": "page_number",
+                        "page_matched": page is not None and abs(value - page) <= 1}
             if page is None:
                 return {"cause": "page_number", "page_matched": False}
-            if abs(value - page) <= 1:
-                return {"cause": "page_number", "page_matched": True}
     if HEADING_NUMBER_RE.match(text):
         return {"cause": "heading_number"}
     if MARKER_RE.match(text) or (digits.isdigit() and len(digits) <= 3):
@@ -825,10 +841,30 @@ def collect_units(server, document_id: str, sections: list[dict], deadline: floa
 # Per-document measurement
 # --------------------------------------------------------------------------------------------
 
-def measure_units(units: list[dict], reference: dict, page_index: PageIndex,
+def unit_pages(units: list[dict], page_index: PageIndex) -> list[int | None]:
+    """The reference page of every unit, filled in from a neighbour when the unit is too short
+    to search for (a one- or two-character unit cannot be located by its opening characters)."""
+    pages: list[int | None] = []
+    for unit in units:
+        text = unit["text"].strip()
+        pages.append(page_index.page_of(text) if len(text) >= 10 else None)
+    filled = list(pages)
+    for index, page in enumerate(pages):
+        if page is not None:
+            continue
+        for offset in (1, -1, 2, -2, 3, -3):
+            other = index + offset
+            if 0 <= other < len(pages) and pages[other] is not None:
+                filled[index] = pages[other]
+                break
+    return filled
+
+
+def measure_units(units: list[dict], reference: dict, pages: list[int | None],
                   page_count: int) -> dict:
     """Classify the long and the short units and the what-if of every long cause."""
     reference_words = reference_tokens("\n".join(reference["texts"]))
+    edges = edge_digits(reference["lines"])
     page_reference_shares: dict[int, float | None] = {
         number + 1: whitespace_share(text) for number, text in enumerate(reference["texts"])
     }
@@ -838,25 +874,25 @@ def measure_units(units: list[dict], reference: dict, page_index: PageIndex,
     long_by_cause: collections.Counter = collections.Counter()
     long_by_kind: collections.Counter = collections.Counter()
     short_by_cause: collections.Counter = collections.Counter()
-    what_if = {cause: {"fixed_units": 0, "added_units": 0, "remaining_long": 0}
-               for cause in LONG_CAUSES}
+    what_if_totals = {cause: {"fixed_units": 0, "added_units": 0, "remaining_long": 0}
+                      for cause in LONG_CAUSES}
 
     for index, unit in enumerate(units):
         text = texts[index]
         stripped = text.strip()
         length = len(stripped)
+        page = pages[index] if index < len(pages) else None
         if length > LONG_CHARS:
-            page = page_index.page_of(stripped)
             verdict = classify_long(stripped, whitespace_share(stripped),
                                     page_reference_shares.get(page) if page else None,
                                     reference_words)
             cause = verdict["cause"]
             long_by_cause[cause] += 1
             long_by_kind["coarse_paragraph" if unit.get("degradation") else "sentence"] += 1
-            split = what_if.get(cause, {"pieces": 1, "pieces_long": 1})
-            what_if[cause]["fixed_units"] += 1
-            what_if[cause]["added_units"] += split["pieces"] - 1
-            what_if[cause]["remaining_long"] += split["pieces_long"]
+            split = what_if(stripped, verdict["cuts"])
+            what_if_totals[cause]["fixed_units"] += 1
+            what_if_totals[cause]["added_units"] += split["pieces"] - 1
+            what_if_totals[cause]["remaining_long"] += split["pieces_long"]
             long_units.append({
                 "kind_record": "long_unit", "unit": index, "chars": length,
                 "cause": cause, "page": page, "degradation": unit.get("degradation"),
@@ -866,11 +902,10 @@ def measure_units(units: list[dict], reference: dict, page_index: PageIndex,
                 "head": clipped(stripped), "tail": clipped(stripped[-120:]),
             })
         elif length < SHORT_CHARS:
-            page = page_index.page_of(stripped) if stripped else None
             verdict = classify_short(stripped, page, page_count,
                                      texts[index - 1] if index else "",
                                      texts[index + 1] if index + 1 < len(texts) else "",
-                                     reference_words)
+                                     reference_words, edges)
             short_by_cause[verdict["cause"]] += 1
             short_units.append({
                 "kind_record": "short_unit", "unit": index, "chars": length,
@@ -885,7 +920,7 @@ def measure_units(units: list[dict], reference: dict, page_index: PageIndex,
         "long": {"units": len(long_units), "by_cause": dict(long_by_cause),
                  "by_kind": dict(long_by_kind)},
         "short": {"units": len(short_units), "by_cause": dict(short_by_cause)},
-        "what_if": what_if,
+        "what_if": what_if_totals,
         "long_units": long_units,
         "short_units": short_units,
         "total_units": len(units),
@@ -910,11 +945,10 @@ def header_measurement(reference: dict, units: list[dict]) -> dict:
 
 
 def loss_measurement(path: str, reference: dict, units: list[dict],
-                     page_index: PageIndex, quality: dict) -> dict:
+                     pages: list[int | None], quality: dict) -> dict:
     """H6: backend against reference characters per page, plus the worst pages' PDF facts."""
     page_chars = [0] * (reference["pages"] + 1)
-    for unit in units:
-        page = page_index.page_of(unit["text"].strip())
+    for unit, page in zip(units, pages):
         if page is not None and 1 <= page <= reference["pages"]:
             page_chars[page] += len(unit["text"])
     deficits = []
@@ -1049,7 +1083,9 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         "sections_with_coverage": len(coverage),
     }
     record["quality"] = quality
-    measured = measure_units(units, reference, page_index, reference["pages"])
+    pages = unit_pages(units, page_index)
+    record["pages_matched"] = sum(1 for page in pages if page is not None)
+    measured = measure_units(units, reference, pages, reference["pages"])
     long_units = measured.pop("long_units")
     short_units = measured.pop("short_units")
     record["long"] = measured["long"]
@@ -1067,7 +1103,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
                     or quality["private_use_share"] + quality["replacement_share"]
                     > BAD_CHAR_SHARE)
     if suspect_loss:
-        record["loss"] = loss_measurement(path, reference, units, page_index, quality)
+        record["loss"] = loss_measurement(path, reference, units, pages, quality)
 
     detail = []
     for unit in long_units:

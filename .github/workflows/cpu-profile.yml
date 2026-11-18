@@ -47,6 +47,11 @@ jobs:
           echo "PERF=$PERF" >> "$GITHUB_ENV"
           sysctl kernel.perf_event_paranoid kernel.kptr_restrict || true
 
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
       - name: Download and generate inputs
         run: |
           set -eux

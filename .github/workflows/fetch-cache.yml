@@ -1,0 +1,56 @@
+name: Download cache
+run-name: Download cache (Gutenberg books for the gates)
+# Fills the Actions cache `fetch-books-v1` with every Gutenberg file the workflows download, so a
+# gate restores the books instead of depending on www.gutenberg.org (on 2026-11-18 it answered
+# `503 retry-after: 3600` for hours). A cache created on `main` is visible to every branch.
+# The key is immutable: to change the book set, add the URL below and bump the key here and in
+# every `Restore the download cache` step. Caches unused for 7 days are evicted; the weekly run
+# recreates it then.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - scripts/fetch-url.sh
+      - .github/workflows/fetch-cache.yml
+concurrency:
+  group: fetch-cache
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is the cache already there?
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
+          lookup-only: true
+      - name: Download every Gutenberg file the workflows use
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          OUT="$RUNNER_TEMP/books"
+          mkdir -p "$OUT"
+          for url in \
+              https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub \
+              https://www.gutenberg.org/cache/epub/24264/pg24264-images.epub \
+              https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub \
+              https://www.gutenberg.org/cache/epub/2600/pg2600.txt; do
+            # set -e: one missing file fails the job, so a partial set is never saved.
+            bash scripts/fetch-url.sh "$OUT/$(basename "$url")" "$url"
+            echo "$url: $(stat -c%s "$OUT/$(basename "$url")") bytes sha256=$(sha256sum "$OUT/$(basename "$url")" | cut -d' ' -f1)"
+          done
+          ls -l ~/.cache/reading-mcp-fetch
+      - name: Save the cache
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1

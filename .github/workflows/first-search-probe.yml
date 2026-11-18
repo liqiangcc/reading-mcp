@@ -24,6 +24,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the release binary
         run: cargo build --release --locked --bin reading-mcp
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
       - name: Download the books
         run: |
           BOOKS="$RUNNER_TEMP/books"

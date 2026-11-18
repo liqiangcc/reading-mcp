@@ -20,6 +20,11 @@ jobs:
         env:
           CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: cargo build --release --locked --bin reading-mcp
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
       - name: Download public-domain books
         run: |
           BOOKS="$RUNNER_TEMP/books"

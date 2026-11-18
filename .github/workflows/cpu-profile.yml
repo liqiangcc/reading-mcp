@@ -52,9 +52,9 @@ jobs:
           set -eux
           IN="$RUNNER_TEMP/inputs"
           mkdir -p "$IN"
-          curl -fsSL --retry 3 -o "$IN/zh-large.epub" \
+          bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$IN/zh-large.epub" \
             https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub
-          curl -fsSL --retry 3 -o "$IN/en-novel.epub" \
+          bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$IN/en-novel.epub" \
             https://www.gutenberg.org/cache/epub/2600/pg2600-images.epub
           python3 -c 'import importlib.util,os; spec=importlib.util.spec_from_file_location("gen","scripts/gen-stress-inputs.py"); gen=importlib.util.module_from_spec(spec); spec.loader.exec_module(gen); gen.write_cjk(os.path.join(os.environ["RUNNER_TEMP"],"inputs","cjk-64mib.txt"), 64*1024*1024)'
           ls -l "$IN"

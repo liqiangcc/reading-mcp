@@ -29,7 +29,7 @@ jobs:
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p "$BOOKS"
-          if curl -fsSL --retry 3 -o "$BOOKS/zh-large.epub" \
+          if bash "$GITHUB_WORKSPACE/scripts/fetch-url.sh" "$BOOKS/zh-large.epub" \
             "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"; then
             echo "zh-large: $(stat -c%s "$BOOKS/zh-large.epub") bytes"
           else

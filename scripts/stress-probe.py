@@ -52,6 +52,9 @@ KILLED_CODES = (-9, 137)
 
 # Extra variables for every server process, filled from --env KEY=VALUE.
 SERVER_ENV: dict[str, str] = {}
+# The tool set every server exposes, filled from --tools.
+SERVER_TOOLS = "v1"
+V2_BATCH_CHARS = 16000
 
 
 class ProbeError(RuntimeError):
@@ -222,7 +225,7 @@ def server_env(state_dir: str, roots: str, telemetry: bool = False) -> dict:
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
     env["READING_MCP_TELEMETRY"] = "1" if telemetry else "false"
-    env["READING_MCP_TOOLS"] = "v1"
+    env["READING_MCP_TOOLS"] = SERVER_TOOLS
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
@@ -324,11 +327,210 @@ def percentile(values: list[float], fraction: float) -> float | None:
 
 def open_document(server: Server, source: str) -> tuple[dict, float, str | None]:
     start = time.perf_counter()
+    tool = "open_document" if SERVER_TOOLS == "v1" else "open"
     try:
-        result = server.tool("open_document", {"source": source})
+        result = server.tool(tool, {"source": source})
     except ProbeError as exc:
         return {}, time.perf_counter() - start, str(exc)
     return payload(result) or {}, time.perf_counter() - start, None
+
+
+def v2_item_handle(item) -> str | None:
+    if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+        return item[0]
+    if isinstance(item, dict) and isinstance(item.get("at"), str):
+        return item["at"]
+    return None
+
+
+def v2_outline_sections(server: Server, doc_handle: str) -> list[dict]:
+    """Every section handle in body order via paginated `outline`."""
+    sections: list[dict] = []
+    cursor = None
+    for _ in range(10_000):
+        arguments: dict = {"at": doc_handle, "depth": 16, "limit": 500}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        data = payload(server.tool("outline", arguments)) or {}
+        for item in data.get("items") or []:
+            if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+                sections.append({"section_id": item[0]})
+        cursor = data.get("next")
+        if not cursor:
+            break
+    return sections
+
+
+def v2_read_batch(server: Server, from_handle: str) -> dict:
+    return payload(
+        server.tool("read", {"from": from_handle, "max_chars": V2_BATCH_CHARS})
+    ) or {}
+
+
+def v2_section_counts(
+    server: Server, doc_handle: str, section_handles: list[str], deadline: float
+) -> list[int]:
+    """Sentence count per section, from an untimed `read` batch walk of the book."""
+    order = {handle: index for index, handle in enumerate(section_handles)}
+    totals = [0] * len(section_handles)
+    from_handle = doc_handle
+    current = -1
+    while time.monotonic() <= deadline:
+        data = v2_read_batch(server, from_handle)
+        for entry in data.get("sections") or []:
+            handle = entry.get("s") if isinstance(entry, dict) else None
+            if isinstance(handle, str) and handle in order:
+                current = order[handle]
+        section = data.get("section")
+        if isinstance(section, dict) and isinstance(section.get("s"), str) and section["s"] in order:
+            current = order[section["s"]]
+        items = data.get("items") or []
+        for item in items:
+            handle = v2_item_handle(item)
+            if handle is None:
+                continue
+            owner = order.get(handle.rsplit(".", 2)[0])
+            if owner is None:
+                owner = order.get(handle.rsplit(".", 1)[0])
+            if owner is not None:
+                current = owner
+            if current >= 0:
+                totals[current] += 1
+        candidate = data.get("next")
+        if not isinstance(candidate, str):
+            break
+        from_handle = candidate
+    return totals
+
+
+def v2_walk_handles(server: Server, doc_handle: str, deadline: float) -> list[str]:
+    """Every sentence handle of the book, in order, from an untimed `read` batch walk."""
+    handles: list[str] = []
+    from_handle = doc_handle
+    while time.monotonic() <= deadline:
+        data = v2_read_batch(server, from_handle)
+        for item in data.get("items") or []:
+            handle = v2_item_handle(item)
+            if handle is not None:
+                handles.append(handle)
+        candidate = data.get("next")
+        if not isinstance(candidate, str):
+            break
+        from_handle = candidate
+    return handles
+
+
+def v2_section_of_handle(handle: str, section_handles: list[str]) -> int | None:
+    for index, section in enumerate(section_handles):
+        if handle.startswith(section + "."):
+            return index
+    return None
+
+
+def deep_probe_v2(server: Server, doc_handle: str, sections: list[dict], deadline: float) -> dict:
+    """Part B over the v2 tools: the same rows, measured through `read`."""
+    handles = v2_walk_handles(server, doc_handle, deadline)
+    section_ids = [section["section_id"] for section in sections]
+    totals = [0] * len(sections)
+    for handle in handles:
+        owner = v2_section_of_handle(handle, section_ids)
+        if owner is not None:
+            totals[owner] += 1
+    stride = max(1, math.ceil(len(sections) / MAX_STREAM_SECTIONS))
+    sampled_index = list(range(0, len(sections), stride))
+    sampled_totals = [totals[i] for i in sampled_index]
+    total_sentences = sum(sampled_totals)
+    result = {
+        "sections_sampled": len(sampled_index),
+        "section_stride": stride,
+        "total_sentences": total_sentences,
+        "rows": [],
+        "partial": False,
+    }
+    if total_sentences == 0:
+        return result
+    cumulative = [0]
+    for count in sampled_totals:
+        cumulative.append(cumulative[-1] + count)
+
+    # The sampled index in the full handle list.
+    full_cum = [0]
+    for count in totals:
+        full_cum.append(full_cum[-1] + count)
+
+    for fraction in POSITIONS:
+        target = min(total_sentences - 1, int(fraction * total_sentences))
+        index = max(i for i in range(len(sampled_totals)) if cumulative[i] <= target)
+        section_pos = sampled_index[index]
+        if totals[section_pos] == 0:
+            continue
+        offset = target - cumulative[index]
+        row: dict = {
+            "position": f"{int(round(fraction * 100))}%",
+            "section_number": section_pos + 1,
+            "offset": offset,
+            "calls_to_reach": 0,
+            "reach_s": None,
+            "next_ms_p50": None,
+            "next_ms_p95": None,
+            "context_ms_p50": None,
+            "anchor_ms_p50": None,
+            "error": None,
+        }
+        try:
+            if time.monotonic() > deadline:
+                raise DeadlineHit()
+            reach_start = time.perf_counter()
+            global_index = full_cum[section_pos] + offset
+            if global_index >= len(handles):
+                raise ProbeError("walk ended before the target")
+            item_handle = handles[global_index]
+            # The reach itself was the untimed prep walk; report its call-equivalent batches.
+            row["calls_to_reach"] = max(1, math.ceil((global_index + 1) * 60 / V2_BATCH_CHARS))
+            row["reach_s"] = time.perf_counter() - reach_start
+            next_handle = handles[global_index + 1] if global_index + 1 < len(handles) else None
+
+            next_ms: list[float] = []
+            from_handle = item_handle
+            for _ in range(20):
+                if time.monotonic() > deadline:
+                    break
+                start = time.perf_counter()
+                data = payload(server.tool("read", {"from": from_handle})) or {}
+                next_ms.append((time.perf_counter() - start) * 1000.0)
+                candidate = data.get("next")
+                if not isinstance(candidate, str):
+                    break
+                from_handle = candidate
+            row["next_ms_p50"] = percentile(next_ms, 0.5)
+            row["next_ms_p95"] = percentile(next_ms, 0.95)
+
+            context_ms: list[float] = []
+            for _ in range(5):
+                if time.monotonic() > deadline:
+                    break
+                start = time.perf_counter()
+                server.tool("read", {"from": item_handle, "back": 2})
+                context_ms.append((time.perf_counter() - start) * 1000.0)
+            row["context_ms_p50"] = percentile(context_ms, 0.5)
+
+            anchor_ms: list[float] = []
+            for _ in range(5):
+                if time.monotonic() > deadline:
+                    break
+                start = time.perf_counter()
+                server.tool("read", {"from": item_handle})
+                anchor_ms.append((time.perf_counter() - start) * 1000.0)
+            row["anchor_ms_p50"] = percentile(anchor_ms, 0.5)
+        except DeadlineHit:
+            row["error"] = "partial: 20-minute budget reached"
+            result["partial"] = True
+        except ProbeError as exc:
+            row["error"] = str(exc)
+        result["rows"].append(row)
+        if result["partial"]:
+            break
+    return result
 
 
 def deep_probe(server: Server, document_id: str, sections: list[dict], deadline: float) -> dict:
@@ -473,12 +675,19 @@ def run_open(binary: str, cap: str | None, label: str, source: str, state_root: 
         record["error"] = error
         if error is None:
             record["ok"] = True
-            record["sections"] = data.get("section_count")
+            record["sections"] = data.get("section_count") if SERVER_TOOLS == "v1" else data.get("sections")
             record["title"] = (data.get("title") or "")[:40]
             if with_deep:
-                document_id = data.get("document_id")
-                sections = read_sections(server, document_id)
-                record["deep"] = deep_probe(server, document_id, sections, time.monotonic() + deep_deadline_s)
+                if SERVER_TOOLS == "v2":
+                    document_id = data.get("doc")
+                    sections = v2_outline_sections(server, document_id)
+                    record["deep"] = deep_probe_v2(
+                        server, document_id, sections, time.monotonic() + deep_deadline_s
+                    )
+                else:
+                    document_id = data.get("document_id")
+                    sections = read_sections(server, document_id)
+                    record["deep"] = deep_probe(server, document_id, sections, time.monotonic() + deep_deadline_s)
                 record["deep"]["structure_sections"] = len(sections)
     except ProbeError as exc:
         record["error"] = str(exc)
@@ -632,14 +841,27 @@ def read_mode(args) -> int:
         data, open_s, error = open_document(server, args.source)
         if error:
             raise ProbeError(error)
-        document_id = data["document_id"]
+        if SERVER_TOOLS == "v2":
+            document_id = data["doc"]
+            sections = v2_outline_sections(server, document_id)
+        else:
+            document_id = data["document_id"]
+            sections = read_sections(server, document_id)
         out["open_s"] = open_s
-        sections = read_sections(server, document_id)
         # Untimed prep pass: sentence count per section, so positions are global.
-        totals = []
-        for section in sections:
-            data = payload(server.tool("get_text_units", text_units(document_id, section["section_id"], 1))) or {}
-            totals.append(int((data.get("stream") or {}).get("total_items", 0)))
+        if SERVER_TOOLS == "v2":
+            handles = v2_walk_handles(server, document_id, time.monotonic() + 3600)
+            section_ids = [section["section_id"] for section in sections]
+            totals = [0] * len(sections)
+            for handle in handles:
+                owner = v2_section_of_handle(handle, section_ids)
+                if owner is not None:
+                    totals[owner] += 1
+        else:
+            totals = []
+            for section in sections:
+                data = payload(server.tool("get_text_units", text_units(document_id, section["section_id"], 1))) or {}
+                totals.append(int((data.get("stream") or {}).get("total_items", 0)))
         cumulative = [0]
         for count in totals:
             cumulative.append(cumulative[-1] + count)
@@ -663,30 +885,46 @@ def read_mode(args) -> int:
                 break
             section_id = sections[index]["section_id"]
             cursor = None
+            from_handle = section_id
+            in_section = 0
             while True:
                 if time.monotonic() > limit:
                     out["partial"] = True
                     break
                 began = time.perf_counter()
-                result = server.tool("get_text_units", text_units(document_id, section_id, 1, cursor))
+                if SERVER_TOOLS == "v2":
+                    result = server.tool("read", {"from": from_handle})
+                else:
+                    result = server.tool("get_text_units", text_units(document_id, section_id, 1, cursor))
                 elapsed_ms = (time.perf_counter() - began) * 1000.0
                 data = payload(result) or {}
                 calls += 1
                 items = data.get("items") or []
                 latencies.append(elapsed_ms)
-                start_index = (data.get("stream") or {}).get("start_index", 0)
-                for offset_in_section in range(len(items)):
-                    positions.append((cumulative[index] + start_index + offset_in_section) / max(1, grand_total))
-                items_done += len(items)
-                if not items:
-                    positions.append(cumulative[index] / max(1, grand_total))
+                if SERVER_TOOLS == "v2":
+                    positions.append(
+                        (cumulative[index] + in_section) / max(1, grand_total)
+                    )
+                    items_done += len(items)
+                    in_section += max(1, len(items))
+                    candidate = data.get("next")
+                    if not isinstance(candidate, str) or not candidate.startswith(section_id + "."):
+                        break
+                    from_handle = candidate
+                else:
+                    start_index = (data.get("stream") or {}).get("start_index", 0)
+                    for offset_in_section in range(len(items)):
+                        positions.append((cumulative[index] + start_index + offset_in_section) / max(1, grand_total))
+                    items_done += len(items)
+                    if not items:
+                        positions.append(cumulative[index] / max(1, grand_total))
+                    cursor = data.get("next_cursor")
+                    if not cursor:
+                        break
                 if calls % 1000 == 0:
                     rss = rss_kib(server.pid)
                     if rss is not None:
                         samples.append((calls, rss))
-                cursor = data.get("next_cursor")
-                if not cursor:
-                    break
             if out["partial"]:
                 break
         out.update({
@@ -811,7 +1049,11 @@ def main() -> int:
     parser.add_argument("--shards-dir", default="")
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
                         help="extra server env var, repeatable")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
+                        help="tool set the servers expose: v1 (default) or v2")
     args = parser.parse_args()
+    global SERVER_TOOLS
+    SERVER_TOOLS = args.tools
     for entry in args.env:
         key, sep, value = entry.partition("=")
         if not sep or not key:

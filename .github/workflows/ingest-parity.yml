@@ -9,6 +9,10 @@ on:
         description: Base git ref whose binary is compared against the head
         required: false
         default: main
+      tools:
+        description: 'Tool set the probe servers expose'
+        required: false
+        default: 'v1'
   push:
     branches: ['ingest-parity-*']
 
@@ -146,7 +150,7 @@ jobs:
           # left the job green. The table still goes to the step summary before the step fails.
           set -o pipefail
           status=0
-          python3 scripts/ingest-parity.py \
+          python3 scripts/ingest-parity.py --tools "${{ inputs.tools || 'v1' }}" \
             --binary-a base-target/release/reading-mcp \
             --binary-b target/release/reading-mcp \
             --inputs "$inputs" \

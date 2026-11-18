@@ -263,44 +263,72 @@ def first_sentences(text: str, limit: int = SENTENCE_LIMIT) -> tuple[int, str]:
 
 
 def open_and_sample(
-    server: Server, url: str, timeout: float
+    server: Server, url: str, timeout: float, tools: str = "v1"
 ) -> dict:
     """Open one URL, then read the first sentences of its root section."""
     started = time.monotonic()
-    opened = tool_json(
-        server.tool("open_document", {"source": url, "force_refresh": False}, timeout)
-    )
+    if tools == "v2":
+        opened = tool_json(server.tool("open", {"source": url}, timeout))
+    else:
+        opened = tool_json(
+            server.tool("open_document", {"source": url, "force_refresh": False}, timeout)
+        )
     seconds = time.monotonic() - started
-    document_id = opened.get("document_id")
+    id_key = "doc" if tools == "v2" else "document_id"
+    document_id = opened.get(id_key)
     if not document_id:
-        raise ProbeError("open_document returned no document_id")
+        raise ProbeError(f"open returned no {id_key}")
 
-    structure = tool_json(
-        server.tool(
-            "get_document_structure",
-            {"document_id": document_id, "max_depth": 1, "max_nodes": 1},
-            timeout,
+    if tools == "v2":
+        text = ""
+        from_handle = document_id
+        for _ in range(200):
+            read = tool_json(
+                server.tool(
+                    "read", {"from": from_handle, "max_chars": 16000}, timeout
+                )
+            )
+            for item in read.get("items") or []:
+                if isinstance(item, (list, tuple)) and len(item) > 1:
+                    text += str(item[1]) + " "
+            body = read.get("text")
+            if isinstance(body, str):
+                text += body + " "
+            from_handle = read.get("next")
+            if not from_handle:
+                break
+        section_count = opened.get("sections")
+        media_type = opened.get("format")
+    else:
+        structure = tool_json(
+            server.tool(
+                "get_document_structure",
+                {"document_id": document_id, "max_depth": 1, "max_nodes": 1},
+                timeout,
+            )
         )
-    )
-    sections = structure.get("sections") or []
-    section_id = sections[0]["section_id"] if sections else None
-    read = tool_json(
-        server.tool(
-            "read_document",
-            {
-                "document_id": document_id,
-                "section_id": section_id,
-                "max_chars": 40000,
-            },
-            timeout,
+        sections = structure.get("sections") or []
+        section_id = sections[0]["section_id"] if sections else None
+        read = tool_json(
+            server.tool(
+                "read_document",
+                {
+                    "document_id": document_id,
+                    "section_id": section_id,
+                    "max_chars": 40000,
+                },
+                timeout,
+            )
         )
-    )
-    sentences, sample = first_sentences(read.get("content") or "")
+        text = read.get("content") or ""
+        section_count = opened.get("section_count")
+        media_type = opened.get("media_type")
+    sentences, sample = first_sentences(text)
     return {
         "document_id": document_id,
         "title": opened.get("title"),
-        "media_type": opened.get("media_type"),
-        "section_count": opened.get("section_count"),
+        "media_type": media_type,
+        "section_count": section_count,
         "seconds": round(seconds, 2),
         "sentences": sentences,
         "sample": sample,
@@ -334,8 +362,9 @@ def preflight(entry: dict) -> str | None:
 
 
 def measure_tools_list(binary: str, state_dir: str, toolset: str, timeout: float) -> dict:
-    environment = server_environment(state_dir, os.path.join(state_dir, f"tools-{toolset}"))
-    environment["READING_MCP_TOOLS"] = toolset
+    environment = server_environment(
+        state_dir, os.path.join(state_dir, f"tools-{toolset}"), toolset
+    )
     server = None
     try:
         server = Server(
@@ -355,7 +384,7 @@ def measure_tools_list(binary: str, state_dir: str, toolset: str, timeout: float
             server.close()
 
 
-def server_environment(state_dir: str, state: str) -> dict:
+def server_environment(state_dir: str, state: str, tools: str = "v1") -> dict:
     environment = dict(os.environ)
     environment.update(
         {
@@ -363,18 +392,18 @@ def server_environment(state_dir: str, state: str) -> dict:
             "READING_MCP_TELEMETRY": "false",
             "READING_MCP_ALLOW_HTTP": "false",
             "READING_MCP_LOCAL_ROOTS": state_dir,
-            "READING_MCP_TOOLS": "v1",
+            "READING_MCP_TOOLS": tools,
         }
     )
     return environment
 
 
-def run_probe(binary: str, state_dir: str, timeout: float) -> dict:
+def run_probe(binary: str, state_dir: str, timeout: float, tools: str = "v1") -> dict:
     state = os.path.join(state_dir, "links")
     os.makedirs(state, exist_ok=True)
     server = Server(
         binary,
-        server_environment(state_dir, state),
+        server_environment(state_dir, state, tools),
         os.path.join(state_dir, "links.log"),
         timeout,
     )
@@ -407,7 +436,7 @@ def run_probe(binary: str, state_dir: str, timeout: float) -> dict:
                 continue
             record["meta_present"] = bool(entry.get("meta_present"))
             try:
-                sample = open_and_sample(server, entry["url"], timeout)
+                sample = open_and_sample(server, entry["url"], timeout, tools)
             except ProbeError as error:
                 record["outcome"] = "failed"
                 record["reason"] = str(error)
@@ -429,7 +458,7 @@ def run_probe(binary: str, state_dir: str, timeout: float) -> dict:
             if not control_url or control_url in samples:
                 continue
             try:
-                samples[control_url] = open_and_sample(server, control_url, timeout)
+                samples[control_url] = open_and_sample(server, control_url, timeout, tools)
             except ProbeError as error:
                 samples[control_url] = {"error": str(error)}
     finally:
@@ -492,6 +521,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--timeout", type=float, default=REQUEST_TIMEOUT)
     parser.add_argument("--out", help="write the JSON report here")
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="tool set the probe's servers expose: v1 (default) or v2",
+    )
     parser.add_argument("--md", help="write the Markdown table here")
     args = parser.parse_args(argv)
 
@@ -503,7 +538,7 @@ def main(argv: list[str]) -> int:
     state_dir = os.path.abspath(args.state_dir)
     os.makedirs(state_dir, exist_ok=True)
 
-    report = run_probe(binary, state_dir, args.timeout)
+    report = run_probe(binary, state_dir, args.timeout, args.tools)
     report["tools_list"] = {
         toolset: measure_tools_list(binary, state_dir, toolset, args.timeout)
         for toolset in ("v1", "v2")

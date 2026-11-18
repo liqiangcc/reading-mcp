@@ -196,23 +196,30 @@ def drop_wall_clock(value):
     return value
 
 
-def server_environment(state_dir: str, roots: str) -> dict:
+def server_environment(state_dir: str, roots: str, tools: str = "v1") -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
     env["READING_MCP_TELEMETRY"] = "false"
-    env["READING_MCP_TOOLS"] = "v1"
+    env["READING_MCP_TOOLS"] = tools
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
     return env
 
 
-def run_open(binary: str, source: str, state_dir: str, timeout: float, log_path: str):
+def run_open(
+    binary: str,
+    source: str,
+    state_dir: str,
+    timeout: float,
+    log_path: str,
+    tools: str = "v1",
+):
     """Opens `source` once on a fresh state directory and returns the payload or its error."""
     os.makedirs(state_dir, exist_ok=True)
     roots = os.path.dirname(os.path.abspath(source))
-    env = server_environment(state_dir, roots)
+    env = server_environment(state_dir, roots, tools)
     with open(log_path, "wb") as log_handle:
         process = subprocess.Popen(
             [binary],
@@ -236,6 +243,8 @@ def run_open(binary: str, source: str, state_dir: str, timeout: float, log_path:
             else:
                 send(process, INITIALIZED_NOTIFICATION)
                 message = json.loads(json.dumps(OPEN_MESSAGE))
+                if tools == "v2":
+                    message["params"]["name"] = "open"
                 message["params"]["arguments"] = {"source": os.path.abspath(source)}
                 send(process, message)
                 response = read_response(responses, 2, timeout)
@@ -1574,7 +1583,12 @@ def run_light_reader_shapes(
 
 
 def run_read_probe(
-    binary: str, source: str, state_dir: str, timeout: float, log_path: str
+    binary: str,
+    source: str,
+    state_dir: str,
+    timeout: float,
+    log_path: str,
+    tools: str = "v1",
 ) -> list[dict]:
     """Reopens the stored state and records the v1 and v2 read sequences, both tools registered.
 
@@ -1584,7 +1598,7 @@ def run_read_probe(
     two binaries can be compared call by call.
     """
     env = server_environment(state_dir, os.path.dirname(os.path.abspath(source)))
-    env["READING_MCP_TOOLS"] = "both"
+    env["READING_MCP_TOOLS"] = "both" if tools == "v1" else "v2"
     records: list[dict] = []
     with open(log_path, "wb") as log_handle:
         process = subprocess.Popen(
@@ -1630,7 +1644,8 @@ def run_read_probe(
                 return [{"step": "initialize", "payload": {"error": failure}}]
             send(process, INITIALIZED_NOTIFICATION)
 
-            run_v1_reads(call, source, records)
+            if tools == "v1":
+                run_v1_reads(call, source, records)
 
             opened = call("open", {"source": os.path.abspath(source)})
             records.append({"step": "v2 open", "payload": opened})
@@ -1763,7 +1778,15 @@ def run_read_probe(
     return drop_wall_clock(records)
 
 
-def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeout: float) -> dict:
+def run_side(
+    binary: str,
+    side: str,
+    label: str,
+    path: str,
+    out_dir: str,
+    timeout: float,
+    tools: str = "v1",
+) -> dict:
     """Opens `path` with `binary` on a fresh state directory and returns its comparable facts."""
     side_dir = os.path.join(out_dir, "runs", safe_label(label), side)
     os.makedirs(side_dir, exist_ok=True)
@@ -1774,6 +1797,7 @@ def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeou
         state_dir,
         timeout,
         os.path.join(side_dir, "server.log"),
+        tools,
     )
     dump = dump_state(os.path.join(state_dir, STATE_DATABASE))
     reads = run_read_probe(
@@ -1782,6 +1806,7 @@ def run_side(binary: str, side: str, label: str, path: str, out_dir: str, timeou
         state_dir,
         timeout,
         os.path.join(side_dir, "read-server.log"),
+        tools,
     )
     return {"payload": payload, "dump": dump, "reads": reads}
 
@@ -1906,6 +1931,12 @@ def main() -> int:
     parser.add_argument("--inputs", required=True, help="label=path pairs, comma separated")
     parser.add_argument("--out", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="tool set the servers expose: v1 (default) or v2",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -1924,8 +1955,8 @@ def main() -> int:
             )
             failed = True
             continue
-        left = run_side(args.binary_a, "a", label, path, args.out, args.timeout_seconds)
-        right = run_side(args.binary_b, "b", label, path, args.out, args.timeout_seconds)
+        left = run_side(args.binary_a, "a", label, path, args.out, args.timeout_seconds, args.tools)
+        right = run_side(args.binary_b, "b", label, path, args.out, args.timeout_seconds, args.tools)
         columns = compare(label, left, right, args.out)
         result = "same" if all(value == "same" for value in columns.values()) else "DIFF"
         failed = failed or result == "DIFF"

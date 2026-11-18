@@ -4,6 +4,7 @@
 //! reading profile and the PDF inspector need coverage, the EPUB validator needs ranges, indices and
 //! orders. Unit structs are materialized from these boundaries where a caller really needs them.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use thiserror::Error;
@@ -1017,15 +1018,20 @@ pub fn looks_like_unreliable_fallback_text_unguarded(text: &str) -> bool {
 
 /// Which source a segmentation is running for, as far as the #139 fallback guard is concerned.
 ///
-/// The guard serves every format. A digit directly before a single capital, though, is ordinary
-/// text in a PDF paragraph - a model size (`7B`), a dimension (`3D`), a unit (`4K,`), a panel
-/// label (`Fig. 3A`) - and the junction cannot be told from glue by shape alone. Only PDF prose
-/// may stop counting it; every other format keeps the guard byte for byte.
+/// The guard serves every format. Two junction shapes, though, are ordinary text in a PDF
+/// paragraph and cannot be told from glue by their own characters:
+///
+/// - a digit directly before a single capital that ends its token - a model size (`7B`), a
+///   dimension (`3D`), a unit (`4K,`), a panel label (`Fig. 3A`);
+/// - a camel-case name the paragraph is about, which comes back in every sentence - `ChatGPT`,
+///   `LLaMA`, `ArabicaQA`, `CodeLLaMA`.
+///
+/// Only PDF prose may stop counting them; every other format keeps the guard byte for byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FallbackGuardProfile {
     /// Every format but PDF: the guard exactly as #139 wrote it.
     AllFormats,
-    /// PDF fallback paragraphs: a digit before one capital that ends its token is not glue.
+    /// PDF fallback paragraphs: the two shapes above are not glue.
     PdfProse,
 }
 
@@ -1053,21 +1059,37 @@ fn looks_like_unreliable_fallback_text(text: &str, guard: FallbackGuardProfile) 
 /// `3642SCIENCE`, `,NewSeries`, `others.John`, `)provided`.
 fn missing_space_glue_events(text: &str, guard: FallbackGuardProfile) -> usize {
     let chars = text.chars().collect::<Vec<_>>();
+    let pdf = guard == FallbackGuardProfile::PdfProse;
+    let counted = count_glue_events(&chars, pdf, None);
+    if !pdf || counted < MIN_MISSING_SPACE_GLUE_EVENTS {
+        return counted;
+    }
+    // The name exemption can only ever remove events, so only a paragraph that already reaches
+    // the threshold pays for the paragraph's token counts.
+    let repeated = repeated_name_tokens(&chars);
+    if repeated.is_empty() {
+        return counted;
+    }
+    count_glue_events(&chars, pdf, Some(&repeated))
+}
+
+/// One pass over every junction. `repeated` is the PDF-only name exemption: `None` counts every
+/// junction, as every non-PDF format does.
+fn count_glue_events(chars: &[char], pdf: bool, repeated: Option<&HashSet<String>>) -> usize {
     let mut events = 0usize;
     for index in 1..chars.len() {
         let previous = chars[index - 1];
         let current = chars[index];
         let glued = (previous.is_ascii_digit()
             && current.is_uppercase()
-            && !(guard == FallbackGuardProfile::PdfProse
-                && is_terminal_single_capital(&chars, index)))
+            && !(pdf && is_terminal_single_capital(chars, index)))
             || (matches!(previous, ',' | ';' | ':' | '.' | '!' | '?') && current.is_uppercase())
             || (previous == ')' && current.is_alphabetic())
             // An all-caps run of 3+ immediately continued by a lowercase tail inside
             // one token ("SCIENCEStrong") means two fragments were merged.
             || (previous.is_uppercase()
                 && current.is_lowercase()
-                && uppercase_run_ending_at(&chars, index - 1) >= 3)
+                && uppercase_run_ending_at(chars, index - 1) >= 3)
             // Interior lowercase->uppercase junction only: single-letter brand
             // prefixes ("iPhone") and surname patterns ("McDonald") are not glue.
             || (previous.is_lowercase()
@@ -1075,10 +1097,71 @@ fn missing_space_glue_events(text: &str, guard: FallbackGuardProfile) -> usize {
                 && chars
                     .get(index.wrapping_sub(2))
                     .is_some_and(|before| before.is_alphabetic())
-                && !is_surname_junction(&chars, index));
+                && !is_surname_junction(chars, index)
+                && !(pdf
+                    && repeated.is_some_and(|tokens| {
+                        is_repeated_name_token(chars, index, tokens)
+                    })));
         events += usize::from(glued);
     }
     events
+}
+
+/// The tokens of a paragraph that occur at least twice, spelled identically, and carry a run of
+/// two or more ASCII capitals: `ChatGPT`, `LLaMA`, `ArabicaQA`, `CodeLLaMA`.
+///
+/// Glue is one word in one place and is almost never repeated exactly, while a name the paragraph
+/// is about comes back in every sentence. A token is a maximal run of alphanumeric characters,
+/// the same tokenisation the measurement used, and it is counted once per paragraph - the text
+/// the guard is handed - in one pass, so the exemption stays O(paragraph).
+fn repeated_name_tokens(chars: &[char]) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut cursor = 0usize;
+    while cursor < chars.len() {
+        if !chars[cursor].is_alphanumeric() {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < chars.len() && chars[cursor].is_alphanumeric() {
+            cursor += 1;
+        }
+        *counts
+            .entry(chars[start..cursor].iter().copied().collect::<String>())
+            .or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(token, count)| *count >= 2 && has_capital_run(token))
+        .map(|(token, _)| token)
+        .collect()
+}
+
+fn has_capital_run(token: &str) -> bool {
+    let mut run = 0usize;
+    for ch in token.chars() {
+        if ch.is_ascii_uppercase() {
+            run += 1;
+            if run >= 2 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+fn is_repeated_name_token(chars: &[char], index: usize, tokens: &HashSet<String>) -> bool {
+    let mut start = index;
+    while start > 0 && chars[start - 1].is_alphanumeric() {
+        start -= 1;
+    }
+    let mut end = index;
+    while end + 1 < chars.len() && chars[end + 1].is_alphanumeric() {
+        end += 1;
+    }
+    tokens.contains(&chars[start..=end].iter().copied().collect::<String>())
 }
 
 /// A digit directly before **one** capital that ends its token: a size (`7B`), a dimension

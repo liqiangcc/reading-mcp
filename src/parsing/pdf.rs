@@ -78,11 +78,14 @@ struct PdfSourceFragment {
 struct PageFragments(Vec<(u32, String)>);
 
 impl PageFragments {
+    /// One fragment per paragraph block: blocks of a page join with `"\n\n"`
+    /// (stage 1 made a fragment a block, not a line), pages join with the
+    /// same separator.
     fn push_line(&mut self, page: u32, text: &str) {
         match self.0.last_mut() {
             Some((last_page, fragment)) if *last_page == page => {
                 if !fragment.is_empty() {
-                    fragment.push('\n');
+                    fragment.push_str("\n\n");
                 }
                 fragment.push_str(text);
             }
@@ -150,7 +153,7 @@ impl PdfParser {
         // The repair copy is a second full object tree, made only for the page text: it is
         // released as soon as the pages are read instead of being carried through the section
         // build and the save.
-        let (mut pages, extraction_errors) = {
+        let (mut pages, extraction_errors, bailouts) = {
             let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
             #[cfg(test)]
             held_buffers::repair_copy_present(prepared.is_some());
@@ -182,6 +185,25 @@ impl PdfParser {
                 "pdf_text_extraction_errors".into(),
                 extraction_errors.len().to_string(),
             );
+        }
+        if bailouts.total() > 0 {
+            metadata.insert(
+                "pdf_positional_bailouts".into(),
+                bailouts.total().to_string(),
+            );
+            for (reason, count) in [
+                ("glyph_cap", bailouts.glyph_cap),
+                ("vertical_writing", bailouts.vertical_writing),
+                ("unsupported_font", bailouts.unsupported_font),
+                ("undecodable", bailouts.undecodable),
+            ] {
+                if count > 0 {
+                    metadata.insert(
+                        format!("pdf_positional_bailout_{reason}"),
+                        count.to_string(),
+                    );
+                }
+            }
         }
 
         let pdf_title = pdf_title(&pdf);
@@ -298,25 +320,64 @@ impl Parser for PdfParser {
 }
 
 #[cfg(test)]
-fn extract_page_texts(pdf: &LopdfDocument, page_numbers: &[u32]) -> (Vec<PageText>, Vec<String>) {
+fn extract_page_texts(
+    pdf: &LopdfDocument,
+    page_numbers: &[u32],
+) -> (Vec<PageText>, Vec<String>, super::pdf_positional::BailCounts) {
     let prepared = super::pdf_text_repair::prepare_text_extraction(pdf);
     extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), page_numbers)
 }
 
-/// Reads every page's text with one content walk per page.
+/// Reads every page's text with the positional walker
+/// (`pdf_positional`): one content walk per page that tracks the text matrix,
+/// the CTM and the per-glyph pen advance, groups the shown strings into
+/// lines and the lines into blocks at large vertical gaps, and renders the
+/// page with `"\n"` between lines and `"\n\n"` between blocks (PDF-7b-1).
 ///
-/// `Document::extract_text_with_limit` is this same walk with the fragments concatenated and the
-/// first error returned, so the page is walked once and both facts are derived from its one
-/// result: decoding the page's streams, every font's encoding and every `/ToUnicode` CMap twice
-/// per page bought nothing and held a second copy of the page's decoded content at the peak.
+/// A page the walker cannot position exactly falls back to
+/// `extract_text_chunks_with_limit`, the walk the page used before; the
+/// bail-outs come back in the third return slot so the document metadata can
+/// count them. `Document::extract_text_with_limit` is this same fallback
+/// walk with the fragments concatenated and the first error returned, so a
+/// bailed-out page is walked once and both facts are derived from its one
+/// result.
 fn extract_page_texts_raw(
     pdf: &LopdfDocument,
     page_numbers: &[u32],
-) -> (Vec<PageText>, Vec<String>) {
+) -> (Vec<PageText>, Vec<String>, super::pdf_positional::BailCounts) {
     let mut pages = Vec::with_capacity(page_numbers.len());
     let mut errors = Vec::new();
+    let mut bailouts = super::pdf_positional::BailCounts::default();
+    let page_ids = pdf.get_pages();
+    let mut memo = super::pdf_layout::FontEncodingMemo::new();
+    let mut metrics = super::pdf_positional::FontMetricsMemo::new(pdf);
 
     for page_number in page_numbers {
+        // The positional walk runs first; a page it declines keeps the old
+        // chunk walk below, unchanged. Its blocks feed the same spaced-dot
+        // normalisation, one block per fragment, so the block boundaries
+        // the heading inference reads stay where the layer put them.
+        if let Some(page_id) = page_ids.get(page_number).copied() {
+            let positional = super::pdf_positional::extract_positional_page(
+                pdf,
+                page_id,
+                MAX_PAGE_DECOMPRESSED_BYTES,
+                &mut memo,
+                &mut metrics,
+            );
+            match positional.bail {
+                Some(reason) => bailouts.add(reason),
+                None => {
+                    let (text, chunks) = normalized_page_text(&positional.chunks);
+                    pages.push(PageText {
+                        number: *page_number,
+                        text: normalize_pdf_text(&text),
+                        chunks,
+                    });
+                    continue;
+                }
+            }
+        }
         let mut fragments = Vec::new();
         let mut first_error = None;
         for fragment in
@@ -351,7 +412,7 @@ fn extract_page_texts_raw(
         });
     }
 
-    (pages, errors)
+    (pages, errors, bailouts)
 }
 
 fn normalize_pdf_text(value: &str) -> String {
@@ -1146,7 +1207,7 @@ mod tests {
 
     fn page_texts(document: &LopdfDocument) -> Vec<PageText> {
         let pages = document.get_pages().keys().copied().collect::<Vec<_>>();
-        let (texts, errors) = extract_page_texts(document, &pages);
+        let (texts, errors, _bailouts) = extract_page_texts(document, &pages);
         assert!(
             errors.is_empty(),
             "unexpected extraction errors: {errors:?}"
@@ -1156,7 +1217,7 @@ mod tests {
 
     fn old_page_texts(document: &LopdfDocument) -> Vec<PageText> {
         let pages = document.get_pages().keys().copied().collect::<Vec<_>>();
-        let (texts, errors) = extract_page_texts_raw(document, &pages);
+        let (texts, errors, _bailouts) = extract_page_texts_raw(document, &pages);
         assert!(
             errors.is_empty(),
             "unexpected extraction errors: {errors:?}"
@@ -1598,7 +1659,7 @@ mod tests {
                 .map(|(number, _)| *number)
                 .collect::<Vec<_>>();
             let prepared = crate::parsing::pdf_text_repair::prepare_text_extraction(&pdf);
-            let (pages, _) =
+            let (pages, _, _bailouts) =
                 extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
             let chars: usize = pages.iter().map(|page| page.text.chars().count()).sum();
             let coverage = crate::parsing::pdf_raster::document_raster_coverage(&pdf, &page_ids);

@@ -1,0 +1,117 @@
+name: PDF-7b positional probe
+run-name: PDF-7b positional probe
+on:
+  workflow_dispatch:
+    inputs:
+      compare_ids:
+        description: >-
+          Comma-separated arXiv ids for the per-paper PyMuPDF comparison
+          table (the line/block counts are still computed for every paper)
+        default: '2308.01909,2404.05778,2403.02247,2403.02626,2403.01859,2308.04244,2311.15310,2401.16311,2306.13140,2310.11602'
+
+concurrency:
+  group: pdf7b-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the library test binary (it carries pdf7b1_positional_probe)
+        run: |
+          cargo test --release --locked --lib --no-run 2>&1 | tail -5
+          bin=$(ls -t target/release/deps/reading_mcp-* | grep -v '\.d$' | head -1)
+          echo "probe binary: $bin"
+          cp "$bin" .tmp-probe-bin
+      - name: Upload the test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf7b-probe-test-bin
+          path: .tmp-probe-bin
+          if-no-files-found: error
+
+  probe:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    name: probe shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the reference tooling
+        run: pip install pymupdf==1.28.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: pdf7b-probe-test-bin
+          path: ${{ runner.temp }}/bin
+      - name: Run the positional probe on shard ${{ matrix.shard }}
+        env:
+          COMPARE_IDS: ${{ inputs.compare_ids }}
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/reading-mcp-tests"
+          mkdir -p "$RUNNER_TEMP/out" "$RUNNER_TEMP/work"
+          python3 scripts/pdf7b-compare.py \
+            --ids scripts/pdf-sweep-ids.txt \
+            --shard ${{ matrix.shard }} --shards 8 \
+            --work-dir "$RUNNER_TEMP/work" \
+            --probe-bin "$RUNNER_TEMP/bin/reading-mcp-tests" \
+            --out-dir "$RUNNER_TEMP/out" \
+            --compare-ids "$COMPARE_IDS" | tail -120
+      - name: Upload the shard's comparison records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf7b-probe-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: warn
+          retention-days: 30
+
+  aggregate:
+    needs: [probe]
+    if: always() && needs.probe.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pdf7b-probe-shard-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/all
+      - name: Merge the shards into the comparison table
+        env:
+          COMPARE_IDS: ${{ inputs.compare_ids }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/final"
+          python3 scripts/pdf7b-compare.py --aggregate \
+            --jsonl-dir "$RUNNER_TEMP/all" \
+            --compare-ids "$COMPARE_IDS" \
+            --out "$RUNNER_TEMP/final/pdf7b-probe-summary.json" \
+            --markdown "$RUNNER_TEMP/final/pdf7b-probe.md" | tail -200
+          cat "$RUNNER_TEMP/final/pdf7b-probe.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the merged comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf7b-probe-final
+          path: |
+            ${{ runner.temp }}/final/
+            ${{ runner.temp }}/all/
+          if-no-files-found: warn
+          retention-days: 30

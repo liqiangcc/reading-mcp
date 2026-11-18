@@ -54,14 +54,14 @@ struct TextState {
 /// fall-through to the ASCII fallback, so the output cannot change. The memo is
 /// local to one call: no global state, no locking, nothing that outlives the
 /// document.
-struct FontEncodingMemo<'a> {
+pub(super) struct FontEncodingMemo<'a> {
     resolved: HashMap<usize, Option<Encoding<'a>>>,
     #[cfg(test)]
     resolutions: usize,
 }
 
 impl<'a> FontEncodingMemo<'a> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             resolved: HashMap::new(),
             #[cfg(test)]
@@ -70,7 +70,7 @@ impl<'a> FontEncodingMemo<'a> {
     }
 
     /// The font's encoding, resolved at most once per distinct font.
-    fn resolve(
+    pub(super) fn resolve(
         &mut self,
         pdf: &'a LopdfDocument,
         font: &'a Dictionary,

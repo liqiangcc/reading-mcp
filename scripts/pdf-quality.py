@@ -681,23 +681,42 @@ def xref_target(doc, xref: int, path: str) -> int | None:
     return None
 
 
+def cmap_facts(doc, xref: int) -> dict:
+    """What a `/ToUnicode` CMap stream looks like to a decoder: does it decompress at all, and
+    which sections does it use."""
+    try:
+        data = doc.xref_stream(xref)
+    except Exception:  # noqa: BLE001
+        return {"decompressed": False}
+    if not data:
+        return {"decompressed": False}
+    return {"decompressed": True, "bytes": len(data),
+            "bfchar": data.count(b"beginbfchar"), "bfrange": data.count(b"beginbfrange"),
+            "cidrange": data.count(b"begincidrange"), "usecmap": data.count(b"usecmap"),
+            "cjk": cmap_has_cjk(data)}
+
+
 def font_facts(doc, xref: int, resources_xref: int | None) -> dict:
-    """Subtype, `/ToUnicode` presence and the PDF-1c CJK hint of one font."""
+    """Subtype, `/Encoding`, `/ToUnicode` and the PDF-1c CJK hint of one font."""
     subtype = ""
     try:
         _kind, value = doc.xref_get_key(xref, "Subtype")
         subtype = value.lstrip("/") if isinstance(value, str) else ""
     except Exception:  # noqa: BLE001
         pass
+    encoding = ""
+    try:
+        kind, value = doc.xref_get_key(xref, "Encoding")
+        encoding = (value if isinstance(value, str) else "")[:60]
+        if kind == "xref":
+            encoding = f"indirect {value}"
+    except Exception:  # noqa: BLE001
+        pass
     to_unicode = xref_target(doc, xref, "ToUnicode")
-    cjk = False
-    if to_unicode is not None:
-        try:
-            cjk = cmap_has_cjk(doc.xref_stream(to_unicode) or b"")
-        except Exception:  # noqa: BLE001
-            cjk = False
-    return {"xref": xref, "subtype": subtype, "to_unicode": to_unicode is not None,
-            "cjk_cmap": cjk}
+    cmap = cmap_facts(doc, to_unicode) if to_unicode is not None else {"decompressed": False}
+    return {"xref": xref, "subtype": subtype, "encoding": encoding,
+            "to_unicode": to_unicode is not None, "cjk_cmap": bool(cmap.get("cjk")),
+            "cmap": cmap}
 
 
 def resource_fonts(doc, owner_xref: int) -> list[dict]:
@@ -903,11 +922,25 @@ def page_pdf_facts(path: str, page_numbers: list[int]) -> list[dict]:
                     content_bytes += len(document.xref_stream(xref) or b"")
                 except Exception:  # noqa: BLE001
                     continue
+            spans = spans_by_font(page)
+            font_by_name = {font["name"]: font for font in fonts}
+            used_fonts = []
+            for name, count in list(spans.items())[:4]:
+                facts = font_by_name.get(name) or {}
+                used_fonts.append({
+                    "name": name, "chars": count,
+                    "subtype": facts.get("subtype"),
+                    "encoding": facts.get("encoding"),
+                    "to_unicode": facts.get("to_unicode"),
+                    "cmap": facts.get("cmap"),
+                    "in_resources": bool(facts),
+                })
             results.append({
                 "page": page_number,
                 "own": own,
                 "content_bytes": content_bytes,
-                "spans_by_font": spans_by_font(page),
+                "spans_by_font": spans,
+                "used_fonts": used_fonts,
                 "tf_fonts_missing_from_resources": [name for name in own["font_names"]
                                                    if name not in resource_names],
                 "forms": [{"name": form["name"], "text_ops": form["text_ops"],
@@ -1614,21 +1647,42 @@ def aggregate_mode(args) -> int:
 
     # 5. Silent loss and bad characters
     loss_docs = [doc for doc in docs if doc.get("loss")]
+    containments = [doc["loss"]["containment_first20"] for doc in docs
+                    if doc.get("loss") and doc["loss"].get("containment_first20") is not None]
+    bad = [(doc.get("quality") or {}).get("replacement_share", 0)
+           + (doc.get("quality") or {}).get("private_use_share", 0) for doc in docs]
     lines += ["", "## 5. Silent loss and bad characters (H6)", "",
-              f"Documents measured here: {len(loss_docs)} (containment below "
-              f"{LOSS_CONTAINMENT} or over 1% U+FFFD/private-use).", "",
-              "| Id | Pages | Containment | Backend chars | Reference chars | Char ratio | "
-              "Worst page | Page reference chars | Page backend chars | Page content KiB | "
-              "Page text ops | Form text ops on the page |", "| --- | --- | --- | --- | --- | "
-              "--- | --- | --- | --- | --- | --- | --- |"]
+              f"Documents measured in detail here: {len(loss_docs)} (containment below "
+              f"{LOSS_CONTAINMENT} or over 1% U+FFFD/private-use). Over all {len(docs)} "
+              f"documents:", "",
+              "| Measure | Median | p05 | p25 | p75 | p95 | Min | Max | Documents below 0.9 |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for label, values, threshold in (("containment of the first 20 sentences", containments, 0.9),
+                                     ("U+FFFD + private-use share", bad, None)):
+        if not values:
+            continue
+        below = (sum(1 for value in values if value is not None and value < threshold)
+                 if threshold is not None else "-")
+        lines.append(f"| {label} | {fmt(statistics.median(values), 4)} | "
+                     f"{fmt(percentile(values, 0.05), 4)} | {fmt(percentile(values, 0.25), 4)} | "
+                     f"{fmt(percentile(values, 0.75), 4)} | {fmt(percentile(values, 0.95), 4)} | "
+                     f"{fmt(min(values), 4)} | {fmt(max(values), 4)} | {below} |")
+    lines += ["", "| Id | Pages | Containment | Backend chars | Reference chars | Char ratio | "
+              "U+FFFD | Private use | Worst page | Page reference chars | Page backend chars | "
+              "Page content KiB | Page text ops | Form text ops on the page |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+              "--- |"]
     for doc in loss_docs:
         loss = doc["loss"]
         worst = (loss.get("worst_pages") or [{}])[0]
         pdf = worst.get("pdf") or {}
+        quality = doc.get("quality") or {}
         lines.append(f"| {doc['id']} | {doc.get('pages')} | "
                      f"{fmt(loss.get('containment_first20'), 3)} | "
                      f"{loss.get('backend_chars')} | {loss.get('reference_chars')} | "
-                     f"{fmt((doc.get('quality') or {}).get('char_ratio'), 3)} | "
+                     f"{fmt(quality.get('char_ratio'), 3)} | "
+                     f"{fmt(quality.get('replacement_share'), 4)} | "
+                     f"{fmt(quality.get('private_use_share'), 4)} | "
                      f"{worst.get('page')} | {worst.get('reference_chars')} | "
                      f"{worst.get('backend_chars')} | "
                      f"{fmt((pdf.get('content_bytes') or 0) / 1024, 1)} | "
@@ -1651,25 +1705,28 @@ def aggregate_mode(args) -> int:
                      f"{forms.get('pages_with_text_forms')} | "
                      f"{forms.get('text_ops_in_forms')} | "
                      f"{forms.get('text_ops_in_cjk_forms')} |")
-    lines += ["", "| Id | Page | Where the page's reference text lives | Fonts (subtype, "
-                  "/ToUnicode, CJK CMap) | Forms reached by Do | Tf fonts missing from "
-                  "/Resources/Font |", "| --- | --- | --- | --- | --- | --- |"]
+    lines += ["", "| Id | Page | Text by font (characters) | The font the page's text uses "
+                  "(subtype, /Encoding, /ToUnicode CMap) | Forms reached by Do |",
+              "| --- | --- | --- | --- | --- |"]
     for doc in loss_docs:
         for worst in (doc["loss"].get("worst_pages") or [])[:2]:
             pdf = worst.get("pdf") or {}
             spans = ", ".join(f"{name} {count}"
                               for name, count in list((pdf.get("spans_by_font") or {}).items())[:3])
-            fonts = "; ".join(f"{font['name']} ({font['subtype']}, "
-                              f"{'ToUnicode' if font['to_unicode'] else 'no ToUnicode'}"
-                              f"{', CJK' if font['cjk_cmap'] else ''})"
-                              for font in (pdf.get("fonts") or [])[:3])
+            used = []
+            for font in (pdf.get("used_fonts") or [])[:2]:
+                cmap = font.get("cmap") or {}
+                used.append(
+                    f"{font['name']} ({font.get('subtype') or 'not in /Resources/Font'}, "
+                    f"enc `{(font.get('encoding') or 'none')[:20]}`, "
+                    f"{'no ToUnicode' if not font.get('to_unicode') else 'ToUnicode'}"
+                    f"{' not decompressible' if not cmap.get('decompressed') else ''}"
+                    f"{', bfchar %d bfrange %d' % (cmap.get('bfchar') or 0, cmap.get('bfrange') or 0) if cmap.get('decompressed') else ''})")
             forms = "; ".join(f"{form['name']} ({form['text_ops']} ops, "
                               f"{'CJK font' if form['has_cjk_font'] else 'no CJK font'})"
                               for form in (pdf.get("forms") or [])[:3])
-            missing = (pdf.get("tf_fonts_missing_from_resources") or [])
-            lines.append(f"| {doc['id']} | {worst.get('page')} | {spans[:110] or '-'} | "
-                         f"{fonts[:120]} | {forms[:80] or '-'} | "
-                         f"{', '.join(missing)[:60] if missing else '-'} |")
+            lines.append(f"| {doc['id']} | {worst.get('page')} | {spans[:80] or '-'} | "
+                         f"{'; '.join(used)[:200]} | {forms[:80] or '-'} |")
 
     text = "\n".join(lines)
     print(text)

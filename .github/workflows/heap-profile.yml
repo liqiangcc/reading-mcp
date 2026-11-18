@@ -2,7 +2,7 @@ name: Heap profile
 on:
   workflow_dispatch:
   push:
-    branches: ['bench/**']
+    branches: ['bench/heap-profile-**']
 jobs:
   heap:
     runs-on: ubuntu-latest

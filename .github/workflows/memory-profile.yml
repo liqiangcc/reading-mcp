@@ -2,7 +2,7 @@ name: Memory profile
 on:
   workflow_dispatch:
   push:
-    branches: ['bench/**']
+    branches: ['bench/memory-profile-**']
 jobs:
   profile:
     runs-on: ubuntu-latest

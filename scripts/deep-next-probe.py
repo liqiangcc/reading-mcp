@@ -228,6 +228,76 @@ class Server:
             pass
 
 
+V2_BATCH_CHARS = 16000
+
+
+def v2_outline_sections(server: Server, doc_handle: str) -> list[dict]:
+    """Every section handle in body order via paginated `outline`."""
+    sections: list[dict] = []
+    cursor = None
+    for _ in range(10_000):
+        arguments = {"at": doc_handle, "depth": 16, "limit": 500}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        payload = tool_payload(server.tool("outline", arguments))
+        if not isinstance(payload, dict):
+            raise ProbeError("outline returned no JSON object")
+        for item in payload.get("items") or []:
+            if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+                sections.append({"section_id": item[0]})
+        cursor = payload.get("next")
+        if not cursor:
+            break
+    else:
+        raise ProbeError("outline pagination did not terminate")
+    return sections
+
+
+def v2_item_handle(item) -> str | None:
+    if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+        return item[0]
+    if isinstance(item, dict) and isinstance(item.get("at"), str):
+        return item["at"]
+    return None
+
+
+def v2_walk_section(
+    server: Server, section_handle: str, unit: str
+) -> list[str]:
+    """Every `unit` item handle of one section, gathered in `max_chars` batches."""
+    prefix = section_handle + "."
+    handles: list[str] = []
+    from_handle = section_handle
+    for _ in range(100_000):
+        payload = tool_payload(
+            server.tool(
+                "read",
+                {"from": from_handle, "unit": unit, "max_chars": V2_BATCH_CHARS},
+            )
+        )
+        if not isinstance(payload, dict):
+            raise ProbeError("read returned no JSON object")
+        for item in payload.get("items") or []:
+            handle = v2_item_handle(item)
+            if handle is not None and handle.startswith(prefix):
+                handles.append(handle)
+        candidate = payload.get("next")
+        if not isinstance(candidate, str) or not candidate.startswith(prefix):
+            break
+        from_handle = candidate
+    else:
+        raise ProbeError("v2 section walk did not terminate")
+    return handles
+
+
+def v2_read(server: Server, arguments: dict) -> dict:
+    payload = tool_payload(server.tool("read", arguments))
+    if not isinstance(payload, dict):
+        raise ProbeError("read returned no JSON object")
+    return payload
+
+
+
 def flatten_structure(structure_result: dict) -> list[dict]:
     flattened: dict[str, dict] = {}
 
@@ -599,7 +669,7 @@ def probe(args: argparse.Namespace) -> int:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = os.path.dirname(document)
-    env["READING_MCP_TOOLS"] = "v1"
+    env["READING_MCP_TOOLS"] = "v1" if args.tools == "v1" else "v2"
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
@@ -626,28 +696,67 @@ def probe(args: argparse.Namespace) -> int:
     try:
         server.initialize()
         opened = time.monotonic()
-        document_id = open_document(server, document)
+        anchor_handle = None
+        if args.tools == "v2":
+            payload = tool_payload(server.tool("open", {"source": document}))
+            if not isinstance(payload, dict) or not isinstance(payload.get("doc"), str):
+                raise ProbeError("open did not return a doc handle")
+            document_id = payload["doc"]
+        else:
+            document_id = open_document(server, document)
         open_seconds = time.monotonic() - opened
         if args.rss_phases:
             rss = proc_rss_kib(server.process.pid)
             if rss is not None:
                 rss_phases["after_open"] = rss
-        sections = read_structure(server, document_id)
+        if args.tools == "v2":
+            sections = v2_outline_sections(server, document_id)
+        else:
+            sections = read_structure(server, document_id)
         if not sections:
             raise ProbeError("document has no sections")
-        index, section_id, total_items, selection_calls = choose_section(
-            server, document_id, sections, args
-        )
-        target = int(total_items * args.start_fraction)
-        cursor, start_position, seek_calls = seek(
-            server,
-            document_id,
-            section_id,
-            target,
-            args.kind,
-            args.policy,
-            args.seek_page,
-        )
+        if args.tools == "v2":
+            selection_calls = 0
+            if args.largest_section:
+                best = (-1, 0, [])
+                for i, section in enumerate(sections):
+                    selection_calls += 1
+                    handles = v2_walk_section(
+                        server, section["section_id"], args.kind
+                    )
+                    if len(handles) > best[0]:
+                        best = (len(handles), i, handles)
+                if best[0] <= 0:
+                    raise ProbeError(f"no section has {args.kind} items")
+                index, total_items, item_handles = best[1], best[0], best[2]
+            else:
+                index = min(len(sections) - 1, int(len(sections) * args.start_fraction))
+                item_handles = v2_walk_section(
+                    server, sections[index]["section_id"], args.kind
+                )
+                total_items = len(item_handles)
+                if total_items <= 0:
+                    raise ProbeError(f"section reported {total_items} {args.kind} items")
+            section_id = sections[index]["section_id"]
+            target = min(int(total_items * args.start_fraction), total_items - 1)
+            anchor_handle = item_handles[target]
+            cursor = None
+            start_position = target
+            seek_calls = 0
+        else:
+            index, section_id, total_items, selection_calls = choose_section(
+                server, document_id, sections, args
+            )
+            target = int(total_items * args.start_fraction)
+            cursor, start_position, seek_calls = seek(
+                server,
+                document_id,
+                section_id,
+                target,
+                args.kind,
+                args.policy,
+                args.seek_page,
+            )
         if args.rss_phases:
             rss = proc_rss_kib(server.process.pid)
             if rss is not None:
@@ -674,23 +783,81 @@ def probe(args: argparse.Namespace) -> int:
                 )
                 perf_mode = "wrapper"
                 server.initialize()
-                document_id = open_document(server, document)
-                sections = read_structure(server, document_id)
-                index, section_id, total_items, _ = choose_section(
-                    server, document_id, sections, args
-                )
-                cursor, start_position, seek_calls = seek(
-                    server,
-                    document_id,
-                    section_id,
-                    int(total_items * args.start_fraction),
-                    args.kind,
-                    args.policy,
-                    args.seek_page,
-                )
+                if args.tools == "v2":
+                    payload = tool_payload(server.tool("open", {"source": document}))
+                    if not isinstance(payload, dict) or not isinstance(
+                        payload.get("doc"), str
+                    ):
+                        raise ProbeError("open did not return a doc handle")
+                    document_id = payload["doc"]
+                    sections = v2_outline_sections(server, document_id)
+                    index = min(
+                        len(sections) - 1, int(len(sections) * args.start_fraction)
+                    )
+                    item_handles = v2_walk_section(
+                        server, sections[index]["section_id"], args.kind
+                    )
+                    section_id = sections[index]["section_id"]
+                    total_items = len(item_handles)
+                    target = min(
+                        int(total_items * args.start_fraction), total_items - 1
+                    )
+                    anchor_handle = item_handles[target] if item_handles else None
+                    cursor = None
+                    start_position = target
+                    seek_calls = 0
+                else:
+                    document_id = open_document(server, document)
+                    sections = read_structure(server, document_id)
+                    index, section_id, total_items, _ = choose_section(
+                        server, document_id, sections, args
+                    )
+                    cursor, start_position, seek_calls = seek(
+                        server,
+                        document_id,
+                        section_id,
+                        int(total_items * args.start_fraction),
+                        args.kind,
+                        args.policy,
+                        args.seek_page,
+                    )
                 print(f"wrapper open done; seeked to {start_position}", flush=True)
 
-        if args.mode == "next":
+        if args.tools == "v2":
+            if args.mode == "next":
+                seconds = []
+                io_per_call = []
+                from_handle = anchor_handle
+                prefix = section_id + "."
+                end_position = start_position
+                for _ in range(args.calls):
+                    if not isinstance(from_handle, str):
+                        break
+                    before_io = proc_io(server.process.pid) if args.io_bytes else None
+                    start = time.monotonic()
+                    payload = v2_read(server, {"from": from_handle, "unit": args.kind})
+                    seconds.append(time.monotonic() - start)
+                    if before_io is not None:
+                        after_io = proc_io(server.process.pid)
+                        io_per_call.append(io_delta(before_io, after_io))
+                    end_position += 1
+                    candidate = payload.get("next")
+                    if not isinstance(candidate, str) or not candidate.startswith(prefix):
+                        break
+                    from_handle = candidate
+            else:
+                if not isinstance(anchor_handle, str):
+                    raise ProbeError("no v2 anchor handle to time")
+                timed_arguments = {"from": anchor_handle, "unit": args.kind}
+                if args.mode == "context":
+                    timed_arguments["back"] = 2
+                if args.max_chars is not None:
+                    timed_arguments["max_chars"] = args.max_chars
+                seconds, io_per_call, end_position = run_repeated(
+                    server, "read", timed_arguments, args.calls,
+                    measure_io=args.io_bytes,
+                )
+        elif args.mode == "next":
             seconds, io_per_call, end_position = run_reads(
                 server,
                 document_id,
@@ -885,6 +1052,12 @@ def main() -> int:
         help="record VmRSS after open, after seek and after the timed reads",
     )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="tool set the server exposes: v1 (default) or v2; --policy is v1-only",
+    )
     parser.add_argument("--out", required=True, help="JSON result path")
     args = parser.parse_args()
     try:

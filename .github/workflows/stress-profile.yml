@@ -7,6 +7,10 @@ on:
         type: string
         default: ''
         description: Set MALLOC_ARENA_MAX for every server process; empty keeps glibc's default
+      tools:
+        description: 'Tool set the probe servers expose'
+        required: false
+        default: 'v1'
   push:
     branches: ['bench/s-**']
 jobs:
@@ -103,7 +107,7 @@ jobs:
           S="$RUNNER_TEMP/stress"
           extra=()
           [ -n "$ARENA" ] && extra=(--env "MALLOC_ARENA_MAX=$ARENA")
-          python3 scripts/stress-probe.py --mode probe \
+          python3 scripts/stress-probe.py --tools "${{ inputs.tools || 'v1' }}" --mode probe \
             --binary "$RUNNER_TEMP/bin/reading-mcp" \
             --state-root "$RUNNER_TEMP/state-probe" \
             --out "$RUNNER_TEMP/probe.json" \
@@ -165,7 +169,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/shards"
           extra=()
           [ -n "$ARENA" ] && extra=(--env "MALLOC_ARENA_MAX=$ARENA")
-          python3 scripts/stress-probe.py --mode read \
+          python3 scripts/stress-probe.py --tools "${{ inputs.tools || 'v1' }}" --mode read \
             --binary "$RUNNER_TEMP/bin/reading-mcp" \
             --state-root "$RUNNER_TEMP/state-read" \
             --label "${{ matrix.label }}" \

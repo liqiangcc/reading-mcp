@@ -356,12 +356,12 @@ class Server:
             pass
 
 
-def server_environment(roots: str, state_dir: str) -> dict:
+def server_environment(roots: str, state_dir: str, tools: str = "v1") -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
     env["READING_MCP_TELEMETRY"] = "false"
-    env["READING_MCP_TOOLS"] = "v1"
+    env["READING_MCP_TOOLS"] = tools
     return env
 
 
@@ -380,16 +380,47 @@ def timed_tool(
     return result, (time.monotonic() - start) * 1000.0
 
 
+def v2_normalized_payload(payload):
+    """One v2 `read` payload in the v1-ish shape `item_stats` measures.
+
+    `[handle, text, class?]` items become `{"text": ...}` objects; `next` becomes
+    `next_cursor`. Other payloads are returned unchanged.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    items = payload.get("items")
+    if not isinstance(items, list):
+        text = payload.get("text")
+        normalized["items"] = [{"text": text}] if isinstance(text, str) else []
+        if isinstance(payload.get("next"), str) and "next_cursor" not in normalized:
+            normalized["next_cursor"] = payload["next"]
+        return normalized
+    normalized["items"] = [
+        {"text": item[1]}
+        if isinstance(item, (list, tuple)) and len(item) > 1
+        else item
+        for item in items
+    ]
+    if isinstance(payload.get("next"), str) and "next_cursor" not in normalized:
+        normalized["next_cursor"] = payload["next"]
+    return normalized
+
+
 def make_call_record(
     pass_name: str,
     section_id: str,
     wall_ms: float,
     result: dict,
     capture_sample: bool = False,
+    v2: bool = False,
     **extra,
 ) -> dict:
     measurement = measure_result(result)
-    items = item_stats(tool_payload(result), measurement)
+    payload = tool_payload(result)
+    if v2:
+        payload = v2_normalized_payload(payload)
+    items = item_stats(payload, measurement)
     record = {
         "pass": pass_name,
         "section_id": section_id,
@@ -662,6 +693,155 @@ def run_item_pass(
     return records, time.monotonic() - start, partial, error, switches
 
 
+V2_PAGE_CHARS = 16000
+
+
+def outline_sections_v2(server: Server, doc_handle: str, deadline: float) -> tuple[list[dict], int]:
+    """The v2 section order via paginated `outline`, as {"section_id": handle} rows."""
+    sections: list[dict] = []
+    calls = 0
+    cursor = None
+    for _ in range(10_000):
+        arguments = {"at": doc_handle, "depth": 16, "limit": 500}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        result = server.tool("outline", arguments, deadline_timeout(deadline))
+        calls += 1
+        payload = tool_payload(result)
+        if not isinstance(payload, dict):
+            raise ProbeError("outline returned no JSON object")
+        for item in payload.get("items") or []:
+            if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+                sections.append(
+                    {"section_id": item[0], "title": item[1] if len(item) > 1 else ""}
+                )
+        cursor = payload.get("next")
+        if not cursor:
+            break
+    else:
+        raise ProbeError("outline pagination did not terminate")
+    return sections, calls
+
+
+def v2_section_of(payload, current: str | None) -> str | None:
+    """The section the latest `read` answer entered, or the current one."""
+    if isinstance(payload, dict):
+        entries = payload.get("sections")
+        if isinstance(entries, list) and entries:
+            last = entries[-1]
+            if isinstance(last, dict) and isinstance(last.get("s"), str):
+                return last["s"]
+        section = payload.get("section")
+        if isinstance(section, dict) and isinstance(section.get("s"), str):
+            return section["s"]
+    return current
+
+
+def v2_read(server: Server, from_handle: str, deadline: float, max_chars: int | None = None):
+    arguments = {"from": from_handle}
+    if max_chars is not None:
+        arguments["max_chars"] = max_chars
+    return timed_tool(server, "read", arguments, deadline_timeout(deadline))
+
+
+def run_page_pass_v2(
+    server: Server,
+    doc_handle: str,
+    first_section: str | None,
+    deadline: float,
+) -> tuple[list[dict], float, bool, str | None, int]:
+    """The `page` pass over the whole book: char-budgeted `read` batches following `next`."""
+    records: list[dict] = []
+    start = time.monotonic()
+    partial = False
+    error = None
+    transitions = 0
+    current_section = first_section
+    seen: set[str] = set()
+    from_handle = doc_handle
+    try:
+        for _ in range(1_000_000):
+            if time.monotonic() >= deadline:
+                partial = True
+                break
+            result, wall_ms = v2_read(server, from_handle, deadline, V2_PAGE_CHARS)
+            record = make_call_record("page", current_section or "", wall_ms, result,
+                                      capture_sample=not records, v2=True)
+            payload = tool_payload(result)
+            entered = v2_section_of(payload, current_section)
+            if entered != current_section:
+                transitions += 1
+                current_section = entered
+            record["section_id"] = current_section or ""
+            records.append(record)
+            next_handle = payload.get("next") if isinstance(payload, dict) else None
+            if not isinstance(next_handle, str):
+                break
+            if next_handle in seen:
+                raise ProbeError("v2 read next handle repeated")
+            seen.add(next_handle)
+            from_handle = next_handle
+    except DeadlineExceeded:
+        partial = True
+    except ProbeError as exc:
+        error = str(exc)
+    return records, time.monotonic() - start, partial, error, transitions
+
+
+def run_item_pass_v2(
+    server: Server,
+    start_handle: str,
+    start_section: str | None,
+    max_chars: int | None,
+    item_cap: int,
+    deadline: float,
+    pass_name: str,
+) -> tuple[list[dict], float, bool, str | None, int]:
+    """An item pass: single-item `read` calls, or `max_chars` batches, following `next`."""
+    records: list[dict] = []
+    start = time.monotonic()
+    partial = False
+    error = None
+    switches = 0
+    total_items = 0
+    current_section = start_section
+    from_handle = start_handle
+    try:
+        for _ in range(1_000_000):
+            if time.monotonic() >= deadline:
+                partial = True
+                break
+            if total_items >= item_cap:
+                break
+            result, wall_ms = v2_read(server, from_handle, deadline, max_chars)
+            record = make_call_record(
+                pass_name,
+                current_section or "",
+                wall_ms,
+                result,
+                capture_sample=pass_name == "one" and not records,
+                v2=True,
+            )
+            payload = tool_payload(result)
+            entered = v2_section_of(payload, current_section)
+            if entered != current_section:
+                switches += 1
+                current_section = entered
+            record["section_id"] = current_section or ""
+            records.append(record)
+            total_items += record["items"]
+            next_handle = payload.get("next") if isinstance(payload, dict) else None
+            if not isinstance(next_handle, str):
+                break
+            from_handle = next_handle
+    except DeadlineExceeded:
+        partial = True
+    except ProbeError as exc:
+        error = str(exc)
+    return records, time.monotonic() - start, partial, error, switches
+
+
+
 def count_occurrences(haystack: str | None, needle: str | None) -> int:
     if not haystack or not needle:
         return 0
@@ -867,6 +1047,109 @@ def representative_calls(
     return records
 
 
+def representative_calls_v2(
+    server: Server,
+    book_label: str,
+    doc_handle: str,
+    content_hash: str,
+    normalized_hash: str,
+    sections: list[dict],
+    start_index: int,
+    open_result: dict,
+    open_wall_ms: float,
+    deadline: float,
+) -> list[dict]:
+    records = [
+        representative_record(
+            book_label,
+            "open_document",
+            open_result,
+            open_wall_ms,
+            doc_handle,
+            content_hash,
+            normalized_hash,
+        )
+    ]
+
+    def add(tool_name: str, result: dict, wall_ms: float) -> None:
+        records.append(
+            representative_record(
+                book_label,
+                tool_name,
+                result,
+                wall_ms,
+                doc_handle,
+                content_hash,
+                normalized_hash,
+            )
+        )
+
+    section_handle = sections[start_index]["section_id"] if sections else None
+
+    try:
+        result, wall_ms = timed_tool(
+            server,
+            "outline",
+            {"at": doc_handle, "depth": 2, "limit": 50},
+            deadline_timeout(deadline),
+        )
+        add("get_document_structure", result, wall_ms)
+    except ProbeError:
+        pass
+
+    hit_handle = None
+    try:
+        search_result, wall_ms = timed_tool(
+            server,
+            "search",
+            {"doc": doc_handle, "query": full_text_query(book_label), "limit": 10},
+            deadline_timeout(deadline),
+        )
+        add("search_document", search_result, wall_ms)
+        hits = (tool_payload(search_result) or {}).get("hits")
+        if isinstance(hits, list) and hits and isinstance(hits[0], (list, tuple)):
+            hit_handle = hits[0][0]
+    except ProbeError:
+        pass
+
+    if isinstance(hit_handle, str):
+        try:
+            context_result, wall_ms = timed_tool(
+                server,
+                "read",
+                {"from": hit_handle, "back": 2, "max_chars": 2000},
+                deadline_timeout(deadline),
+            )
+            add("get_context", context_result, wall_ms)
+        except ProbeError:
+            pass
+
+    if section_handle is not None:
+        try:
+            read_result, wall_ms = timed_tool(
+                server,
+                "read",
+                {"from": section_handle, "max_chars": 4000},
+                deadline_timeout(deadline),
+            )
+            add("read_document", read_result, wall_ms)
+        except ProbeError:
+            pass
+
+        try:
+            units_result, wall_ms = timed_tool(
+                server,
+                "read",
+                {"from": section_handle, "max_chars": V2_PAGE_CHARS},
+                deadline_timeout(deadline),
+            )
+            add("get_text_units", units_result, wall_ms)
+        except ProbeError:
+            pass
+
+    return records
+
+
 def format_number(value, digits: int = 1) -> str:
     if value is None:
         return "-"
@@ -1025,6 +1308,7 @@ def probe_book(
     path: str,
     state_root: str,
     max_seconds: float,
+    tools: str = "v1",
 ) -> dict:
     book: dict = {
         "label": label,
@@ -1052,56 +1336,86 @@ def probe_book(
     try:
         server = Server(
             binary,
-            server_environment(parent, state_dir),
+            server_environment(parent, state_dir, tools),
             os.path.join(state_dir, "server.log"),
             request_timeout=max(30.0, max_seconds),
             cwd=parent,
         )
         server.initialize(timeout=max(30.0, max_seconds))
+        open_tool = "open_document" if tools == "v1" else "open"
         open_result, open_wall_ms = timed_tool(
             server,
-            "open_document",
+            open_tool,
             {"source": os.path.abspath(path)},
             max(30.0, max_seconds),
         )
         opened = tool_payload(open_result)
         if not isinstance(opened, dict):
-            raise ProbeError("open_document did not return an object")
-        document_id = opened.get("document_id")
+            raise ProbeError(f"{open_tool} did not return an object")
+        if tools == "v2":
+            document_id = opened.get("doc")
+            book["section_count"] = opened.get("sections") or 0
+        else:
+            document_id = opened.get("document_id")
+            book["section_count"] = opened.get("section_count") or 0
         if not isinstance(document_id, str):
-            raise ProbeError("open_document did not return a document_id")
+            raise ProbeError(f"{open_tool} did not return a document_id")
         book["document_id"] = document_id
         book["content_hash"] = opened.get("content_hash")
         book["normalized_document_hash"] = opened.get("normalized_document_hash")
         book["title"] = opened.get("title")
-        book["section_count"] = opened.get("section_count") or 0
 
         structure_deadline = time.monotonic() + max_seconds
-        sections, structure_calls = read_structure(
-            server, document_id, structure_deadline
-        )
+        if tools == "v2":
+            sections, structure_calls = outline_sections_v2(
+                server, document_id, structure_deadline
+            )
+        else:
+            sections, structure_calls = read_structure(
+                server, document_id, structure_deadline
+            )
         book["structure_calls"] = structure_calls
         book["sections"] = sections
         book["section_count"] = len(sections) or book["section_count"]
 
         representative_deadline = time.monotonic() + max_seconds
-        book["representative_calls"] = representative_calls(
-            server,
-            label,
-            document_id,
-            book["content_hash"] or "",
-            book["normalized_document_hash"] or "",
-            sections,
-            0,
-            open_result,
-            open_wall_ms,
-            representative_deadline,
-        )
+        if tools == "v2":
+            book["representative_calls"] = representative_calls_v2(
+                server,
+                label,
+                document_id,
+                book["content_hash"] or "",
+                book["normalized_document_hash"] or "",
+                sections,
+                0,
+                open_result,
+                open_wall_ms,
+                representative_deadline,
+            )
+        else:
+            book["representative_calls"] = representative_calls(
+                server,
+                label,
+                document_id,
+                book["content_hash"] or "",
+                book["normalized_document_hash"] or "",
+                sections,
+                0,
+                open_result,
+                open_wall_ms,
+                representative_deadline,
+            )
 
         page_deadline = time.monotonic() + max_seconds
-        page_records, page_elapsed, page_partial, page_error, transitions = (
-            run_page_pass(server, document_id, sections, page_deadline)
-        )
+        if tools == "v2":
+            first_section = sections[0]["section_id"] if sections else None
+            page_records, page_elapsed, page_partial, page_error, transitions = (
+                run_page_pass_v2(server, document_id, first_section, page_deadline)
+            )
+        else:
+            page_records, page_elapsed, page_partial, page_error, transitions = (
+                run_page_pass(server, document_id, sections, page_deadline)
+            )
         book["page_section_transitions"] = transitions
         book["calls"].extend(page_records)
         book["passes"].append(
@@ -1117,19 +1431,35 @@ def probe_book(
             )
         start_index = start_section_index(sections, page_section_items)
 
-        one_deadline = time.monotonic() + max_seconds
-        one_records, one_elapsed, one_partial, one_error, one_switches = (
-            run_item_pass(
-                server,
-                document_id,
-                sections,
-                start_index,
-                1,
-                500,
-                one_deadline,
-                "one",
-            )
+        v2_start_handle = (
+            sections[start_index]["section_id"] if tools == "v2" and sections else None
         )
+        one_deadline = time.monotonic() + max_seconds
+        if tools == "v2":
+            one_records, one_elapsed, one_partial, one_error, one_switches = (
+                run_item_pass_v2(
+                    server,
+                    v2_start_handle or document_id,
+                    v2_start_handle,
+                    None,
+                    500,
+                    one_deadline,
+                    "one",
+                )
+            )
+        else:
+            one_records, one_elapsed, one_partial, one_error, one_switches = (
+                run_item_pass(
+                    server,
+                    document_id,
+                    sections,
+                    start_index,
+                    1,
+                    500,
+                    one_deadline,
+                    "one",
+                )
+            )
         book["calls"].extend(one_records)
         book["passes"].append(
             pass_summary(
@@ -1143,18 +1473,34 @@ def probe_book(
         )
 
         twenty_deadline = time.monotonic() + max_seconds
-        twenty_records, twenty_elapsed, twenty_partial, twenty_error, twenty_switches = (
-            run_item_pass(
-                server,
-                document_id,
-                sections,
-                start_index,
-                20,
-                300,
-                twenty_deadline,
-                "twenty",
+        if tools == "v2":
+            one_chars = sum(record["item_text_chars"] for record in one_records)
+            one_items = sum(record["items"] for record in one_records)
+            mean_chars = (one_chars / one_items) if one_items else 100.0
+            twenty_records, twenty_elapsed, twenty_partial, twenty_error, twenty_switches = (
+                run_item_pass_v2(
+                    server,
+                    v2_start_handle or document_id,
+                    v2_start_handle,
+                    min(V2_PAGE_CHARS, max(1, int(mean_chars * 20))),
+                    300,
+                    twenty_deadline,
+                    "twenty",
+                )
             )
-        )
+        else:
+            twenty_records, twenty_elapsed, twenty_partial, twenty_error, twenty_switches = (
+                run_item_pass(
+                    server,
+                    document_id,
+                    sections,
+                    start_index,
+                    20,
+                    300,
+                    twenty_deadline,
+                    "twenty",
+                )
+            )
         book["calls"].extend(twenty_records)
         book["passes"].append(
             pass_summary(
@@ -1208,6 +1554,12 @@ def main() -> int:
         default=None,
         help="base state directory; a fresh run subdirectory is created inside it",
     )
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="tool set the server exposes: v1 (default) or v2",
+    )
     args = parser.parse_args()
 
     try:
@@ -1244,7 +1596,7 @@ def main() -> int:
     try:
         tools_server = Server(
             binary,
-            server_environment(state_root, tools_state),
+            server_environment(state_root, tools_state, args.tools),
             os.path.join(tools_state, "server.log"),
             request_timeout=max(30.0, args.max_seconds_per_book),
             cwd=state_root,
@@ -1270,7 +1622,7 @@ def main() -> int:
     for label, path in documents:
         print(f"probing {label}: {path}", file=sys.stderr)
         book = probe_book(
-            binary, label, path, state_root, args.max_seconds_per_book
+            binary, label, path, state_root, args.max_seconds_per_book, args.tools
         )
         data["books"].append(book)
         book["passes"] = [

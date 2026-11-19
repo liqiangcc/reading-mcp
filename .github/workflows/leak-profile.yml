@@ -1,6 +1,11 @@
 name: Leak profile
 on:
   workflow_dispatch:
+    inputs:
+      tools:
+        description: 'Tool set the probe servers expose'
+        required: false
+        default: 'v1'
   push:
     branches: ['bench/leak-**']
 jobs:
@@ -46,7 +51,7 @@ jobs:
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p leak
-          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+          python3 scripts/long-read-probe.py --tools "${{ inputs.tools || 'v1' }}" --binary target/release/reading-mcp \
             --document "$BOOKS/en-novel.epub" --calls 100000 \
             --out leak/en-novel-baseline.json
       - name: Long read with MALLOC_ARENA_MAX=2
@@ -54,7 +59,7 @@ jobs:
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p leak
-          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+          python3 scripts/long-read-probe.py --tools "${{ inputs.tools || 'v1' }}" --binary target/release/reading-mcp \
             --document "$BOOKS/en-novel.epub" --calls 100000 \
             --env MALLOC_ARENA_MAX=2 \
             --out leak/en-novel-arena2.json
@@ -63,7 +68,7 @@ jobs:
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p leak
-          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+          python3 scripts/long-read-probe.py --tools "${{ inputs.tools || 'v1' }}" --binary target/release/reading-mcp \
             --document "$BOOKS/en-novel.epub" --calls 100000 \
             --env READING_MCP_TELEMETRY=0 \
             --out leak/en-novel-no-telemetry.json
@@ -72,7 +77,7 @@ jobs:
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p leak
-          python3 scripts/long-read-probe.py --binary target/release/reading-mcp \
+          python3 scripts/long-read-probe.py --tools "${{ inputs.tools || 'v1' }}" --binary target/release/reading-mcp \
             --document "$BOOKS/en-novel.epub" --calls 30000 \
             --wrapper "heaptrack -o leak/en-novel" \
             --out leak/en-novel-heaptrack.json

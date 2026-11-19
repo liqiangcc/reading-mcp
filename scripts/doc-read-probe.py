@@ -339,6 +339,92 @@ def read_structure(server: Server, document_id: str) -> list[dict]:
     return sorted(sections.values(), key=lambda node: node.get("body_order", 0))
 
 
+V2_BATCH_CHARS = 16000
+
+
+def outline_sections(server: Server, doc_handle: str) -> list[dict]:
+    """The v2 section order: every `outline` page's items as {section_id, title, chars}."""
+    sections: list[dict] = []
+    cursor = None
+    for _ in range(10_000):
+        arguments = {"at": doc_handle, "depth": 16, "limit": 500}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        payload = tool_payload(server.tool("outline", arguments))
+        if not isinstance(payload, dict):
+            raise ProbeError("outline returned no JSON object")
+        items = payload.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+                    sections.append(
+                        {
+                            "section_id": item[0],
+                            "title": item[1] if len(item) > 1 else "",
+                            "chars": item[3] if len(item) > 3 else 0,
+                        }
+                    )
+        cursor = payload.get("next")
+        if not cursor:
+            break
+    else:
+        raise ProbeError("outline pagination did not terminate")
+    return sections
+
+
+def v2_item_handle(item) -> str | None:
+    if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+        return item[0]
+    if isinstance(item, dict) and isinstance(item.get("at"), str):
+        return item["at"]
+    return None
+
+
+def v2_read_batch(server: Server, from_handle: str) -> dict:
+    payload = tool_payload(
+        server.tool("read", {"from": from_handle, "max_chars": V2_BATCH_CHARS})
+    )
+    if not isinstance(payload, dict):
+        raise ProbeError("read returned no JSON object")
+    return payload
+
+
+def v2_seek(
+    server: Server, section_handle: str, fraction: float
+) -> tuple[str, int, str, str, int]:
+    """Walk one section in `read` batches; return (handle, position, text, next, count)."""
+    prefix = section_handle + "."
+    handles: list[str] = []
+    texts: list[str] = []
+    from_handle = section_handle
+    next_handle = section_handle
+    for _ in range(100_000):
+        payload = v2_read_batch(server, from_handle)
+        items = payload.get("items")
+        if isinstance(items, list):
+            for item in items:
+                handle = v2_item_handle(item)
+                if handle is None or not handle.startswith(prefix):
+                    continue
+                handles.append(handle)
+                if len(item) > 1 and isinstance(item[1], str):
+                    texts.append(item[1])
+        candidate = payload.get("next")
+        if not isinstance(candidate, str) or not candidate.startswith(prefix):
+            next_handle = candidate if isinstance(candidate, str) else ""
+            break
+        from_handle = candidate
+    else:
+        raise ProbeError("v2 seek walk did not terminate")
+    if not handles:
+        raise ProbeError("the section has no sentence items")
+    total_items = len(handles)
+    target = int(total_items * fraction)
+    position = min(target, total_items - 1)
+    text = texts[position] if position < len(texts) else ""
+    return handles[position], position, text, next_handle, total_items
+
+
 def text_units(server: Server, arguments: dict) -> dict:
     payload = tool_payload(server.tool("get_text_units", arguments))
     if not isinstance(payload, dict):
@@ -568,7 +654,7 @@ def probe(args: argparse.Namespace) -> int:
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
-    env["READING_MCP_TOOLS"] = "both"
+    env["READING_MCP_TOOLS"] = "both" if args.tools == "v1" else "v2"
     env["READING_MCP_TELEMETRY"] = "true"
     for item in args.env:
         key, separator, value = item.partition("=")
@@ -592,12 +678,21 @@ def probe(args: argparse.Namespace) -> int:
         tool_names = server.tool_names()
         open_log_offset = server.log_offset()
         opened = time.monotonic()
-        payload = tool_payload(server.tool("open_document", {"source": document}))
+        open_tool = "open_document" if args.tools == "v1" else "open"
+        payload = tool_payload(server.tool(open_tool, {"source": document}))
         open_seconds = time.monotonic() - opened
         rss_after_open = proc_rss_kib(server.process.pid)
-        if not isinstance(payload, dict) or not isinstance(payload.get("document_id"), str):
-            raise ProbeError("open_document did not return a document_id")
-        document_id = payload["document_id"]
+        anchor_handle = None
+        if args.tools == "v2":
+            if not isinstance(payload, dict) or not isinstance(payload.get("doc"), str):
+                raise ProbeError("open did not return a doc handle")
+            doc_handle = payload["doc"]
+        else:
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("document_id"), str
+            ):
+                raise ProbeError("open_document did not return a document_id")
+            doc_handle = payload["document_id"]
         # The warm starts after the open returns. Wait for its end event before any timed call, so
         # the per-call rchar measures the read path and not the warm; the wait itself is reported.
         if args.wait_for_warm and not warm_off:
@@ -606,83 +701,122 @@ def probe(args: argparse.Namespace) -> int:
                     server, open_log_offset, args.warm_timeout_seconds, "open_document"
                 )
             )
-        sections = read_structure(server, document_id)
+        if args.tools == "v2":
+            sections = outline_sections(server, doc_handle)
+        else:
+            sections = read_structure(server, doc_handle)
         if not sections:
             raise ProbeError("document has no sections")
         index = min(len(sections) - 1, int(len(sections) * args.start_fraction))
         section_id = sections[index]["section_id"]
-        head = text_units(
-            server,
-            {
-                "document_id": document_id,
-                "section_id": section_id,
-                "requested_kind": "sentence",
-                "direction": "forward",
-                "coverage_policy": "preserve_source",
-                "max_items": 1,
-            },
-        )
-        total_items = head["stream"].get("total_items")
-        if not isinstance(total_items, int) or total_items <= 0:
-            raise ProbeError(f"section reported {total_items!r} sentence items")
-        cursor, start_position, item = seek(
-            server, document_id, section_id, int(total_items * args.start_fraction)
-        )
-        if not isinstance(item, dict) or not isinstance(item.get("locator"), dict):
-            raise ProbeError("the seek position has no sentence locator")
-        locator = item["locator"]
-        query = search_term(str(item.get("text", "")))
+        if args.tools == "v2":
+            anchor_handle, start_position, anchor_text, _, total_items = v2_seek(
+                server, section_id, args.start_fraction
+            )
+            locator = {"handle": anchor_handle}
+            cursor = None
+        else:
+            head = text_units(
+                server,
+                {
+                    "document_id": doc_handle,
+                    "section_id": section_id,
+                    "requested_kind": "sentence",
+                    "direction": "forward",
+                    "coverage_policy": "preserve_source",
+                    "max_items": 1,
+                },
+            )
+            total_items = head["stream"].get("total_items")
+            if not isinstance(total_items, int) or total_items <= 0:
+                raise ProbeError(f"section reported {total_items!r} sentence items")
+            cursor, start_position, item = seek(
+                server, doc_handle, section_id, int(total_items * args.start_fraction)
+            )
+            if not isinstance(item, dict) or not isinstance(item.get("locator"), dict):
+                raise ProbeError("the seek position has no sentence locator")
+            locator = item["locator"]
+            anchor_text = str(item.get("text", ""))
+        query = search_term(anchor_text)
         print(
             f"{args.label}: opened in {open_seconds:.2f} s; section {index}/{len(sections)} has "
             f"{total_items} sentences; anchored at {start_position}; query {query!r}",
             flush=True,
         )
 
-        base_units = {
-            "document_id": document_id,
-            "section_id": section_id,
-            "requested_kind": "sentence",
-            "direction": "forward",
-            "coverage_policy": "preserve_source",
-            "max_items": args.max_items,
-        }
-        seconds, io_per_call, restarts = run_cursor_series(
-            server,
-            "get_text_units",
-            base_units,
-            "cursor",
-            "next_cursor",
-            cursor,
-            args.calls,
-            args.io_bytes,
-        )
+        if args.tools == "v2":
+            seconds, io_per_call, restarts = run_cursor_series(
+                server,
+                "read",
+                {"from": anchor_handle},
+                "from",
+                "next",
+                None,
+                args.calls,
+                args.io_bytes,
+            )
+        else:
+            base_units = {
+                "document_id": doc_handle,
+                "section_id": section_id,
+                "requested_kind": "sentence",
+                "direction": "forward",
+                "coverage_policy": "preserve_source",
+                "max_items": args.max_items,
+            }
+            seconds, io_per_call, restarts = run_cursor_series(
+                server,
+                "get_text_units",
+                base_units,
+                "cursor",
+                "next_cursor",
+                cursor,
+                args.calls,
+                args.io_bytes,
+            )
         shapes["get_text_units"] = {
             **summarize(seconds),
             **summarize_io(io_per_call),
             "restarts": restarts,
         }
 
-        context_arguments = {
-            "document_id": document_id,
-            "target_locator": locator,
-            "relation": {"type": "neighbor", "unit": "sentence", "before": 2, "after": 2},
-        }
-        seconds, io_per_call = run_repeated(
-            server, "get_context", context_arguments, args.calls, args.io_bytes
-        )
+        if args.tools == "v2":
+            context_arguments = {"from": anchor_handle, "back": 2}
+            seconds, io_per_call = run_repeated(
+                server, "read", context_arguments, args.calls, args.io_bytes
+            )
+        else:
+            context_arguments = {
+                "document_id": doc_handle,
+                "target_locator": locator,
+                "relation": {"type": "neighbor", "unit": "sentence", "before": 2, "after": 2},
+            }
+            seconds, io_per_call = run_repeated(
+                server, "get_context", context_arguments, args.calls, args.io_bytes
+            )
         shapes["get_context"] = {**summarize(seconds), **summarize_io(io_per_call)}
 
-        read_arguments = {"document_id": document_id, "target_locator": locator}
+        if args.tools == "v2":
+            read_arguments = {"from": anchor_handle}
+            read_tool = "read"
+        else:
+            read_arguments = {"document_id": doc_handle, "target_locator": locator}
+            read_tool = "read_document"
         seconds, io_per_call = run_repeated(
-            server, "read_document", read_arguments, args.calls, args.io_bytes
+            server, read_tool, read_arguments, args.calls, args.io_bytes
         )
         shapes["read_document"] = {**summarize(seconds), **summarize_io(io_per_call)}
 
-        search_arguments = {"document_id": document_id, "query": query, "limit": 10}
+        if args.tools == "v2":
+            search_arguments = {"doc": doc_handle, "query": query, "limit": 10}
+            search_tool = "search"
+        else:
+            search_arguments = {"document_id": doc_handle, "query": query, "limit": 10}
+            search_tool = "search_document"
         seconds, io_per_call = run_repeated(
-            server, "search_document", search_arguments, args.calls, args.io_bytes
+            server, search_tool, search_arguments, args.calls, args.io_bytes
         )
-        hits = tool_payload(server.tool("search_document", search_arguments))
+        hits = tool_payload(server.tool(search_tool, search_arguments))
         shapes["search_document"] = {
             **summarize(seconds),
             **summarize_io(io_per_call),
@@ -690,13 +824,18 @@ def probe(args: argparse.Namespace) -> int:
             "query": query,
         }
 
-        structure_arguments = {"document_id": document_id, "max_nodes": 50}
+        if args.tools == "v2":
+            structure_arguments = {"at": doc_handle, "limit": 50}
+            structure_tool = "outline"
+        else:
+            structure_arguments = {"document_id": doc_handle, "max_nodes": 50}
+            structure_tool = "get_document_structure"
         seconds, io_per_call = run_repeated(
-            server, "get_document_structure", structure_arguments, args.calls, args.io_bytes
+            server, structure_tool, structure_arguments, args.calls, args.io_bytes
         )
         shapes["get_document_structure"] = {**summarize(seconds), **summarize_io(io_per_call)}
 
-        if "open" in tool_names and "read" in tool_names:
+        if args.tools == "v1" and "open" in tool_names and "read" in tool_names:
             v2_open_log_offset = server.log_offset()
             opened_v2 = tool_payload(server.tool("open", {"source": document}))
             # The v2 open triggers its own warm too; wait for it before timing `v2_read`, so the
@@ -726,6 +865,22 @@ def probe(args: argparse.Namespace) -> int:
                     **summarize_io(io_per_call),
                     "restarts": restarts,
                 }
+        elif args.tools == "v2":
+            seconds, io_per_call, restarts = run_cursor_series(
+                server,
+                "read",
+                {"from": anchor_handle},
+                "from",
+                "next",
+                None,
+                args.calls,
+                args.io_bytes,
+            )
+            shapes["v2_read"] = {
+                **summarize(seconds),
+                **summarize_io(io_per_call),
+                "restarts": restarts,
+            }
         else:
             skipped.append(
                 {
@@ -835,6 +990,12 @@ def main() -> int:
         help="give up waiting for the warm after this long (the timeout is reported)",
     )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="tool set the server exposes: v1 (default) or v2",
+    )
     parser.add_argument("--out", required=True, help="JSON result path")
     args = parser.parse_args()
     try:

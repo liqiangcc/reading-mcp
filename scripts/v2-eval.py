@@ -853,6 +853,18 @@ def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[s
         for key in ("v1_tokens", "v2_tokens", "v1_calls", "v2_calls")
     }
     combined_pct = ratio(combined["v2_tokens"], combined["v1_tokens"])
+    if not extended and combined["v1_calls"] == 0:
+        # Only the v2 legs ran (--tools v2): there is no v1 baseline to gate against.
+        lines.append("INFO T3-T5 skipped: no v1 leg was run")
+        summary["t3_t5"] = {
+            "v1_tokens": combined["v1_tokens"],
+            "v2_tokens": combined["v2_tokens"],
+            "v1_calls": combined["v1_calls"],
+            "v2_calls": combined["v2_calls"],
+            "percent": combined_pct,
+        }
+        summary["all_pass"] = all(summary["checks"]) if summary["checks"] else True
+        return lines, summary
     tokens_ok = combined_pct is not None and combined_pct <= 100.0
     calls_ok = combined["v2_calls"] <= combined["v1_calls"]
     lines.append(
@@ -913,6 +925,12 @@ def main() -> int:
         default=None,
         help="base state directory; a fresh run subdirectory is created inside it",
     )
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="which legs run: v1 (default) replays both tool sets; v2 only the v2 legs",
+    )
     args = parser.parse_args()
 
     try:
@@ -932,11 +950,12 @@ def main() -> int:
     state_root = os.path.join(base, f"run-{os.getpid()}-{stamp}")
     os.makedirs(state_root, exist_ok=True)
 
+    toolsets = (V1, V2) if args.tools == V1 else (V2,)
     tools_footprint = {
         toolset: measure_tools_list(
             binary, state_root, toolset, args.max_seconds_per_task
         )
-        for toolset in (V1, V2)
+        for toolset in toolsets
     }
     tools_tokens = {toolset: tokens for toolset, (tokens, _bytes) in tools_footprint.items()}
 
@@ -945,7 +964,7 @@ def main() -> int:
         if not os.path.isfile(path):
             print(f"skipping {label}: {path} is missing", file=sys.stderr)
             continue
-        for toolset in (V1, V2):
+        for toolset in toolsets:
             print(f"replaying {label} with {toolset}", file=sys.stderr)
             rows.append(
                 run_toolset(
@@ -965,7 +984,7 @@ def main() -> int:
         tasks = tasks_for_book(label)
         if not tasks:
             continue
-        for toolset in (V1, V2):
+        for toolset in toolsets:
             print(f"replaying {label} {tasks} with {toolset}", file=sys.stderr)
             rows.append(
                 run_task_book(
@@ -988,7 +1007,7 @@ def main() -> int:
         "`tools/list` tokens multiplied by the number of calls."
     )
     print()
-    for toolset in (V1, V2):
+    for toolset in toolsets:
         tokens, size = tools_footprint.get(toolset, (0.0, 0))
         print(
             f"tools/list {toolset}: {size} bytes, ~{tokens:.0f} est. tokens"

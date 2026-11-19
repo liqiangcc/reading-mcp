@@ -6,6 +6,10 @@ on:
         description: Base git ref whose binary is compared against the head
         required: false
         default: main
+      tools:
+        description: 'Tool set the probe servers expose'
+        required: false
+        default: 'v1'
   push:
     branches: ['bench/r1c3a-**']
 jobs:
@@ -82,7 +86,7 @@ jobs:
             # not wait for an event that never comes.
             local wait=()
             [ "$side" = "branch" ] && wait=(--wait-for-warm)
-            python3 scripts/doc-read-probe.py \
+            python3 scripts/doc-read-probe.py --tools "${{ inputs.tools || 'v1' }}" \
               --binary "$binary" \
               --document "$doc" \
               --label "$label" \
@@ -90,7 +94,7 @@ jobs:
               --calls 200 \
               --start-fraction 0.5 \
               --io-bytes \
-              --env READING_MCP_TOOLS=both \
+              ${{ (inputs.tools || 'v1') == 'v1' && '--env READING_MCP_TOOLS=both' || '' }} \
               "${wait[@]}" \
               --out "measure/$label-$side.json" \
               || echo "::warning::probe failed: $label $side"

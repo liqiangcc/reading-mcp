@@ -68,7 +68,7 @@ def run_once(probe, args: argparse.Namespace, binary: str, document: str) -> dic
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
-    env["READING_MCP_TOOLS"] = "both"
+    env["READING_MCP_TOOLS"] = "both" if args.tools == "v1" else "v2"
     env["READING_MCP_TELEMETRY"] = "true"
     for item in args.env:
         key, separator, value = item.partition("=")
@@ -100,38 +100,53 @@ def run_once(probe, args: argparse.Namespace, binary: str, document: str) -> dic
         server.initialize()
         tool_names = server.tool_names()
 
+        open_tool = "open_document" if args.tools == "v1" else "open"
         started = time.monotonic()
-        payload = probe.tool_payload(server.tool("open_document", {"source": document}))
+        payload = probe.tool_payload(server.tool(open_tool, {"source": document}))
         record["open_seconds"] = round(time.monotonic() - started, 4)
         record["rss_after_open_kib"] = probe.proc_rss_kib(server.process.pid)
-        if not isinstance(payload, dict) or not isinstance(payload.get("document_id"), str):
-            raise probe.ProbeError("open_document did not return a document_id")
-        document_id = payload["document_id"]
+        id_key = "document_id" if args.tools == "v1" else "doc"
+        if not isinstance(payload, dict) or not isinstance(payload.get(id_key), str):
+            raise probe.ProbeError(f"{open_tool} did not return a document_id")
+        document_id = payload[id_key]
 
         if args.shape == "foreground-reads":
-            sections = probe.read_structure(server, document_id)
+            if args.tools == "v2":
+                sections = probe.outline_sections(server, document_id)
+            else:
+                sections = probe.read_structure(server, document_id)
             if not sections:
                 raise probe.ProbeError("document has no sections")
             section_id = sections[min(len(sections) - 1, len(sections) // 2)]["section_id"]
-            arguments = {
-                "document_id": document_id,
-                "section_id": section_id,
-                "requested_kind": "sentence",
-                "direction": "forward",
-                "coverage_policy": "preserve_source",
-                "max_items": 1,
-            }
+            if args.tools == "v2":
+                arguments = {"from": section_id}
+                read_tool = "read"
+            else:
+                arguments = {
+                    "document_id": document_id,
+                    "section_id": section_id,
+                    "requested_kind": "sentence",
+                    "direction": "forward",
+                    "coverage_policy": "preserve_source",
+                    "max_items": 1,
+                }
+                read_tool = "get_text_units"
             for _ in range(args.calls):
-                elapsed, _, _ = probe.timed_tool(server, "get_text_units", arguments, False)
+                elapsed, _, _ = probe.timed_tool(server, read_tool, arguments, False)
                 record["read_ms"].append(round(1000.0 * elapsed, 3))
         else:
             if args.shape == "first-search":
                 time.sleep(args.wait_seconds)
+            if args.tools == "v2":
+                search_tool = "search"
+                search_arguments = {"doc": document_id, "query": args.query, "limit": 10}
+            else:
+                search_tool = "search_document"
+                search_arguments = {
+                    "document_id": document_id, "query": args.query, "limit": 10
+                }
             elapsed, _, result = probe.timed_tool(
-                server,
-                "search_document",
-                {"document_id": document_id, "query": args.query, "limit": 10},
-                False,
+                server, search_tool, search_arguments, False
             )
             record["search_ms"] = round(1000.0 * elapsed, 3)
             hits = probe.tool_payload(result)
@@ -140,7 +155,12 @@ def run_once(probe, args: argparse.Namespace, binary: str, document: str) -> dic
 
             # The v2 search is timed only in the waited shape: opening the v2 handle first costs a
             # call, which would give the warm time in the immediate shape.
-            if args.shape == "first-search" and "open" in tool_names and "search" in tool_names:
+            if (
+                args.tools == "v1"
+                and args.shape == "first-search"
+                and "open" in tool_names
+                and "search" in tool_names
+            ):
                 opened_v2 = probe.tool_payload(server.tool("open", {"source": document}))
                 handle = opened_v2.get("doc") if isinstance(opened_v2, dict) else None
                 if isinstance(handle, str):
@@ -162,7 +182,7 @@ def run_once(probe, args: argparse.Namespace, binary: str, document: str) -> dic
 
         # The second open of the same source takes the open-result path.
         started = time.monotonic()
-        server.tool("open_document", {"source": document})
+        server.tool(open_tool, {"source": document})
         record["reopen_seconds"] = round(time.monotonic() - started, 4)
 
         record["warm"] = [
@@ -312,7 +332,13 @@ def main() -> int:
         help="seconds between the open returning and the first search (first-search shape)",
     )
     parser.add_argument(
-        "--calls", type=int, default=200, help="get_text_units calls (foreground-reads shape)"
+        "--calls", type=int, default=200, help="read calls (foreground-reads shape)"
+    )
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="tool set the server exposes: v1 (default) or v2",
     )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", required=True, help="JSON result path")

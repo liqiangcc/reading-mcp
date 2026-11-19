@@ -14,23 +14,23 @@ design's stage-2 rule, kept out of stage 1 by orchestrator review), so a
 word run whose gap became a space on PyMuPDF's side still counts when the
 characters agree. Multiset compare, not positional.
 
-## Totals (head ef6839e — U+FFFD runs degrade to fragment drops)
+## Totals (head f92d745 — U+FFFD runs kept, counted)
 
 | Measure | Value |
 | --- | --- |
 | Pages compared | 4,842 in 121 documents |
 | PyMuPDF lines | 403,129 |
-| Walker lines | 290,432 |
-| Identical (whitespace-removed) | 178,018 (0.442 of all PyMuPDF lines) |
+| Walker lines | 325,300 |
+| Identical (whitespace-removed) | 181,519 (0.450 of all PyMuPDF lines) |
 | Median per-document identical share | 0.616 |
 | Largest glyph count on one page | 12,609 (cap 200,000) |
-| Pages bailed | 206 (`unsupported_font` 206; `undecodable` 0 — see below) |
+| Pages bailed | 206 (`unsupported_font` 206) |
 
-An earlier head (7e3869b, run 44480437692) bailed a page on ANY
-U+FFFD run: 2,257 pages fell back, six documents held 1,318 of them,
-and the identical share was 0.255. The runner now keeps the run's
-replacement characters like the old chunk path does (dropping the run
-glued its neighbours and halved the unit count) and counts them in
+Two earlier heads bracket this one: 7e3869b bailed any page with a
+U+FFFD run (2,257 pages fell back, share 0.255); ef6839e dropped the
+run instead, which glued its neighbours and halved the unit count
+(78,349 → 14,832). The runner now keeps the run's replacement
+characters like the old chunk path does and counts them in
 `pdf_positional_undecodable_fragments`. The six decode-heavy documents
 still compare near 0 — U+FFFD text cannot equal PyMuPDF's decoded text
 — but their pages now produce positioned lines instead of unpositioned

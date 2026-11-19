@@ -1108,7 +1108,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
                     .map(|line| line.baseline)
                     .fold(f32::NEG_INFINITY, f32::max)
             };
-            b.top
+            top(b)
                 .partial_cmp(&top(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {

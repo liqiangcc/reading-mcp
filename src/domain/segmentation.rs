@@ -530,7 +530,7 @@ fn collect_section_segmentation(
         if eligibility == SentenceEligibility::Eligible
             && content_class == ParagraphContentClass::ProseOrUnknown
             && fallback_guard_can_fire(text)
-            && paragraph_fails_fallback_guard(index, text, candidate.range, guard)
+            && paragraph_fails_fallback_guard(&index, text, candidate.range, guard)
         {
             eligibility = SentenceEligibility::CoarseParagraphOnly;
         }

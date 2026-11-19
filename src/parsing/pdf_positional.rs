@@ -84,6 +84,9 @@ pub(super) struct PositionalPage {
     pub chunks: Vec<String>,
     /// Why the page could not be positioned, when it could not.
     pub bail: Option<&'static str>,
+    /// Fragments dropped as undecodable while the page still positioned
+    /// itself; counted in the document metadata.
+    pub undecodable_fragments: usize,
 }
 
 /// Why pages fell back to the chunk path, counted over the document.
@@ -93,6 +96,9 @@ pub(super) struct BailCounts {
     pub vertical_writing: usize,
     pub unsupported_font: usize,
     pub undecodable: usize,
+    /// Fragments dropped per page while the page still emitted positional
+    /// text (U+FFFD in a run the encoding could not name).
+    pub undecodable_fragments: usize,
 }
 
 impl BailCounts {
@@ -420,6 +426,9 @@ where
     text: TextSpace,
     fragments: Vec<PositionedFragment>,
     glyphs: usize,
+    /// Shown-string runs whose decoded text held U+FFFD (kept
+    /// positioned, dropped from the text).
+    undecodable_fragments: usize,
     bail: Option<&'static str>,
     /// Form object ids on the recursion stack (cycle guard).
     forms: HashSet<ObjectId>,
@@ -730,10 +739,11 @@ where
             return;
         }
         if text.contains('\u{fffd}') {
-            // Replacement characters mean the encoding could not name these
-            // codes; PyMuPDF (and often lopdf's own path) still decode them.
-            // Bailing beats showing garbage.
-            self.bail = Some("undecodable");
+            // Replacement characters mean the encoding could not name
+            // these codes. The pen already advanced, so dropping just
+            // this run keeps the page's other text positioned; the page
+            // only bails when a run is undecodable AND positionless.
+            self.undecodable_fragments += 1;
             return;
         }
         let end = self.pen_device();
@@ -780,7 +790,7 @@ where
             return;
         }
         if piece.contains('\u{fffd}') {
-            self.bail = Some("undecodable");
+            self.undecodable_fragments += 1;
             return;
         }
         let end = self.pen_device();
@@ -1309,6 +1319,9 @@ struct WalkedPage {
     /// Shown codes walked; only the test-time probe reports it.
     #[allow(dead_code)]
     glyphs: usize,
+    /// Shown-string runs dropped as undecodable while the page still
+    /// laid out its lines.
+    undecodable_fragments: usize,
     bail: Option<&'static str>,
 }
 
@@ -1328,6 +1341,7 @@ where
             return WalkedPage {
                 lines: Vec::new(),
                 glyphs: 0,
+                undecodable_fragments: 0,
                 bail: Some("undecodable"),
             };
         }
@@ -1338,6 +1352,7 @@ where
             return WalkedPage {
                 lines: Vec::new(),
                 glyphs: 0,
+                undecodable_fragments: 0,
                 bail: Some("undecodable"),
             };
         }
@@ -1354,6 +1369,7 @@ where
         text: TextSpace::new(),
         fragments: Vec::new(),
         glyphs: 0,
+        undecodable_fragments: 0,
         bail: None,
         forms: HashSet::new(),
         form_budget: max_decompressed,
@@ -1363,12 +1379,14 @@ where
         return WalkedPage {
             lines: Vec::new(),
             glyphs: walker.glyphs,
+            undecodable_fragments: walker.undecodable_fragments,
             bail: Some(reason),
         };
     }
     WalkedPage {
         lines: layout_lines(walker.fragments),
         glyphs: walker.glyphs,
+        undecodable_fragments: walker.undecodable_fragments,
         bail: None,
     }
 }
@@ -1393,7 +1411,11 @@ where
         };
     }
     let (_text, chunks) = render_lines(&walked.lines);
-    PositionalPage { chunks, bail: None }
+    PositionalPage {
+        chunks,
+        bail: None,
+        undecodable_fragments: walked.undecodable_fragments,
+    }
 }
 
 /// The same walk for the CI probe: the laid-out lines themselves, for the

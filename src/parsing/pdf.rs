@@ -205,6 +205,12 @@ impl PdfParser {
                 }
             }
         }
+        if bailouts.undecodable_fragments > 0 {
+            metadata.insert(
+                "pdf_positional_undecodable_fragments".into(),
+                bailouts.undecodable_fragments.to_string(),
+            );
+        }
 
         let pdf_title = pdf_title(&pdf);
         if let Some(title) = &pdf_title {
@@ -376,6 +382,7 @@ fn extract_page_texts_raw(
             match positional.bail {
                 Some(reason) => bailouts.add(reason),
                 None => {
+                    bailouts.undecodable_fragments += positional.undecodable_fragments;
                     // Each block becomes one newline-terminated fragment, the
                     // same shape lopdf's chunk list has, so the spaced-dot
                     // normalisation and the binding ranges see the bytes the

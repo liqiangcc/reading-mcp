@@ -45,6 +45,9 @@ const MAX_FORM_DEPTH: usize = 8;
 /// (`same_line` compares against half the line height), which keeps
 /// sub- and superscripts on the parent's line.
 const BASELINE_TOLERANCE: f32 = 0.5;
+/// Two fragments share a line only while their sizes are within this
+/// ratio of each other (PyMuPDF splits its dict lines on size changes).
+const SIZE_JOIN_RATIO: f32 = 0.75;
 /// A same-baseline fragment joins the open line while its x extent reaches
 /// within `2.0 * size` of the line's extent; farther apart it is its own
 /// span (a different column or table cell).
@@ -1016,13 +1019,17 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     let mut lines = Vec::<Line>::new();
     for fragment in fragments {
         let joins = lines.last().is_some_and(|line: &Line| {
-            // One line is a same-baseline run whose x extent touches or
-            // nearly touches the line's: same-baseline fragments with a real
-            // horizontal gap are separate spans (two-column text rows, table
-            // cells), which keeps each line inside one column.
+            // One line is a same-baseline, same-size run whose x extent
+            // touches or nearly touches the line's. The size check keeps
+            // footnote digits and small captions off the body line the way
+            // PyMuPDF's per-span dict lines do; sub/superscripts that only
+            // ride a different baseline still join when their size stays
+            // within a quarter of the line's.
             line.rotation == fragment.rotation
                 && (line.baseline - fragment.baseline).abs()
                     <= BASELINE_TOLERANCE * line.size.max(fragment.size)
+                && fragment.size >= line.size * SIZE_JOIN_RATIO
+                && line.size >= fragment.size * SIZE_JOIN_RATIO
                 && fragment.x0 <= line.x1 + LINE_X_GAP * fragment.size
                 && fragment.x1 >= line.x0 - LINE_X_GAP * fragment.size
         });

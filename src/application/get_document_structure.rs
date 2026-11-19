@@ -320,18 +320,21 @@ async fn load_body_order(
 ) -> Result<HashMap<SectionId, usize>, ApplicationError> {
     let ordered = match repository.body_order_keys(&document.id).await? {
         Some(Ok(keys)) => {
-            let ids_by_key: HashMap<i64, SectionId> = section_rows::flatten_document(document)
-                .into_iter()
-                .map(|row| (row.section_key, row.id))
-                .collect();
+            // `section_key` is the depth-first index, so the ids in that order answer the mapping
+            // without building a row per section and without copying the titles and locations.
+            let ids_in_key_order = section_rows::section_ids_in_key_order(document);
             keys.into_iter()
                 .map(|key| {
-                    ids_by_key.get(&key).cloned().ok_or_else(|| {
-                        ApplicationError::RepositoryFailed(format!(
-                            "body order of document {} names section key {key}, which the tree does not hold",
-                            document.id.0
-                        ))
-                    })
+                    usize::try_from(key)
+                        .ok()
+                        .and_then(|key| ids_in_key_order.get(key))
+                        .cloned()
+                        .ok_or_else(|| {
+                            ApplicationError::RepositoryFailed(format!(
+                                "body order of document {} names section key {key}, which the tree does not hold",
+                                document.id.0
+                            ))
+                        })
                 })
                 .collect::<Result<Vec<_>, _>>()?
         }

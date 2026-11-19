@@ -45,6 +45,27 @@ fn flatten_section(section: &Section, parent_key: Option<i64>, rows: &mut Vec<Se
     rows[usize::try_from(section_key).unwrap_or(0)].subtree_end_key = subtree_end_key;
 }
 
+/// The section ids of `document` in depth-first document order: `ids[section_key]` is the id
+/// [`flatten_document`] gives that key.
+///
+/// A caller that only needs the key-to-id mapping takes this instead of the rows: the rows carry a
+/// copy of every title and location, which a mapping does not read. `get_document_structure` maps
+/// the stored body order through it on every call, so the copies would be per-call work.
+pub(crate) fn section_ids_in_key_order(document: &Document) -> Vec<SectionId> {
+    let mut ids = Vec::with_capacity(document.section_count());
+    for section in &document.root_sections {
+        push_section_ids(section, &mut ids);
+    }
+    ids
+}
+
+fn push_section_ids(section: &Section, ids: &mut Vec<SectionId>) {
+    ids.push(section.id.clone());
+    for child in &section.children {
+        push_section_ids(child, ids);
+    }
+}
+
 /// The header of `document`, as the store writes it.
 pub(crate) fn header_of(
     document: &Document,
@@ -237,5 +258,21 @@ mod tests {
             .map(|row| row.id.0)
             .collect();
         assert_eq!(ancestors, vec!["section://a", "section://a1"]);
+    }
+
+    /// The key-order ids are exactly the ids the flattening gives those keys, so a caller that
+    /// only needs the mapping reads the same sections as one that builds the rows.
+    #[test]
+    fn the_key_order_ids_match_the_flattening() {
+        let document = document();
+        let from_rows: Vec<String> = flatten_document(&document)
+            .into_iter()
+            .map(|row| row.id.0)
+            .collect();
+        let from_ids: Vec<String> = section_ids_in_key_order(&document)
+            .into_iter()
+            .map(|id| id.0)
+            .collect();
+        assert_eq!(from_ids, from_rows);
     }
 }

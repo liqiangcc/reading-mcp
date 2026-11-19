@@ -57,7 +57,12 @@ pub(crate) async fn resolve_header(
         DocumentView::load_with_hash(Arc::clone(repository), &document_id)
             .await?
             .ok_or_else(ReadingError::not_opened)?;
-    if handle_checksum(view.id(), &normalized_document_hash) != handle.checksum {
+    if handle_checksum(
+        view.id(),
+        &normalized_document_hash,
+        &view.header().media_type,
+    ) != handle.checksum
+    {
         return Err(ReadingError::stale_handle(format!(
             "handle checksum {} does not match the current document identity",
             handle.checksum

@@ -91,7 +91,11 @@ impl OpenReadingUseCase {
             })?;
         let handle = DocumentHandle {
             doc_key: document_key,
-            checksum: handle_checksum(&opened.document_id, &opened.normalized_document_hash),
+            checksum: handle_checksum(
+                &opened.document_id,
+                &opened.normalized_document_hash,
+                &opened.media_type,
+            ),
         };
 
         // The header and the root rows: `open` reads no section text and no tree.

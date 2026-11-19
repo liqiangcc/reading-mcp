@@ -54,9 +54,10 @@ pub use segmentation::{
 };
 pub use text_locator::TextLocator;
 pub use text_unit::{
-    ParagraphContentClass, ParagraphSectionCoverage, ParagraphTextUnitSet, SentenceEligibility,
-    SentenceParagraphCoverage, SentenceTextUnit, SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION,
-    TEXT_UNIT_ID_VERSION, TextUnit, TextUnitId, TextUnitKind,
+    PDF_SENTENCE_RULES_VERSION, ParagraphContentClass, ParagraphSectionCoverage,
+    ParagraphTextUnitSet, SentenceEligibility, SentenceParagraphCoverage, SentenceTextUnit,
+    SentenceTextUnitSet, TEXT_SEGMENTATION_VERSION, TEXT_UNIT_ID_VERSION, TextUnit, TextUnitId,
+    TextUnitKind,
 };
 pub(crate) use text_unit::{paragraph_text_unit_id, sentence_text_unit_id};
 

@@ -9,7 +9,10 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::domain::{DocumentId, NormalizedDocumentHash, TEXT_SEGMENTATION_VERSION};
+use crate::domain::{
+    DocumentId, MediaType, NormalizedDocumentHash, PDF_SENTENCE_RULES_VERSION,
+    TEXT_SEGMENTATION_VERSION,
+};
 
 /// The number of lowercase hex digits of the document identity checksum.
 pub const HANDLE_CHECKSUM_DIGITS: usize = 4;
@@ -105,9 +108,16 @@ impl HandleParseError {
 }
 
 /// The four lowercase hex digits that bind a handle to one document identity and segmentation.
+///
+/// The PDF-6g sentence rules change boundaries inside already-split PDF paragraphs without
+/// touching the normalized text, so a PDF document also hashes `PDF_SENTENCE_RULES_VERSION`:
+/// every PDF handle minted before the rules keeps its old checksum and fails closed as
+/// `stale_handle` instead of resolving to a different sentence. For every other media type
+/// the hashed bytes are exactly what they always were.
 pub fn handle_checksum(
     document_id: &DocumentId,
     normalized_document_hash: &NormalizedDocumentHash,
+    media_type: &MediaType,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(document_id.0.as_bytes());
@@ -115,6 +125,10 @@ pub fn handle_checksum(
     hasher.update(normalized_document_hash.0.as_bytes());
     hasher.update(b"|");
     hasher.update(TEXT_SEGMENTATION_VERSION.as_bytes());
+    if media_type.is_pdf() {
+        hasher.update(b"|");
+        hasher.update(PDF_SENTENCE_RULES_VERSION.as_bytes());
+    }
     let digest = hasher.finalize();
     let hex = format!("{digest:x}");
     hex[..HANDLE_CHECKSUM_DIGITS].to_owned()
@@ -318,7 +332,7 @@ mod tests {
         CursorUnit, DocumentHandle, ReadingCursor, ReadingFrom, ReadingHandle, SectionHandle,
         handle_checksum, paragraph_handle, parse_from, parse_handle, sentence_handle,
     };
-    use crate::domain::{DocumentId, NormalizedDocumentHash};
+    use crate::domain::{DocumentId, MediaType, NormalizedDocumentHash};
 
     fn document() -> DocumentHandle {
         DocumentHandle {
@@ -444,6 +458,7 @@ mod tests {
         let checksum = handle_checksum(
             &DocumentId("doc:alpha".into()),
             &NormalizedDocumentHash("sha256:aaaa".into()),
+            &MediaType("text/markdown".into()),
         );
         assert_eq!(checksum.len(), 4);
         assert!(
@@ -455,10 +470,12 @@ mod tests {
         let other_document = handle_checksum(
             &DocumentId("doc:beta".into()),
             &NormalizedDocumentHash("sha256:aaaa".into()),
+            &MediaType("text/markdown".into()),
         );
         let other_hash = handle_checksum(
             &DocumentId("doc:alpha".into()),
             &NormalizedDocumentHash("sha256:bbbb".into()),
+            &MediaType("text/markdown".into()),
         );
         assert_ne!(checksum, other_document);
         assert_ne!(checksum, other_hash);
@@ -469,6 +486,60 @@ mod tests {
             handle_checksum(
                 &DocumentId("doc:alpha".into()),
                 &NormalizedDocumentHash("sha256:aaaa".into()),
+                &MediaType("text/markdown".into()),
+            )
+        );
+    }
+
+    /// PDF-6g: a non-PDF checksum is byte-identical to the formula every handle was minted
+    /// with (sha256 of `id | hash | text-segmentation/v3`, first 4 hex digits).
+    #[test]
+    fn a_non_pdf_checksum_keeps_the_exact_bytes_it_always_hashed() {
+        for media_type in [
+            "application/epub+zip",
+            "text/html",
+            "text/markdown",
+            "text/plain",
+        ] {
+            assert_eq!(
+                handle_checksum(
+                    &DocumentId("doc:alpha".into()),
+                    &NormalizedDocumentHash("sha256:aaaa".into()),
+                    &MediaType(media_type.into()),
+                ),
+                "209b",
+                "media type {media_type}"
+            );
+        }
+    }
+
+    /// PDF-6g: a PDF checksum adds `PDF_SENTENCE_RULES_VERSION`, so it differs from the
+    /// non-PDF formula for the same inputs - which is what makes every PDF handle minted
+    /// before the rules a `stale_handle`.
+    #[test]
+    fn a_pdf_checksum_hashes_the_pdf_sentence_rules_version() {
+        let pdf = handle_checksum(
+            &DocumentId("doc:alpha".into()),
+            &NormalizedDocumentHash("sha256:aaaa".into()),
+            &MediaType("application/pdf".into()),
+        );
+        assert_eq!(pdf, "6634");
+        assert_ne!(
+            pdf,
+            handle_checksum(
+                &DocumentId("doc:alpha".into()),
+                &NormalizedDocumentHash("sha256:aaaa".into()),
+                &MediaType("text/markdown".into()),
+            )
+        );
+        // Parameters on the media type keep the essence rule: `application/pdf; x=y` is
+        // still a PDF.
+        assert_eq!(
+            pdf,
+            handle_checksum(
+                &DocumentId("doc:alpha".into()),
+                &NormalizedDocumentHash("sha256:aaaa".into()),
+                &MediaType("application/pdf; charset=binary".into()),
             )
         );
     }

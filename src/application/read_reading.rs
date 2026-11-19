@@ -152,7 +152,9 @@ impl ReadReadingUseCase {
             DocumentView::load_with_hash(Arc::clone(&self.repository), &document_id)
                 .await?
                 .ok_or_else(ReadingError::not_opened)?;
-        if handle_checksum(view.id(), &normalized_hash) != document_handle.checksum {
+        if handle_checksum(view.id(), &normalized_hash, &view.header().media_type)
+            != document_handle.checksum
+        {
             return Err(ReadingError::stale_handle(format!(
                 "handle checksum {} does not match the current document identity",
                 document_handle.checksum

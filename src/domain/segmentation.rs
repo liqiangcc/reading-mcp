@@ -398,15 +398,18 @@ impl Document {
         let mut sections = Vec::new();
         let mut paragraph_source_order = 0usize;
         let mut sentence_source_order = 0usize;
-        // The document already carries the one field that decides the fallback guard's profile:
-        // its media type. No parser-facing API is needed for it.
+        // The document already carries the one field that decides the fallback guard's
+        // profile and the PDF-6g sentence rules: its media type. No parser-facing API is
+        // needed for it.
         let guard = FallbackGuardProfile::for_media_type(&self.media_type);
+        let pdf_sentence_rules = guard == FallbackGuardProfile::PdfProse;
 
         for section in &self.root_sections {
             collect_section_segmentation(
                 block_map,
                 section,
                 guard,
+                pdf_sentence_rules,
                 &mut sections,
                 &mut paragraph_source_order,
                 &mut sentence_source_order,
@@ -439,6 +442,7 @@ fn collect_section_segmentation(
     block_map: Option<&NormalizedBlockMap>,
     section: &Section,
     guard: FallbackGuardProfile,
+    pdf_sentence_rules: bool,
     out: &mut Vec<SectionSegmentation>,
     paragraph_source_order: &mut usize,
     sentence_source_order: &mut usize,
@@ -561,7 +565,7 @@ fn collect_section_segmentation(
                             // Eligible, as a paragraph the shipped exemptions already
                             // clear.
                         } else {
-                            let ranges = sentence_ranges(text, candidate.range);
+                            let ranges = sentence_ranges(text, candidate.range, pdf_sentence_rules);
                             let refused = ranges.iter().any(|range| {
                                 index.slice(*range).is_ok_and(|sentence| {
                                     let sentence_chars = sentence.chars().collect::<Vec<_>>();
@@ -595,8 +599,8 @@ fn collect_section_segmentation(
                 0,
             )?);
         } else {
-            let ranges =
-                freed_sentence_ranges.unwrap_or_else(|| sentence_ranges(text, candidate.range));
+            let ranges = freed_sentence_ranges
+                .unwrap_or_else(|| sentence_ranges(text, candidate.range, pdf_sentence_rules));
             let sentence_chars = ranges.iter().map(|range| range.len()).sum::<usize>();
 
             for (sentence_offset, range) in ranges.iter().copied().enumerate() {
@@ -650,6 +654,7 @@ fn collect_section_segmentation(
             block_map,
             child,
             guard,
+            pdf_sentence_rules,
             out,
             paragraph_source_order,
             sentence_source_order,
@@ -815,14 +820,18 @@ fn paragraph_ranges(content: &str) -> Vec<NormalizedTextRange> {
     ranges
 }
 
-fn sentence_ranges(text: &str, paragraph_range: NormalizedTextRange) -> Vec<NormalizedTextRange> {
+fn sentence_ranges(
+    text: &str,
+    paragraph_range: NormalizedTextRange,
+    pdf_sentence_rules: bool,
+) -> Vec<NormalizedTextRange> {
     let chars = text.chars().collect::<Vec<_>>();
     let mut ranges = Vec::new();
     let mut start = skip_whitespace(&chars, 0);
     let mut cursor = start;
 
     while cursor < chars.len() {
-        if let Some(end) = sentence_boundary_end(&chars, cursor) {
+        if let Some(end) = sentence_boundary_end(&chars, cursor, pdf_sentence_rules) {
             if start < end {
                 ranges.push(
                     NormalizedTextRange::new(
@@ -853,13 +862,13 @@ fn sentence_ranges(text: &str, paragraph_range: NormalizedTextRange) -> Vec<Norm
     ranges
 }
 
-fn sentence_boundary_end(chars: &[char], index: usize) -> Option<usize> {
+fn sentence_boundary_end(chars: &[char], index: usize, pdf: bool) -> Option<usize> {
     match chars[index] {
         '。' | '！' | '？' => Some(extend_terminal_cluster(chars, index)),
         '!' | '?' if ascii_terminal_is_terminal(chars, index) => {
             Some(extend_terminal_cluster(chars, index))
         }
-        '.' if ascii_period_is_terminal(chars, index) => {
+        '.' if ascii_period_is_terminal(chars, index, pdf) => {
             Some(extend_terminal_cluster(chars, index))
         }
         _ => None,
@@ -871,7 +880,7 @@ fn ascii_terminal_is_terminal(chars: &[char], index: usize) -> bool {
     boundary_end == chars.len() || chars[boundary_end].is_whitespace()
 }
 
-fn ascii_period_is_terminal(chars: &[char], index: usize) -> bool {
+fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
     if chars.get(index + 1) == Some(&'.') {
         return false;
     }
@@ -909,14 +918,76 @@ fn ascii_period_is_terminal(chars: &[char], index: usize) -> bool {
         }
     }
 
-    if token.chars().count() == 1
-        && token.chars().all(|ch| ch.is_ascii_alphabetic())
-        && next_non_whitespace(chars, index + 1).is_some_and(|ch| ch.is_uppercase())
+    // PDF-6g R-A (PDF only): `et al.` is terminal only when the next non-whitespace
+    // character is uppercase, the same shape the `etc` rule has - `et al. (2019)`,
+    // `et al. [13]`, `et al. show` and `et al.,` stay inside the sentence, `et al. The`
+    // still ends it.
+    if pdf
+        && token == "al"
+        && index + 1 < chars.len()
+        && word_before_period_token(chars, index).is_some_and(|word| word == "et")
     {
+        let terminal_al = ascii_terminal_is_terminal(chars, index)
+            && next_non_whitespace(chars, extend_terminal_cluster(chars, index))
+                .is_some_and(|ch| ch.is_uppercase());
+        if !terminal_al {
+            return false;
+        }
+    }
+
+    // A single letter is an initial in every format. PDF-6g R-I widens that to a token made
+    // only of single ASCII letters joined by periods (`E.F`, `K.R`, `J.R.R`), which the
+    // one-letter check could not see - but only for PDF, where author initials are dense;
+    // `u.s`, `u.k`, `e.g` and `i.e` keep their own abbreviation handling above.
+    let initials = if pdf {
+        token_is_initials(&token)
+    } else {
+        token.chars().count() == 1 && token.chars().all(|ch| ch.is_ascii_alphabetic())
+    };
+    if initials && next_non_whitespace(chars, index + 1).is_some_and(|ch| ch.is_uppercase()) {
         return false;
     }
 
     ascii_terminal_is_terminal(chars, index)
+}
+
+/// PDF-6g R-I: a token of single ASCII letters joined by periods (`E.F`, `K.R`, `J.R.R`;
+/// one letter alone included).
+fn token_is_initials(token: &str) -> bool {
+    let mut letters = 0usize;
+    for part in token.split('.') {
+        if part.chars().count() != 1 || !part.chars().all(|ch| ch.is_ascii_alphabetic()) {
+            return false;
+        }
+        letters += 1;
+    }
+    letters >= 1
+}
+
+/// The whitespace-separated word directly before `preceding_period_token`'s token, lowercase
+/// (`et` for `et al.`). None when the token does not directly follow whitespace.
+fn word_before_period_token(chars: &[char], index: usize) -> Option<String> {
+    let mut token_start = index;
+    while token_start > 0 {
+        let ch = chars[token_start - 1];
+        if ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            token_start -= 1;
+        } else {
+            break;
+        }
+    }
+    if token_start == 0 || !chars[token_start - 1].is_whitespace() {
+        return None;
+    }
+    let mut cursor = token_start;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    let end = cursor;
+    while cursor > 0 && !chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    (end > cursor).then(|| chars[cursor..end].iter().collect::<String>().to_lowercase())
 }
 
 fn extend_terminal_cluster(chars: &[char], index: usize) -> usize {
@@ -1990,6 +2061,96 @@ mod tests {
                 expected,
                 "{text}"
             );
+        }
+    }
+
+    /// PDF-6g fixtures: the four sentences the rules pin, segmented under a PDF document and
+    /// under a Markdown document.
+    fn pdf6g_sentences(document: &Document) -> Vec<Vec<String>> {
+        let segmentation = document.segmentation();
+        segmentation
+            .sections
+            .iter()
+            .map(|section| {
+                let owner = document
+                    .find_section(&section.section_id)
+                    .expect("segmented section must exist in its document");
+                let index = owner.normalized_text_index();
+                section
+                    .sentences
+                    .iter()
+                    .map(|sentence| {
+                        index
+                            .slice(sentence.range())
+                            .expect("sentence range must be an owner slice")
+                            .to_owned()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// PDF-6g R-I/R-A only fire for PDF. Under `application/pdf` the initials and the `et al.`
+    //  stays inside their sentences.
+    #[test]
+    fn pdf_sentence_rules_keep_initials_and_et_al_inside_the_sentence() {
+        for (text, expected) in [
+            (
+                "E.F. Fama and K.R. French study returns. They find two factors.",
+                vec![
+                    "E.F. Fama and K.R. French study returns.",
+                    "They find two factors.",
+                ],
+            ),
+            (
+                "Smith et al. show that X holds. Then Y follows.",
+                vec!["Smith et al. show that X holds.", "Then Y follows."],
+            ),
+            (
+                "Smith et al. (2019) report Z.",
+                vec!["Smith et al. (2019) report Z."],
+            ),
+            (
+                "as in Smith et al. The next step is W.",
+                vec!["as in Smith et al.", "The next step is W."],
+            ),
+        ] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType("application/pdf".into());
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// PDF-6g R-I/R-A are PDF-only: the same four strings segment exactly as they did before
+    /// the rules in every other format.
+    #[test]
+    fn non_pdf_formats_keep_the_old_sentence_boundaries() {
+        for (text, expected) in [
+            (
+                "E.F. Fama and K.R. French study returns. They find two factors.",
+                vec![
+                    "E.F.",
+                    "Fama and K.R.",
+                    "French study returns.",
+                    "They find two factors.",
+                ],
+            ),
+            (
+                "Smith et al. show that X holds. Then Y follows.",
+                vec!["Smith et al.", "show that X holds.", "Then Y follows."],
+            ),
+            (
+                "Smith et al. (2019) report Z.",
+                vec!["Smith et al.", "(2019) report Z."],
+            ),
+            (
+                "as in Smith et al. The next step is W.",
+                vec!["as in Smith et al.", "The next step is W."],
+            ),
+        ] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType("text/markdown".into());
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
         }
     }
 

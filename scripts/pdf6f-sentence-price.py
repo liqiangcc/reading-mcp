@@ -92,7 +92,39 @@ def ascii_terminal_is_terminal(chars: list[str], index: int) -> bool:
     return boundary_end == len(chars) or is_ws(chars[boundary_end])
 
 
-def ascii_period_is_terminal(chars: list[str], index: int) -> bool:
+INITIALS_TOKEN_RE = re.compile(r"[A-Za-z](\.[A-Za-z])*\Z")
+
+
+def preceding_period_token_start(chars: list[str], index: int) -> tuple[int, str]:
+    """`preceding_period_token` plus the start offset, so a PDF rule can read the word
+    before the token (`et` for `et al.`)."""
+    start = index
+    while start > 0:
+        ch = chars[start - 1]
+        if ch.isalnum() or ch in "._-":
+            start -= 1
+        else:
+            break
+    return start, "".join(chars[start:index])
+
+
+def word_before(chars: list[str], start: int) -> str | None:
+    """The whitespace-separated word directly before position `start`, lowercased, or None
+    when the token sits at the text start or does not follow whitespace."""
+    cursor = start - 1
+    if cursor < 0 or not is_ws(chars[cursor]):
+        return None
+    while cursor >= 0 and is_ws(chars[cursor]):
+        cursor -= 1
+    end = cursor + 1
+    while cursor >= 0 and not is_ws(chars[cursor]):
+        cursor -= 1
+    return "".join(chars[cursor + 1:end]).lower() or None
+
+
+def ascii_period_is_terminal(chars: list[str], index: int,
+                             rules: frozenset = frozenset()) -> bool:
+    """`rules` names the PDF-only PDF-6g rules: `initials` (R-I) and `et_al` (R-A)."""
     if index + 1 < len(chars) and chars[index + 1] == ".":
         return False
     previous = chars[index - 1] if index >= 1 else None
@@ -105,32 +137,47 @@ def ascii_period_is_terminal(chars: list[str], index: int) -> bool:
         return False
     if nxt is not None and nxt in "/\\":
         return False
-    token = preceding_period_token(chars, index).lower()
+    token_start, token = preceding_period_token_start(chars, index)
+    token = token.lower()
     if token and token in PROTECTED_ABBREVIATIONS and index + 1 < len(chars):
         terminal_etc = (token == "etc" and ascii_terminal_is_terminal(chars, index)
                         and (next_non_whitespace(chars, extend_terminal_cluster(chars, index))
                              or "").isupper())
         if not terminal_etc:
             return False
-    if len(token) == 1 and token.isascii() and token.isalpha() \
-            and (next_non_whitespace(chars, index + 1) or "").isupper():
+    if "et_al" in rules and token == "al" \
+            and word_before(chars, token_start) == "et" \
+            and index + 1 < len(chars):
+        # Like `etc`: only terminal when the next non-whitespace character is uppercase.
+        terminal_al = (ascii_terminal_is_terminal(chars, index)
+                       and (next_non_whitespace(
+                           chars, extend_terminal_cluster(chars, index)) or "").isupper())
+        if not terminal_al:
+            return False
+    initials = (bool(INITIALS_TOKEN_RE.match(token)) if "initials" in rules
+                else len(token) == 1 and token.isascii() and token.isalpha())
+    if initials and (next_non_whitespace(chars, index + 1) or "").isupper():
         return False
     return ascii_terminal_is_terminal(chars, index)
 
 
-def sentence_boundary_end(chars: list[str], index: int) -> int | None:
+def sentence_boundary_end(chars: list[str], index: int,
+                          rules: frozenset = frozenset()) -> int | None:
     ch = chars[index]
     if ch in "。！？":
         return extend_terminal_cluster(chars, index)
     if ch in "!?" and ascii_terminal_is_terminal(chars, index):
         return extend_terminal_cluster(chars, index)
-    if ch == "." and ascii_period_is_terminal(chars, index):
+    if ch == "." and ascii_period_is_terminal(chars, index, rules):
         return extend_terminal_cluster(chars, index)
     return None
 
 
-def sentence_ranges(text: str) -> list[tuple[int, int]]:
-    """The port of `sentence_ranges`: (start, end) char-index pairs inside `text`."""
+def sentence_ranges(text: str, rules: frozenset = frozenset()) -> list[tuple[int, int]]:
+    """The port of `sentence_ranges`: (start, end) char-index pairs inside `text`.
+
+    `rules` is the PDF-6g addition: today's `sentence_ranges` is `rules=frozenset()`, the
+    PDF rules are `rules={"initials", "et_al"}`."""
     chars = list(text)
     ranges = []
     start = 0
@@ -138,7 +185,7 @@ def sentence_ranges(text: str) -> list[tuple[int, int]]:
         start += 1
     cursor = start
     while cursor < len(chars):
-        end = sentence_boundary_end(chars, cursor)
+        end = sentence_boundary_end(chars, cursor, rules)
         if end is not None:
             if start < end:
                 ranges.append((start, end))
@@ -156,8 +203,8 @@ def sentence_ranges(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
-def sentences(text: str) -> list[str]:
-    return [text[start:end] for start, end in sentence_ranges(text)]
+def sentences(text: str, rules: frozenset = frozenset()) -> list[str]:
+    return [text[start:end] for start, end in sentence_ranges(text, rules)]
 
 
 # --------------------------------------------------------------------------------------------
@@ -193,9 +240,10 @@ def fires_missing_space_only(text: str, context: dict | None = None) -> bool:
 # Candidates
 # --------------------------------------------------------------------------------------------
 
-def verdict_s1(text: str, context: dict | None = None) -> dict:
+def verdict_s1(text: str, context: dict | None = None,
+               rules: frozenset = frozenset()) -> dict:
     """Per-sentence: the paragraph stays coarse iff a sentence fires the unchanged guard."""
-    pieces = sentences(text)
+    pieces = sentences(text, rules)
     fired = [piece for piece in pieces if guard_fires_pdf(piece)]
     fires = (GE.doubled_token(text) is not None
              or GE.bibliographic_markers(text) >= GE.MIN_BIBLIOGRAPHIC_MARKERS
@@ -304,6 +352,247 @@ def projected_units(records: list[dict], freed: dict[int, list[str]]) -> list[di
     return projected
 
 
+# --------------------------------------------------------------------------------------------
+# PDF-6g: R-I (multi-letter initials) and R-A (et al.), priced on the paragraph stream of a
+# --keep-pdf-sentence-text run
+# --------------------------------------------------------------------------------------------
+
+SPLIT_ELIGIBLE_DETAILS = {"prose_or_unknown", "native_paragraph"}
+
+
+def load_pdf_paragraphs(path: str) -> tuple[dict[str, list[dict]], dict[str, dict]]:
+    """`pdf_paragraph` records (ordered by `unit`) and the `pdf_stream_totals` record, per
+    document id."""
+    paragraphs: dict[str, list[dict]] = collections.defaultdict(list)
+    totals: dict[str, dict] = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            kind = record.get("kind_record")
+            if kind == "pdf_paragraph":
+                paragraphs[record["id"]].append(record)
+            elif kind == "pdf_stream_totals":
+                totals[record["id"]] = record
+    for records in paragraphs.values():
+        records.sort(key=lambda record: record["unit"])
+    return paragraphs, totals
+
+
+def removed_boundaries(text: str, rules: frozenset) -> list[tuple[int, frozenset]]:
+    """Old-rule boundaries the new rules suppress, each paired with the minimal rule set
+    that suppresses it: `(end_char_offset, {rule, ...})`."""
+    old = {end for _start, end in sentence_ranges(text)}
+    new = {end for _start, end in sentence_ranges(text, rules)}
+    removed = []
+    for end in sorted(old - new):
+        minimal = frozenset(
+            rule for rule in ("initials", "et_al")
+            if rule in rules and end not in
+            {e for _s, e in sentence_ranges(text, frozenset({rule}))})
+        removed.append((end, minimal))
+    return removed
+
+
+def doc_stream(paragraphs: list[dict], rules: frozenset) -> list[dict]:
+    """The document's projected unit stream: each split-eligible paragraph is re-segmented
+    with `rules`; every other paragraph is one unit of its own."""
+    units: list[dict] = []
+    for paragraph in paragraphs:
+        text = paragraph["text"]
+        eligible = (paragraph.get("content_class_detail") in SPLIT_ELIGIBLE_DETAILS
+                    and not paragraph.get("degradation"))
+        if not eligible:
+            units.append({"text": text,
+                          "paragraph_coarse": True,
+                          "non_prose": paragraph.get("content_class") == "non_prose"})
+            continue
+        for start, end in sentence_ranges(text, rules):
+            units.append({"text": text[start:end], "paragraph_coarse": False,
+                          "non_prose": False})
+    return units
+
+
+def stream_metrics(paragraphs: list[dict], rules: frozenset) -> dict:
+    units = doc_stream(paragraphs, rules)
+    short = long = broken = 0
+    last: dict | None = None
+    for unit in units:
+        text = unit["text"].strip()
+        if len(text) < SHORT_CHARS:
+            short += 1
+        if len(text) > LONG_CHARS:
+            long += 1
+        skip = (unit["non_prose"] or not text or ends_with_terminal(text)
+                or (unit["paragraph_coarse"] and len(text) <= 120))
+        if last is not None and last["open"] and text[:1].islower():
+            broken += 1
+        last = {"open": not skip} if text else last
+    total = len(units)
+    return {"units": total, "short": short, "long": long, "broken": broken,
+            "m1": bool(total) and long / total > 0.05,
+            "short_over_10pct": bool(total) and short / total > 0.10}
+
+
+def pdf6g_mode(args) -> int:
+    docs, _units = load_records(args.records)
+    paragraphs, totals = load_pdf_paragraphs(args.records)
+    if not paragraphs:
+        print("::error::no pdf_paragraph records; rerun the probe with "
+              "--keep-pdf-sentence-text")
+        return 1
+    missing = sorted(set(docs) - set(paragraphs))
+    if missing:
+        print(f"# {len(missing)} document records carry no paragraphs "
+              f"(not opened or flagged off): {', '.join(missing[:10])}")
+
+    # Verbatim fidelity: under today's rules the projected stream must reproduce the
+    # sentence stream the server emitted, item for item.
+    checked = exact = 0
+    for identifier, records in sorted(paragraphs.items()):
+        total = totals.get(identifier) or {}
+        if total.get("sentence_truncated") or total.get("paragraph_truncated"):
+            continue
+        expected = total.get("sentence_total_items")
+        if expected is None:
+            continue
+        checked += 1
+        projected = stream_metrics(records, frozenset())["units"]
+        if projected == expected:
+            exact += 1
+        else:
+            print(f"# fidelity miss {identifier}: projected {projected} units, "
+                  f"server stream {expected}")
+    print(f"# verbatim fidelity: {exact} of {checked} non-truncated documents reproduce "
+          f"the sentence stream exactly")
+
+    RULE_SETS = {"R-I initials": frozenset({"initials"}),
+                 "R-A et al.": frozenset({"et_al"})}
+    both = frozenset({"initials", "et_al"})
+
+    base_metrics: dict[str, dict] = {}
+    for identifier, records in paragraphs.items():
+        base_metrics[identifier] = stream_metrics(records, frozenset())
+    # Cross-check the projected baseline against the harness's own document numbers.
+    drift = []
+    for identifier, metric in base_metrics.items():
+        doc = docs.get(identifier) or {}
+        if (doc.get("broken_sentences") is not None
+                and metric["broken"] != doc["broken_sentences"]):
+            drift.append((identifier, doc["broken_sentences"], metric["broken"]))
+    print(f"# broken-sentence drift vs the harness document records: {len(drift)} documents"
+          + (f" ({drift[:8]})" if drift else ""))
+
+    def price(rules: frozenset) -> dict:
+        removed: list[dict] = []
+        metrics: dict[str, dict] = {}
+        for identifier, records in paragraphs.items():
+            for record in records:
+                if (record.get("content_class_detail") not in SPLIT_ELIGIBLE_DETAILS
+                        or record.get("degradation")):
+                    continue
+                for end, minimal in removed_boundaries(record["text"], rules):
+                    removed.append({"id": identifier, "unit": record["unit"],
+                                    "end": end, "rules": sorted(minimal),
+                                    "record": record})
+            metrics[identifier] = stream_metrics(records, rules)
+        return {"removed": removed, "metrics": metrics}
+
+    results = {name: price(rules) for name, rules in RULE_SETS.items()}
+    results["R-I+R-A"] = price(both)
+
+    print("\n## PDF-6g rules, each priced on the paragraph stream\n")
+    print("| Rule | Boundaries removed | Units merged | Papers touched | Short (<5) | "
+          "Long (>800) | M1 (>5% long) | Broken sentences |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    base = {"units": sum(m["units"] for m in base_metrics.values()),
+            "short": sum(m["short"] for m in base_metrics.values()),
+            "long": sum(m["long"] for m in base_metrics.values()),
+            "m1": sum(1 for m in base_metrics.values() if m["m1"]),
+            "broken": sum(m["broken"] for m in base_metrics.values()),
+            "short10": [i for i, m in base_metrics.items() if m["short_over_10pct"]]}
+    print(f"| today | - | - | - | {base['short']} | {base['long']} | {base['m1']} | "
+          f"{base['broken']} |")
+    for name, result in results.items():
+        removed = result["removed"]
+        papers = {item["id"] for item in removed}
+        metrics = result["metrics"]
+        short = sum(m["short"] for m in metrics.values())
+        long = sum(m["long"] for m in metrics.values())
+        m1 = sum(1 for m in metrics.values() if m["m1"])
+        broken = sum(m["broken"] for m in metrics.values())
+        # A removed boundary merges the two units it separated; chains merge more.
+        print(f"| {name} | {len(removed)} | {len(removed)} | {len(papers)} | {short} | "
+              f"{long} | {m1} | {broken} |")
+        result["short10"] = [i for i, m in metrics.items() if m["short_over_10pct"]]
+    print(f"\nPapers above 10% short units: today {len(base['short10'])}; "
+          + "; ".join(f"{name} {len(res['short10'])}" for name, res in results.items()))
+
+    # PDF-6f interaction: a refused prose paragraph is re-checked sentence by sentence;
+    # under the new ranges a paragraph can flip to freed (or, in principle, to refused).
+    flips = 0
+    for identifier, records in paragraphs.items():
+        for record in records:
+            if (record.get("content_class_detail") not in SPLIT_ELIGIBLE_DETAILS
+                    or not record.get("degradation")
+                    or record.get("content_class") == "non_prose"):
+                continue
+            text = record["text"]
+            old_verdict = verdict_s1(text, {"tokens": GE.token_counts(text)})
+            new_verdict = verdict_s1(text, {"tokens": GE.token_counts(text)}, both)
+            if old_verdict["fires"] != new_verdict["fires"]:
+                flips += 1
+    print(f"# coarse paragraphs whose PDF-6f verdict flips under the new ranges: {flips}")
+
+    # Hand-labelling sample: up to --sample removed boundaries per rule, seeded, at most 8
+    # per document.
+    rng = random.Random(args.seed)
+    for name in ("R-I initials", "R-A et al."):
+        # Every removal the rule explains, alone or jointly with the other rule, is fair
+        # to label under the rule.
+        rule = {"R-I initials": "initials", "R-A et al.": "et_al"}[name]
+        pool = [item for item in results["R-I+R-A"]["removed"] if rule in item["rules"]]
+        rng.shuffle(pool)
+        per_doc: collections.Counter = collections.Counter()
+        chosen = []
+        for item in pool:
+            if len(chosen) >= args.sample:
+                break
+            if per_doc[item["id"]] >= 8:
+                continue
+            per_doc[item["id"]] += 1
+            chosen.append(item)
+        print(f"\n## {name} removed-boundary sample (seed {args.seed}): {len(chosen)} of "
+              f"{len(pool)} boundaries, {len(per_doc)} documents\n")
+        print("| # | Id | Unit | Context (60 chars each side) | Label |")
+        print("| --- | --- | --- | --- | --- |")
+        for number, item in enumerate(chosen, 1):
+            text = item["record"]["text"]
+            end = item["end"]
+            context = norm1(text[max(0, end - 60):end + 60])
+            print(f"| {number} | {item['id']} | {item['unit']} | `{context}` | |")
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as handle:
+            json.dump({
+                "fidelity": {"checked": checked, "exact": exact},
+                "baseline": base,
+                "rules": {
+                    name: {
+                        "removed": len(res["removed"]),
+                        "papers": len({item["id"] for item in res["removed"]}),
+                        "short": sum(m["short"] for m in res["metrics"].values()),
+                        "long": sum(m["long"] for m in res["metrics"].values()),
+                        "m1": sum(1 for m in res["metrics"].values() if m["m1"]),
+                        "broken": sum(m["broken"] for m in res["metrics"].values()),
+                    } for name, res in results.items()
+                },
+            }, handle, indent=1)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--records", required=True,
@@ -312,7 +601,12 @@ def main() -> int:
     parser.add_argument("--sample", type=int, default=50)
     parser.add_argument("--out", default="")
     parser.add_argument("--sample-candidate", default="S1 per-sentence")
+    parser.add_argument("--pdf6g", action="store_true",
+                        help="price the PDF-6g rules (R-I initials, R-A et al.) on the "
+                             "pdf_paragraph records of a --keep-pdf-sentence-text run")
     args = parser.parse_args()
+    if args.pdf6g:
+        return pdf6g_mode(args)
 
     docs, units = load_records(args.records)
     for records in units.values():

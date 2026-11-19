@@ -589,7 +589,11 @@ impl Stored {
                 .await
                 .expect("document key")
                 .expect("stored document"),
-            checksum: handle_checksum(&self.document.id, &self.document.normalized_document_hash()),
+            checksum: handle_checksum(
+                &self.document.id,
+                &self.document.normalized_document_hash(),
+                &self.document.media_type,
+            ),
         }
     }
 
@@ -1279,7 +1283,11 @@ async fn a_failed_stored_body_order_reports_the_same_error() {
     let units: Arc<dyn TextUnitIndex> = keyed;
     let handle = DocumentHandle {
         doc_key: 1,
-        checksum: handle_checksum(&document.id, &document.normalized_document_hash()),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
     };
     let command = ReadReadingCommand {
         from: handle.to_string(),
@@ -1364,7 +1372,11 @@ async fn an_old_shape_document_answers_every_migrated_reader_identically() {
             .await
             .expect("document key")
             .expect("stored document"),
-        checksum: handle_checksum(&document.id, &document.normalized_document_hash()),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
     };
     let section = SectionHandle {
         document: handle.clone(),
@@ -2114,7 +2126,11 @@ async fn read_path_calls(roots: usize, per_root: usize) -> usize {
     let units: Arc<dyn TextUnitIndex> = keyed;
     let handle = DocumentHandle {
         doc_key: 1,
-        checksum: handle_checksum(&document.id, &document.normalized_document_hash()),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
     };
     let read = ReadReadingUseCase::new(Arc::clone(&counted), Arc::clone(&units));
     let before = counting.count();
@@ -2149,7 +2165,11 @@ async fn read_path_tally(roots: usize, per_root: usize) -> Vec<(String, usize, u
     });
     let handle = DocumentHandle {
         doc_key: 1,
-        checksum: handle_checksum(&document.id, &document.normalized_document_hash()),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
     };
     let read = ReadReadingUseCase::new(repository, units);
     let result = read
@@ -2511,4 +2531,60 @@ async fn the_fixture_handles_parse_back() {
     let handle = stored.document_handle().await;
     let parsed = parse_handle(&handle.to_string()).expect("a document handle parses");
     assert_eq!(parsed.document(), &handle);
+}
+
+// ------------------------------------------------------------------------------------------------
+// PDF-6g: an old-formula PDF handle fails closed
+// ------------------------------------------------------------------------------------------------
+
+/// The PDF-6g sentence rules changed the PDF checksum's hashed bytes, so every PDF handle
+/// minted before them must be refused as `stale_handle` instead of resolving to a different
+/// sentence. The old formula is exactly what a non-PDF media type still hashes.
+#[tokio::test]
+async fn an_old_formula_pdf_handle_is_refused_as_stale() {
+    let mut document = document_fixture();
+    document.media_type = MediaType("application/pdf".into());
+    let full: Arc<dyn DocumentRepository> = Arc::new(InMemoryDocumentRepository::default());
+    full.save(document.clone()).await.expect("save");
+    let index = Arc::new(KeyedTextUnitIndex::default());
+    index.store(&document).await;
+    let units: Arc<dyn TextUnitIndex> = index;
+
+    // The checksum a binary before PDF-6g minted for this PDF: the same bytes, without
+    // PDF_SENTENCE_RULES_VERSION.
+    let old_checksum = handle_checksum(
+        &document.id,
+        &document.normalized_document_hash(),
+        &MediaType("text/markdown".into()),
+    );
+    let current = handle_checksum(
+        &document.id,
+        &document.normalized_document_hash(),
+        &document.media_type,
+    );
+    assert_ne!(old_checksum, current, "the PDF checksum must change");
+
+    let stale = DocumentHandle {
+        doc_key: units
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
+        checksum: old_checksum,
+    };
+    let read = ReadReadingUseCase::new(Arc::clone(&full), Arc::clone(&units));
+    let error = read
+        .execute(ReadReadingCommand {
+            from: stale.to_string(),
+            unit: RequestedTextUnitKind::Sentence,
+            max_chars: None,
+            direction: None,
+            back: 0,
+        })
+        .await
+        .expect_err("an old-formula PDF handle must not resolve");
+    assert_eq!(
+        error.code,
+        reading_mcp::application::reading_error::ReadingErrorCode::StaleHandle
+    );
 }

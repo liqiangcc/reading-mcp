@@ -1691,15 +1691,25 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
             # PDF-6g: with --keep-pdf-sentence-text, also read the paragraph stream so every
             # paragraph's full text can be re-segmented offline by the Python port of
             # `sentence_ranges`. The read is a second enumeration inside the same open; only
-            # the new record kind carries it.
+            # the new record kind carries it. The paragraph stream does not carry
+            # `degradation` (a sentence-mode verdict), so a refused prose paragraph is marked
+            # through the sentence stream's degraded units, keyed by the paragraph index the
+            # locator carries.
             if args.keep_pdf_sentence_text:
                 paragraph_read = collect_units(server, document_id, sections, deadline,
                                                "paragraph")
                 record["paragraph_read"] = {key: paragraph_read[key] for key in
                                             ("calls", "chars", "truncated", "error",
                                              "seconds")}
+                degraded_keys = collections.Counter(
+                    (unit["section_id"], unit.get("paragraph_index"))
+                    for unit in units if unit.get("degradation"))
                 paragraph_records = []
                 for index, unit in enumerate(paragraph_read["units"]):
+                    key = (unit["section_id"], unit.get("paragraph_index"))
+                    coarse = degraded_keys.get(key, 0) > 0
+                    if coarse:
+                        degraded_keys[key] -= 1
                     paragraph_records.append({
                         "kind_record": "pdf_paragraph",
                         "id": entry["id"],
@@ -1708,7 +1718,8 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
                         "paragraph_index": unit.get("paragraph_index"),
                         "content_class": unit.get("content_class"),
                         "content_class_detail": unit.get("content_class_detail"),
-                        "degradation": unit.get("degradation"),
+                        "degradation": (unit.get("degradation")
+                                        or ("paragraph_is_coarse_only" if coarse else None)),
                         "chars": len(unit["text"]),
                         "text": unit["text"],
                     })
@@ -1716,10 +1727,10 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
                     "kind_record": "pdf_stream_totals",
                     "id": entry["id"],
                     "sentence_total_items": sum(
-                        int((item.get("coverage") or {}).get("total_items") or 0)
+                        int(item.get("total_items") or 0)
                         for item in read["coverage"]),
                     "paragraph_total_items": sum(
-                        int((item.get("coverage") or {}).get("total_items") or 0)
+                        int(item.get("total_items") or 0)
                         for item in paragraph_read["coverage"]),
                     "sentence_truncated": read["truncated"],
                     "paragraph_truncated": paragraph_read["truncated"],

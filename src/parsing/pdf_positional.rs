@@ -1701,10 +1701,11 @@ mod tests {
             for (number, page_id) in document.get_pages() {
                 eprintln!("probe {id} page {number}");
                 if diag {
-                    let page =
-                        extract_positional_page(&document, page_id, LIMIT, &mut memo, &mut metrics);
-                    for (index, chunk) in page.chunks.iter().enumerate() {
-                        let marker = if chunk
+                    let (lines, _glyphs, bail) =
+                        probe_positional_page(&document, page_id, LIMIT, &mut memo, &mut metrics);
+                    for line in &lines {
+                        let marker = if line
+                            .text
                             .trim_start()
                             .chars()
                             .next()
@@ -1714,13 +1715,12 @@ mod tests {
                         } else {
                             ""
                         };
-                        println!("DIAG id={id} page={number} chunk={index}{marker}:\n{chunk}");
+                        println!(
+                            "DIAG id={id} page={number} b={} x={:.0}-{:.0} y={:.1}{marker}: {}",
+                            line.block, line.x0, line.x1, line.baseline, line.text
+                        );
                     }
-                    println!(
-                        "DIAG id={id} page={number} bail={:?} chunks={}",
-                        page.bail,
-                        page.chunks.len()
-                    );
+                    println!("DIAG id={id} page={number} bail={bail:?}");
                     continue;
                 }
                 let (lines, glyphs, bail) =

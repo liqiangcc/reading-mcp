@@ -14,7 +14,7 @@ design's stage-2 rule, kept out of stage 1 by orchestrator review), so a
 word run whose gap became a space on PyMuPDF's side still counts when the
 characters agree. Multiset compare, not positional.
 
-## Totals (head f92d745 — U+FFFD runs kept, counted)
+## Totals (head 9d67892 — U+FFFD runs kept, counted)
 
 | Measure | Value |
 | --- | --- |
@@ -26,11 +26,19 @@ characters agree. Multiset compare, not positional.
 | Largest glyph count on one page | 12,609 (cap 200,000) |
 | Pages bailed | 206 (`unsupported_font` 206) |
 
-Two earlier heads bracket this one: 7e3869b bailed any page with a
-U+FFFD run (2,257 pages fell back, share 0.255); ef6839e dropped the
-run instead, which glued its neighbours and halved the unit count
-(78,349 → 14,832). The runner now keeps the run's replacement
-characters like the old chunk path does and counts them in
+Variants measured on the way to this head:
+
+- 7e3869b bailed any page with a U+FFFD run: 2,257 pages fell back,
+  six documents held 1,318 of them, share 0.255.
+- ef6839e dropped the run instead: 0.442 but unit count halved
+  (78,349 → 14,832) because a missing run glues its neighbours —
+  reverted.
+- 54b270f split lines on a >0.75× size change (a guess at PyMuPDF's
+  per-span rule): 550,336 lines but share FELL to 0.409 — PyMuPDF does
+  not split on size — reverted to 9d67892.
+
+The runner now keeps the run's replacement characters like the old
+chunk path does and counts them in
 `pdf_positional_undecodable_fragments`. The six decode-heavy documents
 still compare near 0 — U+FFFD text cannot equal PyMuPDF's decoded text
 — but their pages now produce positioned lines instead of unpositioned
@@ -75,14 +83,16 @@ The walker's own line text is faithful: on the Raft diag the emitted
 lines are complete sentences in reading order. The share is driven by
 where PyMuPDF puts line BOUNDARIES, not by wrong text:
 
-- PyMuPDF emits a dict "line" per span run at a different font or size —
-  an italic word, a citation number, a subscript — splitting what the
-  walker (baseline + x-reach) keeps as one line.
+- PyMuPDF inserts a space at a measured gap (`space_width`); stage 1
+  does not, so `𝑥∈Z𝑝to` cannot equal `𝑥∈Z𝑝 to` until stage 2.
+  Whitespace-removed comparison was supposed to hide this, but PyMuPDF
+  ALSO keeps punctuation its decoder renders (parentheses, bullets,
+  `+`/`=` in math) that lopdf's encodings name differently, so the
+  character streams differ, not just the gaps.
 - Six documents (2407.10296, 2403.04799, 2311.05862, 2306.17419,
   2311.18111, 2403.11395) decode to U+FFFD through lopdf's built-in
-  encodings on every run but resolve through PyMuPDF's font handling;
-  with runs dropped rather than bailed they emit no positional text and
-  compare at 0.0–0.4, dragging the total. That is font-decoding
+  encodings on most runs but resolve through PyMuPDF's font handling;
+  they compare at 0.0–0.4 and drag the total. That is font-decoding
   coverage, not a layout gap.
 
 Both are out of stage 1's scope: the first is the stage-3 merging work,

@@ -264,8 +264,12 @@ fn pdf_per_sentence_verdict_keeps_paragraph_index_stable() {
     {
         assert_eq!(before.text, after.text);
         assert_eq!(
-            before.locator.normalized_range, after.locator.normalized_range,
+            before.normalized_range, after.normalized_range,
             "a freed paragraph keeps its normalized range"
+        );
+        assert_eq!(
+            before.paragraph_index, after.paragraph_index,
+            "a freed paragraph keeps its index"
         );
     }
     // The sentence handle into the freed paragraph resolves to its first sentence.

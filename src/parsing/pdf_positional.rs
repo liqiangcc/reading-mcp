@@ -43,6 +43,10 @@ const MAX_FORM_DEPTH: usize = 8;
 /// Two fragments share a baseline when their device y differs by at most this
 /// fraction of the larger size.
 const BASELINE_TOLERANCE: f32 = 0.35;
+/// A same-baseline fragment joins the open line while its x extent reaches
+/// within `2.0 * size` of the line's extent; farther apart it is its own
+/// span (a different column or table cell).
+const LINE_X_GAP: f32 = 2.0;
 /// A baseline gap above this multiple of the page's modal leading starts a
 /// new block.
 const BLOCK_GAP_RATIO: f32 = 1.8;
@@ -968,14 +972,15 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     let mut lines = Vec::<Line>::new();
     for fragment in fragments {
         let joins = lines.last().is_some_and(|line: &Line| {
-            // One line is everything that shares a baseline: table cells,
-            // two-column rows, math mid-line. The ordering pass below puts
-            // the fragments left-to-right; splitting on an x-gap here tore
-            // one text line into several (the probe's PyMuPDF comparison
-            // showed it).
+            // One line is a same-baseline run whose x extent touches or
+            // nearly touches the line's: same-baseline fragments with a real
+            // horizontal gap are separate spans (two-column text rows, table
+            // cells), which keeps each line inside one column.
             line.rotation == fragment.rotation
                 && (line.baseline - fragment.baseline).abs()
                     <= BASELINE_TOLERANCE * line.size.max(fragment.size)
+                && fragment.x0 <= line.x1 + LINE_X_GAP * fragment.size
+                && fragment.x1 >= line.x0 - LINE_X_GAP * fragment.size
         });
         if joins {
             let line = lines.last_mut().expect("line exists");
@@ -997,16 +1002,63 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
             block: 0,
         });
     }
-    // Reading order within a rotation bucket: top to bottom, left to right.
-    // (Column-aware ordering is stage 6; for an interleaved two-column page
-    // the content stream's own column-major order is usually already right,
-    // and this sort is the same one the reference applies to its dict.)
+    // Reading order within a rotation bucket: column bands left to right,
+    // baselines top to bottom inside a band. Without the band pass an
+    // interleaved two-column page alternates the columns line by line (the
+    // Raft evidence run showed it) and headings land mid-paragraph; this is
+    // the coarse version of stage 6's column work, needed now only so the
+    // block boundaries are sane.
     lines.sort_by(|a, b| {
         a.rotation
             .cmp(&b.rotation)
             .then(b.baseline.total_cmp(&a.baseline))
             .then(a.x0.total_cmp(&b.x0))
     });
+    let mut final_lines = Vec::with_capacity(lines.len());
+    let mut buckets: Vec<Vec<Line>> = Vec::new();
+    for line in lines {
+        if buckets
+            .last()
+            .is_none_or(|bucket: &Vec<Line>| bucket[0].rotation != line.rotation)
+        {
+            buckets.push(Vec::new());
+        }
+        buckets.last_mut().expect("bucket").push(line);
+    }
+    for mut rest in buckets {
+        while !rest.is_empty() {
+            // Grow the leftmost band until it is stable.
+            let mut lo = rest
+                .iter()
+                .map(|line| line.x0)
+                .fold(f32::INFINITY, f32::min);
+            let mut hi = rest
+                .iter()
+                .map(|line| line.x1)
+                .fold(f32::NEG_INFINITY, f32::max);
+            loop {
+                let (wide_lo, wide_hi) = rest
+                    .iter()
+                    .filter(|line| line.x0 < hi && line.x1 > lo)
+                    .fold((lo, hi), |(a, b), line| (a.min(line.x0), b.max(line.x1)));
+                if (wide_lo - lo).abs() < f32::EPSILON && (wide_hi - hi).abs() < f32::EPSILON {
+                    break;
+                }
+                lo = wide_lo;
+                hi = wide_hi;
+            }
+            let mut next = Vec::new();
+            for line in rest {
+                if line.x0 < hi && line.x1 > lo {
+                    final_lines.push(line);
+                } else {
+                    next.push(line);
+                }
+            }
+            rest = next;
+        }
+    }
+    let mut lines = final_lines;
 
     let leading = modal_leading(&lines);
     let (body_lo, body_hi) = body_band(&lines, leading);

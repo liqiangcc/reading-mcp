@@ -102,8 +102,8 @@ fn the_same_one_name_text_stays_coarse_in_markdown() {
 #[test]
 fn a_pdf_paragraph_that_repeats_a_glued_word_stays_coarse() {
     let document = document_with_media_type(
-        "thecaseofRedPajama is one dataset. thecaseofRedPajama is another one. \
-         thecaseofRedPajama is the third.",
+        "thecaseofRedPajama thecaseofRedPajama thecaseofRedPajama is one dataset. \
+         thecaseofRedPajama is another one.",
         "application/pdf",
     );
     let set = document.sentence_text_units();
@@ -138,7 +138,7 @@ fn a_pdf_paragraph_of_names_that_occur_once_stays_coarse() {
 #[test]
 fn a_pdf_paragraph_of_initials_glued_to_surnames_stays_coarse() {
     let document = document_with_media_type(
-        "See J.Platt (2019) and Z.Phys. vol. 24 for the two sources, and A.Einstein for the third.",
+        "See J.Platt,Z.Phys,A.Einstein cited in one sentence. A clean sentence follows.",
         "application/pdf",
     );
     let set = document.sentence_text_units();

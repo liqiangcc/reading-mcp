@@ -120,12 +120,14 @@ fn a_pdf_paragraph_with_real_glue_stays_coarse() {
 }
 
 /// A size glued to the word that follows it is still glue in a PDF: the exemption needs the single
-/// capital to end its token.
+/// capital to end its token. PDF-6f: the three events must sit in ONE sentence for the paragraph
+/// to stay coarse - spread over three sentences, each sentence is clean and the paragraph is
+/// now split.
 #[test]
 fn a_pdf_paragraph_of_sizes_glued_to_words_stays_coarse() {
     let document = document_with_media_type(
-        "The 7Binstruct-model is small. The 13Bvariant is larger. The 3Dprinter paper is \
-         different.",
+        "The 7Binstruct-model 13Bvariant 3Dprinter paper is different. A second sentence is \
+         clean.",
         "application/pdf",
     );
     let set = document.sentence_text_units();

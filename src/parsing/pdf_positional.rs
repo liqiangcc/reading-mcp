@@ -371,9 +371,13 @@ impl<'a> FontMetricsMemo<'a> {
 // ---------------------------------------------------------------------------
 
 struct TextSpace {
-    /// The text matrix Tm (PDF spec: Tlm and Tm coincide at every point the
-    /// layer reads them, because each positioning operator resets Tm to Tlm).
+    /// The text matrix Tm, the matrix the pen lives in.
     tm: Matrix,
+    /// The text line matrix Tlm: the matrix at the start of the current
+    /// line. `Td`/`TD`/`T*` move Tlm; `Tm` follows it. Conflating the two
+    /// made every `Td` move the pen instead of the line start, so a
+    /// line-broken word landed one pen-width to the right.
+    tlm: Matrix,
     font_resource: Option<Vec<u8>>,
     font_size: f64,
     char_spacing: f64,
@@ -387,6 +391,7 @@ impl TextSpace {
     fn new() -> Self {
         Self {
             tm: IDENTITY,
+            tlm: IDENTITY,
             font_resource: None,
             font_size: 0.0,
             char_spacing: 0.0,
@@ -463,7 +468,9 @@ where
                 }
                 "Tm" => {
                     if let Some(matrix) = matrix_of(&operation.operands) {
+                        // Tm sets the line start too: Tlm = Tm = M.
                         self.text.tm = matrix;
+                        self.text.tlm = matrix;
                     }
                 }
                 "Td" | "TD" => {
@@ -472,7 +479,9 @@ where
                     if operation.operator == "TD" {
                         self.text.leading = -ty;
                     }
-                    self.text.tm = multiply([1.0, 0.0, 0.0, 1.0, tx, ty], self.text.tm);
+                    // Td moves the line start: Tlm = Tl x Tlm, Tm = Tlm.
+                    self.text.tlm = multiply([1.0, 0.0, 0.0, 1.0, tx, ty], self.text.tlm);
+                    self.text.tm = self.text.tlm;
                 }
                 "TL" => {
                     self.text.leading = operation.operands.first().and_then(number).unwrap_or(0.0);
@@ -552,7 +561,9 @@ where
     }
 
     fn move_to_next_line(&mut self) {
-        self.text.tm = multiply([1.0, 0.0, 0.0, 1.0, 0.0, -self.text.leading], self.text.tm);
+        // T* moves the line start down by the leading: Tlm = Tl x Tlm.
+        self.text.tlm = multiply([1.0, 0.0, 0.0, 1.0, 0.0, -self.text.leading], self.text.tlm);
+        self.text.tm = self.text.tlm;
     }
 
     fn current_font(&self, fonts: &BTreeMap<Vec<u8>, &'d Dictionary>) -> Option<&'d Dictionary> {

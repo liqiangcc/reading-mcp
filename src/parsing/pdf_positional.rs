@@ -84,8 +84,8 @@ pub(super) struct PositionalPage {
     pub chunks: Vec<String>,
     /// Why the page could not be positioned, when it could not.
     pub bail: Option<&'static str>,
-    /// Fragments dropped as undecodable while the page still positioned
-    /// itself; counted in the document metadata.
+    /// Fragments whose decoded text held U+FFFD while the page still
+    /// emitted positional text; counted in the document metadata.
     pub undecodable_fragments: usize,
 }
 
@@ -96,8 +96,8 @@ pub(super) struct BailCounts {
     pub vertical_writing: usize,
     pub unsupported_font: usize,
     pub undecodable: usize,
-    /// Fragments dropped per page while the page still emitted positional
-    /// text (U+FFFD in a run the encoding could not name).
+    /// Fragments on positional pages whose decoded text held U+FFFD
+    /// (kept in the text; counted separately from page bail-outs).
     pub undecodable_fragments: usize,
 }
 
@@ -426,8 +426,8 @@ where
     text: TextSpace,
     fragments: Vec<PositionedFragment>,
     glyphs: usize,
-    /// Shown-string runs whose decoded text held U+FFFD (kept
-    /// positioned, dropped from the text).
+    /// Shown-string runs whose decoded text held U+FFFD (kept in the
+    /// text like the old chunk path, counted for the metadata).
     undecodable_fragments: usize,
     bail: Option<&'static str>,
     /// Form object ids on the recursion stack (cycle guard).
@@ -739,12 +739,11 @@ where
             return;
         }
         if text.contains('\u{fffd}') {
-            // Replacement characters mean the encoding could not name
-            // these codes. The pen already advanced, so dropping just
-            // this run keeps the page's other text positioned; the page
-            // only bails when a run is undecodable AND positionless.
+            // The encoding could not name some codes; the old chunk path
+            // keeps the replacement characters in the page's text, so
+            // this layer does too (dropping the run glued its neighbours
+            // and halved the unit count). Counted in the metadata.
             self.undecodable_fragments += 1;
-            return;
         }
         let end = self.pen_device();
         if !end.0.is_finite() || !end.1.is_finite() || !start.0.is_finite() || !start.1.is_finite()
@@ -791,7 +790,6 @@ where
         }
         if piece.contains('\u{fffd}') {
             self.undecodable_fragments += 1;
-            return;
         }
         let end = self.pen_device();
         if !end.0.is_finite() || !end.1.is_finite() || !start.0.is_finite() || !start.1.is_finite()
@@ -1319,8 +1317,7 @@ struct WalkedPage {
     /// Shown codes walked; only the test-time probe reports it.
     #[allow(dead_code)]
     glyphs: usize,
-    /// Shown-string runs dropped as undecodable while the page still
-    /// laid out its lines.
+    /// Shown-string runs whose decoded text held U+FFFD.
     undecodable_fragments: usize,
     bail: Option<&'static str>,
 }

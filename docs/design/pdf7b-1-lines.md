@@ -28,13 +28,13 @@ characters agree. Multiset compare, not positional.
 
 An earlier head (7e3869b, run 44480437692) bailed a page on ANY
 U+FFFD run: 2,257 pages fell back, six documents held 1,318 of them,
-and the identical share was 0.255. Since a run's position comes from
-the pen advance, not its decoded text, the runner now drops only the
-garbled run and keeps the page positioned
-(`pdf_positional_undecodable_fragments` counts the dropped runs in the
-document metadata). The six decode-heavy documents still compare at
-~0 — they have no text to emit either way — but 1,851 pages went from
-uncompared fallback text to measured positional text.
+and the identical share was 0.255. The runner now keeps the run's
+replacement characters like the old chunk path does (dropping the run
+glued its neighbours and halved the unit count) and counts them in
+`pdf_positional_undecodable_fragments`. The six decode-heavy documents
+still compare near 0 — U+FFFD text cannot equal PyMuPDF's decoded text
+— but their pages now produce positioned lines instead of unpositioned
+fallback text.
 
 ## The ten required papers
 

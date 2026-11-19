@@ -43,9 +43,6 @@ const MAX_FORM_DEPTH: usize = 8;
 /// Two fragments share a baseline when their device y differs by at most this
 /// fraction of the larger size.
 const BASELINE_TOLERANCE: f32 = 0.35;
-/// A fragment belongs to the open line while its x0 is within `2.0 * size`
-/// of the line's running right edge.
-const LINE_X_GAP: f32 = 2.0;
 /// A baseline gap above this multiple of the page's modal leading starts a
 /// new block.
 const BLOCK_GAP_RATIO: f32 = 1.8;
@@ -971,11 +968,14 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     let mut lines = Vec::<Line>::new();
     for fragment in fragments {
         let joins = lines.last().is_some_and(|line: &Line| {
+            // One line is everything that shares a baseline: table cells,
+            // two-column rows, math mid-line. The ordering pass below puts
+            // the fragments left-to-right; splitting on an x-gap here tore
+            // one text line into several (the probe's PyMuPDF comparison
+            // showed it).
             line.rotation == fragment.rotation
                 && (line.baseline - fragment.baseline).abs()
                     <= BASELINE_TOLERANCE * line.size.max(fragment.size)
-                && fragment.x0 >= line.x0 - LINE_X_GAP * fragment.size
-                && fragment.x0 <= line.x1 + LINE_X_GAP * fragment.size
         });
         if joins {
             let line = lines.last_mut().expect("line exists");
@@ -1427,15 +1427,15 @@ mod tests {
             font_resources(),
         );
         let lines = lines_of(&document, page_ids[0]);
-        // The 30-unit gap exceeds 2*size = 24, so the words are two lines
-        // at measured positions.
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text, "AB");
+        // Same baseline: one line whose two fragments keep their measured
+        // positions (the 30-unit Td gap between them is not a space).
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "ABCD");
         assert!((lines[0].x0 - 100.0).abs() < 0.01);
-        assert!((lines[0].x1 - 112.0).abs() < 0.01);
-        assert_eq!(lines[1].text, "CD");
-        assert!((lines[1].x0 - 142.0).abs() < 0.01);
-        assert!((lines[1].baseline - 700.0).abs() < 0.01);
+        assert!((lines[0].x1 - 154.0).abs() < 0.01);
+        assert_eq!(lines[0].fragments.len(), 2);
+        assert!((lines[0].fragments[0].x0 - 100.0).abs() < 0.01);
+        assert!((lines[0].fragments[1].x0 - 142.0).abs() < 0.01);
     }
 
     #[test]

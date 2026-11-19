@@ -1064,11 +1064,13 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     for mut rest in buckets {
         let mut bands: Vec<Vec<Line>> = Vec::new();
         while !rest.is_empty() {
-            // Grow the band from the leftmost line only until it is stable.
-            // A line counts into the band only when the band contains it:
-            // a centered heading or footer that overlaps BOTH column
-            // extents would otherwise chain them into one band and
-            // interleave the columns (the Raft evidence run showed that).
+            // Grow the band from the leftmost START edge: a line belongs to
+            // the band while its x0 sits inside the band's span. Indented
+            // lines share their column's x0 range but not its x1, so
+            // containing the whole line splits the column into many bands
+            // (the Raft evidence run showed that); keying on x0 keeps a
+            // paragraph's indents inside its column while still stopping at
+            // the gutter.
             let first = rest
                 .iter()
                 .min_by(|a, b| a.x0.total_cmp(&b.x0))
@@ -1077,7 +1079,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
             for _ in 0..=rest.len() {
                 let (wide_lo, wide_hi) = rest
                     .iter()
-                    .filter(|line| line.x0 >= lo && line.x1 <= hi)
+                    .filter(|line| line.x0 >= lo && line.x0 < hi)
                     .fold((lo, hi), |(a, b), line| (a.min(line.x0), b.max(line.x1)));
                 if wide_lo == lo && wide_hi == hi {
                     break;
@@ -1088,7 +1090,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
             let mut next = Vec::new();
             let mut band = Vec::new();
             for line in rest {
-                if line.x0 >= lo && line.x1 <= hi {
+                if line.x0 >= lo && line.x0 < hi {
                     band.push(line);
                 } else {
                     next.push(line);
@@ -1586,15 +1588,14 @@ mod tests {
             font_resources(),
         );
         let lines = lines_of(&document, page_ids[0]);
-        // Same baseline, but the 30-unit Td gap is wider than the join's
-        // reach: two lines, each at a measured position.
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text, "AB");
+        // Td moves the line start (not just the pen): the 30-unit offset
+        // lands CD at x=130, inside the 2*size join reach, so the baseline
+        // shares one line.
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "ABCD");
         assert!((lines[0].x0 - 100.0).abs() < 0.01);
-        assert!((lines[0].x1 - 112.0).abs() < 0.01);
-        assert_eq!(lines[1].text, "CD");
-        assert!((lines[1].x0 - 142.0).abs() < 0.01);
-        assert!((lines[1].baseline - 700.0).abs() < 0.01);
+        assert!((lines[0].x1 - 142.0).abs() < 0.01);
+        assert!((lines[0].baseline - 700.0).abs() < 0.01);
     }
 
     #[test]

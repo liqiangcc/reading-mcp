@@ -119,9 +119,11 @@ emits glued text as served sentences. It is priced, not proposed.
 
 Both samples drawn with seed 23, 50 units each, at most 8 per document, >= 10 documents. The
 candidate sample is sentences S1 produces from freed paragraphs; the control is units the server
-already emits today (recorded units only - the 5..800-char majority carries no stored text, so
-the control is drawn from the recorded tail and is mostly `<5`-char units, which makes the
-comparison stricter for the candidate, not easier). Labels:
+already emits today. **The control is biased**: the artifact stores text only for `<5`-char and
+`>800`-char units, so the control is drawn almost entirely from the `<5`-char tail and is 88%
+`fragment` by construction. The "fragment <= control + 2" bar therefore tested nothing, and it
+is not a stricter bar - it is a meaningless one. The useful comparison is the absolute candidate
+label counts below. Labels:
 
 - `sentence`: one sentence. Glued words inside it are allowed.
 - `merged`: two or more sentences, or a heading, byline, caption, masthead or table row fused
@@ -185,15 +187,28 @@ comparison stricter for the candidate, not easier). Labels:
 | 49 | 2403.02626 | 135 | `4 , 5 [34] Pan Lu, Baolin Peng, Hao Cheng, Michel Galley, Kai-Wei Chang, Ying Nian Wu, Song-Chun Zhu, and Jianfeng Gao.` | fragment |
 | 50 | 2310.09263 | 87 | `DataWig: Missing Value Imputation for Tables.` | fragment |
 
-**Sentence 18, merged 5, fragment 27, garbled 0.** The fragments are citation tails (`2019.`,
-`1376–1385.`, `(2022), "Gradient methods..."`), reference-list pieces (`[7] Junming Chen...`,
-`[Cited on: pg.`, `PhD thesis...`), heading stubs (`Теорема 3.1.5 .`,
-`Hand-Object Interaction Image Synthesis.`), formula/table bits (`07 94 .`, `# ResBlock Channel
-mul.`) and one page-number (`93 seek 0 .`). They are the units the splitter already emits
-everywhere else in the corpus - the same shapes the control sample is made of - not a new
-damage mode. The 5 merged rows are glued text the segmenter cannot see (missing spaces inside,
-as in 2307.09982's spaceless Russian) - exactly the text the guard is right about and that S1
-still cannot split honestly, but no worse than the paragraph it replaces.
+**Sentence 17, merged 7, fragment 26, garbled 0.** The 26 fragments are three groups:
+
+- **prose half-sentences** (9): `As shown in Table.`, `, 2023 ; Nishida et al.`,
+  `, n K ) in input and returns...`, `Example 23.2 Hearst et al.`, `In [13], Niels et al.`,
+  `accumulate toward the end.`, `...Llama2-7B-chat ( 0 .`, plus `The atis spoken language
+  sys- tems pilot corpus.` and `In International Conference on Security for Information
+  Technology and Communications .` - these are the units the user cares about, fragments cut at
+  a citation or heading the splitter treats as a boundary;
+- **reference-list pieces** (11): `2019.`, `1376–1385.`, `[7] Junming Chen, ...`,
+  `[Cited on: pgs.`, `[Cited on: pg.`, `(2022), "Gra- dient methods..."`, `PhD thesis,
+  University of Illinois at Chicago, 2022.`, `, 2023 ; Nishida et al.` group-mates
+  `B 80 , 184421 (2009) .`, `4 , 5 [34] Pan Lu, ...`, `DataWig: Missing Value Imputation
+  for Tables.`;
+- **formula, table or heading bits** (6): `07 94 .`, `# ResBlock Channel mul.`,
+  `93 seek 0 .` (page number), `Теорема 3.1.5 .`, `Hand-Object Interaction Image
+  Synthesis.`, `Example 23.2 Hearst et al.`'s companion heading rows.
+
+They are the same shapes the splitter already emits from every clean paragraph in the corpus -
+visible in the control column - not a new damage mode. The 7 merged rows are glued text the
+segmenter cannot see (missing spaces inside, as in 2307.09982's spaceless Russian) - exactly
+the text the guard is right about and that S1 still cannot split honestly, but no worse than
+the paragraph it replaces.
 
 ### Control sample (server's own emitted units, seed 23): 50 units from 26 documents
 
@@ -254,10 +269,11 @@ still cannot split honestly, but no worse than the paragraph it replaces.
 
 ## Stop-condition check (Step 0)
 
-- Candidate `fragment` 27 of 50 vs control `fragment` 44 of 50: the candidate is **17 below**
-  the control, nowhere near the +2 stop line. The freed paragraphs' sentence stream is *more*
-  sentence-like than the units the server already serves, because the control tail is all
-  citation fragments and math debris.
+- Candidate `fragment` 26 of 50 vs control `fragment` 44 of 50. The +2 line is not crossed,
+  but the comparison is formally void: the control is 88% fragment *by construction* (only
+  `<5`-char units carry stored text), so it cannot bound the candidate. What the labels
+  actually show: 9 of the candidate's 50 produced sentences are prose half-sentences,
+  the rest are reference-list debris and heading/table bits the splitter emits everywhere.
 - S1 frees 251 of the 538 `missed_boundary` coarse paragraphs - above the 200 minimum.
 
 ## Choice: S1, per-sentence verdict

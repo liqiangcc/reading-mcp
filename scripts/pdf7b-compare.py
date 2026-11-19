@@ -103,14 +103,14 @@ def run_shard(args) -> int:
                       flush=True)
                 continue
             env = dict(os.environ)
-            env["PDF7B_PROBE_DIR"] = os.path.dirname(os.path.abspath(path))
-            env["PDF7B_PROBE_OUT"] = args.out_dir
             # The probe test reads every PDF in the directory; run it on the
             # one file by pointing at a private subdirectory.
             one_dir = os.path.join(args.work_dir, "one")
             os.makedirs(one_dir, exist_ok=True)
             for old in os.listdir(one_dir):
                 os.unlink(os.path.join(one_dir, old))
+            env["PDF7B_PROBE_DIR"] = one_dir
+            env["PDF7B_PROBE_OUT"] = args.out_dir
             target = os.path.join(one_dir, os.path.basename(path))
             try:
                 os.link(path, target)

@@ -1096,6 +1096,15 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
                     next.push(line);
                 }
             }
+            if band.is_empty() {
+                // A degenerate span (a rotated line can reach x1 < x0)
+                // selected nothing: pull one line out anyway so the loop
+                // always makes progress instead of spinning on the same
+                // `rest`.
+                if let Some(line) = next.pop() {
+                    band.push(line);
+                }
+            }
             bands.push(band);
             rest = next;
         }

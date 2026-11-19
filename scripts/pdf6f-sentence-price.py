@@ -398,19 +398,22 @@ def removed_boundaries(text: str, rules: frozenset) -> list[tuple[int, frozenset
 
 def doc_stream(paragraphs: list[dict], rules: frozenset) -> list[dict]:
     """The document's projected unit stream: each split-eligible paragraph is re-segmented
-    with `rules`; every other paragraph is one unit of its own."""
+    with `rules`; every other paragraph is one unit of its own. Units carry their section,
+    so the broken count never pairs across a section boundary."""
     units: list[dict] = []
     for paragraph in paragraphs:
         text = paragraph["text"]
+        section_id = paragraph.get("section_id")
         eligible = (paragraph.get("content_class_detail") in SPLIT_ELIGIBLE_DETAILS
                     and not paragraph.get("degradation"))
         if not eligible:
-            units.append({"text": text,
+            units.append({"text": text, "section_id": section_id,
                           "paragraph_coarse": True,
                           "non_prose": paragraph.get("content_class") == "non_prose"})
             continue
         for start, end in sentence_ranges(text, rules):
-            units.append({"text": text[start:end], "paragraph_coarse": False,
+            units.append({"text": text[start:end], "section_id": section_id,
+                          "paragraph_coarse": False,
                           "non_prose": False})
     return units
 
@@ -418,18 +421,24 @@ def doc_stream(paragraphs: list[dict], rules: frozenset) -> list[dict]:
 def stream_metrics(paragraphs: list[dict], rules: frozenset) -> dict:
     units = doc_stream(paragraphs, rules)
     short = long = broken = 0
-    last: dict | None = None
-    for unit in units:
+    for index, unit in enumerate(units):
         text = unit["text"].strip()
         if len(text) < SHORT_CHARS:
             short += 1
         if len(text) > LONG_CHARS:
             long += 1
-        skip = (unit["non_prose"] or not text or ends_with_terminal(text)
-                or (unit["paragraph_coarse"] and len(text) <= 120))
-        if last is not None and last["open"] and text[:1].islower():
-            broken += 1
-        last = {"open": not skip} if text else last
+        if (unit["non_prose"] or not text or ends_with_terminal(text)
+                or (unit["paragraph_coarse"] and len(text) <= 120)):
+            continue
+        for follow in units[index + 1:]:
+            if follow["section_id"] != unit["section_id"]:
+                break
+            follow_text = follow["text"].lstrip()
+            if not follow_text:
+                continue
+            if follow_text[:1].islower():
+                broken += 1
+            break
     total = len(units)
     return {"units": total, "short": short, "long": long, "broken": broken,
             "m1": bool(total) and long / total > 0.05,

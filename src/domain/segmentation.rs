@@ -935,33 +935,18 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
         }
     }
 
-    // A single letter is an initial in every format. PDF-6g R-I widens that to a token made
-    // only of single ASCII letters joined by periods (`E.F`, `K.R`, `J.R.R`), which the
-    // one-letter check could not see - but only for PDF, where author initials are dense;
-    // `u.s`, `u.k`, `e.g` and `i.e` keep their own abbreviation handling above.
-    let initials = if pdf {
-        token_is_initials(&token)
-    } else {
-        token.chars().count() == 1 && token.chars().all(|ch| ch.is_ascii_alphabetic())
-    };
-    if initials && next_non_whitespace(chars, index + 1).is_some_and(|ch| ch.is_uppercase()) {
+    // A single letter is an initial in every format. PDF-6g R-I (multi-letter initials)
+    // was measured out: the same rule that protects `E.F.` also merges the sentence-final
+    // abbreviations PDFs carry (`w.h.p.`, `d.o.f.`, `i.i.d.` end a sentence more often
+    // than they join one). The one-letter check stays exactly as it was.
+    if token.chars().count() == 1
+        && token.chars().all(|ch| ch.is_ascii_alphabetic())
+        && next_non_whitespace(chars, index + 1).is_some_and(|ch| ch.is_uppercase())
+    {
         return false;
     }
 
     ascii_terminal_is_terminal(chars, index)
-}
-
-/// PDF-6g R-I: a token of single ASCII letters joined by periods (`E.F`, `K.R`, `J.R.R`;
-/// one letter alone included).
-fn token_is_initials(token: &str) -> bool {
-    let mut letters = 0usize;
-    for part in token.split('.') {
-        if part.chars().count() != 1 || !part.chars().all(|ch| ch.is_ascii_alphabetic()) {
-            return false;
-        }
-        letters += 1;
-    }
-    letters >= 1
 }
 
 /// The whitespace-separated word directly before `preceding_period_token`'s token, lowercase
@@ -2090,15 +2075,18 @@ mod tests {
             .collect()
     }
 
-    /// PDF-6g R-I/R-A only fire for PDF. Under `application/pdf` the initials and the `et al.`
-    //  stays inside their sentences.
+    /// PDF-6g ships R-A only: R-I (multi-letter initials) was measured out on the corpus
+    /// (`w.h.p.`, `d.o.f.` and friends end sentences more often than they join), so `E.F.`
+    //  keeps splitting exactly as before while `et al.` stays inside its sentence.
     #[test]
-    fn pdf_sentence_rules_keep_initials_and_et_al_inside_the_sentence() {
+    fn pdf_sentence_rules_keep_et_al_inside_the_sentence() {
         for (text, expected) in [
             (
                 "E.F. Fama and K.R. French study returns. They find two factors.",
                 vec![
-                    "E.F. Fama and K.R. French study returns.",
+                    "E.F.",
+                    "Fama and K.R.",
+                    "French study returns.",
                     "They find two factors.",
                 ],
             ),

@@ -1498,6 +1498,49 @@ def measure_units(units: list[dict], reference: dict, pages: list[int | None],
 HEADER_TIERS = (("spec", HEADER_PAGE_SHARE, PAGENUM_PAGE_SHARE),
                 ("loose", 0.3, 0.3))
 
+# A broken sentence (PDF-7b-1): a prose unit that does not end with a
+# terminal, followed in the same section by a unit that starts lowercase.
+# Headings (short paragraph units without a terminal) and non-prose units
+# are not sentences and cannot be broken.
+SENTENCE_TERMINALS = ".?!\u3002\uff1f\uff01"
+TERMINAL_CLOSERS = "\u201d\u2019\u00bb)]}" + "\u3009\u300b\u3011\u3010\u300f\u300d"
+
+
+def ends_with_terminal(text: str) -> bool:
+    """The unit's last non-whitespace character is a terminal, or a closing
+    quote/bracket after one."""
+    text = text.rstrip()
+    while text and text[-1] in TERMINAL_CLOSERS:
+        text = text[:-1].rstrip()
+    return bool(text) and text[-1] in SENTENCE_TERMINALS
+
+
+def broken_sentence_count(units: list[dict]) -> int:
+    """Units that are half of a sentence: not a heading (a short paragraph
+    unit is the heading shape) and not non-prose, no terminal at the end,
+    and the next unit of the same section opens lowercase."""
+    broken = 0
+    for index, unit in enumerate(units):
+        if unit.get("content_class") == "non_prose":
+            continue
+        text = (unit.get("text") or "").strip()
+        if not text:
+            continue
+        if unit.get("effective_kind") == "paragraph" and len(text) <= 120:
+            continue
+        if ends_with_terminal(text):
+            continue
+        for follow in units[index + 1:]:
+            if follow.get("section_id") != unit.get("section_id"):
+                break
+            follow_text = (follow.get("text") or "").lstrip()
+            if not follow_text:
+                continue
+            if follow_text[0].islower():
+                broken += 1
+            break
+    return broken
+
 
 def header_measurement(reference: dict, units: list[dict]) -> dict:
     """Both the thresholds the task fixes (80% / 50%) and PDF-5a's 30% proxy, because the
@@ -1713,6 +1756,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     record["what_if"] = measured["what_if"]
     record["units"] = measured["total_units"]
     record["headers"] = header_measurement(reference, units)
+    record["broken_sentences"] = broken_sentence_count(units)
 
     suspect_loss = ((quality["containment_first20"] is not None
                      and quality["containment_first20"] < LOSS_CONTAINMENT)
@@ -2262,6 +2306,27 @@ def aggregate_mode(args) -> int:
                   f"(`du -sh`), {biggest['venv_bytes']} bytes (`du -sb`), from "
                   f"`{biggest.get('venv_path')}`."]
 
+    # 7. Broken sentences (PDF-7b-1)
+    #
+    # A broken sentence is a prose unit that ends without a terminal and is
+    # followed in the same section by a unit that starts lowercase - the
+    # half-sentence unit the positional layer must not create more of.
+    broken_total = sum(doc.get("broken_sentences") or 0 for doc in docs)
+    broken_docs = sorted(
+        ((doc.get("broken_sentences") or 0, doc["id"]) for doc in docs
+         if doc.get("broken_sentences")),
+        reverse=True)
+    lines += ["", "## 7. Broken sentences (PDF-7b-1)", "",
+              "A broken sentence is a prose unit (not a heading, not "
+              "`non_prose`) that does not end with a terminal and is followed, "
+              "in the same section, by a unit that starts with a lowercase "
+              "letter - a unit that is half of a sentence.", "",
+              f"Broken sentences: **{broken_total}** in "
+              f"{len(broken_docs)} documents.", "",
+              "| Id | Broken sentences |", "| --- | --- |"]
+    for count, identifier in broken_docs[:30]:
+        lines.append(f"| {identifier} | {count} |")
+
     text = "\n".join(lines)
     print(text)
     if args.markdown:
@@ -2294,6 +2359,9 @@ def aggregate_mode(args) -> int:
                                  for name, _, _ in HEADER_TIERS},
             "missed_boundary_tokens": missed_tokens.most_common(10),
             "loss_documents": [doc["id"] for doc in loss_docs],
+            "broken_sentences": broken_total,
+            "broken_sentences_documents": {identifier: count
+                                           for count, identifier in broken_docs},
             "outcomes": {f"{backend}/{outcome}/{code}": count
                          for (backend, outcome, code), count in sorted(outcome_counts.items())},
             "refusal_reasons": reasons.most_common(),
@@ -2329,6 +2397,7 @@ PAIRED_MEASURES = (
     ("containment_median", "5-gram containment (median)"),
     ("containment_p05", "5-gram containment (p05)"),
     ("papers_below_0p9_containment", "Papers with containment below 0.9"),
+    ("broken_sentences", "Broken sentence units"),
     ("open_s_median", "Open seconds (median)"),
     ("open_s_p95", "Open seconds (p95)"),
     ("peak_tree_mib_median", "Peak tree RSS MiB (median)"),
@@ -2391,6 +2460,7 @@ def measures_for(documents: list[dict], long_units: list[dict], short_units: lis
         "containment_median": statistics.median(containments) if containments else None,
         "containment_p05": percentile(containments, 0.05),
         "papers_below_0p9_containment": sum(1 for value in containments if value < 0.9),
+        "broken_sentences": sum(doc.get("broken_sentences") or 0 for doc in opened),
         "open_s_median": statistics.median(opens) if opens else None,
         "open_s_p95": percentile(opens, 0.95),
         "peak_tree_mib_median": statistics.median(peaks) if peaks else None,
@@ -2466,6 +2536,22 @@ def paired_mode(args) -> int:
         base_measures = measures_for(base_documents, base_long, base_short, population)
         run_measures = measures_for(loaded[label], longs, shorts, population)
         lines += paired_measure_table(base_measures, run_measures, label)
+        base_broken = {doc["id"]: doc.get("broken_sentences") or 0
+                       for doc in base_documents}
+        run_broken = {doc["id"]: doc.get("broken_sentences") or 0
+                      for doc in loaded[label]}
+        risen = sorted(
+            (run_broken.get(identifier, 0) - base_broken.get(identifier, 0),
+             identifier)
+            for identifier in population
+            if run_broken.get(identifier, 0) > base_broken.get(identifier, 0))
+        risen.reverse()
+        lines += ["", f"Papers whose broken-sentence count rose under `{label}`: "
+                      f"{len(risen)} of {len(population)} paired papers.", ""]
+        if risen:
+            lines += ["| Id | Broken sentences added |", "| --- | --- |"]
+            for added, identifier in risen[:20]:
+                lines.append(f"| {identifier} | {added} |")
         lines += ["", f"Outcomes over `{label}`'s whole population:", ""]
         lines += outcome_table(loaded, ["default", label])
         lines.append("")

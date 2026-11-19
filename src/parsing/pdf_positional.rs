@@ -1063,50 +1063,26 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     }
     for mut rest in buckets {
         let mut bands: Vec<Vec<Line>> = Vec::new();
-        while !rest.is_empty() {
-            // Grow the band from the leftmost START edge: a line belongs to
-            // the band while its x0 sits inside the band's span. Indented
-            // lines share their column's x0 range but not its x1, so
-            // containing the whole line splits the column into many bands
-            // (the Raft evidence run showed that); keying on x0 keeps a
-            // paragraph's indents inside its column while still stopping at
-            // the gutter.
-            let first = rest
-                .iter()
-                .min_by(|a, b| a.x0.total_cmp(&b.x0))
-                .expect("non-empty");
-            let (mut lo, mut hi) = (first.x0, first.x1);
-            for _ in 0..=rest.len() {
-                let (wide_lo, wide_hi) = rest
-                    .iter()
-                    .filter(|line| line.x0 >= lo && line.x0 < hi)
-                    .fold((lo, hi), |(a, b), line| (a.min(line.x0), b.max(line.x1)));
-                if wide_lo == lo && wide_hi == hi {
-                    break;
-                }
-                lo = wide_lo;
-                hi = wide_hi;
+        // Cluster the lines by their left edges: sorted by x0, split where
+        // the next start is a full gap away. Column lines sit within an
+        // indent of each other; a gutter or a centered line that begins
+        // between the columns starts its own band, and a line that
+        // STRADDLES the gutter but begins at a column edge only widens
+        // its own band (membership never looks at x1, so it cannot chain
+        // the columns together the way an x-extent union did).
+        const BAND_X_GAP: f32 = 24.0;
+        rest.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+        let mut band: Vec<Line> = Vec::new();
+        let mut previous_x0 = f32::NEG_INFINITY;
+        for line in rest {
+            if !band.is_empty() && line.x0 - previous_x0 > BAND_X_GAP {
+                bands.push(std::mem::take(&mut band));
             }
-            let mut next = Vec::new();
-            let mut band = Vec::new();
-            for line in rest {
-                if line.x0 >= lo && line.x0 < hi {
-                    band.push(line);
-                } else {
-                    next.push(line);
-                }
-            }
-            if band.is_empty() {
-                // A degenerate span (a rotated line can reach x1 < x0)
-                // selected nothing: pull one line out anyway so the loop
-                // always makes progress instead of spinning on the same
-                // `rest`.
-                if let Some(line) = next.pop() {
-                    band.push(line);
-                }
-            }
+            previous_x0 = line.x0;
+            band.push(line);
+        }
+        if !band.is_empty() {
             bands.push(band);
-            rest = next;
         }
         // Band order: highest first, then left to right. A full-width
         // title or a header row tops the page (and so leads its band's

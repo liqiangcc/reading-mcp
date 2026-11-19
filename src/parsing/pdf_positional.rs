@@ -718,6 +718,12 @@ where
             return;
         }
         let end = self.pen_device();
+        if !end.0.is_finite() || !end.1.is_finite() || !start.0.is_finite() || !start.1.is_finite()
+        {
+            // Degenerate text matrix (huge Tz/Tm): drop the run rather than
+            // poison every geometry comparison below.
+            return;
+        }
         self.fragments.push(PositionedFragment {
             text,
             x0: start.0 as f32,
@@ -755,6 +761,10 @@ where
             return;
         }
         let end = self.pen_device();
+        if !end.0.is_finite() || !end.1.is_finite() || !start.0.is_finite() || !start.1.is_finite()
+        {
+            return;
+        }
         self.fragments.push(PositionedFragment {
             text: piece,
             x0: start.0 as f32,
@@ -1027,21 +1037,18 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     }
     for mut rest in buckets {
         while !rest.is_empty() {
-            // Grow the leftmost band until it is stable.
-            let mut lo = rest
+            // Grow the band from the leftmost line only until it is stable.
+            let first = rest
                 .iter()
-                .map(|line| line.x0)
-                .fold(f32::INFINITY, f32::min);
-            let mut hi = rest
-                .iter()
-                .map(|line| line.x1)
-                .fold(f32::NEG_INFINITY, f32::max);
-            loop {
+                .min_by(|a, b| a.x0.total_cmp(&b.x0))
+                .expect("non-empty");
+            let (mut lo, mut hi) = (first.x0, first.x1);
+            for _ in 0..=rest.len() {
                 let (wide_lo, wide_hi) = rest
                     .iter()
                     .filter(|line| line.x0 < hi && line.x1 > lo)
                     .fold((lo, hi), |(a, b), line| (a.min(line.x0), b.max(line.x1)));
-                if (wide_lo - lo).abs() < f32::EPSILON && (wide_hi - hi).abs() < f32::EPSILON {
+                if wide_lo == lo && wide_hi == hi {
                     break;
                 }
                 lo = wide_lo;

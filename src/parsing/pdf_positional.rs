@@ -49,10 +49,6 @@ const BASELINE_TOLERANCE: f32 = 0.5;
 /// within `2.0 * size` of the line's extent; farther apart it is its own
 /// span (a different column or table cell).
 const LINE_X_GAP: f32 = 2.0;
-/// A horizontal gap wider than this fraction of the fragment's size
-/// (PyMuPDF's space advance is about `0.25 * size`) is a word gap even
-/// when no space glyph was shown.
-const SPACE_GAP_RATIO: f32 = 0.2;
 /// A baseline gap above this multiple of the page's modal leading starts a
 /// new block.
 const BLOCK_GAP_RATIO: f32 = 1.8;
@@ -998,26 +994,11 @@ impl Line {
         let mut fragments = self.fragments.iter().collect::<Vec<_>>();
         fragments.sort_by(|a, b| a.x0.total_cmp(&b.x0));
         let mut text = String::new();
-        let mut end_x = 0.0_f32;
         for fragment in fragments {
-            // A fragment that starts visibly right of the previous one's
-            // pen end is a word gap the writer never showed a space for:
-            // PyMuPDF inserts one at `space_width`, the design's stage-2
-            // rule. Stage 1 needs it anyway so a math run does not glue to
-            // the word before it.
-            if !text.is_empty()
-                && !text.ends_with(char::is_whitespace)
-                && fragment.x0 - end_x > fragment.size * SPACE_GAP_RATIO
-                && fragment
-                    .text
-                    .chars()
-                    .next()
-                    .is_some_and(|character| !character.is_whitespace())
-            {
-                text.push(' ');
-            }
+            // No gap-based space insertion: that is stage 2's calibrated
+            // rule (orchestrator review, PDF-7b-1). Only the `TJ`
+            // threshold lopdf already applies adds spaces in stage 1.
             text.push_str(fragment.text.trim_matches('\n'));
-            end_x = fragment.x1;
         }
         text.trim().to_string()
     }

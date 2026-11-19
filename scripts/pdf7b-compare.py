@@ -43,7 +43,10 @@ SWEEP = load_sibling("pdf-sweep.py")
 
 
 def normalize_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    # All whitespace removed, not folded: stage 1 does not insert spaces
+    # (stage 2's gap rule), so a line whose words run together still counts
+    # as a match when every non-space character is identical.
+    return re.sub(r"\s+", "", text).strip()
 
 
 def pymupdf_lines(page) -> list[dict]:

@@ -320,6 +320,69 @@ fn pdf_masthead_blob_stays_coarse_under_the_per_sentence_guard() {
 }
 
 #[test]
+fn pdf_bibliographic_markers_spanning_sentences_stay_coarse() {
+    // A masthead whose bibliographic markers pack a 10-word window across sentence
+    // boundaries. `sentence_ranges` splits this into seven short pieces - "Vol." is not a
+    // protected abbreviation, "No." is protected so "No. 3642" stays inside its piece - and
+    // no piece holds four markers (at most two). A per-sentence bibliographic check would
+    // free the paragraph; the paragraph-wide check keeps it refused, which is exactly the
+    // #139 masthead case.
+    let mut document = document_with_content(
+        "Science , New Series . Vol. 146 , No. 3642 . Oct. 16 , 1964 . Pp. 347-353 .",
+    );
+    document.media_type = MediaType("application/pdf".into());
+
+    let set = document.sentence_text_units();
+
+    assert!(set.units.is_empty());
+    assert_eq!(
+        set.coverage[0].eligibility,
+        SentenceEligibility::CoarseParagraphOnly
+    );
+}
+
+#[test]
+fn pdf_paragraph_where_only_a_repeated_name_counts_is_split() {
+    // One camel-case name in each of three sentences and nothing else: R1 exempts the
+    // repeated name paragraph-wide, the count that remains is zero, so the paragraph was
+    // never refused and splits like clean prose.
+    let mut document = document_with_content(
+        "The ChatGPT baseline was tuned first. The ChatGPT ablation removed the retrieval \
+         step. The ChatGPT numbers are reported in Table 4.",
+    );
+    document.media_type = MediaType("application/pdf".into());
+
+    let set = document.sentence_text_units();
+
+    assert_eq!(set.units.len(), 3);
+    assert_eq!(set.coverage[0].eligibility, SentenceEligibility::Eligible);
+}
+
+#[test]
+fn pdf_per_sentence_verdict_uses_the_paragraphs_name_set() {
+    // R1's repeated-name set is a property of the paragraph. `ChatGPT` repeats across the
+    // three sentences, so it is exempt everywhere; the remaining counted events are
+    // `gluedOne`/`gluedTwo` in sentence one and `gluedThree` in sentence two - three events
+    // over the paragraph, at most two in any sentence, so the paragraph is freed.
+    // Recomputing the name set per sentence would count `ChatGPT` inside sentence one and
+    // keep the paragraph coarse.
+    let mut document = document_with_content(
+        "The ChatGPT model beats gluedOne and gluedTwo easily. The ChatGPT variant also \
+         beats gluedThree today. The ChatGPT name appears again.",
+    );
+    document.media_type = MediaType("application/pdf".into());
+
+    let set = document.sentence_text_units();
+
+    assert_eq!(set.units.len(), 3);
+    assert_eq!(set.coverage[0].eligibility, SentenceEligibility::Eligible);
+    assert_eq!(
+        set.units[0].text,
+        "The ChatGPT model beats gluedOne and gluedTwo easily."
+    );
+}
+
+#[test]
 fn clean_fallback_pdf_keeps_not_applicable_reliability() {
     let mut document = document_with_content(
         "Certain systematic methods of scientific thinking may produce much more rapid progress \

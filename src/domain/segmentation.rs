@@ -527,12 +527,59 @@ fn collect_section_segmentation(
         // terminal-punctuation splitting would produce a fake clean sentence that
         // hides front matter or extra body text inside one unit. Keep it coarse so
         // strict callers can fail closed instead of trusting the over-claim.
+        // The ranges a freed paragraph already paid for: the PDF per-sentence re-check
+        // computes them to judge the sentences, and they are exactly what the eligible
+        // branch would compute again.
+        let mut freed_sentence_ranges = None;
         if eligibility == SentenceEligibility::Eligible
             && content_class == ParagraphContentClass::ProseOrUnknown
             && fallback_guard_can_fire(text)
-            && paragraph_fails_fallback_guard(&index, text, candidate.range, guard)
         {
-            eligibility = SentenceEligibility::CoarseParagraphOnly;
+            if guard == FallbackGuardProfile::PdfProse {
+                // PDF-6f (#232): a refused paragraph is re-checked sentence by sentence.
+                // The doubled-character and bibliographic rules stay paragraph-wide - a
+                // masthead's markers are dense only across sentence boundaries - so a
+                // paragraph they flag never reaches the per-sentence pass. Otherwise the
+                // paragraph stays refused only when one of its own sentences carries the
+                // missing-space count.
+                if contains_doubled_character_token(text) || has_bibliographic_metadata_run(text) {
+                    eligibility = SentenceEligibility::CoarseParagraphOnly;
+                } else {
+                    let chars = text.chars().collect::<Vec<_>>();
+                    let paragraph_events = count_glue_events(&chars, true, None);
+                    if paragraph_events < MIN_MISSING_SPACE_GLUE_EVENTS {
+                        // Eligible, as a paragraph that never fired.
+                    } else {
+                        // R1's name set is a property of the paragraph, so the same set
+                        // judges every sentence; recomputing it per sentence would let a
+                        // name that repeats across sentences look unrepeated.
+                        let repeated = repeated_name_tokens(&chars);
+                        let repeated = (!repeated.is_empty()).then_some(&repeated);
+                        let paragraph_fires = count_glue_events(&chars, true, repeated)
+                            >= MIN_MISSING_SPACE_GLUE_EVENTS;
+                        if !paragraph_fires {
+                            // Eligible, as a paragraph the shipped exemptions already
+                            // clear.
+                        } else {
+                            let ranges = sentence_ranges(text, candidate.range);
+                            let refused = ranges.iter().any(|range| {
+                                index.slice(*range).is_ok_and(|sentence| {
+                                    let sentence_chars = sentence.chars().collect::<Vec<_>>();
+                                    count_glue_events(&sentence_chars, true, repeated)
+                                        >= MIN_MISSING_SPACE_GLUE_EVENTS
+                                })
+                            });
+                            if refused {
+                                eligibility = SentenceEligibility::CoarseParagraphOnly;
+                            } else {
+                                freed_sentence_ranges = Some(ranges);
+                            }
+                        }
+                    }
+                }
+            } else if looks_like_unreliable_fallback_text(text, guard) {
+                eligibility = SentenceEligibility::CoarseParagraphOnly;
+            }
         }
 
         if eligibility == SentenceEligibility::CoarseParagraphOnly {
@@ -548,7 +595,8 @@ fn collect_section_segmentation(
                 0,
             )?);
         } else {
-            let ranges = sentence_ranges(text, candidate.range);
+            let ranges =
+                freed_sentence_ranges.unwrap_or_else(|| sentence_ranges(text, candidate.range));
             let sentence_chars = ranges.iter().map(|range| range.len()).sum::<usize>();
 
             for (sentence_offset, range) in ranges.iter().copied().enumerate() {
@@ -1043,32 +1091,6 @@ impl FallbackGuardProfile {
             Self::AllFormats
         }
     }
-}
-
-/// The fallback guard's verdict on one paragraph. A paragraph the guard refuses is, for PDF
-/// prose only, re-checked sentence by sentence (PDF-6f): the missing-space count is taken
-/// per sentence, so one glued sentence no longer condemns its clean neighbours. The
-/// paragraph stays refused when at least one sentence fires the unchanged guard on its own
-/// text. The doubled-character and bibliographic checks stay paragraph-wide under every
-/// profile: a masthead merged into a paragraph is invisible to any per-sentence view. The
-/// re-check runs only when the paragraph-level verdict is "refuse", so paragraphs that
-/// pass today pay nothing for it.
-fn paragraph_fails_fallback_guard(
-    index: &NormalizedTextIndex<'_>,
-    text: &str,
-    paragraph_range: NormalizedTextRange,
-    guard: FallbackGuardProfile,
-) -> bool {
-    if !looks_like_unreliable_fallback_text(text, guard) {
-        return false;
-    }
-    if guard != FallbackGuardProfile::PdfProse {
-        return true;
-    }
-    sentence_ranges(text, paragraph_range)
-        .iter()
-        .filter_map(|range| index.slice(*range).ok())
-        .any(|sentence| looks_like_unreliable_fallback_text(sentence, guard))
 }
 
 /// A fallback paragraph that merges heterogeneous fragments (masthead, title, byline,

@@ -31,10 +31,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the library test binary (it carries pdf7b1_positional_probe)
         run: |
+          set -eux
           cargo test --release --locked --lib --no-run 2>&1 | tail -5
-          bin=$(ls -t target/release/deps/reading_mcp-* | grep -v '\.d$' | head -1)
+          bin=$(find target/release/deps -maxdepth 1 -type f -name 'reading_mcp-*' -perm -u+x | head -1)
           echo "probe binary: $bin"
-          cp "$bin" .tmp-probe-bin
+          cp -v "$bin" .tmp-probe-bin
+          ls -la .tmp-probe-bin
       - name: Upload the test binary
         uses: actions/upload-artifact@v4
         with:

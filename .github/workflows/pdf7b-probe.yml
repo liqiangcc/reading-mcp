@@ -35,13 +35,13 @@ jobs:
           cargo test --release --locked --lib --no-run 2>&1 | tail -5
           bin=$(find target/release/deps -maxdepth 1 -type f -name 'reading_mcp-*' -perm -u+x | head -1)
           echo "probe binary: $bin"
-          cp -v "$bin" .tmp-probe-bin
-          ls -la .tmp-probe-bin
+          cp -v "$bin" pdf7b-probe-bin
+          ls -la pdf7b-probe-bin
       - name: Upload the test binary
         uses: actions/upload-artifact@v4
         with:
           name: pdf7b-probe-test-bin
-          path: .tmp-probe-bin
+          path: pdf7b-probe-bin
           if-no-files-found: error
 
   probe:
@@ -68,13 +68,13 @@ jobs:
         env:
           COMPARE_IDS: ${{ inputs.compare_ids || env.DEFAULT_COMPARE_IDS }}
         run: |
-          chmod +x "$RUNNER_TEMP/bin/reading-mcp-tests"
+          chmod +x "$RUNNER_TEMP/bin/pdf7b-probe-bin"
           mkdir -p "$RUNNER_TEMP/out" "$RUNNER_TEMP/work"
           python3 scripts/pdf7b-compare.py \
             --ids scripts/pdf-sweep-ids.txt \
             --shard ${{ matrix.shard }} --shards 8 \
             --work-dir "$RUNNER_TEMP/work" \
-            --probe-bin "$RUNNER_TEMP/bin/reading-mcp-tests" \
+            --probe-bin "$RUNNER_TEMP/bin/pdf7b-probe-bin" \
             --out-dir "$RUNNER_TEMP/out" \
             --compare-ids "$COMPARE_IDS" | tail -120
       - name: Diagnose the Raft heading inference (shard 0 only)
@@ -88,7 +88,7 @@ jobs:
           PDF7B_PROBE_DIR="$RUNNER_TEMP/work/one" \
           PDF7B_PROBE_OUT="$RUNNER_TEMP/out" \
           PDF7B_PROBE_DIAG=1 \
-            "$RUNNER_TEMP/bin/reading-mcp-tests" pdf7b1_positional_probe \
+            "$RUNNER_TEMP/bin/pdf7b-probe-bin" pdf7b1_positional_probe \
             --ignored --nocapture --test-threads 1 | grep -A60 'chunk=.* \*' | head -200 || true
       - name: Upload the shard's comparison records
         if: always()

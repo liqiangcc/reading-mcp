@@ -23,7 +23,9 @@ use super::observability::{
     emit_storage_prune,
 };
 use super::section_layout::{
-    CHUNK_CHARS, LAYOUT_CHUNK_BYTES, LayoutCoverage, LayoutParagraph, LayoutSentence, SectionLayout,
+    CHUNK_CHARS, LAYOUT_CHUNK_BYTES, LayoutCoverage, LayoutParagraph, LayoutSentence,
+    SectionLayout, decode_paragraph_coverage, decode_stream_coverage, encode_paragraph_coverage,
+    encode_stream_coverage,
 };
 use super::sqlite_support::{open_connection, run_sqlite};
 use crate::application::get_text_units::{
@@ -1634,7 +1636,7 @@ fn section_text_place(
             "its section text is not stored for the current segmentation version",
         ));
     }
-    let Some(section_key) = stored_section_key(connection, document_id, section_id)
+    let Some(section_key) = stored_section_key_of_doc(connection, doc_key, section_id)
         .map_err(|error| stale_section_text(document_id, &error.to_string()))?
     else {
         return Ok(SectionTextPlace::Missing);
@@ -3576,9 +3578,15 @@ impl SqliteTextUnitIndex {
         // `document_body_order_v1` table (a JSON array of every section id) is dropped here, in
         // the same open that bumps `TEXT_UNIT_STORE_VERSION`. Dropping is idempotent; the bump
         // makes every book stored by the previous version re-ingest once on its next open.
+        //
+        // v12 (LAYOUT-1) stores the header's coverages as varint blobs instead of JSON objects and
+        // looks a section up by a 64-bit hash of its id, so a `section_layout_v2` written by v11 has
+        // no `id_hash` column: both layout tables are dropped and recreated here, in the same open
+        // that carries the bump, and their documents re-ingest on their next open.
         connection
             .execute_batch("DROP TABLE IF EXISTS document_body_order_v1;")
             .map_err(text_unit_index_error)?;
+        drop_section_layout_of_another_shape(&connection)?;
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS section_layout_v1;
@@ -3603,8 +3611,9 @@ impl SqliteTextUnitIndex {
                     doc_key INTEGER NOT NULL,
                     section_key INTEGER NOT NULL,
                     section_id TEXT NOT NULL,
+                    id_hash INTEGER NOT NULL,
                     char_len INTEGER NOT NULL,
-                    paragraph_coverage_json TEXT,
+                    paragraph_coverage BLOB,
                     plan_error TEXT,
                     paragraph_count INTEGER NOT NULL,
                     sentence_count INTEGER NOT NULL,
@@ -3614,14 +3623,15 @@ impl SqliteTextUnitIndex {
                     total_items_paragraph_eligible INTEGER NOT NULL,
                     total_items_sentence_preserve INTEGER NOT NULL,
                     total_items_sentence_eligible INTEGER NOT NULL,
-                    coverage_paragraph_preserve_json TEXT NOT NULL,
-                    coverage_paragraph_eligible_json TEXT NOT NULL,
-                    coverage_sentence_preserve_json TEXT NOT NULL,
-                    coverage_sentence_eligible_json TEXT NOT NULL,
-                    UNIQUE(doc_key, section_id)
+                    coverage_paragraph_preserve BLOB NOT NULL,
+                    coverage_paragraph_eligible BLOB NOT NULL,
+                    coverage_sentence_preserve BLOB NOT NULL,
+                    coverage_sentence_eligible BLOB NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS idx_section_layout_v2_section_key
                     ON section_layout_v2(doc_key, section_key);
+                 CREATE INDEX IF NOT EXISTS idx_section_layout_v2_id
+                    ON section_layout_v2(doc_key, id_hash);
                  CREATE TABLE IF NOT EXISTS section_layout_chunk_v2 (
                     doc_key INTEGER NOT NULL,
                     section_key INTEGER NOT NULL,
@@ -4933,6 +4943,53 @@ fn sort_scanned_hits(hits: &mut [ScannedUnitHit], section_ids: &[SectionId]) {
     });
 }
 
+/// Drops the two section layout tables when they were written by a store version before LAYOUT-1,
+/// so the `CREATE TABLE IF NOT EXISTS` that follows builds the compact shape.
+///
+/// The test is the `id_hash` column: v11's `section_layout_v2` has no such column and its coverages
+/// are JSON. Dropping is idempotent, and the bump of `TEXT_UNIT_STORE_VERSION` in the same open makes
+/// every document stored by the previous version re-ingest on its next open, so nothing is read from
+/// the dropped rows.
+fn drop_section_layout_of_another_shape(connection: &Connection) -> Result<(), ApplicationError> {
+    let has_layout = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'section_layout_v2'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(text_unit_index_error)?
+        .is_some();
+    if !has_layout {
+        return Ok(());
+    }
+    let current = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(section_layout_v2)")
+            .map_err(text_unit_index_error)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(text_unit_index_error)?;
+        let mut current = false;
+        for column in columns {
+            if column.map_err(text_unit_index_error)? == "id_hash" {
+                current = true;
+            }
+        }
+        current
+    };
+    if current {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS section_layout_chunk_v2;
+             DROP TABLE IF EXISTS section_layout_v2;",
+        )
+        .map_err(text_unit_index_error)?;
+    Ok(())
+}
+
 /// The v5 search index kept its own FTS tables. Search now scans the stored section text, so they are
 /// dropped, and the file is vacuumed once to give their space back.
 fn drop_legacy_lexical_search_tables(connection: &Connection) -> Result<(), ApplicationError> {
@@ -4993,16 +5050,12 @@ impl SectionLayoutSource<'_> {
         }
     }
 
-    fn paragraph_coverage_json(
+    fn paragraph_coverage_blob(
         &self,
         section_id: &SectionId,
-    ) -> Result<Option<String>, ApplicationError> {
-        let coverage = self.paragraph_coverage(section_id);
-        match coverage {
-            Some(coverage) => Ok(Some(
-                serde_json::to_string(&StoredParagraphCoverage::from_coverage(coverage))
-                    .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?,
-            )),
+    ) -> Result<Option<Vec<u8>>, ApplicationError> {
+        match self.paragraph_coverage(section_id) {
+            Some(coverage) => Ok(Some(encode_paragraph_coverage(coverage, section_id)?)),
             None => Ok(None),
         }
     }
@@ -5064,12 +5117,12 @@ struct ChunkRow {
     sentence_eligible_entries: usize,
 }
 
-/// The header row's counters for one kind: summary totals and both coverages.
+/// The header row's counters for one kind: summary totals and both coverages, encoded.
 struct StoredKindSummary {
     total_preserve: usize,
     total_eligible: usize,
-    preserve_json: String,
-    eligible_json: String,
+    preserve: Vec<u8>,
+    eligible: Vec<u8>,
 }
 
 impl StoredKindSummary {
@@ -5077,14 +5130,8 @@ impl StoredKindSummary {
         Ok(Self {
             total_preserve: counts.total_items_preserve,
             total_eligible: counts.total_items_eligible,
-            preserve_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(
-                &counts.preserve_source,
-            ))
-            .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?,
-            eligible_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(
-                &counts.eligible_only,
-            ))
-            .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?,
+            preserve: encode_stream_coverage(&counts.preserve_source)?,
+            eligible: encode_stream_coverage(&counts.eligible_only)?,
         })
     }
 
@@ -5105,13 +5152,13 @@ impl StoredKindSummary {
             unsupported_gaps: 0,
             source_complete: true,
         };
+        let encoded = encode_stream_coverage(&coverage)
+            .expect("a zero stream coverage always encodes: every value is zero");
         Self {
             total_preserve: 0,
             total_eligible: 0,
-            preserve_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(&coverage))
-                .unwrap_or_else(|_| "{}".into()),
-            eligible_json: serde_json::to_string(&StoredStreamCoverage::from_coverage(&coverage))
-                .unwrap_or_else(|_| "{}".into()),
+            preserve: encoded.clone(),
+            eligible: encoded,
         }
     }
 }
@@ -5665,12 +5712,22 @@ fn write_document_sections(
     collect_sections(&document.root_sections, &mut ordered_sections);
     let mut section_keys = HashMap::new();
     for (index, section) in ordered_sections.iter().enumerate() {
-        section_keys.insert(
-            section.id.clone(),
-            i64::try_from(index).map_err(|_| {
-                ApplicationError::TextUnitIndexFailed("document has too many sections".into())
-            })?,
-        );
+        let section_key = i64::try_from(index).map_err(|_| {
+            ApplicationError::TextUnitIndexFailed("document has too many sections".into())
+        })?;
+        // `section_layout_v2` used to enforce this with `UNIQUE(doc_key, section_id)`, which the
+        // compact row replaces with an `(doc_key, id_hash)` lookup index. Two sections of one
+        // document with the same id would now share a `section_key` instead of failing the insert,
+        // so the writer refuses them itself.
+        if section_keys
+            .insert(section.id.clone(), section_key)
+            .is_some()
+        {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "document {} has two sections with id {}",
+                document.id.0, section.id.0
+            )));
+        }
     }
 
     {
@@ -5686,8 +5743,9 @@ fn write_document_sections(
                     doc_key,
                     section_key,
                     section_id,
+                    id_hash,
                     char_len,
-                    paragraph_coverage_json,
+                    paragraph_coverage,
                     plan_error,
                     paragraph_count,
                     sentence_count,
@@ -5697,13 +5755,13 @@ fn write_document_sections(
                     total_items_paragraph_eligible,
                     total_items_sentence_preserve,
                     total_items_sentence_eligible,
-                    coverage_paragraph_preserve_json,
-                    coverage_paragraph_eligible_json,
-                    coverage_sentence_preserve_json,
-                    coverage_sentence_eligible_json
+                    coverage_paragraph_preserve,
+                    coverage_paragraph_eligible,
+                    coverage_sentence_preserve,
+                    coverage_sentence_eligible
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
                  )",
             )
             .map_err(text_unit_index_error)?;
@@ -5735,7 +5793,7 @@ fn write_document_sections(
             insert_section_text(&mut chunk_statement, doc_key, section_key, &section.content)?;
 
             let paragraph_coverage = source.paragraph_coverage(&section.id);
-            let paragraph_coverage_json = source.paragraph_coverage_json(&section.id)?;
+            let paragraph_coverage_blob = source.paragraph_coverage_blob(&section.id)?;
             let layout = source.layout(&section.id)?;
             let paragraphs_sorted = layout
                 .paragraphs
@@ -5776,8 +5834,9 @@ fn write_document_sections(
                     doc_key,
                     section_key,
                     &section.id.0,
+                    section_row_hash(&section.id.0),
                     usize_to_i64(section.normalized_text_len())?,
-                    paragraph_coverage_json,
+                    paragraph_coverage_blob,
                     plan_error,
                     usize_to_i64(layout.paragraphs.len())?,
                     usize_to_i64(layout.sentences.len())?,
@@ -5787,10 +5846,10 @@ fn write_document_sections(
                     usize_to_i64(paragraph_summary.total_eligible)?,
                     usize_to_i64(sentence_summary.total_preserve)?,
                     usize_to_i64(sentence_summary.total_eligible)?,
-                    paragraph_summary.preserve_json,
-                    paragraph_summary.eligible_json,
-                    sentence_summary.preserve_json,
-                    sentence_summary.eligible_json,
+                    paragraph_summary.preserve,
+                    paragraph_summary.eligible,
+                    sentence_summary.preserve,
+                    sentence_summary.eligible,
                 ])
                 .map_err(text_unit_index_error)?;
 
@@ -6635,46 +6694,47 @@ impl SectionChunk {
     }
 }
 
-fn decode_stream_coverage(json: &str) -> Result<TextUnitEnumerationCoverage, ApplicationError> {
-    let stored: StoredStreamCoverage = serde_json::from_str(json)
-        .map_err(|error| ApplicationError::TextUnitIndexFailed(error.to_string()))?;
-    Ok(stored.into_coverage())
-}
-
+/// The header row of `section_id`, read by the 64-bit hash of its id.
+///
+/// The hash bucket is one row in practice, and the full id is compared after the lookup, so a
+/// collision answers `None` rather than another section's header.
 fn load_section_header(
     connection: &Connection,
     meta: &StoredUnitDocument,
     section_id: &SectionId,
 ) -> Result<Option<SectionHeader>, ApplicationError> {
-    connection
+    let stored_id_hash = section_row_hash(&section_id.0);
+    let row = connection
         .query_row(
-            "SELECT section_key, char_len, paragraph_coverage_json, plan_error,
+            "SELECT section_id, section_key, char_len, paragraph_coverage, plan_error,
                     paragraph_count, sentence_count, chunk_count,
                     total_items_paragraph_preserve, total_items_paragraph_eligible,
                     total_items_sentence_preserve, total_items_sentence_eligible,
-                    coverage_paragraph_preserve_json, coverage_paragraph_eligible_json,
-                    coverage_sentence_preserve_json, coverage_sentence_eligible_json
+                    coverage_paragraph_preserve, coverage_paragraph_eligible,
+                    coverage_sentence_preserve, coverage_sentence_eligible
                FROM section_layout_v2
-              WHERE doc_key = ?1 AND section_id = ?2",
-            params![meta.doc_key, &section_id.0],
+              WHERE doc_key = ?1 AND id_hash = ?2",
+            params![meta.doc_key, stored_id_hash],
             |row| {
-                let paragraph_coverage_json: Option<String> = row.get(2)?;
-                let paragraph_preserve: String = row.get(11)?;
-                let paragraph_eligible: String = row.get(12)?;
-                let sentence_preserve: String = row.get(13)?;
-                let sentence_eligible: String = row.get(14)?;
+                let stored_id: String = row.get(0)?;
+                let paragraph_coverage: Option<Vec<u8>> = row.get(3)?;
+                let paragraph_preserve: Vec<u8> = row.get(12)?;
+                let paragraph_eligible: Vec<u8> = row.get(13)?;
+                let sentence_preserve: Vec<u8> = row.get(14)?;
+                let sentence_eligible: Vec<u8> = row.get(15)?;
                 Ok((
-                    row.get::<_, i64>(0)?,
+                    stored_id,
                     row.get::<_, i64>(1)?,
-                    paragraph_coverage_json,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(2)?,
+                    paragraph_coverage,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
                     paragraph_preserve,
                     paragraph_eligible,
                     sentence_preserve,
@@ -6683,37 +6743,32 @@ fn load_section_header(
             },
         )
         .optional()
-        .map_err(text_unit_index_error)?
-        .map(|row| -> Result<SectionHeader, ApplicationError> {
-            let _ = (row.4, row.5);
-            Ok(SectionHeader {
-                section_key: row.0,
-                char_len: i64_to_usize(row.1, "char_len")?,
-                paragraph_coverage: row
-                    .2
-                    .map(
-                        |json| -> Result<ParagraphSectionCoverage, ApplicationError> {
-                            let stored: StoredParagraphCoverage = serde_json::from_str(&json)
-                                .map_err(|error| {
-                                    ApplicationError::TextUnitIndexFailed(error.to_string())
-                                })?;
-                            Ok(stored.into_coverage())
-                        },
-                    )
-                    .transpose()?,
-                plan_error: row.3,
-                chunk_count: i64_to_usize(row.6, "chunk_count")?,
-                paragraph_total_preserve: i64_to_usize(row.7, "paragraph total")?,
-                paragraph_total_eligible: i64_to_usize(row.8, "paragraph eligible total")?,
-                sentence_total_preserve: i64_to_usize(row.9, "sentence total")?,
-                sentence_total_eligible: i64_to_usize(row.10, "sentence eligible total")?,
-                paragraph_preserve_coverage: decode_stream_coverage(&row.11)?,
-                paragraph_eligible_coverage: decode_stream_coverage(&row.12)?,
-                sentence_preserve_coverage: decode_stream_coverage(&row.13)?,
-                sentence_eligible_coverage: decode_stream_coverage(&row.14)?,
-            })
-        })
-        .transpose()
+        .map_err(text_unit_index_error)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.0 != section_id.0 {
+        return Ok(None);
+    }
+    let _ = (row.5, row.6);
+    Ok(Some(SectionHeader {
+        section_key: row.1,
+        char_len: i64_to_usize(row.2, "char_len")?,
+        paragraph_coverage: row
+            .3
+            .map(|blob| decode_paragraph_coverage(&blob, section_id))
+            .transpose()?,
+        plan_error: row.4,
+        chunk_count: i64_to_usize(row.7, "chunk_count")?,
+        paragraph_total_preserve: i64_to_usize(row.8, "paragraph total")?,
+        paragraph_total_eligible: i64_to_usize(row.9, "paragraph eligible total")?,
+        sentence_total_preserve: i64_to_usize(row.10, "sentence total")?,
+        sentence_total_eligible: i64_to_usize(row.11, "sentence eligible total")?,
+        paragraph_preserve_coverage: decode_stream_coverage(&row.12)?,
+        paragraph_eligible_coverage: decode_stream_coverage(&row.13)?,
+        sentence_preserve_coverage: decode_stream_coverage(&row.14)?,
+        sentence_eligible_coverage: decode_stream_coverage(&row.15)?,
+    }))
 }
 
 const SECTION_CHUNK_COLUMNS: &str = "chunk_no, first_paragraph_index, first_sentence_index, paragraph_slot, sentence_slot, paragraph_entry, sentence_entry, eligible_paragraph_entry, eligible_sentence_entry, paragraph_count, sentence_count, blob";
@@ -8473,107 +8528,6 @@ impl StoredLocation {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct StoredParagraphCoverage {
-    owner_section_id: String,
-    owner_chars: usize,
-    paragraph_chars: usize,
-    separator_chars: usize,
-    paragraph_count: usize,
-    native_paragraph_chars: usize,
-    native_structural_container_chars: usize,
-    native_non_prose_chars: usize,
-    fallback_chars: usize,
-}
-
-impl StoredParagraphCoverage {
-    fn from_coverage(coverage: &ParagraphSectionCoverage) -> Self {
-        Self {
-            owner_section_id: coverage.owner_section_id.0.clone(),
-            owner_chars: coverage.owner_chars,
-            paragraph_chars: coverage.paragraph_chars,
-            separator_chars: coverage.separator_chars,
-            paragraph_count: coverage.paragraph_count,
-            native_paragraph_chars: coverage.native_paragraph_chars,
-            native_structural_container_chars: coverage.native_structural_container_chars,
-            native_non_prose_chars: coverage.native_non_prose_chars,
-            fallback_chars: coverage.fallback_chars,
-        }
-    }
-
-    fn into_coverage(self) -> ParagraphSectionCoverage {
-        ParagraphSectionCoverage {
-            owner_section_id: SectionId(self.owner_section_id),
-            owner_chars: self.owner_chars,
-            paragraph_chars: self.paragraph_chars,
-            separator_chars: self.separator_chars,
-            paragraph_count: self.paragraph_count,
-            native_paragraph_chars: self.native_paragraph_chars,
-            native_structural_container_chars: self.native_structural_container_chars,
-            native_non_prose_chars: self.native_non_prose_chars,
-            fallback_chars: self.fallback_chars,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredStreamCoverage {
-    owner_chars: usize,
-    section_separator_chars: usize,
-    sentence_separator_chars: usize,
-    paragraph_count: usize,
-    sentence_eligible_paragraphs: usize,
-    non_prose_paragraphs: usize,
-    coarse_structural_paragraphs: usize,
-    represented_paragraphs: usize,
-    represented_sentences: usize,
-    coarse_non_prose_items: usize,
-    coarse_structural_items: usize,
-    intentionally_skipped: usize,
-    unsupported_gaps: usize,
-    source_complete: bool,
-}
-
-impl StoredStreamCoverage {
-    fn from_coverage(coverage: &TextUnitEnumerationCoverage) -> Self {
-        Self {
-            owner_chars: coverage.owner_chars,
-            section_separator_chars: coverage.section_separator_chars,
-            sentence_separator_chars: coverage.sentence_separator_chars,
-            paragraph_count: coverage.paragraph_count,
-            sentence_eligible_paragraphs: coverage.sentence_eligible_paragraphs,
-            non_prose_paragraphs: coverage.non_prose_paragraphs,
-            coarse_structural_paragraphs: coverage.coarse_structural_paragraphs,
-            represented_paragraphs: coverage.represented_paragraphs,
-            represented_sentences: coverage.represented_sentences,
-            coarse_non_prose_items: coverage.coarse_non_prose_items,
-            coarse_structural_items: coverage.coarse_structural_items,
-            intentionally_skipped: coverage.intentionally_skipped,
-            unsupported_gaps: coverage.unsupported_gaps,
-            source_complete: coverage.source_complete,
-        }
-    }
-
-    fn into_coverage(self) -> TextUnitEnumerationCoverage {
-        TextUnitEnumerationCoverage {
-            owner_chars: self.owner_chars,
-            section_separator_chars: self.section_separator_chars,
-            sentence_separator_chars: self.sentence_separator_chars,
-            paragraph_count: self.paragraph_count,
-            sentence_eligible_paragraphs: self.sentence_eligible_paragraphs,
-            non_prose_paragraphs: self.non_prose_paragraphs,
-            coarse_structural_paragraphs: self.coarse_structural_paragraphs,
-            represented_paragraphs: self.represented_paragraphs,
-            represented_sentences: self.represented_sentences,
-            coarse_non_prose_items: self.coarse_non_prose_items,
-            coarse_structural_items: self.coarse_structural_items,
-            intentionally_skipped: self.intentionally_skipped,
-            unsupported_gaps: self.unsupported_gaps,
-            source_complete: self.source_complete,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Short-handle key lookups (v2).
 //
@@ -8614,23 +8568,57 @@ fn stored_document_id_at_key(
         .map_err(text_unit_index_error)
 }
 
-/// `section_layout_v2.section_key` of one section of `document_id`.
+/// `section_layout_v2.section_key` of one section of `document_id`, found by the 64-bit hash of the
+/// section id. The full id is compared after the lookup, so a hash collision answers `None`.
+/// The `doc_key` of a stored document, or `None` when the store does not know the document.
+///
+/// The two section lookups below resolve the key first and then seek one layout row, instead of
+/// joining the layout table to `text_unit_documents_v2`: the join lets the planner scan every
+/// section of every document to find one, and these reads are O(page) by design.
+fn stored_doc_key(
+    connection: &Connection,
+    document_id: &DocumentId,
+) -> Result<Option<i64>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
+            params![&document_id.0],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(text_unit_index_error)
+}
+
+/// The section of `doc_key` with this id: one seek on the id hash, then the full id compared, so a
+/// hash collision reads as "not stored" instead of answering with another section.
+fn stored_section_key_of_doc(
+    connection: &Connection,
+    doc_key: i64,
+    section_id: &SectionId,
+) -> Result<Option<i64>, ApplicationError> {
+    let row = connection
+        .query_row(
+            "SELECT section_id, section_key FROM section_layout_v2
+              WHERE doc_key = ?1 AND id_hash = ?2",
+            params![doc_key, section_row_hash(&section_id.0)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(text_unit_index_error)?;
+    Ok(row
+        .filter(|(stored_id, _)| stored_id == &section_id.0)
+        .map(|(_, key)| key))
+}
+
 fn stored_section_key(
     connection: &Connection,
     document_id: &DocumentId,
     section_id: &SectionId,
 ) -> Result<Option<i64>, ApplicationError> {
-    connection
-        .query_row(
-            "SELECT l.section_key
-               FROM section_layout_v2 l
-               JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
-              WHERE d.document_id = ?1 AND l.section_id = ?2",
-            params![&document_id.0, &section_id.0],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(text_unit_index_error)
+    let Some(doc_key) = stored_doc_key(connection, document_id)? else {
+        return Ok(None);
+    };
+    stored_section_key_of_doc(connection, doc_key, section_id)
 }
 
 /// The section stored at `section_key` of `document_id`.
@@ -8639,13 +8627,14 @@ fn stored_section_id_at_key(
     document_id: &DocumentId,
     section_key: i64,
 ) -> Result<Option<SectionId>, ApplicationError> {
+    let Some(doc_key) = stored_doc_key(connection, document_id)? else {
+        return Ok(None);
+    };
     connection
         .query_row(
-            "SELECT l.section_id
-               FROM section_layout_v2 l
-               JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
-              WHERE d.document_id = ?1 AND l.section_key = ?2",
-            params![&document_id.0, section_key],
+            "SELECT section_id FROM section_layout_v2
+              WHERE doc_key = ?1 AND section_key = ?2",
+            params![doc_key, section_key],
             |row| row.get::<_, String>(0),
         )
         .optional()

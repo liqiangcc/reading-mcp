@@ -314,6 +314,7 @@ jobs:
             done
             python3 scripts/sqlite-facts.py \
               --binary "$bin" --out-dir "$RUNNER_TEMP/facts-$side" \
+              --layout-detail \
               "${facts_docs[@]}" \
               | tee "facts-$side.txt" || echo "::warning::sqlite facts failed for $side"
           done
@@ -505,6 +506,220 @@ jobs:
           table += "\n" + "\n".join(lines) + "\n"
 
           with open("section-rows-table.md", "w", encoding="utf-8") as handle:
+              handle.write(table)
+          print(table)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(table)
+          PY
+      - name: Section layout table (main vs branch)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          FIELDS = re.compile(r"(\w+)=(\S+)")
+          # Both sides' objects are shown, in this order first, then anything else seen: the base
+          # has the `UNIQUE(doc_key, section_id)` autoindex and the branch has `idx_..._id`.
+          LAYOUT_OBJECTS = (
+              "section_layout_v2",
+              "sqlite_autoindex_section_layout_v2_1",
+              "idx_section_layout_v2_id",
+              "idx_section_layout_v2_section_key",
+              "section_layout_chunk_v2",
+              "sqlite_autoindex_section_layout_chunk_v2_1",
+              "idx_section_layout_chunk_v2_paragraph_entry",
+              "idx_section_layout_chunk_v2_sentence_entry",
+              "idx_section_layout_chunk_v2_eligible_paragraph_entry",
+              "idx_section_layout_chunk_v2_eligible_sentence_entry",
+              "idx_section_layout_chunk_v2_first",
+          )
+          # The branch renamed `..._json` to a blob of the same value, so the suffix is stripped and
+          # both sides line up in one column per value.
+          LAYOUT_COLUMNS = (
+              "section_id",
+              "id_hash",
+              "paragraph_coverage",
+              "plan_error",
+              "coverage_paragraph_preserve",
+              "coverage_paragraph_eligible",
+              "coverage_sentence_preserve",
+              "coverage_sentence_eligible",
+          )
+
+
+          def layout_lines(side):
+              """Every `layout-` line of one side, grouped by its first field."""
+              grouped = {}
+              path = f"facts-{side}.txt"
+              if not os.path.isfile(path):
+                  return grouped
+              with open(path, encoding="utf-8") as handle:
+                  for line in handle:
+                      if not line.startswith("layout-"):
+                          continue
+                      fields = dict(FIELDS.findall(line))
+                      grouped.setdefault(line.split()[0], []).append(fields)
+              return grouped
+
+
+          def disk_rows(side):
+              path = os.path.join(f"disk-{side}", "runs.json")
+              if not os.path.isfile(path):
+                  return {}
+              with open(path, encoding="utf-8") as handle:
+                  data = json.load(handle)
+              rows = data if isinstance(data, list) else data.get("rows", [])
+              return {row.get("label"): row for row in rows if row.get("label")}
+
+
+          sides = {side: layout_lines(side) for side in ("base", "head")}
+          disk = {side: disk_rows(side) for side in ("base", "head")}
+
+
+          def layout_by_input(side, kind):
+              entries = {}
+              for fields in sides[side].get(kind, []):
+                  entries.setdefault(fields.get("input"), []).append(fields)
+              return entries
+
+
+          def number(value):
+              try:
+                  return int(value)
+              except (TypeError, ValueError):
+                  return None
+
+
+          # 1. Bytes per layout object and the layout share of the store.
+          rows = [
+              "| input | side | store bytes | layout bytes | layout share | "
+              + " | ".join(LAYOUT_OBJECTS) + " |",
+              "|---|---|---:|---:|---:|" + "---:|" * len(LAYOUT_OBJECTS),
+          ]
+          shares = {side: layout_by_input(side, "layout-share") for side in sides}
+          dbstat = {side: layout_by_input(side, "layout-dbstat") for side in sides}
+          labels = sorted(
+              {label for side in sides for label in (shares[side] or {}) if label is not None}
+            )
+          seen_objects = {
+              entry.get("object")
+              for side in sides
+              for entries in dbstat[side].values()
+              for entry in entries
+          }
+          objects_order = [name for name in LAYOUT_OBJECTS if name in seen_objects]
+          objects_order += sorted(seen_objects - set(objects_order))
+          for label in labels:
+              for side in ("base", "head"):
+                  share = (shares[side].get(label) or [{}])[0]
+                  objects = {
+                      entry.get("object"): number(entry.get("bytes"))
+                      for entry in dbstat[side].get(label, [])
+                  }
+                  cells = [label, side, share.get("store_bytes", "-"),
+                           share.get("layout_bytes", "-"),
+                           share.get("layout_share_pct", "-")]
+                  cells += [str(objects.get(name, 0)) for name in objects_order]
+                  rows.append("| " + " | ".join(cells) + " |")
+          rows[0] = (
+              "| input | side | store bytes | layout bytes | layout share | "
+              + " | ".join(objects_order) + " |"
+          )
+          rows[1] = "|---|---|---:|---:|---:|" + "---:|" * len(objects_order)
+          table = "\n".join(rows) + "\n"
+
+          # 2. The header table's column bytes.
+          columns = {side: layout_by_input(side, "layout-column") for side in sides}
+          rows = [
+              "| input | side | " + " | ".join(LAYOUT_COLUMNS) + " |",
+              "|---|---|" + "---:|" * len(LAYOUT_COLUMNS),
+          ]
+          seen_columns = {
+              str(entry.get("column") or "").removesuffix("_json")
+              for side in sides
+              for entries in columns[side].values()
+              for entry in entries
+          }
+          columns_order = [name for name in LAYOUT_COLUMNS if name in seen_columns]
+          columns_order += sorted(seen_columns - set(columns_order))
+          rows[0] = "| input | side | " + " | ".join(columns_order) + " |"
+          rows[1] = "|---|---|" + "---:|" * len(columns_order)
+          for label in labels:
+              for side in ("base", "head"):
+                  by_column = {
+                      str(entry.get("column") or "").removesuffix("_json"): number(
+                          entry.get("bytes")
+                      )
+                      for entry in columns[side].get(label, [])
+                  }
+                  if not by_column:
+                      continue
+                  rows.append(
+                      "| " + " | ".join(
+                          [label, side] + [str(by_column.get(name, 0)) for name in columns_order]
+                      ) + " |"
+                  )
+          table += "\n" + "\n".join(rows) + "\n"
+
+          # 3. The header's repeated coverages and the chunk shape.
+          coverage = {side: layout_by_input(side, "layout-coverage") for side in sides}
+          chunks = {side: layout_by_input(side, "layout-chunks") for side in sides}
+          rows = [
+              "| input | side | header rows | all four coverage values equal | "
+              "paragraph pair equal | sentence pair equal | empty | null paragraph coverage | "
+              "chunk rows | sections with one chunk | max chunks | blob bytes | sentences | "
+              "blob bytes/sentence |",
+              "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+          for label in labels:
+              for side in ("base", "head"):
+                  entry = (coverage[side].get(label) or [{}])[0]
+                  shape = (chunks[side].get(label) or [{}])[0]
+                  if not entry and not shape:
+                      continue
+                  rows.append(
+                      "| " + " | ".join(
+                          [
+                              label,
+                              side,
+                              entry.get("rows", "-"),
+                              entry.get("all_four_equal_rows", "-"),
+                              entry.get("paragraph_pair_equal_rows", "-"),
+                              entry.get("sentence_pair_equal_rows", "-"),
+                              entry.get("empty_rows", "-"),
+                              entry.get("paragraph_coverage_null_rows", "-"),
+                              shape.get("chunk_rows", "-"),
+                              shape.get("single_chunk_sections", "-"),
+                              shape.get("max_chunks_per_section", "-"),
+                              shape.get("blob_bytes", "-"),
+                              shape.get("sentence_count", "-"),
+                              shape.get("blob_bytes_per_sentence", "-"),
+                          ]
+                      ) + " |"
+                  )
+          table += "\n" + "\n".join(rows) + "\n"
+
+          # 4. Every layout statement's query plan, one block per side.
+          plans = {side: layout_by_input(side, "layout-plan") for side in sides}
+          for side in ("base", "head"):
+              if not plans[side]:
+                  continue
+              for label in sorted(plans[side]):
+                  table += f"\n{side} {label} query plans:\n\n```\n"
+                  current = None
+                  for entry in plans[side][label]:
+                      name = entry.get("name")
+                      if name != current:
+                          table += f"{name}:\n"
+                          current = name
+                      table += f"  {entry.get('detail') or entry.get('error')}\n"
+                  table += "```\n"
+
+          with open("layout-table.md", "w", encoding="utf-8") as handle:
               handle.write(table)
           print(table)
           summary = os.environ.get("GITHUB_STEP_SUMMARY")

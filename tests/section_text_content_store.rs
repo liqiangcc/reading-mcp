@@ -418,7 +418,7 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
                 PRIMARY KEY (doc_key, section_key)
              ) WITHOUT ROWID;
              INSERT INTO section_layout_v1
-                SELECT doc_key, section_key, section_id, char_len, paragraph_coverage_json, x'00'
+                SELECT doc_key, section_key, section_id, char_len, paragraph_coverage, x'00'
                   FROM section_layout_v2;
              DROP TABLE section_text_v3;
              DROP TABLE section_layout_chunk_v2;

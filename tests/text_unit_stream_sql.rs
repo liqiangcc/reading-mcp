@@ -766,7 +766,7 @@ async fn null_section_coverage_and_missing_paragraph_coverage_report_the_exact_e
     let connection = rusqlite::Connection::open(&database).expect("database should open");
     connection
         .execute(
-            "UPDATE section_layout_v2 SET paragraph_coverage_json = NULL
+            "UPDATE section_layout_v2 SET paragraph_coverage = NULL
               WHERE doc_key = (SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1)",
             rusqlite::params![&document.id.0],
         )

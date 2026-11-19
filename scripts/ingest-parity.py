@@ -12,9 +12,10 @@ database into one text file per side:
   row that keeps its heavy ones in `document_meta_v1` or `document_meta_v2` (its `metadata_store`
   key) are merged back into its `metadata` object;
 - layouts joined to `text_unit_documents_v2` and ordered by document then `section_key`:
-  `section_id`, `char_len`, `paragraph_coverage_json` and the whole-section layout hex. The v3
-  `section_layout_v1` blob is compared directly; the v4 chunk rows are decoded, rebased and
-  re-encoded as that blob;
+  `section_id`, `char_len`, the paragraph coverage and the whole-section layout hex. The coverage is
+  compared as the JSON object the v11 store wrote, whether the side keeps it as that JSON string or
+  as the v12 varint blob. The v3 `section_layout_v1` blob is compared directly; the v4 chunk rows
+  are decoded, rebased and re-encoded as that blob;
 - section text: one sha256 per section over its chunks in order, plus `char_len`;
 - sections: the section tree rebuilt from `document_sections_v1` plus `document_header_v1` (or, on
   a side without those rows, from `document_json`), compared field by field in depth-first order,
@@ -622,12 +623,61 @@ def merge_chunk_layouts(chunks: list[tuple[int, bool, bytes]]) -> bytes:
     return encode_layout(merged)
 
 
+PARAGRAPH_COVERAGE_FIELDS = (
+    "owner_section_id",
+    "owner_chars",
+    "paragraph_chars",
+    "separator_chars",
+    "paragraph_count",
+    "native_paragraph_chars",
+    "native_structural_container_chars",
+    "native_non_prose_chars",
+    "fallback_chars",
+)
+
+
+def decode_paragraph_coverage_blob(data: bytes, section_id: str) -> str:
+    """A `paragraph_coverage` blob as the JSON string the v11 store wrote for the same coverage.
+
+    LAYOUT-1 stores the coverage as a version byte, a flag byte and eight varints, with the owner id
+    elided when it is the row's own `section_id`. Rendering it as the JSON the base side still keeps
+    makes the two stores comparable field for field instead of column for column.
+    """
+    reader = BlobReader(data)
+    version = reader.byte()
+    if version != 1:
+        raise ValueError(f"unsupported paragraph coverage version {version}")
+    flags = reader.byte()
+    if flags & ~1:
+        raise ValueError(f"unsupported paragraph coverage flags {flags}")
+    if flags & 1:
+        owner = section_id
+    else:
+        length = reader.uvarint()
+        owner = data[reader.pos : reader.pos + length].decode("utf-8")
+        reader.pos += length
+    coverage = {"owner_section_id": owner}
+    for field in PARAGRAPH_COVERAGE_FIELDS[1:]:
+        coverage[field] = reader.uvarint()
+    if reader.pos != len(data):
+        raise ValueError(f"paragraph coverage has {len(data) - reader.pos} trailing bytes")
+    return json.dumps(coverage, separators=(",", ":"), ensure_ascii=False)
+
+
 def table_exists(connection: sqlite3.Connection, name: str) -> bool:
     return (
         connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
         ).fetchone()
         is not None
+    )
+
+
+def column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    if not table_exists(connection, table):
+        return False
+    return any(
+        row[1] == column for row in connection.execute(f"PRAGMA table_info({table})")
     )
 
 
@@ -653,38 +703,49 @@ def layout_rows(connection: sqlite3.Connection) -> list[str]:
             chunks[(document_id, section_key)].append(
                 (first_paragraph, paragraph_count == 0 and chunk_no > 0, bytes(blob))
             )
+        # v12 (LAYOUT-1) stores the coverage as a blob instead of the `paragraph_coverage_json`
+        # string; both sides are compared as the JSON, so the column rename is not a difference.
+        coverage_column = "paragraph_coverage"
+        if not column_exists(connection, "section_layout_v2", coverage_column):
+            coverage_column = "paragraph_coverage_json"
         rows = []
-        for document_id, section_key, section_id, char_len, coverage_json in connection.execute(
-            """
+        for document_id, section_key, section_id, char_len, coverage in connection.execute(
+            f"""
             SELECT d.document_id, l.section_key, l.section_id, l.char_len,
-                   l.paragraph_coverage_json
+                   l.{coverage_column}
               FROM section_layout_v2 l
               JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key
              ORDER BY d.document_id, l.section_key
             """
         ):
+            if coverage_column == "paragraph_coverage" and coverage is not None:
+                coverage = decode_paragraph_coverage_blob(bytes(coverage), section_id)
             layout_hex = merge_chunk_layouts(
                 chunks.get((document_id, section_key), [])
             ).hex().upper()
             rows.append(
                 "\t".join(
                     "" if value is None else str(value)
-                    for value in (document_id, section_key, section_id, char_len, coverage_json)
+                    for value in (document_id, section_key, section_id, char_len, coverage)
                 )
                 + "\t"
                 + layout_hex
             )
         return rows
 
+    # The v3 table keeps its coverage as JSON on both sides; only the v4 table was renamed.
+    coverage_column = "paragraph_coverage"
+    if not column_exists(connection, "section_layout_v1", coverage_column):
+        coverage_column = "paragraph_coverage_json"
     return [
         "\t".join("" if value is None else str(value) for value in row)
         for row in connection.execute(
-            """
+            f"""
             SELECT d.document_id,
                    l.section_key,
                    l.section_id,
                    l.char_len,
-                   l.paragraph_coverage_json,
+                   l.{coverage_column},
                    hex(l.layout)
               FROM section_layout_v1 l
               JOIN text_unit_documents_v2 d ON d.doc_key = l.doc_key

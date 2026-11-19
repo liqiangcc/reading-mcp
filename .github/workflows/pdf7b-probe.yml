@@ -1,6 +1,11 @@
 name: PDF-7b positional probe
 run-name: PDF-7b positional probe
 on:
+  pull_request:
+    # While the stage-1 branch is open, each push to the PR re-runs the corpus
+    # probe so the summary artifact is always current. Before merge the
+    # workflow only exists on this branch, and pull_request is the trigger
+    # that runs head-branch workflows.
   workflow_dispatch:
     inputs:
       compare_ids:

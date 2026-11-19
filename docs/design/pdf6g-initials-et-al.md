@@ -1,4 +1,4 @@
-# PDF-6g: multi-letter initials and `et al.` inside the sentence splitter
+# PDF-6g: uppercase initials and `et al.` inside the sentence splitter
 
 Step-0 measurement for #232. Baseline: `PDF quality probe` run 44531503850 on
 `6992fc3` (product code `origin/main` `9274b1a`; harness-only
@@ -8,33 +8,90 @@ stream **exactly for 121 of 121 non-truncated documents**, and whose projected
 broken-sentence count matches the harness's own document records on every paper
 (0 drift).
 
-## The two candidate rules
+**Measurement note — repeated paragraphs.** The probe reads every section with
+v1 `get_text_units`, so a page paragraph shared by several headings counts once
+per section: the baseline dump holds 632 paragraph texts over 200 characters
+that appear in more than one section (865 extra copies in 87 papers; in
+`2403.19012` one 5,171-character paragraph is `paragraph_index` 1 of three
+sections). Every "boundaries removed" figure below is reported **counted** and
+**distinct** (deduped by paragraph text); labels are drawn only from distinct
+boundaries. Before/after comparisons share this effect, so it does not bias the
+delta.
 
-- **R-I, multi-letter initials.** A period ending a token of single ASCII
-  letters joined by periods (`E.F`, `K.R`, `J.R.R`) is not terminal when the
-  next non-whitespace character is uppercase — the rule the one-letter check
-  already applies.
-- **R-A, `et al.`** A period after `al` that directly follows `et` is terminal
-  only when the next non-whitespace character is uppercase, like `etc` today:
-  `et al. (2019)`, `et al. [13]`, `et al. show`, `et al.,` are not split;
+## The rules
+
+- **R-A, `et al.`** (ships). A period after `al` that directly follows `et` is
+  terminal only when the next non-whitespace character is uppercase, like `etc`
+  today: `et al. (2019)`, `et al. [13]`, `et al. show`, `et al.,` are not split;
   `… et al. The …` still is.
+- **R-I-U, uppercase multi-letter initials** (ships). A period ending a token
+  of two or more single **uppercase** ASCII letters joined by periods (`E.F`,
+  `K.R`, `J.R.R`) is not terminal when the next non-whitespace character is
+  uppercase — the name-initial case the one-letter check already covers.
+  `u.s.`/`u.k.` keep `is_protected_abbreviation`'s protection.
+- **R-I, mixed-case initials** (dropped). The un-narrowed R-I had 6 `wrong_join`
+  of 35 (`w.h.p.`, `d.o.f.`, `D.b.c.`), over the stop line. Every one of the six
+  contains a lowercase letter; every uppercase-only token in that sample was a
+  `correct_join`, which is why R-I narrowed to uppercase and was priced again
+  below.
 
-## Prices (each rule alone, then both)
+**PDF-6g changes no verdict.** The PDF-6f per-sentence verdict is judged on
+`sentence_ranges(text, range, false)` — the exact ranges `main` uses — and the
+PDF-6g rules apply only to the sentence units of paragraphs already eligible.
+The first head judged the verdict on the PDF-rule ranges, and an `et al.` join
+that put the whole paragraph's glue events into one merged sentence re-coarsened
+paragraphs `main` had freed — the same adding-up PDF-6f removed. Port
+projection under the buggy shape (verdict on rule ranges):
 
-| Rule | Boundaries removed | Units merged | Papers touched | Short (<5) | Long (>800) | M1 (>5% long) | Broken sentences |
+| Rule set | freed → refused | refused → freed |
+| --- | --- | --- |
+| R-I initials | 0 | 0 |
+| R-I-U upper initials | 0 | 0 |
+| R-A et al. | 20 | 0 |
+| R-I-U + R-A | 20 | 0 |
+| **shipped (verdict on `main` ranges)** | **0** | **0** |
+
+The port's verdict replica agrees with the server's recorded `degradation` flag
+on 20,886 of 20,939 prose paragraphs (99.75%); the shipped unit stream uses the
+recorded flag, so the flip count is exact: **0 in both directions**.
+
+## Prices (each rule alone, then shipped)
+
+| Rule | Removed (counted) | Removed (distinct) | Papers touched | Short (<5) | Long (>800) | M1 (>5% long) | Broken sentences |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | today | - | - | - | 6747 | 1987 | 16 | 6380 |
-| R-I initials | 41 | 41 | 14 | 6747 | 1987 | 16 | 6380 |
-| R-A et al. | 1849 | 1849 | 58 | 6742 | 1991 | 17 | 6380 |
-| R-I+R-A | 1890 | 1890 | 66 | 6742 | 1991 | 17 | 6380 |
+| R-I initials | 41 | 32 | 14 | 6747 | 1987 | 16 | 6380 |
+| R-I-U upper initials | 7 | 7 | 5 | 6747 | 1987 | 16 | 6380 |
+| R-A et al. | 1849 | 1242 | 58 | 6742 | 1991 | 17 | 6380 |
+| R-I-U + R-A (shipped) | 1856 | 1249 | 60 | 6742 | 1991 | 17 | 6380 |
 
-Papers above 10% short units: 14 under every rule set. No coarse paragraph's
-PDF-6f verdict flips under the new ranges.
+Papers above 10% short units: 14 under every rule set.
 
 `units merged` equals `boundaries removed`: every removed boundary joins the two
 units it separated (chained removals merge more than two units into one). The
 `et al.` merges add 4 long units and move one paper over the 5% line — a single
 references paragraph whose citation sentences collapse into one long unit.
+
+## R-I-U census: every distinct boundary it removes (7 counted, 7 distinct)
+
+Label: `correct_join` = the period was not a sentence end; `wrong_join` = a real
+sentence end was merged. Not sampled — the full list.
+
+| # | Id | Unit | Context (60 chars each side) | Label |
+| --- | --- | --- | --- | --- |
+| 1 | 2403.17992 | 0 | `jie Zheng, Rafael Fuentes-Dominguez, Matt Clark, George S.D. Gordon, Fernando Perez-Cota Optics and Photonics Research G` | correct_join |
+| 2 | 2402.18422 | 5 | `nd Technology, Government of India. AD acknowledges the J.C. Bose Fellowship (JCB/2022/000014) of the Science and Engine` | correct_join |
+| 3 | 2307.03827 | 0 | `chanisms ( Wardlaw © 2023 CC-BY 4.0 , A. Ghazvanchahi, P.J. Maralani, A.R. Moody & A. Khademi. arXiv:2307.03827v1 [ee` | correct_join |
+| 4 | 2307.03827 | 0 | `law © 2023 CC-BY 4.0 , A. Ghazvanchahi, P.J. Maralani, A.R. Moody & A. Khademi. arXiv:2307.03827v1 [eess.IV] 7 Jul 2` | correct_join |
+| 5 | 2510.07408 | 1 | `tefully acknowledges the support and hospitality of the C.N. Yang Institute for Theoretical Physics and the Simons Cente` | correct_join |
+| 6 | 2510.07408 | 316 | `[Cited on: pgs. 239 and 244 .] [Pac91] U. Pachner, P.L. Homeomorphic Manifolds are Equivalent by Elementary Shellin` | correct_join |
+| 7 | 2312.13331 | 22 | `from the Emory Rollins School of Public Health, Harvard T.H. Chan School of Public Health, and the UK Small Area Health` | correct_join |
+
+**R-I-U verdict: 0 `wrong_join` of 7.** Every removed boundary is a name
+initial (`S.D. Gordon`, `J.C. Bose`, `P.J. Maralani`, `A.R. Moody`, `C.N. Yang`,
+`P.L.`, `T.H. Chan`). R-I-U ships.
+
+## Historical R-I sample (kept for the record)
 
 ## R-I removed-boundary sample (seed 23; all 35 of the 41 that fit the caps, 14 documents)
 
@@ -141,10 +198,10 @@ than they join one. R-I is **out**.
 
 **R-A verdict: 0 wrong_join of 50.** Every sampled `et al.` period is
 mid-citation — the period after `al` is never the sentence end the reader wants.
-R-A **ships**, alone.
+R-A ships.
 
 ## Out of scope (unchanged)
 
 Spaced decimals (`( 0 . 63`), `Rev.`/`Phys.` journal abbreviations, `Ph.D.`,
-everything else. R-I is out for cause, listed above; `E.F.`/`K.R.` keep
-splitting exactly as before this change.
+mixed-case initials (R-I, out for cause above), everything else. `w.h.p.`,
+`d.o.f.`, `D.b.c.` keep ending their sentences exactly as before.

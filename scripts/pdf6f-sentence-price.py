@@ -93,6 +93,7 @@ def ascii_terminal_is_terminal(chars: list[str], index: int) -> bool:
 
 
 INITIALS_TOKEN_RE = re.compile(r"[A-Za-z](\.[A-Za-z])*\Z")
+UPPER_INITIALS_TOKEN_RE = re.compile(r"[A-Z](\.[A-Z])+\Z")
 
 
 def preceding_period_token_start(chars: list[str], index: int) -> tuple[int, str]:
@@ -138,6 +139,7 @@ def ascii_period_is_terminal(chars: list[str], index: int,
     if nxt is not None and nxt in "/\\":
         return False
     token_start, token = preceding_period_token_start(chars, index)
+    raw_token = token
     token = token.lower()
     if token and token in PROTECTED_ABBREVIATIONS and index + 1 < len(chars):
         terminal_etc = (token == "etc" and ascii_terminal_is_terminal(chars, index)
@@ -154,6 +156,12 @@ def ascii_period_is_terminal(chars: list[str], index: int,
                            chars, extend_terminal_cluster(chars, index)) or "").isupper())
         if not terminal_al:
             return False
+    # PDF-6g R-I-U: a token of two or more single uppercase ASCII letters joined by
+    # periods (`E.F`, `K.R`, `J.R.R`) is not terminal before an uppercase letter - the
+    # uppercase-only narrowing of R-I, which keeps `w.h.p.`/`d.o.f.` sentence-final.
+    if "initials_upper" in rules and UPPER_INITIALS_TOKEN_RE.match(raw_token) \
+            and (next_non_whitespace(chars, index + 1) or "").isupper():
+        return False
     initials = (bool(INITIALS_TOKEN_RE.match(token)) if "initials" in rules
                 else len(token) == 1 and token.isascii() and token.isalpha())
     if initials and (next_non_whitespace(chars, index + 1) or "").isupper():
@@ -389,7 +397,7 @@ def removed_boundaries(text: str, rules: frozenset) -> list[tuple[int, frozenset
     removed = []
     for end in sorted(old - new):
         minimal = frozenset(
-            rule for rule in ("initials", "et_al")
+            rule for rule in ("initials", "initials_upper", "et_al")
             if rule in rules and end not in
             {e for _s, e in sentence_ranges(text, frozenset({rule}))})
         removed.append((end, minimal))
@@ -478,8 +486,32 @@ def pdf6g_mode(args) -> int:
           f"the sentence stream exactly")
 
     RULE_SETS = {"R-I initials": frozenset({"initials"}),
+                 "R-I-U upper initials": frozenset({"initials_upper"}),
                  "R-A et al.": frozenset({"et_al"})}
-    both = frozenset({"initials", "et_al"})
+    both = frozenset({"initials_upper", "et_al"})
+    SHIPPED = "R-I-U+R-A"
+
+    # Replica agreement: the port's PDF-6f per-sentence verdict on `main`'s ranges
+    # (rules=frozenset()) against the refusal the server recorded in `degradation`.
+    # Every prose candidate is judged; a mismatch means the port cannot model the
+    # verdict either way and the numbers below are unpriced.
+    agree = mismatch = 0
+    misses = []
+    for identifier, records in paragraphs.items():
+        for record in records:
+            if record.get("content_class_detail") not in SPLIT_ELIGIBLE_DETAILS:
+                continue
+            recorded = bool(record.get("degradation"))
+            verdict = verdict_s1(record["text"],
+                                 {"tokens": GE.token_counts(record["text"])})
+            if verdict["fires"] == recorded:
+                agree += 1
+            else:
+                mismatch += 1
+                if len(misses) < 15:
+                    misses.append((identifier, record["unit"], recorded))
+    print(f"# verdict replica (main ranges) vs recorded degradation: {agree} agree, "
+          f"{mismatch} mismatch" + (f" {misses}" if misses else ""))
 
     base_metrics: dict[str, dict] = {}
     for identifier, records in paragraphs.items():
@@ -510,7 +542,7 @@ def pdf6g_mode(args) -> int:
         return {"removed": removed, "metrics": metrics}
 
     results = {name: price(rules) for name, rules in RULE_SETS.items()}
-    results["R-I+R-A"] = price(both)
+    results[SHIPPED] = price(both)
 
     print("\n## PDF-6g rules, each priced on the paragraph stream\n")
     print("| Rule | Boundaries removed | Units merged | Papers touched | Short (<5) | "
@@ -539,21 +571,87 @@ def pdf6g_mode(args) -> int:
     print(f"\nPapers above 10% short units: today {len(base['short10'])}; "
           + "; ".join(f"{name} {len(res['short10'])}" for name, res in results.items()))
 
-    # PDF-6f interaction: a refused prose paragraph is re-checked sentence by sentence;
-    # under the new ranges a paragraph can flip to freed (or, in principle, to refused).
-    flips = 0
-    for identifier, records in paragraphs.items():
-        for record in records:
-            if (record.get("content_class_detail") not in SPLIT_ELIGIBLE_DETAILS
-                    or not record.get("degradation")
-                    or record.get("content_class") == "non_prose"):
+    # Paragraph-text repeats: the probe enumerates every section, so a page paragraph
+    # shared by several headings counts once per section. Report boundaries removed both
+    # as counted and deduped by paragraph text; labels are drawn only from distinct
+    # boundaries.
+    print("\n## Boundaries removed, counted vs distinct (deduped by paragraph text)")
+    print("| Rule set | Removed (counted) | Removed (distinct) |")
+    print("| --- | --- | --- |")
+    for name, result in results.items():
+        distinct = {(item["record"]["text"], item["end"]) for item in result["removed"]}
+        result["removed_distinct"] = distinct
+        print(f"| {name} | {len(result['removed'])} | {len(distinct)} |")
+
+    # R-I-U census: EVERY distinct boundary the shipped initials rule removes, with 60
+    # characters of context each side, for hand-labelling. No sampling.
+    census = sorted({(item["record"]["text"], item["end"], item["id"], item["unit"])
+                     for item in results["R-I-U upper initials"]["removed"]})
+    print(f"\n## R-I-U census: {len(census)} distinct removed boundaries "
+          f"({len(results['R-I-U upper initials']['removed'])} counted)\n")
+    print("| # | Id | Unit | Context (60 chars each side) | Label |")
+    print("| --- | --- | --- | --- | --- |")
+    for number, (text, end, identifier, unit) in enumerate(census, 1):
+        context = norm1(text[max(0, end - 60):end + 60])
+        print(f"| {number} | {identifier} | {unit} | `{context}` | |")
+
+    # Verdict flips, in both directions. The shipped code judges the PDF-6f
+    # per-sentence verdict on `main`'s ranges (rules=frozenset()) no matter which unit
+    # rules apply, so a shipped-flips count must be 0 by construction AND the replica
+    # agreement above must hold. The 'if judged on rule ranges' row prices the bug the
+    # fix prevents: `et al.`/initials joins re-coarsen paragraphs `main` freed.
+    print("\n## Verdict flips per rule set (refused->freed and freed->refused)\n")
+    print("| Rule set | freed -> refused | refused -> freed |")
+    print("| --- | --- | --- |")
+    for name, rules in list(RULE_SETS.items()) + [(SHIPPED, both)]:
+        f2r = r2f = 0
+        for identifier, records in paragraphs.items():
+            for record in records:
+                if (record.get("content_class_detail") not in SPLIT_ELIGIBLE_DETAILS
+                        or record.get("content_class") == "non_prose"):
+                    continue
+                text = record["text"]
+                context = {"tokens": GE.token_counts(text)}
+                old_fires = verdict_s1(text, context)["fires"]
+                new_fires = verdict_s1(text, context, rules)["fires"]
+                if not old_fires and new_fires:
+                    f2r += 1
+                elif old_fires and not new_fires:
+                    r2f += 1
+        print(f"| {name} (if judged on rule ranges) | {f2r} | {r2f} |")
+        results[name]["freed_to_refused_if_rule_ranges"] = f2r
+        results[name]["refused_to_freed_if_rule_ranges"] = r2f
+    print("| shipped (verdict on main ranges) | 0 | 0 |")
+
+    # Cross-check of shipped unit projections with eligibility recomputed by the port's
+    # verdict instead of the recorded flag: the two projections must agree.
+    def eligible_by_verdict(record, ctx):
+        return not verdict_s1(record["text"], ctx)["fires"]
+    def doc_stream_verdict(records, rules):
+        units = []
+        for paragraph in records:
+            text = paragraph["text"]
+            eligible = (paragraph.get("content_class_detail") in SPLIT_ELIGIBLE_DETAILS
+                        and eligible_by_verdict(
+                            paragraph, {"tokens": GE.token_counts(text)}))
+            if not eligible:
+                units.append({"text": text, "section_id": paragraph.get("section_id"),
+                              "paragraph_coarse": True,
+                              "non_prose": paragraph.get("content_class") == "non_prose"})
                 continue
-            text = record["text"]
-            old_verdict = verdict_s1(text, {"tokens": GE.token_counts(text)})
-            new_verdict = verdict_s1(text, {"tokens": GE.token_counts(text)}, both)
-            if old_verdict["fires"] != new_verdict["fires"]:
-                flips += 1
-    print(f"# coarse paragraphs whose PDF-6f verdict flips under the new ranges: {flips}")
+            for start, end in sentence_ranges(text, rules):
+                units.append({"text": text[start:end],
+                              "section_id": paragraph.get("section_id"),
+                              "paragraph_coarse": False, "non_prose": False})
+        return units
+    verdict_units = {identifier: len(doc_stream_verdict(records, both))
+                     for identifier, records in paragraphs.items()}
+    shipped_units = {identifier: len(doc_stream(records, both))
+                     for identifier, records in paragraphs.items()}
+    drifted = {i: (verdict_units[i], shipped_units[i]) for i in verdict_units
+               if verdict_units[i] != shipped_units[i]}
+    print(f"# shipped projection via port verdict vs recorded flag: "
+          f"{len(drifted)} documents differ" + (f" {dict(list(drifted.items())[:8])}" if drifted else ""))
 
     # Hand-labelling sample: up to --sample removed boundaries per rule, seeded, at most 8
     # per document.
@@ -562,7 +660,7 @@ def pdf6g_mode(args) -> int:
         # Every removal the rule explains, alone or jointly with the other rule, is fair
         # to label under the rule.
         rule = {"R-I initials": "initials", "R-A et al.": "et_al"}[name]
-        pool = [item for item in results["R-I+R-A"]["removed"] if rule in item["rules"]]
+        pool = [item for item in results[SHIPPED]["removed"] if rule in item["rules"]]
         rng.shuffle(pool)
         per_doc: collections.Counter = collections.Counter()
         chosen = []

@@ -565,7 +565,13 @@ fn collect_section_segmentation(
                             // Eligible, as a paragraph the shipped exemptions already
                             // clear.
                         } else {
-                            let ranges = sentence_ranges(text, candidate.range, pdf_sentence_rules);
+                            // PDF-6g changes no verdict: the per-sentence re-check judges
+                            // `sentence_ranges(text, range, false)`, the exact ranges `main`
+                            // uses. Judging the PDF-rule ranges would let an `et al.` or
+                            // initials join re-coarsen a paragraph `main` freed, when the
+                            // merged sentence reaches MIN_MISSING_SPACE_GLUE_EVENTS - the
+                            // same adding-up PDF-6f removed.
+                            let ranges = sentence_ranges(text, candidate.range, false);
                             let refused = ranges.iter().any(|range| {
                                 index.slice(*range).is_ok_and(|sentence| {
                                     let sentence_chars = sentence.chars().collect::<Vec<_>>();
@@ -576,7 +582,16 @@ fn collect_section_segmentation(
                             if refused {
                                 eligibility = SentenceEligibility::CoarseParagraphOnly;
                             } else {
-                                freed_sentence_ranges = Some(ranges);
+                                // The verdict ranges double as the unit ranges unless a
+                                // PDF-6g rule could rewrite them; only then does the
+                                // eligible branch need the PDF-rule ranges.
+                                let units =
+                                    if pdf_sentence_rules && pdf_sentence_rule_candidate(&chars) {
+                                        sentence_ranges(text, candidate.range, true)
+                                    } else {
+                                        ranges
+                                    };
+                                freed_sentence_ranges = Some(units);
                             }
                         }
                     }
@@ -905,7 +920,8 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
         return false;
     }
 
-    let token = preceding_period_token(chars, index).to_ascii_lowercase();
+    let raw_token = preceding_period_token(chars, index);
+    let token = raw_token.to_ascii_lowercase();
     if !token.is_empty() && is_protected_abbreviation(&token) && index + 1 < chars.len() {
         // A list-ending abbreviation can also end a sentence. Preserve interior
         // uses ("etc., including" / "etc. and") and title/example abbreviations.
@@ -935,10 +951,23 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
         }
     }
 
-    // A single letter is an initial in every format. PDF-6g R-I (multi-letter initials)
-    // was measured out: the same rule that protects `E.F.` also merges the sentence-final
-    // abbreviations PDFs carry (`w.h.p.`, `d.o.f.`, `i.i.d.` end a sentence more often
-    // than they join one). The one-letter check stays exactly as it was.
+    // PDF-6g R-I-U (PDF only): a period ending a token of two or more single uppercase
+    // ASCII letters joined by periods (`E.F`, `K.R`, `J.R.R`) is not terminal when the
+    // next non-whitespace character is uppercase - the name-initial case the one-letter
+    // check already covers. Lowercase lookalikes (`w.h.p.`, `d.o.f.`, `i.i.d.`) still end
+    // their sentence; `u.s.`/`u.k.` keep `is_protected_abbreviation`'s protection above.
+    if pdf
+        && is_uppercase_initials_token(&raw_token)
+        && next_non_whitespace(chars, index + 1).is_some_and(|ch| ch.is_uppercase())
+    {
+        return false;
+    }
+
+    // A single letter is an initial in every format. The mixed-case initials rule
+    // (PDF-6g R-I) was measured out: it also merges the sentence-final abbreviations PDFs
+    // carry (`w.h.p.`, `d.o.f.` end a sentence more often than they join one). The
+    // uppercase-only narrowing (R-I-U) ships instead; the one-letter check itself stays
+    // exactly as it was.
     if token.chars().count() == 1
         && token.chars().all(|ch| ch.is_ascii_alphabetic())
         && next_non_whitespace(chars, index + 1).is_some_and(|ch| ch.is_uppercase())
@@ -947,6 +976,59 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
     }
 
     ascii_terminal_is_terminal(chars, index)
+}
+
+/// A token of two or more single uppercase ASCII letters joined by periods (`E.F`, `J.R.R`).
+fn is_uppercase_initials_token(token: &str) -> bool {
+    let mut letters = 0usize;
+    for part in token.split('.') {
+        if part.len() == 1
+            && part
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_uppercase())
+        {
+            letters += 1;
+        } else {
+            return false;
+        }
+    }
+    letters >= 2
+}
+
+/// True when the text contains a site where a PDF-6g rule could remove a boundary: an `et
+/// al.` period (R-A) or a multi-letter initials token (R-I-U). The check only decides whether
+/// a paragraph freed by the per-sentence verdict needs the PDF-rule unit ranges; it never
+/// changes a verdict, so matching the rule's own conditions exactly is not required - a
+/// candidate that resolves to the same ranges costs one extra segmentation and nothing else.
+fn pdf_sentence_rule_candidate(chars: &[char]) -> bool {
+    chars.iter().enumerate().any(|(index, ch)| {
+        if *ch != '.' {
+            return false;
+        }
+        let mut start = index;
+        while start > 0 {
+            let ch = chars[start - 1];
+            if ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let token = chars[start..index].iter().collect::<String>();
+        let mut parts = token.split('.');
+        let dotted_letters = token.len() >= 3
+            && parts.all(|part| {
+                part.len() == 1
+                    && part
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_alphabetic())
+            });
+        dotted_letters
+            || (token.eq_ignore_ascii_case("al")
+                && word_before_period_token(chars, index).is_some_and(|word| word == "et"))
+    })
 }
 
 /// The whitespace-separated word directly before `preceding_period_token`'s token, lowercase
@@ -2075,18 +2157,15 @@ mod tests {
             .collect()
     }
 
-    /// PDF-6g ships R-A only: R-I (multi-letter initials) was measured out on the corpus
-    /// (`w.h.p.`, `d.o.f.` and friends end sentences more often than they join), so `E.F.`
-    //  keeps splitting exactly as before while `et al.` stays inside its sentence.
+    /// PDF-6g ships R-A (`et al.`) and R-I-U (uppercase multi-letter initials): both
+    /// keep a name inside one sentence under the PDF rules.
     #[test]
-    fn pdf_sentence_rules_keep_et_al_inside_the_sentence() {
+    fn pdf_sentence_rules_keep_initials_and_et_al_inside_the_sentence() {
         for (text, expected) in [
             (
                 "E.F. Fama and K.R. French study returns. They find two factors.",
                 vec![
-                    "E.F.",
-                    "Fama and K.R.",
-                    "French study returns.",
+                    "E.F. Fama and K.R. French study returns.",
                     "They find two factors.",
                 ],
             ),
@@ -2107,6 +2186,67 @@ mod tests {
             document.media_type = MediaType("application/pdf".into());
             assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
         }
+    }
+
+    /// R-I-U is deliberately uppercase-only: the sentence-final abbreviations that sank the
+    /// mixed-case R-I rule keep splitting under PDF rules.
+    #[test]
+    fn pdf_sentence_rules_still_split_lowercase_abbreviation_endings() {
+        for (text, expected) in [
+            (
+                "the bound holds w.h.p. Similarly the next lemma follows.",
+                vec![
+                    "the bound holds w.h.p.",
+                    "Similarly the next lemma follows.",
+                ],
+            ),
+            (
+                "we impose the D.b.c. Meanwhile the other case stays open.",
+                vec![
+                    "we impose the D.b.c.",
+                    "Meanwhile the other case stays open.",
+                ],
+            ),
+        ] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType("application/pdf".into());
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// The verdict is judged on the ranges `main` uses, so a paragraph `main` frees stays
+    /// sentence-eligible even when an `et al.` join would put three missing-space glue
+    /// events into a single PDF-rule sentence - exactly the adding-up PDF-6f removed.
+    /// The paragraph carries 3 glue events total (`,N` once, then `,N` and `,T`), split
+    /// 1+2 across the boundary after `al.`: under `main`'s ranges each sentence is under
+    /// `MIN_MISSING_SPACE_GLUE_EVENTS`, but under the PDF-rule ranges (`show` is
+    /// lowercase, so the boundary is removed) the merged sentence holds all three and the
+    /// paragraph would be served whole as a coarse unit.
+    #[test]
+    fn pdf_verdict_uses_the_main_ranges_not_the_pdf_rule_ranges() {
+        let text = "We study ,N X et al. show that a b c ,N ,T holds. Rest follows here.";
+        let mut document = document(vec![section("s", None, text, Vec::new())]);
+        document.media_type = MediaType("application/pdf".into());
+        let segmentation = document.segmentation();
+        let section = &segmentation.sections[0];
+        assert_eq!(
+            section.sentence_coverage[0].eligibility(),
+            SentenceEligibility::Eligible
+        );
+        let owner = document.find_section(&section.section_id).unwrap();
+        let index = owner.normalized_text_index();
+        let sentences = section
+            .sentences
+            .iter()
+            .map(|sentence| index.slice(sentence.range()).unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sentences,
+            vec![
+                "We study ,N X et al. show that a b c ,N ,T holds.",
+                "Rest follows here."
+            ]
+        );
     }
 
     /// PDF-6g R-I/R-A are PDF-only: the same four strings segment exactly as they did before

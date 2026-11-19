@@ -8,11 +8,15 @@ use super::{
 pub const TEXT_SEGMENTATION_VERSION: &str = "text-segmentation/v3";
 pub const TEXT_UNIT_ID_VERSION: &str = "text-unit-id/v1";
 
-/// The PDF-only sentence rules layer (PDF-6g, #232): multi-letter initials and `et al.`
-/// stay inside one sentence. It is *not* part of `TEXT_SEGMENTATION_VERSION`: the rules
-/// change boundaries only inside PDF paragraphs, so only PDF document handles hash it into
-/// their checksum, which makes every handle minted before the rules fail closed as
-/// `stale_handle` instead of resolving to a different sentence.
+/// The PDF-only sentence rules layer (PDF-6g, #232): `et al.` stays inside its sentence
+/// (R-A), and an uppercase multi-letter initials token such as `E.F.` or `K.R.` is not
+/// terminal before an uppercase letter (R-I-U). Neither rule touches the fallback-guard
+/// verdicts - a paragraph's eligibility is always judged on the same sentence ranges
+/// `main` uses; the rules only re-cut the sentences of paragraphs already eligible.
+/// It is *not* part of `TEXT_SEGMENTATION_VERSION`: the rules change boundaries only
+/// inside PDF paragraphs, so only PDF document handles hash it into their checksum, which
+/// makes every handle minted before the rules fail closed as `stale_handle` instead of
+/// resolving to a different sentence.
 pub const PDF_SENTENCE_RULES_VERSION: &str = "pdf-sentence-rules/v1";
 
 const TEXT_UNIT_ID_DOMAIN: &[u8] = b"reading-mcp/text-unit-id/v1\0";

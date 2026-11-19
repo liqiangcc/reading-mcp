@@ -1082,6 +1082,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
         buckets.last_mut().expect("bucket").push(line);
     }
     for mut rest in buckets {
+        let mut bands: Vec<Vec<Line>> = Vec::new();
         while !rest.is_empty() {
             // Grow the band from the leftmost line only until it is stable.
             // A line counts into the band only when the band contains it:
@@ -1105,14 +1106,44 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
                 hi = wide_hi;
             }
             let mut next = Vec::new();
+            let mut band = Vec::new();
             for line in rest {
                 if line.x0 >= lo && line.x1 <= hi {
-                    final_lines.push(line);
+                    band.push(line);
                 } else {
                     next.push(line);
                 }
             }
+            bands.push(band);
             rest = next;
+        }
+        // Band order: highest first, then left to right. A full-width
+        // title or a header row tops the page (and so leads its band's
+        // block), and the left column still precedes the right.
+        bands.sort_by(|a, b| {
+            let top = |lines: &Vec<Line>| {
+                lines
+                    .iter()
+                    .map(|line| line.baseline)
+                    .fold(f32::NEG_INFINITY, f32::max)
+            };
+            b.top
+                .partial_cmp(&top(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let left = |lines: &Vec<Line>| {
+                        lines
+                            .iter()
+                            .map(|line| line.x0)
+                            .fold(f32::INFINITY, f32::min)
+                    };
+                    left(a)
+                        .partial_cmp(&left(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        for band in bands {
+            final_lines.extend(band);
         }
     }
     let mut lines = final_lines;
@@ -1125,6 +1156,13 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     for line in &mut lines {
         let starts_new = previous.is_some_and(|(rotation, baseline)| {
             if rotation != line.rotation {
+                return true;
+            }
+            // A heading-shaped line breaks the block wherever it sits:
+            // `infer_numbered_headings` only accepts a fragment that is
+            // the heading alone, so a merged line loses the document's
+            // whole inferred structure (the Raft evidence gate).
+            if heading_shaped(&line.text()) {
                 return true;
             }
             let gap = baseline - line.baseline;
@@ -1146,6 +1184,42 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
         previous = Some((line.rotation, line.baseline));
     }
     lines
+}
+
+/// The line looks like a numbered section heading: `N`, `N.N` or `N.N.N`
+/// followed by a capitalized title, short enough to be a heading. This is
+/// a lighter `parse_numbered_heading` (`pdf.rs`) - it only has to decide
+/// whether the line starts a new block.
+fn heading_shaped(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 160 {
+        return false;
+    }
+    let mut prefix_end = 0_usize;
+    for (index, character) in text.char_indices() {
+        if character.is_ascii_digit() || character == '.' {
+            prefix_end = index + character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if prefix_end == 0 {
+        return false;
+    }
+    let number = text[..prefix_end].trim_end_matches('.');
+    let title = text[prefix_end..]
+        .trim_start_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '.' | ':' | '-' | '\u{2013}' | '\u{2014}')
+        })
+        .trim();
+    !number.is_empty()
+        && number
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+        && !title.is_empty()
+        && title.split_whitespace().count() <= 24
+        && title.chars().next().is_some_and(char::is_uppercase)
 }
 
 /// Renders the laid-out lines: `"\n"` inside a block, `"\n\n"` between

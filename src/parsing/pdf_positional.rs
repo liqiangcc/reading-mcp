@@ -49,6 +49,10 @@ const BASELINE_TOLERANCE: f32 = 0.5;
 /// within `2.0 * size` of the line's extent; farther apart it is its own
 /// span (a different column or table cell).
 const LINE_X_GAP: f32 = 2.0;
+/// A horizontal gap wider than this fraction of the fragment's size
+/// (PyMuPDF's space advance is about `0.25 * size`) is a word gap even
+/// when no space glyph was shown. Measure branch only.
+const SPACE_GAP_RATIO: f32 = 0.2;
 /// A baseline gap above this multiple of the page's modal leading starts a
 /// new block.
 const BLOCK_GAP_RATIO: f32 = 1.8;

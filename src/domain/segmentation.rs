@@ -530,7 +530,7 @@ fn collect_section_segmentation(
         if eligibility == SentenceEligibility::Eligible
             && content_class == ParagraphContentClass::ProseOrUnknown
             && fallback_guard_can_fire(text)
-            && looks_like_unreliable_fallback_text(text, guard)
+            && paragraph_fails_fallback_guard(index, text, candidate.range, guard)
         {
             eligibility = SentenceEligibility::CoarseParagraphOnly;
         }
@@ -1043,6 +1043,32 @@ impl FallbackGuardProfile {
             Self::AllFormats
         }
     }
+}
+
+/// The fallback guard's verdict on one paragraph. A paragraph the guard refuses is, for PDF
+/// prose only, re-checked sentence by sentence (PDF-6f): the missing-space count is taken
+/// per sentence, so one glued sentence no longer condemns its clean neighbours. The
+/// paragraph stays refused when at least one sentence fires the unchanged guard on its own
+/// text. The doubled-character and bibliographic checks stay paragraph-wide under every
+/// profile: a masthead merged into a paragraph is invisible to any per-sentence view. The
+/// re-check runs only when the paragraph-level verdict is "refuse", so paragraphs that
+/// pass today pay nothing for it.
+fn paragraph_fails_fallback_guard(
+    index: &NormalizedTextIndex<'_>,
+    text: &str,
+    paragraph_range: NormalizedTextRange,
+    guard: FallbackGuardProfile,
+) -> bool {
+    if !looks_like_unreliable_fallback_text(text, guard) {
+        return false;
+    }
+    if guard != FallbackGuardProfile::PdfProse {
+        return true;
+    }
+    sentence_ranges(text, paragraph_range)
+        .iter()
+        .filter_map(|range| index.slice(*range).ok())
+        .any(|sentence| looks_like_unreliable_fallback_text(sentence, guard))
 }
 
 /// A fallback paragraph that merges heterogeneous fragments (masthead, title, byline,

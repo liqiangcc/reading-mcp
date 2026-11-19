@@ -202,6 +202,119 @@ fn fallback_pdf_with_unreliable_paragraphs_reports_reliability_degradation() {
     );
 }
 
+// PDF-6f (#232): under the PDF profile the missing-space count is taken per sentence.
+// A paragraph whose three glue events sit in three different sentences has no glued
+// sentence at all, so it is sentenced like a clean paragraph; a paragraph whose events
+// pile up inside one sentence still has a glued sentence and stays coarse.
+
+#[test]
+fn pdf_paragraph_with_one_glue_event_per_sentence_is_split() {
+    let mut document = document_with_content(
+        "The arXiv preprint was posted last Tuesday. The arXiv listing drew wide attention. \
+         The arXiv version differs slightly today.",
+    );
+    document.media_type = MediaType("application/pdf".into());
+
+    let set = document.sentence_text_units();
+
+    assert_eq!(set.units.len(), 3);
+    assert_eq!(set.coverage[0].eligibility, SentenceEligibility::Eligible);
+    assert_eq!(
+        set.units[0].text,
+        "The arXiv preprint was posted last Tuesday."
+    );
+}
+
+#[test]
+fn pdf_paragraph_with_three_glue_events_in_one_sentence_stays_coarse() {
+    let mut document = document_with_content(
+        "The arXiv arXiv arXiv preprint cluster is dense today. A clean sentence follows here.",
+    );
+    document.media_type = MediaType("application/pdf".into());
+
+    let set = document.sentence_text_units();
+
+    assert!(set.units.is_empty());
+    assert_eq!(
+        set.coverage[0].eligibility,
+        SentenceEligibility::CoarseParagraphOnly
+    );
+}
+
+#[test]
+fn pdf_per_sentence_verdict_keeps_paragraph_index_stable() {
+    // A freed paragraph keeps its index and its paragraph handle: the paragraph text a
+    // paragraph handle resolves is identical before and after the per-sentence re-check.
+    let content = "Body prose sentence zero.\n\nThe arXiv preprint was posted last Tuesday. \
+                   The arXiv listing drew wide attention. The arXiv version differs slightly \
+                   today.";
+    let mut plain = document_with_content(content);
+    plain.media_type = MediaType("text/plain".into());
+    let mut pdf = document_with_content(content);
+    pdf.media_type = MediaType("application/pdf".into());
+
+    let plain_paragraphs = plain.paragraph_text_units();
+    let pdf_paragraphs = pdf.paragraph_text_units();
+
+    assert_eq!(plain_paragraphs.units.len(), pdf_paragraphs.units.len());
+    for (before, after) in plain_paragraphs
+        .units
+        .iter()
+        .zip(pdf_paragraphs.units.iter())
+    {
+        assert_eq!(before.text, after.text);
+        assert_eq!(
+            before.locator.normalized_range, after.locator.normalized_range,
+            "a freed paragraph keeps its normalized range"
+        );
+    }
+    // The sentence handle into the freed paragraph resolves to its first sentence.
+    let pdf_sentences = pdf.sentence_text_units();
+    assert_eq!(
+        pdf_sentences.units[1].text,
+        "The arXiv preprint was posted last Tuesday."
+    );
+}
+
+#[test]
+fn pdf_masthead_blob_stays_coarse_under_the_per_sentence_guard() {
+    // The same text as `merged_masthead_title_and_opening_blob_is_not_a_clean_sentence`,
+    // under the PDF profile: its first sentence packs the bibliographic markers densely
+    // enough to fire on its own, so the verdict is unchanged.
+    let mut document = document_with_content(
+        "16 October 1964, Volume 146, Number 3642 Strong Inference Certain systematic methods \
+         of scientific thinking may produce much more rapid progress than others. John R. \
+         Platt Scientists these days tend to keep up a polite fiction that all science is \
+         equal.",
+    );
+    document.media_type = MediaType("application/pdf".into());
+    document
+        .metadata
+        .insert("pdf_structure_provenance".into(), "page_fallback".into());
+
+    let set = document.sentence_text_units();
+    assert!(set.units.is_empty());
+    assert_eq!(
+        set.coverage[0].eligibility,
+        SentenceEligibility::CoarseParagraphOnly
+    );
+
+    let summary = PersistedDocumentReliabilityInspector
+        .inspect(&document)
+        .expect("reliability inspection should succeed");
+    let evidence = summary
+        .evidence
+        .iter()
+        .find(|evidence| evidence.degradation_count > 0)
+        .expect("the still-refused paragraph must surface degradation evidence");
+    assert!(
+        evidence
+            .degradation_codes
+            .iter()
+            .any(|code| code == "pdf_fallback_paragraph_unreliable")
+    );
+}
+
 #[test]
 fn clean_fallback_pdf_keeps_not_applicable_reliability() {
     let mut document = document_with_content(

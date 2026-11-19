@@ -79,9 +79,8 @@ struct PositionedFragment {
 /// The lines and blocks of one page, ready to become `PageText`.
 #[derive(Clone, Debug, Default)]
 pub(super) struct PositionalPage {
-    /// Lines joined with `"\n"`, blocks with `"\n\n"`.
-    pub text: String,
-    /// One item per block.
+    /// One item per block; `normalized_page_text` joins them into the
+    /// page text, so no separate joined string is kept.
     pub chunks: Vec<String>,
     /// Why the page could not be positioned, when it could not.
     pub bail: Option<&'static str>,
@@ -1406,12 +1405,8 @@ where
             ..PositionalPage::default()
         };
     }
-    let (text, chunks) = render_lines(&walked.lines);
-    PositionalPage {
-        text,
-        chunks,
-        bail: None,
-    }
+    let (_text, chunks) = render_lines(&walked.lines);
+    PositionalPage { chunks, bail: None }
 }
 
 /// The same walk for the CI probe: the laid-out lines themselves, for the

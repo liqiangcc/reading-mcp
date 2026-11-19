@@ -22,7 +22,12 @@ use super::common::{content_hash, document_id, slugify, title_from_metadata};
 /// serving the coarse paragraphs the older rule produced. It keys the parsed cache
 /// (`CachingParser::cache_key`) and, through `ingest_fingerprint`, the stored open results, so no
 /// stored PDF can keep the old units.
-pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v3";
+///
+/// v3 -> v4 is the deploy-time bump for everything merged since the 2026-11-19 deploy. PDF-6f (#251)
+/// judges the #139 guard per sentence in a refused PDF paragraph, so those paragraphs now segment
+/// into sentences; a stored PDF re-ingests instead of replaying the coarse paragraphs. The
+/// normalized text does not change, so handles stay valid.
+pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v4";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";

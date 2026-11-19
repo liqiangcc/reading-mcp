@@ -1651,7 +1651,9 @@ mod tests {
             let mut memo = FontEncodingMemo::new();
             let mut metrics = FontMetricsMemo::new(&document);
             let diag = std::env::var_os("PDF7B_PROBE_DIAG").is_some();
+            eprintln!("probe starting {id}");
             for (number, page_id) in document.get_pages() {
+                eprintln!("probe {id} page {number}");
                 if diag {
                     let page =
                         extract_positional_page(&document, page_id, LIMIT, &mut memo, &mut metrics);

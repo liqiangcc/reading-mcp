@@ -120,10 +120,19 @@ def run_shard(args) -> int:
             probe_out = os.path.join(args.out_dir, "positional-lines.jsonl")
             if os.path.exists(probe_out):
                 os.unlink(probe_out)
-            completed = subprocess.run(
-                [args.probe_bin, "pdf7b1_positional_probe",
-                 "--ignored", "--nocapture", "--test-threads", "1"],
-                env=env, capture_output=True, text=True, timeout=600)
+            try:
+                completed = subprocess.run(
+                    [args.probe_bin, "pdf7b1_positional_probe",
+                     "--ignored", "--nocapture", "--test-threads", "1"],
+                    env=env, capture_output=True, text=True, timeout=180)
+            except subprocess.TimeoutExpired as exc:
+                tail = (exc.stderr or b"" if isinstance(exc.stderr, bytes)
+                        else exc.stderr or "")
+                if isinstance(tail, bytes):
+                    tail = tail.decode("utf-8", "replace")
+                print(f"| {entry['id']} | probe timed out: {tail[-300:]} |",
+                      flush=True)
+                continue
             pages: list[dict] = []
             if os.path.exists(probe_out):
                 with open(probe_out, encoding="utf-8") as handle:

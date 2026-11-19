@@ -56,6 +56,18 @@ def pymupdf_lines(page) -> list[dict]:
     return out
 
 
+def pymupdf_dump(path: str, out_path: str) -> None:
+    """PyMuPDF's own lines as JSONL, one record per page, for offline diffing
+    of the walker's text against the reference's."""
+    import pymupdf
+    doc = pymupdf.open(path)
+    with open(out_path, "w", encoding="utf-8") as handle:
+        for page_no, page in enumerate(doc):
+            record = {"page": page_no + 1, "lines": pymupdf_lines(page)}
+            handle.write(json.dumps(record) + "\n")
+    doc.close()
+
+
 def compare_page(ours: list[dict], theirs: list[dict]) -> dict:
     """Multiset match of whitespace-normalised line text."""
     ours_text = [normalize_ws(line["t"]) for line in ours]
@@ -120,6 +132,12 @@ def run_shard(args) -> int:
             probe_out = os.path.join(args.out_dir, "positional-lines.jsonl")
             if os.path.exists(probe_out):
                 os.unlink(probe_out)
+            # Keep each document's own dump so all shards' artifacts merge
+            # without clobbering one another.
+            dump_out = os.path.join(args.out_dir,
+                                    f"our-{entry['id'].replace('/', '_')}.jsonl")
+            if os.path.exists(dump_out):
+                os.unlink(dump_out)
             try:
                 completed = subprocess.run(
                     [args.probe_bin, "pdf7b1_positional_probe",
@@ -135,6 +153,8 @@ def run_shard(args) -> int:
                 continue
             pages: list[dict] = []
             if os.path.exists(probe_out):
+                import shutil
+                shutil.copyfile(probe_out, dump_out)
                 with open(probe_out, encoding="utf-8") as handle:
                     pages = [json.loads(line) for line in handle if line.strip()]
             if not pages:
@@ -142,6 +162,8 @@ def run_shard(args) -> int:
                       f"{completed.stdout[-200:]} {completed.stderr[-200:]} |",
                       flush=True)
                 continue
+            pymupdf_dump(path, os.path.join(
+                args.out_dir, f"ref-{entry['id'].replace('/', '_')}.jsonl"))
             import pymupdf
             doc = pymupdf.open(path)
             for record in pages:

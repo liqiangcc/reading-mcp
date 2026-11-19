@@ -166,7 +166,9 @@ def aggregate(args) -> int:
     pages = []
     summaries = []
     for name in sorted(os.listdir(args.jsonl_dir)):
-        if not name.endswith(".jsonl"):
+        # The probe's own positional-lines.jsonl dumps also live in the shard
+        # artifacts; only the compare-<shard>.jsonl rows are aggregated.
+        if not (name.endswith(".jsonl") and name.startswith("compare-")):
             continue
         with open(os.path.join(args.jsonl_dir, name), encoding="utf-8") as handle:
             for line in handle:

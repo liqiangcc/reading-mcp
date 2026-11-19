@@ -1119,17 +1119,17 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     let (body_lo, body_hi) = body_band(&lines, leading);
 
     let mut block = 0_usize;
-    let mut previous: Option<(i32, f32)> = None;
+    let mut previous: Option<(i32, f32, bool)> = None;
     for line in &mut lines {
-        let starts_new = previous.is_some_and(|(rotation, baseline)| {
+        let starts_new = previous.is_some_and(|(rotation, baseline, heading)| {
             if rotation != line.rotation {
                 return true;
             }
-            // A heading-shaped line breaks the block wherever it sits:
-            // `infer_numbered_headings` only accepts a fragment that is
-            // the heading alone, so a merged line loses the document's
-            // whole inferred structure (the Raft evidence gate).
-            if heading_shaped(&line.text()) {
+            // A heading-shaped line is a whole block by itself, before and
+            // after: `parse_numbered_heading` only accepts a fragment that
+            // holds one line, so a merged line loses the document's whole
+            // inferred structure (the Raft evidence gate).
+            if heading || heading_shaped(&line.text()) {
                 return true;
             }
             let gap = baseline - line.baseline;
@@ -1148,7 +1148,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
             block += 1;
         }
         line.block = block;
-        previous = Some((line.rotation, line.baseline));
+        previous = Some((line.rotation, line.baseline, heading_shaped(&line.text())));
     }
     lines
 }

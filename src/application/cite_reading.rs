@@ -10,9 +10,11 @@ use crate::application::handle_reading::{resolve_header, resolve_locator};
 use crate::application::ports::{DocumentRepository, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::carrier_section;
-use crate::application::short_handle::parse_handle;
+use crate::application::short_handle::{ReadingHandle, parse_handle};
+use crate::application::text_unit_stream::coarse_degradation;
 use crate::domain::{
-    NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, TEXT_SEGMENTATION_VERSION, TextLocator,
+    DocumentId, NORMALIZATION_VERSION, NORMALIZED_DOCUMENT_HASH_VERSION, SectionId,
+    SentenceEligibility, TEXT_SEGMENTATION_VERSION, TextLocator,
 };
 
 /// One cited handle.
@@ -21,6 +23,12 @@ pub struct CiteReadingItem {
     pub at: String,
     /// The full v1 locator, absent only for a document handle.
     pub locator: Option<TextLocator>,
+    /// The v1 `effective_kind` of a paragraph handle sentence mode cannot split, so a caller sees
+    /// the unit is a paragraph without having to read it. `None` for a sentence and for a
+    /// paragraph that splits into sentences.
+    pub effective_kind: Option<&'static str>,
+    /// The v1 degradation code that says why that paragraph is whole.
+    pub degradation: Option<&'static str>,
     /// The original source position the section carries (`epub:<file>#<anchor>` or `pdf:page:<n>`).
     pub source_position: Option<String>,
     /// The PDF page number, when the source position names one.
@@ -71,6 +79,23 @@ impl CiteReadingUseCase {
             .await?;
             let locator =
                 resolve_locator(self.text_unit_index.as_ref(), &resolved, &handle).await?;
+            let (effective_kind, degradation) = match (&handle, &locator) {
+                (
+                    ReadingHandle::Paragraph {
+                        paragraph_index, ..
+                    },
+                    Some(locator),
+                ) => {
+                    unsplittable_paragraph(
+                        self.text_unit_index.as_ref(),
+                        resolved.id(),
+                        &locator.owner_section_id,
+                        *paragraph_index,
+                    )
+                    .await?
+                }
+                _ => (None, None),
+            };
             let source_position = locator
                 .as_ref()
                 .and_then(|locator| locator.native_location.clone());
@@ -78,6 +103,8 @@ impl CiteReadingUseCase {
             items.push(CiteReadingItem {
                 at: at.clone(),
                 locator,
+                effective_kind,
+                degradation,
                 source_position,
                 page,
                 document_id: resolved.id().0.clone(),
@@ -127,6 +154,34 @@ impl CiteReadingUseCase {
             &carrier_section(&row),
             &resolved.normalized_document_hash,
         ))
+    }
+}
+
+/// The v1 `effective_kind` and degradation code of a paragraph handle, when sentence mode cannot
+/// split that paragraph: the paragraph is coarse, so a caller citing it is citing a whole paragraph
+/// and not a sentence. `(None, None)` for a paragraph that splits into sentences.
+async fn unsplittable_paragraph(
+    index: &dyn TextUnitIndex,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+    paragraph_index: usize,
+) -> Result<(Option<&'static str>, Option<&'static str>), ReadingError> {
+    let Some(units) = index.section_units(document_id, section_id).await? else {
+        return Err(ReadingError::stale_handle(format!(
+            "section {} has no stored text units",
+            section_id.0
+        )));
+    };
+    let coverage = units
+        .sentence_coverage
+        .iter()
+        .find(|coverage| coverage.paragraph_index == paragraph_index);
+    match coverage {
+        Some(coverage) if coverage.eligibility == SentenceEligibility::CoarseParagraphOnly => Ok((
+            Some(crate::application::text_unit_stream::PARAGRAPH_KIND),
+            Some(coarse_degradation(coverage.content_class)),
+        )),
+        _ => Ok((None, None)),
     }
 }
 

@@ -1586,12 +1586,15 @@ mod tests {
             font_resources(),
         );
         let lines = lines_of(&document, page_ids[0]);
-        // Same baseline: one line whose two fragments keep their measured
-        // positions (the 30-unit Td gap between them is not a space).
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].text, "ABCD");
+        // Same baseline, but the 30-unit Td gap is wider than the join's
+        // reach: two lines, each at a measured position.
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "AB");
         assert!((lines[0].x0 - 100.0).abs() < 0.01);
-        assert!((lines[0].x1 - 154.0).abs() < 0.01);
+        assert!((lines[0].x1 - 112.0).abs() < 0.01);
+        assert_eq!(lines[1].text, "CD");
+        assert!((lines[1].x0 - 142.0).abs() < 0.01);
+        assert!((lines[1].baseline - 700.0).abs() < 0.01);
     }
 
     #[test]

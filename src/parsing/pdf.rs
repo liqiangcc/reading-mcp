@@ -78,14 +78,14 @@ struct PdfSourceFragment {
 struct PageFragments(Vec<(u32, String)>);
 
 impl PageFragments {
-    /// One fragment per paragraph block: blocks of a page join with `"\n\n"`
-    /// (stage 1 made a fragment a block, not a line), pages join with the
-    /// same separator.
+    /// One fragment per paragraph block: a fragment's trailing line break
+    /// plus the join's own newline separates two fragments with `"\n\n"`,
+    /// so a block is a paragraph unit.
     fn push_line(&mut self, page: u32, text: &str) {
         match self.0.last_mut() {
             Some((last_page, fragment)) if *last_page == page => {
                 if !fragment.is_empty() {
-                    fragment.push_str("\n\n");
+                    fragment.push('\n');
                 }
                 fragment.push_str(text);
             }
@@ -376,7 +376,16 @@ fn extract_page_texts_raw(
             match positional.bail {
                 Some(reason) => bailouts.add(reason),
                 None => {
-                    let (text, chunks) = normalized_page_text(&positional.chunks);
+                    // Each block becomes one newline-terminated fragment, the
+                    // same shape lopdf's chunk list has, so the spaced-dot
+                    // normalisation and the binding ranges see the bytes the
+                    // old path would have produced for the same runs.
+                    let pieces = positional
+                        .chunks
+                        .iter()
+                        .map(|chunk| format!("{chunk}\n"))
+                        .collect::<Vec<_>>();
+                    let (text, chunks) = normalized_page_text(&pieces);
                     pages.push(PageText {
                         number: *page_number,
                         text: normalize_pdf_text(&text),

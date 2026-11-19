@@ -41,12 +41,18 @@ const TJ_SPACE_THRESHOLD: f64 = -100.0;
 /// Nested `Do` recursion depth (same bound as the repair pass).
 const MAX_FORM_DEPTH: usize = 8;
 /// Two fragments share a baseline when their device y differs by at most this
-/// fraction of the larger size.
-const BASELINE_TOLERANCE: f32 = 0.35;
+/// fraction of the larger size. `0.5` is PyMuPDF's own threshold
+/// (`same_line` compares against half the line height), which keeps
+/// sub- and superscripts on the parent's line.
+const BASELINE_TOLERANCE: f32 = 0.5;
 /// A same-baseline fragment joins the open line while its x extent reaches
 /// within `2.0 * size` of the line's extent; farther apart it is its own
 /// span (a different column or table cell).
 const LINE_X_GAP: f32 = 2.0;
+/// A horizontal gap wider than this fraction of the fragment's size
+/// (PyMuPDF's space advance is about `0.25 * size`) is a word gap even
+/// when no space glyph was shown.
+const SPACE_GAP_RATIO: f32 = 0.2;
 /// A baseline gap above this multiple of the page's modal leading starts a
 /// new block.
 const BLOCK_GAP_RATIO: f32 = 1.8;
@@ -728,6 +734,13 @@ where
         if text.trim().is_empty() {
             return;
         }
+        if text.contains('\u{fffd}') {
+            // Replacement characters mean the encoding could not name these
+            // codes; PyMuPDF (and often lopdf's own path) still decode them.
+            // Bailing beats showing garbage.
+            self.bail = Some("undecodable");
+            return;
+        }
         let end = self.pen_device();
         if !end.0.is_finite() || !end.1.is_finite() || !start.0.is_finite() || !start.1.is_finite()
         {
@@ -769,6 +782,10 @@ where
             }
         }
         if piece.trim().is_empty() {
+            return;
+        }
+        if piece.contains('\u{fffd}') {
+            self.bail = Some("undecodable");
             return;
         }
         let end = self.pen_device();
@@ -981,8 +998,26 @@ impl Line {
         let mut fragments = self.fragments.iter().collect::<Vec<_>>();
         fragments.sort_by(|a, b| a.x0.total_cmp(&b.x0));
         let mut text = String::new();
+        let mut end_x = 0.0_f32;
         for fragment in fragments {
+            // A fragment that starts visibly right of the previous one's
+            // pen end is a word gap the writer never showed a space for:
+            // PyMuPDF inserts one at `space_width`, the design's stage-2
+            // rule. Stage 1 needs it anyway so a math run does not glue to
+            // the word before it.
+            if !text.is_empty()
+                && !text.ends_with(char::is_whitespace)
+                && fragment.x0 - end_x > fragment.size * SPACE_GAP_RATIO
+                && fragment
+                    .text
+                    .chars()
+                    .next()
+                    .is_some_and(|character| !character.is_whitespace())
+            {
+                text.push(' ');
+            }
             text.push_str(fragment.text.trim_matches('\n'));
+            end_x = fragment.x1;
         }
         text.trim().to_string()
     }

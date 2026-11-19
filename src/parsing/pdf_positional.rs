@@ -1084,6 +1084,10 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
     for mut rest in buckets {
         while !rest.is_empty() {
             // Grow the band from the leftmost line only until it is stable.
+            // A line counts into the band only when the band contains it:
+            // a centered heading or footer that overlaps BOTH column
+            // extents would otherwise chain them into one band and
+            // interleave the columns (the Raft evidence run showed that).
             let first = rest
                 .iter()
                 .min_by(|a, b| a.x0.total_cmp(&b.x0))
@@ -1092,7 +1096,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
             for _ in 0..=rest.len() {
                 let (wide_lo, wide_hi) = rest
                     .iter()
-                    .filter(|line| line.x0 < hi && line.x1 > lo)
+                    .filter(|line| line.x0 >= lo && line.x1 <= hi)
                     .fold((lo, hi), |(a, b), line| (a.min(line.x0), b.max(line.x1)));
                 if wide_lo == lo && wide_hi == hi {
                     break;
@@ -1102,7 +1106,7 @@ fn layout_lines(fragments: Vec<PositionedFragment>) -> Vec<Line> {
             }
             let mut next = Vec::new();
             for line in rest {
-                if line.x0 < hi && line.x1 > lo {
+                if line.x0 >= lo && line.x1 <= hi {
                     final_lines.push(line);
                 } else {
                     next.push(line);

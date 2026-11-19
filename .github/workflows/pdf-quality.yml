@@ -16,6 +16,11 @@ on:
         type: choice
         options: ['false', 'true']
         default: 'false'
+      keep_pdf_sentence_text:
+        description: 'Also record every PDF paragraph''s full text and the stream totals (PDF-6g; default off)'
+        type: choice
+        options: ['false', 'true']
+        default: 'false'
   # Before this workflow exists on the default branch, GitHub cannot dispatch it on a branch
   # (a workflow_dispatch run needs the file on `main`), so a push to the PDF-6a branch whose
   # commit message contains `[quality-run]` starts it instead - the same pattern PDF-5a used
@@ -186,6 +191,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.keep_coarse_text }}" = "true" ]; then
             args+=(--keep-coarse-text)
+          fi
+          if [ "${{ github.event.inputs.keep_pdf_sentence_text }}" = "true" ]; then
+            args+=(--keep-pdf-sentence-text)
           fi
           python3 scripts/pdf-quality.py "${args[@]}" | tail -200
       - name: Upload the shard's per-unit records

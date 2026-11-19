@@ -1328,8 +1328,11 @@ def refusal_reason(layout_python: str, worker_source: str, path: str) -> dict:
 # Reading the document through the server
 # --------------------------------------------------------------------------------------------
 
-def collect_units(server, document_id: str, sections: list[dict], deadline: float) -> dict:
-    """Every sentence unit, with the unit kind and the degradation the server reports."""
+def collect_units(server, document_id: str, sections: list[dict], deadline: float,
+                  requested_kind: str = "sentence") -> dict:
+    """Every unit of `requested_kind`, with the unit kind and the degradation the server
+    reports. `sentence` is the only kind a run without --keep-pdf-sentence-text asks for,
+    and its stream is unchanged."""
     units: list[dict] = []
     coverage: list[dict] = []
     calls = 0
@@ -1349,6 +1352,7 @@ def collect_units(server, document_id: str, sections: list[dict], deadline: floa
                 break
             arguments = PROBE.text_units(document_id, section["section_id"],
                                          QUALITY_BATCH_ITEMS, cursor)
+            arguments["requested_kind"] = requested_kind
             try:
                 data = PROBE.payload(server.tool("get_text_units", arguments)) or {}
             except PROBE.ProbeError as exc:
@@ -1367,6 +1371,7 @@ def collect_units(server, document_id: str, sections: list[dict], deadline: floa
                 first = False
             for item in data.get("items") or []:
                 text = item.get("text") or ""
+                locator = item.get("locator") or {}
                 units.append({
                     "text": text,
                     "degradation": item.get("degradation"),
@@ -1374,6 +1379,7 @@ def collect_units(server, document_id: str, sections: list[dict], deadline: floa
                     "content_class": item.get("content_class"),
                     "content_class_detail": item.get("content_class_detail"),
                     "section_id": section["section_id"],
+                    "paragraph_index": locator.get("paragraph_index"),
                 })
                 chars += len(text)
             cursor = data.get("next_cursor")
@@ -1647,6 +1653,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     units: list[dict] = []
     coverage: list[dict] = []
     read: dict = {}
+    paragraph_records: list[dict] = []
     try:
         server.initialize()
         peak.snapshot()
@@ -1681,6 +1688,42 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
             coverage = read["coverage"]
             record["read"] = {key: read[key] for key in
                               ("calls", "chars", "truncated", "error", "seconds")}
+            # PDF-6g: with --keep-pdf-sentence-text, also read the paragraph stream so every
+            # paragraph's full text can be re-segmented offline by the Python port of
+            # `sentence_ranges`. The read is a second enumeration inside the same open; only
+            # the new record kind carries it.
+            if args.keep_pdf_sentence_text:
+                paragraph_read = collect_units(server, document_id, sections, deadline,
+                                               "paragraph")
+                record["paragraph_read"] = {key: paragraph_read[key] for key in
+                                            ("calls", "chars", "truncated", "error",
+                                             "seconds")}
+                paragraph_records = []
+                for index, unit in enumerate(paragraph_read["units"]):
+                    paragraph_records.append({
+                        "kind_record": "pdf_paragraph",
+                        "id": entry["id"],
+                        "unit": index,
+                        "section_id": unit["section_id"],
+                        "paragraph_index": unit.get("paragraph_index"),
+                        "content_class": unit.get("content_class"),
+                        "content_class_detail": unit.get("content_class_detail"),
+                        "degradation": unit.get("degradation"),
+                        "chars": len(unit["text"]),
+                        "text": unit["text"],
+                    })
+                paragraph_records.append({
+                    "kind_record": "pdf_stream_totals",
+                    "id": entry["id"],
+                    "sentence_total_items": sum(
+                        int((item.get("coverage") or {}).get("total_items") or 0)
+                        for item in read["coverage"]),
+                    "paragraph_total_items": sum(
+                        int((item.get("coverage") or {}).get("total_items") or 0)
+                        for item in paragraph_read["coverage"]),
+                    "sentence_truncated": read["truncated"],
+                    "paragraph_truncated": paragraph_read["truncated"],
+                })
             record["outcome"] = "ok"
             peak.snapshot()
     finally:
@@ -1766,6 +1809,10 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         record["loss"] = loss_measurement(path, reference, units, pages, quality)
 
     detail = []
+    if args.keep_pdf_sentence_text:
+        for unit in paragraph_records:
+            unit.setdefault("doc_units", len(units))
+            detail.append(unit)
     for unit in long_units:
         unit["id"] = entry["id"]
         unit["doc_units"] = measured["total_units"]
@@ -2613,7 +2660,14 @@ def main() -> int:
                         help="also record the full text of every coarse paragraph, at any "
                              "length (PDF-6e; off by default, and the default records are "
                              "byte-identical)")
+    parser.add_argument("--keep-pdf-sentence-text", action="store_true",
+                        help="also read the paragraph stream and record every paragraph's "
+                             "full text plus the stream totals, as `pdf_paragraph` and "
+                             "`pdf_stream_totals` records (PDF-6g; off by default, and the "
+                             "default records are byte-identical)")
     args = parser.parse_args()
+    if not args.keep_pdf_sentence_text:
+        args.keep_pdf_sentence_text = False
     if not args.worker_source:
         args.worker_source = os.path.join(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))), "src", "parsing", "pdf_layout_worker.py")

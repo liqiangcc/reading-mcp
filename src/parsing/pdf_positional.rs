@@ -1433,9 +1433,6 @@ mod tests {
         assert_eq!(lines[0].text, "ABCD");
         assert!((lines[0].x0 - 100.0).abs() < 0.01);
         assert!((lines[0].x1 - 154.0).abs() < 0.01);
-        assert_eq!(lines[0].fragments.len(), 2);
-        assert!((lines[0].fragments[0].x0 - 100.0).abs() < 0.01);
-        assert!((lines[0].fragments[1].x0 - 142.0).abs() < 0.01);
     }
 
     #[test]

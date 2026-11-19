@@ -75,6 +75,19 @@ jobs:
             --probe-bin "$RUNNER_TEMP/bin/reading-mcp-tests" \
             --out-dir "$RUNNER_TEMP/out" \
             --compare-ids "$COMPARE_IDS" | tail -120
+      - name: Diagnose the Raft heading inference (shard 0 only)
+        if: matrix.shard == 0
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --max-time 60 \
+            "https://www.usenix.org/system/files/conference/atc14/atc14-paper-ongaro.pdf" \
+            --output "$RUNNER_TEMP/work/one/atc14-paper-ongaro.pdf"
+          rm -f "$RUNNER_TEMP/out/positional-lines.jsonl"
+          PDF7B_PROBE_DIR="$RUNNER_TEMP/work/one" \
+          PDF7B_PROBE_OUT="$RUNNER_TEMP/out" \
+          PDF7B_PROBE_DIAG=1 \
+            "$RUNNER_TEMP/bin/reading-mcp-tests" pdf7b1_positional_probe \
+            --ignored --nocapture --test-threads 1 | grep -A60 'chunk=.* \*' | head -200 || true
       - name: Upload the shard's comparison records
         if: always()
         uses: actions/upload-artifact@v4

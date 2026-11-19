@@ -1594,7 +1594,31 @@ mod tests {
             };
             let mut memo = FontEncodingMemo::new();
             let mut metrics = FontMetricsMemo::new(&document);
+            let diag = std::env::var_os("PDF7B_PROBE_DIAG").is_some();
             for (number, page_id) in document.get_pages() {
+                if diag {
+                    let page =
+                        extract_positional_page(&document, page_id, LIMIT, &mut memo, &mut metrics);
+                    for (index, chunk) in page.chunks.iter().enumerate() {
+                        let marker = if chunk
+                            .trim_start()
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_digit())
+                        {
+                            " *"
+                        } else {
+                            ""
+                        };
+                        println!("DIAG id={id} page={number} chunk={index}{marker}:\n{chunk}");
+                    }
+                    println!(
+                        "DIAG id={id} page={number} bail={:?} chunks={}",
+                        page.bail,
+                        page.chunks.len()
+                    );
+                    continue;
+                }
                 let (lines, glyphs, bail) =
                     probe_positional_page(&document, page_id, LIMIT, &mut memo, &mut metrics);
                 let mut line_json = String::new();

@@ -823,6 +823,7 @@ async fn document_handle(stored: &Stored) -> DocumentHandle {
         checksum: handle_checksum(
             &stored.document.id,
             &stored.document.normalized_document_hash(),
+            &stored.document.media_type,
         ),
     }
 }

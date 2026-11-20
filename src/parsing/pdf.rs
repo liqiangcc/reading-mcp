@@ -27,7 +27,12 @@ use super::common::{content_hash, document_id, slugify, title_from_metadata};
 /// judges the #139 guard per sentence in a refused PDF paragraph, so those paragraphs now segment
 /// into sentences; a stored PDF re-ingests instead of replaying the coarse paragraphs. The
 /// normalized text does not change, so handles stay valid.
-pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v4";
+///
+/// v4 -> v5 is the deploy-time bump for PDF-6g (#253): `et al.` and uppercase multi-letter initials
+/// no longer end a PDF sentence, so the same bytes segment into different sentence units and a
+/// stored PDF re-ingests. Handles do not rely on this bump: `PDF_SENTENCE_RULES_VERSION` in the
+/// handle checksum makes every older PDF handle answer `stale_handle`.
+pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v5";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay the sequential and navigation tasks with both tool sets and compare the cost.
+"""Replay the sequential and navigation tasks with the v2 tool set and report the cost.
 
 The tasks are the ones a reader actually runs:
 
@@ -145,7 +145,7 @@ class TaskResult:
 
 
 def item_text(item):
-    """The text of one item, in the v1 object shape or the v2 `[handle, text, class?]` shape."""
+    """The text of one item, in the object shape or the `[handle, text, class?]` shape."""
     if isinstance(item, dict):
         text = item.get("text")
         return text if isinstance(text, str) else None
@@ -466,30 +466,13 @@ def table(rows: list[dict], tools_tokens: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
-def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[str], dict]:
-    """Only the v2 legs exist: the table reports the per-task numbers, nothing to gate."""
-    summary: dict = {
-        "ratios": {},
-        "checks": [],
-        "t3_t5": {
-            "v1_tokens": 0,
-            "v2_tokens": 0,
-            "v1_calls": 0,
-            "v2_calls": 0,
-            "percent": None,
-        },
-        "all_pass": True,
-    }
-    return ["INFO T3-T5 skipped: no v1 leg was run"], summary
-
-
 def parse_documents(spec: str) -> list[tuple[str, str]]:
     return probe.parse_documents(spec)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Replay the two sequential-reading tasks with both tool sets."
+        description="Replay the two sequential-reading tasks with the v2 tool set."
     )
     parser.add_argument("--binary", required=True, help="reading-mcp binary to run")
     parser.add_argument(
@@ -581,7 +564,6 @@ def main() -> int:
                 )
             )
 
-    lines, summary = pass_lines(rows, tools_tokens)
     print("## V2 evaluation (T1-T5)")
     print()
     print(
@@ -597,9 +579,6 @@ def main() -> int:
         )
     print()
     print(table(rows, tools_tokens))
-    print()
-    for line in lines:
-        print(line)
     print()
     for row in rows:
         if row.get("error"):
@@ -646,10 +625,9 @@ def main() -> int:
                 }
                 for row in rows
             ],
-            "summary": summary,
         },
     )
-    return 0 if summary.get("all_pass") else 1
+    return 0
 
 
 if __name__ == "__main__":

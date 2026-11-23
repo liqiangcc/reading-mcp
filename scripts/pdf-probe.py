@@ -239,7 +239,7 @@ class Server:
 
 
 def server_env(state_dir: str, roots: str, backend: str, layout_python: str,
-               tools: str = "v1") -> dict:
+               tools: str = "v2") -> dict:
     env = dict(os.environ)
     env.pop("READING_MCP_PDF_LAYOUT_PYTHON", None)
     env["READING_MCP_STATE_DIR"] = state_dir
@@ -248,7 +248,7 @@ def server_env(state_dir: str, roots: str, backend: str, layout_python: str,
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
-    # v1 (the default) calls v1 tools only; v2 exposes only the seven v2 tools.
+    # v2 (the default) exposes only the seven v2 tools; v1 calls v1 tools only.
     env["READING_MCP_TOOLS"] = tools
     # OCR is opt-in and stays off: an image-only PDF must report ocr_required.
     env["READING_MCP_OCR_ENABLED"] = "false"
@@ -314,7 +314,7 @@ def flatten_structure(nodes, out: dict) -> None:
         flatten_structure(node.get("children"), out)
 
 
-def read_sections(server: Server, document_id: str, tools: str = "v1") -> list[dict]:
+def read_sections(server: Server, document_id: str, tools: str = "v2") -> list[dict]:
     if tools == "v2":
         return read_sections_v2(server, document_id)
     found: dict[str, dict] = {}
@@ -356,7 +356,7 @@ def read_sections_v2(server: Server, document_handle: str) -> list[dict]:
     return sections
 
 
-def is_page_fallback(sections: list[dict], tools: str = "v1") -> bool:
+def is_page_fallback(sections: list[dict], tools: str = "v2") -> bool:
     """Whether the structure is one section per PDF page (the parser's page fallback)."""
     if not sections:
         return False
@@ -403,20 +403,20 @@ def read_batch(server: Server, from_handle: str, max_chars: int | None = V2_READ
     return payload(server.tool("read", arguments)) or {}
 
 
-def document_handle(data: dict, tools: str = "v1") -> str | None:
+def document_handle(data: dict, tools: str = "v2") -> str | None:
     """The document identifier a v1 or v2 open answer carries."""
     key = "document_id" if tools == "v1" else "doc"
     value = data.get(key) if isinstance(data, dict) else None
     return value if isinstance(value, str) else None
 
 
-def opened_section_count(data: dict, tools: str = "v1"):
+def opened_section_count(data: dict, tools: str = "v2"):
     """The section count an open answer carries (`section_count` v1, `sections` v2)."""
     key = "section_count" if tools == "v1" else "sections"
     return data.get(key) if isinstance(data, dict) else None
 
 
-def opened_media_type(data: dict, tools: str = "v1"):
+def opened_media_type(data: dict, tools: str = "v2"):
     """The format an open answer carries (`media_type` v1, `format` v2)."""
     key = "media_type" if tools == "v1" else "format"
     return data.get(key) if isinstance(data, dict) else None
@@ -458,7 +458,7 @@ def page_count(path: str) -> int | None:
         return None
 
 
-def open_document(server: Server, source: str, tools: str = "v1") -> tuple[dict, float, ProbeError | None]:
+def open_document(server: Server, source: str, tools: str = "v2") -> tuple[dict, float, ProbeError | None]:
     start = time.perf_counter()
     try:
         result = server.tool("open_document" if tools == "v1" else "open", {"source": source})
@@ -468,7 +468,7 @@ def open_document(server: Server, source: str, tools: str = "v1") -> tuple[dict,
 
 
 def sentence_totals(server: Server, document_id: str, sections: list[dict],
-                    deadline: float, tools: str = "v1") -> tuple[list[int], str | None]:
+                    deadline: float, tools: str = "v2") -> tuple[list[int], str | None]:
     if tools == "v2":
         return sentence_totals_v2(server, document_id, sections, deadline)
     totals: list[int] = []
@@ -519,7 +519,7 @@ def sentence_totals_v2(server: Server, document_handle: str, sections: list[dict
 
 
 def read_sentences(server: Server, document_id: str, sections: list[dict], limit: int,
-                   deadline: float, tools: str = "v1") -> dict:
+                   deadline: float, tools: str = "v2") -> dict:
     """Read sentence by sentence (one item per call) and time every call."""
     if tools == "v2":
         return read_sentences_v2(server, document_id, limit, deadline)
@@ -787,7 +787,7 @@ def real_paper_metrics(texts: list[str], errors: list[str]) -> dict:
 
 
 def run_caps(binary: str, label: str, source: str, state_root: str, backend: str,
-             layout_python: str, deadline: float, tools: str = "v1") -> list[dict]:
+             layout_python: str, deadline: float, tools: str = "v2") -> list[dict]:
     records = []
     if not cap_available():
         return [{"kind_record": "caps", "input": label, "backend": backend, "cap": cap,
@@ -1251,8 +1251,8 @@ def main() -> int:
     parser.add_argument("--jsonl-dir", default="")
     parser.add_argument("--caps", action="store_true")
     parser.add_argument("--deadline-minutes", type=float, default=150.0)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
-                        help="tool set the server exposes: v1 (default) or v2")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
+                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if args.mode == "run":
         if not args.binary or not args.input:

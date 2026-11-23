@@ -1,9 +1,11 @@
 # V2-4a: every measurement script gets an opt-in v2 mode
 
 Step 1 of deleting the v1 tools (v2-4b removes them). Every gate keeps measuring exactly what it
-measured: each script grows `--tools v1|v2`, default `v1`, and only the v2 mode starts its servers
+measured: each script grows `--tools v1|v2` and only the v2 mode starts its servers
 with `READING_MCP_TOOLS=v2` and calls the v2 tool set (`open`, `outline`, `read`, `cite`,
-`search`, `source_view`, `browse`).
+`search`, `source_view`, `browse`). V2-4a added the flag with default `v1`; V2-4b PR-4
+flipped every script and workflow default to `v2`, and `--tools v1` / `tools=v1` stays for
+rollback until PR-6 deletes the v1 code.
 
 **Same number** means the v2 cell measures the identical fact (same stored state, same text, same
 item). **Comparable** means it measures the same quantity through a different call shape (per-call
@@ -65,10 +67,10 @@ query, comparable latency). Phase names are kept so the report table is diffable
 
 ## scripts/v2-eval.py
 
-Already measures both tool sets; `--tools` selects which legs run. `v1` (default) runs both
-exactly as today. `v2` runs only the v2 legs (T1-T5, `tools/list` v2), so the gate still reports
-after v1 is deleted; cross-toolset PASS lines are skipped when a leg is absent (**same number**
-for the v2 rows it still produces).
+Already measures both tool sets; `--tools` selects which legs run. `v2` (default) runs only the v2
+legs (T1-T5, `tools/list` v2), so the gate still reports after v1 is deleted; cross-toolset PASS
+lines are skipped when a leg is absent (**same number** for the v2 rows it still produces). `v1`
+runs both exactly as before V2-4b.
 
 ## scripts/stress-probe.py
 
@@ -121,17 +123,18 @@ for the v2 rows it still produces).
 
 ## .github/workflows/section-scale.yml (inline Python)
 
-Reads `doc-read-probe` JSON. With `--tools v2` the probe writes the same `shapes` keys filled by
-the v2 equivalents above, so the flatness gate rows stay structurally identical; their ms/rchar
-values are **comparable**, and the `tools` input is passed through to the probe so a v1 run on the
-head reproduces today's table.
+Reads `doc-read-probe` JSON. In v2 mode (the default) the probe writes the same `shapes` keys
+filled by the v2 equivalents above, so the flatness gate rows stay structurally identical; their
+ms/rchar values are **comparable**, and the `tools` input is passed through to the probe so a v1
+run on the head reproduces the pre-V2-4b table.
 
 ## Workflow `tools` inputs
 
 `book-profile`, `cpu-profile`, `doc-read-profile`, `first-search-probe`, `ingest-parity`,
 `leak-profile`, `mem-profile-now`, `section-scale`, `stress-profile`, `url-resolve-probe` get a
-`workflow_dispatch` input `tools` (`v1`|`v2`, default `v1`) passed to every affected script.
-Push triggers are unchanged.
+`workflow_dispatch` input `tools` (`v1`|`v2`, default `v2` since V2-4b PR-4) passed to every
+affected script. Push, pull_request and schedule triggers use the same `v2` fallback. Push
+triggers are unchanged.
 
 ## Dropped at v2-4b (summary)
 

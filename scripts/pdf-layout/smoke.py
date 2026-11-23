@@ -3,7 +3,7 @@ from pathlib import Path
 parser=argparse.ArgumentParser(description='PDF layout smoke: open, read and re-read every unit')
 parser.add_argument('binary')
 parser.add_argument('document')
-parser.add_argument('--tools',choices=('v1','v2'),default='v1',help='tool set the server exposes')
+parser.add_argument('--tools',choices=('v1','v2'),default='v2',help='tool set the server exposes (default v2)')
 ARGS=parser.parse_args()
 ROOT=Path(ARGS.document).resolve().parent
 BINARY=str(Path(ARGS.binary).resolve())

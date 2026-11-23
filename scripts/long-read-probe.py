@@ -240,7 +240,7 @@ class Server:
 
 
 def server_environment(
-    state_dir: str, roots: str, overrides: list[str], tools: str = "v1"
+    state_dir: str, roots: str, overrides: list[str], tools: str = "v2"
 ) -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
@@ -527,8 +527,8 @@ def main() -> int:
     parser.add_argument(
         "--tools",
         choices=("v1", "v2"),
-        default="v1",
-        help="tool set the server exposes: v1 (default) or v2",
+        default="v2",
+        help="tool set the server exposes: v2 (default) or v1",
     )
     parser.add_argument(
         "--wrapper",

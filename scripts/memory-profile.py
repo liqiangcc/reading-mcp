@@ -39,12 +39,12 @@ before stdin is closed, so that row's peak RSS includes the probe work. Probe to
 recorded in `probe_error` and never change the open row's `ok`. With no `--probe-query` the table
 is byte-identical to before.
 
-With `--tools v2` the servers start with `READING_MCP_TOOLS=v2` and every call uses the v2 tool
+In v2 mode (the default) the servers start with `READING_MCP_TOOLS=v2` and every call uses the v2 tool
 set: `open` instead of `open_document` (its `sections`/`title` stand in for `section_count`/
 `title`), and the probe runs `search` and then `read {"from": <first hit handle>, "back": 2}`
 instead of `search_document` and `get_context`. Everything else — the inputs, the rows, the peak
-RSS, the telemetry phases and the disk measurement — is unchanged. The default `v1` is today's
-behaviour, byte for byte.
+RSS, the telemetry phases and the disk measurement — is unchanged. `v2` is the default; `--tools
+v1` is today's behaviour, byte for byte.
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ def server_environment(
     state_dir: str,
     parse_timeout: float | None,
     telemetry: bool = False,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> dict:
     env = dict(os.environ)
     env["READING_MCP_LOCAL_ROOTS"] = os.pathsep.join(roots)
@@ -301,13 +301,13 @@ def extract_text_payload(response: dict) -> dict | None:
     return None
 
 
-def extract_payload(response: dict, tools: str = "v1") -> dict | None:
+def extract_payload(response: dict, tools: str = "v2") -> dict | None:
     """The tool result's JSON object: v1 `structuredContent`, v2 `content[0].text`."""
     return extract_structured(response) if tools == "v1" else extract_text_payload(response)
 
 
 def extract_metadata(
-    response: dict, tools: str = "v1"
+    response: dict, tools: str = "v2"
 ) -> tuple[object | None, str | None]:
     """Return `(section_count, title_truncated)` from an open result.
 
@@ -339,7 +339,7 @@ def probe(
     response: dict,
     query: str,
     run_timeout: float,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> tuple[float | None, int | None, float | None, str | None]:
     """Time the search and the context read for one successful open, in the same process.
 
@@ -460,7 +460,7 @@ def run_one(
     stderr_path: str | None = None,
     samples: dict | None = None,
     settle_seconds: float = 3.0,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> tuple[
     int,
     float | None,
@@ -1053,7 +1053,7 @@ def run_input_group(
     roots: list[str] | None = None,
     parse_timeout: float | None = None,
     retained: bool = False,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> None:
     skip = False
     for entry in inputs:
@@ -1228,8 +1228,8 @@ def main() -> int:
     parser.add_argument(
         "--tools",
         choices=("v1", "v2"),
-        default="v1",
-        help="tool set the servers expose and the script calls (default v1)",
+        default="v2",
+        help="tool set the servers expose and the script calls (default v2; v1 is the old behaviour)",
     )
     args = parser.parse_args()
 

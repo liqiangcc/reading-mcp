@@ -10,7 +10,7 @@ on:
       tools:
         description: 'Tool set the probe servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['bench/pdf1b-**']
 
@@ -148,7 +148,7 @@ jobs:
             --out "$RUNNER_TEMP/results/cjk-${{ matrix.shard }}.jsonl" \
             --deadline-minutes 65 \
             --paper-deadline-minutes 12 \
-            --tools "${{ inputs.tools || 'v1' }}" | tail -40
+            --tools "${{ inputs.tools || 'v2' }}" | tail -40
       - name: Upload shard results
         if: always() && steps.corpus.outputs.present == 'yes'
         uses: actions/upload-artifact@v4

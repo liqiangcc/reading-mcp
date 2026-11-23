@@ -5,7 +5,7 @@ on:
       tools:
         description: 'Tool set the profile servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['bench/heap-profile-**']
 jobs:
@@ -28,7 +28,7 @@ jobs:
       - name: Record heap profiles
         run: |
           mkdir -p heap
-          python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v1' }}" \
+          python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v2' }}" \
             --binary target/release/reading-mcp --sizes-mb 4 \
             --states memory,dir --wrapper "heaptrack -o heap/{label}" --out heap/runs.json
       - name: Restore the download cache
@@ -54,7 +54,7 @@ jobs:
           if [ -f "$RUNNER_TEMP/books/zh-large.epub" ]; then
             docs="zh-large=$RUNNER_TEMP/books/zh-large.epub"
           fi
-          args=(--tools "${{ inputs.tools || 'v1' }}" \
+          args=(--tools "${{ inputs.tools || 'v2' }}" \
             --binary target/release/reading-mcp --states dir --cjk-sizes-mb 16,64
             --parse-timeout-seconds 900 --run-timeout-seconds 900
             --wrapper "heaptrack -o heap/{label}" --out heap/runs-big.json)
@@ -84,7 +84,7 @@ jobs:
         if: always()
         run: |
           mkdir -p heap
-          python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v1' }}" \
+          python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v2' }}" \
             --binary target/release/reading-mcp --states dir \
             --cjk-sizes-mb 64 --parse-timeout-seconds 900 --run-timeout-seconds 900 \
             --rss-phases --out heap/runs-rss-phases.json

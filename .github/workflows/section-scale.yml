@@ -21,7 +21,7 @@ on:
       tools:
         description: 'Tool set the probe servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['section-scale-*']
 
@@ -92,7 +92,7 @@ jobs:
                   warm) extra=(--wait-for-warm) ;;
                   warm-off) extra=(--env READING_MCP_SEARCH_PREWARM_BUDGET_MS=0) ;;
                 esac
-                python3 scripts/doc-read-probe.py --tools "${{ inputs.tools || 'v1' }}" \
+                python3 scripts/doc-read-probe.py --tools "${{ inputs.tools || 'v2' }}" \
                   --binary target/release/reading-mcp \
                   --document "$INPUTS/$label.epub" \
                   --label "$label" \
@@ -100,7 +100,7 @@ jobs:
                   --calls 200 \
                   --start-fraction 0.5 \
                   --io-bytes \
-                  ${{ (inputs.tools || 'v1') == 'v1' && '--env READING_MCP_TOOLS=both' || '' }} \
+                  ${{ (inputs.tools || 'v2') == 'v1' && '--env READING_MCP_TOOLS=both' || '' }} \
                   "${extra[@]}" \
                   --out "read-measure/$label-$side.json" \
                   || echo "::warning::read probe failed: $label $side"

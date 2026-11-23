@@ -53,7 +53,7 @@ KILLED_CODES = (-9, 137)
 # Extra variables for every server process, filled from --env KEY=VALUE.
 SERVER_ENV: dict[str, str] = {}
 # The tool set every server exposes, filled from --tools.
-SERVER_TOOLS = "v1"
+SERVER_TOOLS = "v2"
 V2_BATCH_CHARS = 16000
 
 
@@ -1053,8 +1053,8 @@ def main() -> int:
     parser.add_argument("--shards-dir", default="")
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
                         help="extra server env var, repeatable")
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
-                        help="tool set the servers expose: v1 (default) or v2")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
+                        help="tool set the servers expose: v2 (default) or v1")
     args = parser.parse_args()
     global SERVER_TOOLS
     SERVER_TOOLS = args.tools

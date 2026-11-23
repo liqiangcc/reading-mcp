@@ -1329,7 +1329,7 @@ def refusal_reason(layout_python: str, worker_source: str, path: str) -> dict:
 # --------------------------------------------------------------------------------------------
 
 def collect_units(server, document_id: str, sections: list[dict], deadline: float,
-                  requested_kind: str = "sentence", tools: str = "v1") -> dict:
+                  requested_kind: str = "sentence", tools: str = "v2") -> dict:
     """Every unit of `requested_kind`, with the unit kind and the degradation the server
     reports. `sentence` is the only kind a run without --keep-pdf-sentence-text asks for,
     and its stream is unchanged."""
@@ -2761,8 +2761,8 @@ def main() -> int:
                              "full text plus the stream totals, as `pdf_paragraph` and "
                              "`pdf_stream_totals` records (PDF-6g; off by default, and the "
                              "default records are byte-identical)")
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
-                        help="tool set the server exposes: v1 (default) or v2")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
+                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if not args.keep_pdf_sentence_text:
         args.keep_pdf_sentence_text = False

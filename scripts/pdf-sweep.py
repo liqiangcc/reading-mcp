@@ -796,7 +796,7 @@ def classify(record: dict, timed_out: bool, message: str) -> str:
 
 
 def collect_text(server, document_id: str, sections: list[dict], budget: int,
-                 deadline: float, tools: str = "v1") -> dict:
+                 deadline: float, tools: str = "v2") -> dict:
     """Read the whole document text in 256-item batches, bounded by a character budget."""
     if tools == "v2":
         return collect_text_v2(server, document_id, budget, deadline)
@@ -1500,8 +1500,8 @@ def main() -> int:
     parser.add_argument("--shards", type=int, default=8)
     parser.add_argument("--deadline-minutes", type=float, default=42.0)
     parser.add_argument("--per-document-minutes", type=float, default=4.5)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
-                        help="tool set the server exposes: v1 (default) or v2")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
+                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if args.select:
         if not args.out:

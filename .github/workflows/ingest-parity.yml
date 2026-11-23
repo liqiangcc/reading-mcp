@@ -12,7 +12,7 @@ on:
       tools:
         description: 'Tool set the probe servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['ingest-parity-*']
 
@@ -150,7 +150,7 @@ jobs:
           # left the job green. The table still goes to the step summary before the step fails.
           set -o pipefail
           status=0
-          python3 scripts/ingest-parity.py --tools "${{ inputs.tools || 'v1' }}" \
+          python3 scripts/ingest-parity.py --tools "${{ inputs.tools || 'v2' }}" \
             --binary-a base-target/release/reading-mcp \
             --binary-b target/release/reading-mcp \
             --inputs "$inputs" \

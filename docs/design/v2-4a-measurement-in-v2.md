@@ -3,7 +3,7 @@
 Step 1 of deleting the v1 tools (v2-4b removes them). Every gate keeps measuring exactly what it
 measured: each script grows `--tools v1|v2` and only the v2 mode starts its servers
 with `READING_MCP_TOOLS=v2` and calls the v2 tool set (`open`, `outline`, `read`, `cite`,
-`search`, `source_view`, `browse`). V2-4a added the flag with default `v1`; V2-4b PR-4
+`search`, `source_view`, `browse`). V2-4a added the flag with default `v1`; V2-4b PR-4 (#265)
 flipped every script and workflow default to `v2`, and `--tools v1` / `tools=v1` stays for
 rollback until PR-6 deletes the v1 code.
 

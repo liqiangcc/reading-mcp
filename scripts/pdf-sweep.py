@@ -784,18 +784,22 @@ def classify(record: dict, timed_out: bool, message: str) -> str:
     code = record.get("error_code")
     if timed_out:
         return "timeout"
-    if code == "OCR_REQUIRED":
+    if code in ("OCR_REQUIRED", "ocr_required"):
         return "ocr_required"
-    if code == "RESOURCE_LIMIT_EXCEEDED":
+    if code in ("RESOURCE_LIMIT_EXCEEDED", "too_large"):
         return "too_large"
+    if code == "unreadable":
+        return "unreadable"
     if code == "PARSE_FAILED" and "no extractable text" in message:
         return "unreadable"
     return "parse_failed"
 
 
 def collect_text(server, document_id: str, sections: list[dict], budget: int,
-                 deadline: float) -> dict:
+                 deadline: float, tools: str = "v1") -> dict:
     """Read the whole document text in 256-item batches, bounded by a character budget."""
+    if tools == "v2":
+        return collect_text_v2(server, document_id, budget, deadline)
     units: list[str] = []
     chars = 0
     calls = 0
@@ -829,6 +833,46 @@ def collect_text(server, document_id: str, sections: list[dict], budget: int,
                 break
         if error:
             break
+    return {"text": "\n".join(units), "units": units, "chars": chars, "calls": calls,
+            "truncated": truncated, "error": error,
+            "seconds": round(time.monotonic() - started, 2)}
+
+
+def collect_text_v2(server, document_handle: str, budget: int, deadline: float) -> dict:
+    """The whole document text through sequential v2 `read` batches (16,000 chars each).
+
+    The batch is char-bounded, not item-bounded, so `calls` differs from v1's 256-item pages
+    and the batch that crosses `budget` can overshoot by a different amount.
+    """
+    units: list[str] = []
+    chars = 0
+    calls = 0
+    truncated = False
+    error = None
+    started = time.monotonic()
+    from_handle = document_handle
+    seen: set[str] = set()
+    while True:
+        if chars >= budget or time.monotonic() > deadline:
+            truncated = True
+            break
+        try:
+            data = PROBE.read_batch(server, from_handle)
+        except PROBE.ProbeError as exc:
+            error = str(exc)[:200]
+            break
+        calls += 1
+        for _handle, text, _kind in PROBE.v2_items(data):
+            units.append(text)
+            chars += len(text)
+        next_handle = data.get("next")
+        if not isinstance(next_handle, str):
+            break
+        if next_handle in seen:
+            error = "v2 read next handle repeated"
+            break
+        seen.add(next_handle)
+        from_handle = next_handle
     return {"text": "\n".join(units), "units": units, "chars": chars, "calls": calls,
             "truncated": truncated, "error": error,
             "seconds": round(time.monotonic() - started, 2)}
@@ -910,7 +954,8 @@ def process_document(entry: dict, args, deadline: float) -> dict:
     state_dir = os.path.join(args.state_root, f"open-{entry['id'].replace('/', '_')}")
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
-    env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), "default", "")
+    env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), "default", "",
+                           args.tools)
     cap = CAP if args.cap_available else None
     command = PROBE.cap_command(args.binary, cap, env)
     server = PROBE.Server(command, env, os.path.join(state_dir, "server.log"),
@@ -926,7 +971,8 @@ def process_document(entry: dict, args, deadline: float) -> dict:
         record["phase"] = "open"
         began = time.perf_counter()
         try:
-            result = server.tool("open_document", {"source": path}, timeout=OPEN_TIMEOUT_S)
+            result = server.tool("open_document" if args.tools == "v1" else "open",
+                                 {"source": path}, timeout=OPEN_TIMEOUT_S)
         except PROBE.ProbeError as exc:
             result = None
             open_error = exc
@@ -943,20 +989,18 @@ def process_document(entry: dict, args, deadline: float) -> dict:
             record["died"] = died
         else:
             data = PROBE.payload(result) or {}
-            document_id = data.get("document_id")
-            record["server_sections"] = data.get("section_count")
+            document_id = PROBE.document_handle(data, args.tools)
+            record["server_sections"] = PROBE.opened_section_count(data, args.tools)
             record["server_title"] = (data.get("title") or "")[:120]
 
         if document_id:
             record["phase"] = "structure"
-            sections = PROBE.read_sections(server, document_id)
+            sections = PROBE.read_sections(server, document_id, args.tools)
             record["sections"] = len(sections)
             record["structure_mode"] = (
-                "page_fallback"
-                if sections and all(re.fullmatch(r"section://page-\d+", str(section.get(
-                    "section_id", ""))) for section in sections)
-                else "headings")
-            totals, totals_error = PROBE.sentence_totals(server, document_id, sections, deadline)
+                "page_fallback" if PROBE.is_page_fallback(sections, args.tools) else "headings")
+            totals, totals_error = PROBE.sentence_totals(server, document_id, sections, deadline,
+                                                         args.tools)
             sentences = sum(totals) if totals and not totals_error else None
             record["sentences"] = sentences
             record["sentences_error"] = totals_error
@@ -966,7 +1010,8 @@ def process_document(entry: dict, args, deadline: float) -> dict:
 
             record["phase"] = "read"
             if time.monotonic() < deadline:
-                read = PROBE.read_sentences(server, document_id, sections, READ_CALLS, deadline)
+                read = PROBE.read_sentences(server, document_id, sections, READ_CALLS, deadline,
+                                            args.tools)
                 latencies = read["latencies_ms"]
                 record["read"] = {
                     "calls": read["calls"], "sentences": len(read["texts"]),
@@ -983,7 +1028,8 @@ def process_document(entry: dict, args, deadline: float) -> dict:
 
             record["phase"] = "full_text"
             if time.monotonic() < deadline:
-                full = collect_text(server, document_id, sections, TEXT_BUDGET_CHARS, deadline)
+                full = collect_text(server, document_id, sections, TEXT_BUDGET_CHARS, deadline,
+                                    args.tools)
                 record["text"] = {"chars": full["chars"], "units": len(full["units"]),
                                   "calls": full["calls"], "truncated": full["truncated"],
                                   "seconds": full["seconds"], "error": full["error"]}
@@ -994,9 +1040,9 @@ def process_document(entry: dict, args, deadline: float) -> dict:
                 began = time.perf_counter()
                 try:
                     hits = PROBE.payload(server.tool(
-                        "search_document",
-                        {"document_id": document_id, "query": token,
-                         "limit": SEARCH_LIMIT})) or {}
+                        "search_document" if args.tools == "v1" else "search",
+                        {"document_id" if args.tools == "v1" else "doc": document_id,
+                         "query": token, "limit": SEARCH_LIMIT})) or {}
                     found = hits.get("hits") or []
                     record["search"] = {
                         "query": token,
@@ -1052,7 +1098,8 @@ def process_document(entry: dict, args, deadline: float) -> dict:
             record["outcome"] = "ok"
         elif document_id is None and open_error is None:
             record["outcome"] = "parse_failed"
-            record["error"] = "open_document returned no document_id"
+            record["error"] = ("open_document returned no document_id"
+                               if args.tools == "v1" else "open returned no document handle")
         elif died:
             record["outcome"] = "parse_failed"
             record["error"] = f"server exited (rc={server.rc}) before answering"
@@ -1453,6 +1500,8 @@ def main() -> int:
     parser.add_argument("--shards", type=int, default=8)
     parser.add_argument("--deadline-minutes", type=float, default=42.0)
     parser.add_argument("--per-document-minutes", type=float, default=4.5)
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
+                        help="tool set the server exposes: v1 (default) or v2")
     args = parser.parse_args()
     if args.select:
         if not args.out:

@@ -2,6 +2,15 @@ name: PDF2c open memory
 run-name: PDF2c open memory (before/after)
 on:
   workflow_dispatch:
+    inputs:
+      # This workflow runs pdf-open-profile.py and memory-profile.py, which stay v1-only until
+      # the memory-profile PR. The input exists for parity with the other PDF workflows and is
+      # wired nowhere: v2 is rejected below rather than silently ignored.
+      tools:
+        description: 'Tool set (v1; v2 arrives with the memory-profile PR)'
+        type: choice
+        options: [v1, v2]
+        default: v1
   push:
     branches: ['bench/pdf2c**']
 
@@ -50,6 +59,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Check the tool set
+        if: inputs.tools == 'v2'
+        run: |
+          echo "::error::pdf2c-measure runs pdf-open-profile.py and memory-profile.py, which are v1-only until the memory-profile PR"
+          exit 1
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:

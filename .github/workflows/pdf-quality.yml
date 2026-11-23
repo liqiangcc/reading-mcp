@@ -21,6 +21,10 @@ on:
         type: choice
         options: ['false', 'true']
         default: 'false'
+      tools:
+        description: 'Tool set the probe servers expose'
+        required: false
+        default: 'v1'
   # Before this workflow exists on the default branch, GitHub cannot dispatch it on a branch
   # (a workflow_dispatch run needs the file on `main`), so a push to the PDF-6a branch whose
   # commit message contains `[quality-run]` starts it instead - the same pattern PDF-5a used
@@ -184,7 +188,8 @@ jobs:
                 --out "$RUNNER_TEMP/results/quality-${{ matrix.shard }}.jsonl"
                 --deadline-minutes "$DEADLINE"
                 --per-document-minutes 6
-                --backend "$BACKEND")
+                --backend "$BACKEND"
+                --tools "${{ inputs.tools || 'v1' }}")
           if [ "$BACKEND" = "layout" ]; then
             args+=(--layout-python "$GITHUB_WORKSPACE/.pdf-layout-venv/bin/python"
                    --venv-path "$GITHUB_WORKSPACE/.pdf-layout-venv")

@@ -472,6 +472,21 @@ pub trait DocumentRepository: Send + Sync {
         Ok(map.page_at_offset(section_id, offset))
     }
 
+    /// True when this document predates the original-source binding rows in a way a reopen
+    /// fixes: it keeps no `original_source_bindings_v1` rows at all and its stored open result
+    /// is absent or not of the current `TEXT_UNIT_STORE_VERSION`. A document with any rows, or
+    /// one ingested under the current version, reports false — reopening it cannot add rows.
+    /// The default answers false, so a store that cannot see the open-result version falls back
+    /// to the section's own page or to no page rather than to a `stale_handle` a reopen would
+    /// not fix.
+    async fn original_source_bindings_stale(
+        &self,
+        id: &DocumentId,
+    ) -> Result<bool, ApplicationError> {
+        let _ = id;
+        Ok(false)
+    }
+
     /// The document's canonical body order as `section_body_order` computes it: the section ids in
     /// body order, or the exact error that function returns for this document. `Ok(None)` when this
     /// repository holds no body order for `id`.

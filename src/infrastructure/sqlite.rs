@@ -827,10 +827,9 @@ impl SqliteDocumentRepository {
                     owner_section_id TEXT NOT NULL,
                     range_start INTEGER NOT NULL,
                     range_end INTEGER NOT NULL,
-                    page_number INTEGER NOT NULL
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_original_source_bindings_v1
-                    ON original_source_bindings_v1(document_id, owner_section_id, range_start);",
+                    page_number INTEGER NOT NULL,
+                    PRIMARY KEY(document_id, owner_section_id, range_start)
+                 ) WITHOUT ROWID;",
             )
             .map_err(repository_error)?;
         ensure_normalized_document_hash_column(&connection)?;
@@ -1187,6 +1186,47 @@ impl DocumentRepository for SqliteDocumentRepository {
                         })
                     })
                     .transpose()
+            },
+        )
+        .await
+    }
+
+    async fn original_source_bindings_stale(
+        &self,
+        id: &DocumentId,
+    ) -> Result<bool, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let has_rows: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM original_source_bindings_v1
+                          WHERE document_id = ?1)",
+                        params![id.0],
+                        |row| row.get(0),
+                    )
+                    .map_err(repository_error)?;
+                if has_rows {
+                    return Ok(false);
+                }
+                // A document with no rows is fixable only when its open result predates this
+                // store version: the startup prune already deleted stale results and their
+                // documents, so a survivor with rows missing was ingested fresh and reopening
+                // it cannot add the rows it lacks.
+                if !has_table(connection, "open_results_v1")? {
+                    return Ok(true);
+                }
+                let current: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM open_results_v1
+                          WHERE document_id = ?1 AND fingerprint LIKE ?2)",
+                        params![id.0, format!("%|{TEXT_UNIT_STORE_VERSION}")],
+                        |row| row.get(0),
+                    )
+                    .map_err(repository_error)?;
+                Ok(!current)
             },
         )
         .await
@@ -3438,6 +3478,7 @@ fn delete_unreachable_document(
         "document_body_order_rows_v1",
         "document_meta_v1",
         "document_meta_v2",
+        "original_source_bindings_v1",
     ] {
         if has_table(transaction, table)? {
             report.rows_removed += transaction

@@ -435,12 +435,64 @@ async fn a_pdf_stored_before_the_binding_rows_refuses_instead_of_citing_the_wron
         .expect("rows should delete");
     assert_eq!(deleted, 3);
 
+    // No open result of the current store version means the bump has not re-ingested this
+    // document yet: refuse, because reopening re-ingests it and stores the rows.
     let error = case
         .cite()
         .execute(std::slice::from_ref(&p2))
         .await
         .expect_err("a pre-change store has no covering binding for p2");
     assert_eq!(error.code, ReadingErrorCode::StaleHandle);
+
+    // The same miss under a current-version open result is a freshly ingested document with
+    // no binding rows: reopening cannot add them, so a unit on a multi-page section reports
+    // no page instead of looping on stale_handle, and a unit on a one-page section answers
+    // the section's own page.
+    let connection = rusqlite::Connection::open(&case.database).expect("database should open");
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS open_results_v1 (
+                document_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                result_json TEXT NOT NULL
+             );",
+        )
+        .expect("open results table should be created");
+    connection
+        .execute(
+            "INSERT INTO open_results_v1(document_id, fingerprint, result_json)
+             VALUES (?1, ?2, '{}')",
+            rusqlite::params![
+                case.document_id.0,
+                format!(
+                    "open-result/v1|test|text-unit-stream/v1|{}",
+                    reading_mcp::application::text_unit_stream::TEXT_UNIT_STORE_VERSION
+                )
+            ],
+        )
+        .expect("current open result should be inserted");
+    drop(connection);
+    let cite = case
+        .cite()
+        .execute(std::slice::from_ref(&p2))
+        .await
+        .expect("cite should answer");
+    assert_eq!(
+        cite.items[0].page, None,
+        "a unit no binding covers on a multi-page section reports no page"
+    );
+    let chapter_b = case.section_handle("section://chapter-b").await;
+    let b1 = paragraph_handle(&chapter_b, 1);
+    let cite = case
+        .cite()
+        .execute(std::slice::from_ref(&b1))
+        .await
+        .expect("cite should answer");
+    assert_eq!(
+        cite.items[0].page,
+        Some(3),
+        "a unit on a one-page section answers the section's own page"
+    );
 
     // Re-ingesting — what the store-version bump forces on the next open — stores the rows and
     // the same handle answers.

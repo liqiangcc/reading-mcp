@@ -146,15 +146,23 @@ impl CiteReadingUseCase {
         {
             return Ok(Some(page));
         }
+        // `stale_handle` only when reopening fixes it: the document keeps no binding rows at
+        // all and its stored open result predates this store version. A document ingested
+        // fresh that lacks a covering row cannot gain one by reopening, so it falls through.
+        if self
+            .repository
+            .original_source_bindings_stale(resolved.id())
+            .await?
+        {
+            return Err(ReadingError::stale_handle(
+                "the stored PDF keeps no original-source bindings; open the document again",
+            ));
+        }
         match source_position {
-            // A one-page section needs no binding row to name its page: a stored PDF written
-            // before the rows existed still answers.
+            // A one-page section needs no binding row to name its page.
             Some(position) if position.starts_with("pdf:page:") => Ok(page_of(position)),
-            // A PDF unit whose section has no binding that covers it was stored before the rows
-            // existed; reopening re-ingests it. The section's start page would be the wrong page.
-            Some(position) if position.starts_with("pdf:") => Err(ReadingError::stale_handle(
-                "the stored PDF keeps no original-source binding that covers this unit; open the document again",
-            )),
+            // A unit no stored binding covers reports no page: the section's start page would
+            // be the wrong page.
             _ => Ok(None),
         }
     }

@@ -494,6 +494,13 @@ impl DocumentRepository for ObservedDocumentRepository {
             .await
     }
 
+    async fn original_source_bindings_stale(
+        &self,
+        id: &DocumentId,
+    ) -> Result<bool, ApplicationError> {
+        self.inner.original_source_bindings_stale(id).await
+    }
+
     async fn body_order(
         &self,
         id: &DocumentId,

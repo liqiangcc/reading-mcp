@@ -126,14 +126,14 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
 
     let abstract_items = first_sentences(index.as_ref(), &document, abstract_section).await;
     assert_eq!(abstract_items.len(), 1);
-    assert_eq!(abstract_items[0].owner_section_id, abstract_section.id);
-    assert!(!abstract_items[0].text.is_empty());
+    assert_eq!(abstract_items[0].0, abstract_section.id);
+    assert!(!abstract_items[0].1.is_empty());
     println!("EVIDENCE_ABSTRACT_BODY explicit_abstract_body_reveal=PASS");
 
     let revealed = first_sentences(index.as_ref(), &document, introduction).await;
     assert_eq!(revealed.len(), 1);
-    assert_eq!(revealed[0].owner_section_id, introduction.id);
-    assert!(!revealed[0].text.is_empty());
+    assert_eq!(revealed[0].0, introduction.id);
+    assert!(!revealed[0].1.is_empty());
     println!("EVIDENCE_D explicit_allowed_body_reveal=PASS");
 }
 
@@ -244,12 +244,14 @@ fn preorder(sections: &[Section]) -> Vec<(&Section, usize)> {
     out
 }
 
-/// The first stored sentence unit(s) of one section's `PreserveSource` stream.
+/// The first stored item(s) of one section's `PreserveSource` sentence stream, as
+/// `(owner_section_id, text)`. A sentence stream can yield a whole paragraph when the paragraph
+/// is one coarse unit; ownership and text carry the evidence either way.
 async fn first_sentences(
     index: &dyn TextUnitIndex,
     document: &Document,
     section: &Section,
-) -> Vec<reading_mcp::domain::SentenceTextUnit> {
+) -> Vec<(reading_mcp::domain::SectionId, String)> {
     let items = index
         .section_stream_items(
             TextUnitStreamKey {
@@ -267,10 +269,8 @@ async fn first_sentences(
     items
         .into_iter()
         .map(|item| match item.unit {
-            OwnedStreamUnit::Sentence(sentence) => sentence,
-            OwnedStreamUnit::Paragraph(paragraph) => {
-                panic!("a sentence stream must not yield a paragraph: {paragraph:?}")
-            }
+            OwnedStreamUnit::Sentence(sentence) => (sentence.owner_section_id, sentence.text),
+            OwnedStreamUnit::Paragraph(paragraph) => (paragraph.owner_section_id, paragraph.text),
         })
         .collect()
 }

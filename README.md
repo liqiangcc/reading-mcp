@@ -98,7 +98,7 @@ outline / search
       ↓
 read
       ↓
-必要时：item handle → cite → source_view（原始视觉 fidelity review）
+必要时：item handle → source_view（原始视觉 fidelity review）；需要完整 locator 时用 cite
 ```
 
 `open` 返回短句柄，`outline` / `search` / `read` 用句柄推进阅读；`read` 的 `next`

@@ -3,9 +3,10 @@ run-name: PDF2c open memory (before/after)
 on:
   workflow_dispatch:
     inputs:
-      # Both measurement scripts take the input: a v2 run measures everything in v2.
+      # Only memory-profile.py takes this input; pdf-open-profile.py hardcodes v2 and ignores it.
+      # PR-7 removes the input.
       tools:
-        description: 'Tool set both measurement scripts expose'
+        description: 'Tool set for memory-profile.py (pdf-open-profile.py always runs v2)'
         type: choice
         options: [v1, v2]
         default: v2

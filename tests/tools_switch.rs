@@ -84,7 +84,10 @@ async fn stale_tools_values_refuse_to_start_on_both_binaries() {
                 .env("READING_MCP_HTTP_BIND", "127.0.0.1:0")
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
-            let output = command.output().await.expect("{binary} should exit");
+            let output = command
+                .output()
+                .await
+                .unwrap_or_else(|error| panic!("{binary} should exit: {error}"));
             assert!(
                 !output.status.success(),
                 "{binary} must refuse READING_MCP_TOOLS={value}"

@@ -80,6 +80,7 @@ jobs:
             label="$1"
             source="$2"
             python3 scripts/memory-profile.py \
+              --tools "${{ inputs.tools || 'v1' }}" \
               --binary "$BIN" \
               --states dir \
               --documents "$label=$source" \

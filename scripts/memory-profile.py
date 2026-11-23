@@ -38,6 +38,13 @@ same server process, and the row gains `Search s`, `Hits` and `Context s` column
 before stdin is closed, so that row's peak RSS includes the probe work. Probe tool errors are
 recorded in `probe_error` and never change the open row's `ok`. With no `--probe-query` the table
 is byte-identical to before.
+
+With `--tools v2` the servers start with `READING_MCP_TOOLS=v2` and every call uses the v2 tool
+set: `open` instead of `open_document` (its `sections`/`title` stand in for `section_count`/
+`title`), and the probe runs `search` and then `read {"from": <first hit handle>, "back": 2}`
+instead of `search_document` and `get_context`. Everything else — the inputs, the rows, the peak
+RSS, the telemetry phases and the disk measurement — is unchanged. The default `v1` is today's
+behaviour, byte for byte.
 """
 
 from __future__ import annotations
@@ -170,11 +177,12 @@ def server_environment(
     state_dir: str,
     parse_timeout: float | None,
     telemetry: bool = False,
+    tools: str = "v1",
 ) -> dict:
     env = dict(os.environ)
     env["READING_MCP_LOCAL_ROOTS"] = os.pathsep.join(roots)
     env["READING_MCP_TELEMETRY"] = "1" if telemetry else "false"
-    env["READING_MCP_TOOLS"] = "v1"
+    env["READING_MCP_TOOLS"] = tools
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = (
@@ -243,7 +251,7 @@ def read_response(responses: queue.Queue, awaited_id: int, timeout: float | None
             return item
 
 
-def extract_error(response: dict) -> str | None:
+def extract_error(response: dict, tool: str = "open_document") -> str | None:
     error = response.get("error")
     if isinstance(error, dict):
         return "JSON-RPC error: " + str(error.get("message", error))
@@ -260,7 +268,7 @@ def extract_error(response: dict) -> str | None:
             ]
             if texts:
                 return "tool error: " + " ".join(texts)
-        return "tool error: open_document reported an error"
+        return f"tool error: {tool} reported an error"
     return None
 
 
@@ -275,12 +283,40 @@ def extract_structured(response: dict) -> dict | None:
     return structured if isinstance(structured, dict) else None
 
 
-def extract_metadata(response: dict) -> tuple[object | None, str | None]:
-    """Return `(section_count, title_truncated)` from a tool result's structured content."""
-    structured = extract_structured(response)
+def extract_text_payload(response: dict) -> dict | None:
+    """Return the JSON object a v2 tool answer carries in its first text block."""
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    content = result.get("content")
+    if not isinstance(content, list):
+        return None
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                payload = json.loads(item.get("text", ""))
+            except json.JSONDecodeError:
+                return None
+            return payload if isinstance(payload, dict) else None
+    return None
+
+
+def extract_payload(response: dict, tools: str = "v1") -> dict | None:
+    """The tool result's JSON object: v1 `structuredContent`, v2 `content[0].text`."""
+    return extract_structured(response) if tools == "v1" else extract_text_payload(response)
+
+
+def extract_metadata(
+    response: dict, tools: str = "v1"
+) -> tuple[object | None, str | None]:
+    """Return `(section_count, title_truncated)` from an open result.
+
+    v1 names the section count `section_count`; v2's `open` names it `sections`.
+    """
+    structured = extract_payload(response, tools)
     if structured is None:
         return None, None
-    sections = structured.get("section_count")
+    sections = structured.get("section_count" if tools == "v1" else "sections")
     title = structured.get("title")
     if isinstance(title, str):
         title = title[:30]
@@ -303,64 +339,101 @@ def probe(
     response: dict,
     query: str,
     run_timeout: float,
+    tools: str = "v1",
 ) -> tuple[float | None, int | None, float | None, str | None]:
-    """Time search_document and get_context for one successful open, in the same process.
+    """Time the search and the context read for one successful open, in the same process.
+
+    v1 runs `search_document` and `get_context` (neighbour 2/2 of the first hit's locator); v2
+    runs `search` and `read {"from": <first hit handle>, "back": 2}`.
 
     Returns (search_seconds, hit_count, context_seconds, probe_error). A probe timeout or tool
     error is reported in `probe_error`; it never changes the open result.
     """
-    structured = extract_structured(response)
-    document_id = structured.get("document_id") if structured is not None else None
+    structured = extract_payload(response, tools)
+    document_id = (
+        structured.get("document_id" if tools == "v1" else "doc")
+        if structured is not None
+        else None
+    )
     if not isinstance(document_id, str):
-        return None, None, None, "open_document result did not include a document_id"
+        open_tool = "open_document" if tools == "v1" else "open"
+        id_field = "document_id" if tools == "v1" else "doc"
+        return None, None, None, f"{open_tool} result did not include a {id_field}"
 
-    search_message = {
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {
-            "name": "search_document",
-            "arguments": {"document_id": document_id, "query": query},
-        },
-    }
+    if tools == "v1":
+        search_message = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "search_document",
+                "arguments": {"document_id": document_id, "query": query},
+            },
+        }
+    else:
+        search_message = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": {"doc": document_id, "query": query, "limit": 10},
+            },
+        }
+    search_tool = "search_document" if tools == "v1" else "search"
     start = time.monotonic()
     try:
         send(process, search_message)
         search_response = read_response(responses, 3, run_timeout)
     except TimeoutError:
         process.kill()
-        return float(run_timeout), None, None, f"search_document timeout after {run_timeout:g}s"
+        return float(run_timeout), None, None, f"{search_tool} timeout after {run_timeout:g}s"
     search_seconds = time.monotonic() - start
-    probe_error = extract_error(search_response)
+    probe_error = extract_error(search_response, search_tool)
     if probe_error is not None:
         return search_seconds, None, None, probe_error
 
-    hits = extract_structured(search_response)
+    hits = extract_payload(search_response, tools)
     hits = hits.get("hits") if hits is not None else None
     if not isinstance(hits, list):
-        return search_seconds, None, None, "search_document result did not include hits"
+        return search_seconds, None, None, f"{search_tool} result did not include hits"
     hit_count = len(hits)
     if not hits:
         return search_seconds, hit_count, None, None
 
-    first = hits[0] if isinstance(hits[0], dict) else {}
-    locator = first.get("text_locator")
-    if not isinstance(locator, dict):
-        return search_seconds, hit_count, None, "search hit did not include a text_locator"
-    unit = "sentence" if locator.get("sentence_index") is not None else "paragraph"
-    context_message = {
-        "jsonrpc": "2.0",
-        "id": 4,
-        "method": "tools/call",
-        "params": {
-            "name": "get_context",
-            "arguments": {
-                "document_id": document_id,
-                "target_locator": locator,
-                "relation": {"type": "neighbor", "unit": unit, "before": 2, "after": 2},
+    if tools == "v1":
+        first = hits[0] if isinstance(hits[0], dict) else {}
+        locator = first.get("text_locator")
+        if not isinstance(locator, dict):
+            return search_seconds, hit_count, None, "search hit did not include a text_locator"
+        unit = "sentence" if locator.get("sentence_index") is not None else "paragraph"
+        context_message = {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "get_context",
+                "arguments": {
+                    "document_id": document_id,
+                    "target_locator": locator,
+                    "relation": {"type": "neighbor", "unit": unit, "before": 2, "after": 2},
+                },
             },
-        },
-    }
+        }
+        context_tool = "get_context"
+    else:
+        # v2 search hits are `[handle, text]` pairs; the anchor is the first handle.
+        first = hits[0]
+        handle = first[0] if isinstance(first, (list, tuple)) and first else None
+        if not isinstance(handle, str):
+            return search_seconds, hit_count, None, "search hit did not include a handle"
+        context_message = {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "read", "arguments": {"from": handle, "back": 2}},
+        }
+        context_tool = "read"
     start = time.monotonic()
     try:
         send(process, context_message)
@@ -371,10 +444,10 @@ def probe(
             search_seconds,
             hit_count,
             float(run_timeout),
-            f"get_context timeout after {run_timeout:g}s",
+            f"{context_tool} timeout after {run_timeout:g}s",
         )
     context_seconds = time.monotonic() - start
-    probe_error = extract_error(context_response)
+    probe_error = extract_error(context_response, context_tool)
     return search_seconds, hit_count, context_seconds, probe_error
 
 
@@ -387,6 +460,7 @@ def run_one(
     stderr_path: str | None = None,
     samples: dict | None = None,
     settle_seconds: float = 3.0,
+    tools: str = "v1",
 ) -> tuple[
     int,
     float | None,
@@ -399,7 +473,9 @@ def run_one(
     float | None,
     str | None,
 ]:
-    """Run one open_document call, then optionally its read probe.
+    """Run one open call, then optionally its read probe.
+
+    `tools` selects the tool set: v1 `open_document` or v2 `open`.
 
     Returns (peak_rss_kib, open_seconds, error, timed_out, section_count, title,
     search_seconds, hit_count, context_seconds, probe_error). The probe runs before stdin is
@@ -437,11 +513,12 @@ def run_one(
         error = extract_error(initialized)
         send(process, INITIALIZED_NOTIFICATION)
         if source is not None and error is None:
+            open_tool = "open_document" if tools == "v1" else "open"
             message = {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": "open_document", "arguments": {"source": source}},
+                "params": {"name": open_tool, "arguments": {"source": source}},
             }
             start = time.monotonic()
             send(process, message)
@@ -454,8 +531,8 @@ def run_one(
                 process.kill()
             else:
                 open_seconds = time.monotonic() - start
-                error = extract_error(response)
-                section_count, title = extract_metadata(response)
+                error = extract_error(response, open_tool)
+                section_count, title = extract_metadata(response, tools)
                 if samples is not None:
                     sample = process_memory_kib(process.pid)
                     if sample is not None:
@@ -470,7 +547,9 @@ def run_one(
                         hit_count,
                         context_seconds,
                         probe_error,
-                    ) = probe(process, responses, response, probe_query, run_timeout)
+                    ) = probe(
+                        process, responses, response, probe_query, run_timeout, tools
+                    )
     except TimeoutError:
         timed_out = True
         open_seconds = float(run_timeout)
@@ -974,6 +1053,7 @@ def run_input_group(
     roots: list[str] | None = None,
     parse_timeout: float | None = None,
     retained: bool = False,
+    tools: str = "v1",
 ) -> None:
     skip = False
     for entry in inputs:
@@ -1004,7 +1084,7 @@ def run_input_group(
                 prefix=f"state-{entry['label'].replace(os.sep, '_')}-", dir=temp_root
             )
             entry_env = server_environment(
-                roots or [], entry_state_dir, parse_timeout, telemetry=telemetry
+                roots or [], entry_state_dir, parse_timeout, telemetry=telemetry, tools=tools
             )
         open_stderr = (
             telemetry_path(telemetry_dir, entry["label"], "open")
@@ -1036,6 +1116,7 @@ def run_input_group(
             probe_query,
             stderr_path=open_stderr,
             samples=samples,
+            tools=tools,
         )
         row = make_row(
             state,
@@ -1079,6 +1160,7 @@ def run_input_group(
                 entry["source"],
                 run_timeout,
                 stderr_path=reopen_stderr,
+                tools=tools,
             )
             row["reopen_seconds"] = reopen_seconds if reopen_error is None else None
             row["reopen_extra_kib"] = (
@@ -1143,6 +1225,12 @@ def main() -> int:
         action="store_true",
         help="give each input a fresh state dir and print its disk footprint",
     )
+    parser.add_argument(
+        "--tools",
+        choices=("v1", "v2"),
+        default="v1",
+        help="tool set the servers expose and the script calls (default v1)",
+    )
     args = parser.parse_args()
 
     if args.rss_phases:
@@ -1197,9 +1285,15 @@ def main() -> int:
                 state_dir = "memory"
             else:
                 state_dir = os.path.abspath(tempfile.mkdtemp(prefix="state-dir-", dir=root))
-            env = server_environment(roots, state_dir, args.parse_timeout_seconds)
+            env = server_environment(
+                roots, state_dir, args.parse_timeout_seconds, tools=args.tools
+            )
             input_env = server_environment(
-                roots, state_dir, args.parse_timeout_seconds, telemetry=args.telemetry
+                roots,
+                state_dir,
+                args.parse_timeout_seconds,
+                telemetry=args.telemetry,
+                tools=args.tools,
             )
 
             baseline_label = f"{state}-baseline"
@@ -1215,7 +1309,7 @@ def main() -> int:
                 _,
                 _,
                 _,
-            ) = run_one(baseline_command, env, None, run_timeout)
+            ) = run_one(baseline_command, env, None, run_timeout, tools=args.tools)
             baseline_row = make_row(
                 state,
                 baseline_label,
@@ -1244,6 +1338,7 @@ def main() -> int:
                 roots=roots,
                 parse_timeout=args.parse_timeout_seconds,
                 retained=args.retained_rss,
+                tools=args.tools,
             )
             run_input_group(
                 state, input_env, binary, args.wrapper, run_timeout, size_inputs,

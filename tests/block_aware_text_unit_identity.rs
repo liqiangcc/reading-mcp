@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use reading_mcp::application::get_text_units::{
-    GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
-    TextUnitDirection,
+    RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection, TextUnitEnumerationCoverage,
 };
-use reading_mcp::application::ports::{ApplicationError, DocumentRepository, Parser, SearchIndex};
+use reading_mcp::application::ports::{
+    ApplicationError, DocumentRepository, Parser, SearchIndex, StoredStreamItem, TextUnitIndex,
+    TextUnitStreamKey,
+};
 use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NormalizedBlock,
@@ -111,21 +113,17 @@ async fn sentence_enumeration_preserves_flat_structural_and_non_prose_blocks_coa
     repository.save(document.clone()).await.expect("save");
     let index = Arc::new(InMemoryTextUnitIndex::default());
     store_text_units(&*index, &document).await.unwrap();
-    let use_case = GetTextUnitsUseCase::new(repository, index);
-
-    let preserved = use_case
-        .execute(GetTextUnitsCommand {
-            document_id: document.id.clone(),
-            section_id: section_id.clone(),
-            requested_kind: RequestedTextUnitKind::Sentence,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 32,
-            max_chars: None,
-            cursor: None,
-        })
-        .await
-        .expect("preserve-source enumeration");
+    let _ = repository;
+    let preserved = enumerate(
+        &index,
+        &document,
+        &section_id,
+        RequestedTextUnitKind::Sentence,
+        TextUnitCoveragePolicy::PreserveSource,
+        32,
+    )
+    .await
+    .expect("preserve-source enumeration");
 
     assert_eq!(preserved.items.len(), 6);
     assert_eq!(preserved.coverage.sentence_eligible_paragraphs, 1);
@@ -149,19 +147,16 @@ async fn sentence_enumeration_preserves_flat_structural_and_non_prose_blocks_coa
         ]
     );
 
-    let eligible = use_case
-        .execute(GetTextUnitsCommand {
-            document_id: document.id,
-            section_id,
-            requested_kind: RequestedTextUnitKind::Sentence,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::EligibleOnly,
-            max_items: 32,
-            max_chars: None,
-            cursor: None,
-        })
-        .await
-        .expect("eligible-only enumeration");
+    let eligible = enumerate(
+        &index,
+        &document,
+        &section_id,
+        RequestedTextUnitKind::Sentence,
+        TextUnitCoveragePolicy::EligibleOnly,
+        32,
+    )
+    .await
+    .expect("eligible-only enumeration");
     assert_eq!(eligible.items.len(), 2);
     assert_eq!(eligible.coverage.intentionally_skipped, 4);
     assert!(!eligible.coverage.source_complete);
@@ -256,17 +251,18 @@ async fn invalid_declared_block_map_fails_closed_for_text_units_and_lexical_inde
         .save(document.clone())
         .await
         .expect("save corrupt fixture");
-    let error = GetTextUnitsUseCase::new(repository, Arc::new(index))
-        .execute(GetTextUnitsCommand {
-            document_id: document.id,
-            section_id: document.root_sections[0].id.clone(),
-            requested_kind: RequestedTextUnitKind::Paragraph,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 32,
-            max_chars: None,
-            cursor: None,
-        })
+    let error = index
+        .section_stream_items(
+            TextUnitStreamKey {
+                document_id: &document.id,
+                section_id: &document.root_sections[0].id,
+                kind: RequestedTextUnitKind::Paragraph,
+                policy: TextUnitCoveragePolicy::PreserveSource,
+            },
+            TextUnitDirection::Forward,
+            0,
+            32,
+        )
         .await
         .expect_err("enumeration must fail closed");
     assert!(matches!(error, ApplicationError::StaleDocument(_)));
@@ -350,4 +346,39 @@ fn plain_document(content: &str) -> Document {
             children: vec![],
         }],
     }
+}
+
+/// The stored stream under one policy, with its coverage: what the deleted v1 use case returned.
+struct Enumerated {
+    items: Vec<StoredStreamItem>,
+    coverage: TextUnitEnumerationCoverage,
+    section_complete: bool,
+}
+
+async fn enumerate(
+    index: &Arc<InMemoryTextUnitIndex>,
+    document: &Document,
+    section_id: &SectionId,
+    kind: RequestedTextUnitKind,
+    policy: TextUnitCoveragePolicy,
+    max_items: usize,
+) -> Result<Enumerated, ApplicationError> {
+    let key = TextUnitStreamKey {
+        document_id: &document.id,
+        section_id,
+        kind,
+        policy,
+    };
+    let items = index
+        .section_stream_items(key, TextUnitDirection::Forward, 0, max_items)
+        .await?;
+    let summary = index
+        .section_stream_summary(key)
+        .await?
+        .expect("stored units");
+    Ok(Enumerated {
+        section_complete: summary.coverage.source_complete && items.len() == summary.total_items,
+        items,
+        coverage: summary.coverage,
+    })
 }

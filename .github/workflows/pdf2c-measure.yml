@@ -3,10 +3,9 @@ run-name: PDF2c open memory (before/after)
 on:
   workflow_dispatch:
     inputs:
-      # memory-profile.py takes the input; pdf-open-profile.py still runs v1 only (it is not
-      # ported yet), so a v2 run measures the memory profile in v2 and the open profile in v1.
+      # Both measurement scripts take the input: a v2 run measures everything in v2.
       tools:
-        description: 'Tool set memory-profile.py exposes (pdf-open-profile.py stays v1)'
+        description: 'Tool set both measurement scripts expose'
         type: choice
         options: [v1, v2]
         default: v2

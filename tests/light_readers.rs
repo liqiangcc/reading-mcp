@@ -5,40 +5,35 @@
 //! reader that asked for the full document would fail the test instead of silently reading an empty
 //! section text, and every answer of the light run must equal the full run byte for byte.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, RwLock};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use reading_mcp::application::get_context::{
-    ContextContainerKind, ContextRelation, ContextTarget, ContextUnit, GetContextCommand,
-    GetContextUseCase, GetStructuredContextCommand, StructuralContextKind,
-};
-use reading_mcp::application::get_text_units::{
-    GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
-    TextUnitDirection,
-};
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::open_document::OpenDocumentUseCase;
 use reading_mcp::application::open_reading::{OpenReadingCommand, OpenReadingUseCase};
 use reading_mcp::application::ports::{
     ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, Parser,
-    RetrievalOptions, RetrievedResource, Retriever, SearchIndex, SectionRow, SectionTextUnits,
-    SourcePolicy, TextUnitIndex,
-};
-use reading_mcp::application::read_document::{
-    ContinueReadCommand, ReadDocumentUseCase, ReadExactTargetCommand, ReadSectionCommand,
+    RetrievalOptions, RetrievedResource, Retriever, SearchIndex, SectionRow, SourcePolicy,
+    TextUnitIndex,
 };
 use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
 use reading_mcp::application::search_document::{
     SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
 };
-use reading_mcp::application::short_handle::{DocumentHandle, SectionHandle, handle_checksum};
-use reading_mcp::application::text_unit_store::store_text_units;
+use reading_mcp::application::short_handle::{
+    DocumentHandle, SectionHandle, handle_checksum, paragraph_handle,
+};
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NormalizedDocumentHash,
-    ParagraphTextUnitSet, Section, SectionId, SentenceTextUnitSet, TextLocator, TextUnit,
+    Section, SectionId,
 };
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use reading_mcp::infrastructure::{
-    InMemoryDocumentRepository, InMemorySearchIndex, InMemoryTextUnitIndex, NoopSearchIndex,
+    InMemoryDocumentRepository, InMemorySearchIndex, NoopSearchIndex,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -214,133 +209,6 @@ fn clear_section_text(sections: &mut [Section]) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// A text-unit index that also answers the v2 short-handle keys
-// ------------------------------------------------------------------------------------------------
-
-/// [`InMemoryTextUnitIndex`] plus the `document_key` / `section_key` mapping, in document order.
-#[derive(Default)]
-struct KeyedTextUnitIndex {
-    inner: InMemoryTextUnitIndex,
-    sections: RwLock<HashMap<DocumentId, Vec<SectionId>>>,
-}
-
-impl KeyedTextUnitIndex {
-    async fn store(&self, document: &Document) {
-        store_text_units(&self.inner, document)
-            .await
-            .expect("units should persist");
-        self.record_sections(document);
-    }
-
-    fn record_sections(&self, document: &Document) {
-        let mut ordered = Vec::new();
-        collect_ids(&document.root_sections, &mut ordered);
-        self.sections
-            .write()
-            .expect("lock")
-            .insert(document.id.clone(), ordered);
-    }
-
-    fn section_ids(&self, document_id: &DocumentId) -> Option<Vec<SectionId>> {
-        self.sections
-            .read()
-            .expect("lock")
-            .get(document_id)
-            .cloned()
-    }
-}
-
-fn collect_ids(sections: &[Section], output: &mut Vec<SectionId>) {
-    for section in sections {
-        output.push(section.id.clone());
-        collect_ids(&section.children, output);
-    }
-}
-
-#[async_trait]
-impl TextUnitIndex for KeyedTextUnitIndex {
-    async fn replace_document(
-        &self,
-        document_id: &DocumentId,
-        units: &[TextUnit],
-    ) -> Result<(), ApplicationError> {
-        self.inner.replace_document(document_id, units).await
-    }
-
-    async fn list_document(
-        &self,
-        document_id: &DocumentId,
-    ) -> Result<Vec<TextUnit>, ApplicationError> {
-        self.inner.list_document(document_id).await
-    }
-
-    async fn replace_document_sets(
-        &self,
-        document: &Arc<Document>,
-        paragraphs: Arc<ParagraphTextUnitSet>,
-        sentences: Arc<SentenceTextUnitSet>,
-    ) -> Result<(), ApplicationError> {
-        self.record_sections(document);
-        self.inner
-            .replace_document_sets(document, paragraphs, sentences)
-            .await
-    }
-
-    async fn section_units(
-        &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-    ) -> Result<Option<SectionTextUnits>, ApplicationError> {
-        self.inner.section_units(document_id, section_id).await
-    }
-
-    async fn document_key(
-        &self,
-        document_id: &DocumentId,
-    ) -> Result<Option<i64>, ApplicationError> {
-        // A handle's document key starts at 1, so this fixture document is key 1.
-        Ok(self.section_ids(document_id).map(|_| 1))
-    }
-
-    async fn document_id_for_key(
-        &self,
-        doc_key: i64,
-    ) -> Result<Option<DocumentId>, ApplicationError> {
-        if doc_key != 1 {
-            return Ok(None);
-        }
-        Ok(self.sections.read().expect("lock").keys().next().cloned())
-    }
-
-    async fn section_key(
-        &self,
-        document_id: &DocumentId,
-        section_id: &SectionId,
-    ) -> Result<Option<i64>, ApplicationError> {
-        let Some(sections) = self.section_ids(document_id) else {
-            return Ok(None);
-        };
-        Ok(sections
-            .iter()
-            .position(|candidate| candidate == section_id)
-            .and_then(|index| i64::try_from(index).ok()))
-    }
-
-    async fn section_id_for_key(
-        &self,
-        document_id: &DocumentId,
-        section_key: i64,
-    ) -> Result<Option<SectionId>, ApplicationError> {
-        let Some(sections) = self.section_ids(document_id) else {
-            return Ok(None);
-        };
-        Ok(usize::try_from(section_key)
-            .ok()
-            .and_then(|index| sections.get(index).cloned()))
-    }
-}
-
-// ------------------------------------------------------------------------------------------------
 // Fixtures
 // ------------------------------------------------------------------------------------------------
 
@@ -449,320 +317,72 @@ impl Stored {
 }
 
 // ------------------------------------------------------------------------------------------------
-// v1 read_document
+// v2 read on the light document
 // ------------------------------------------------------------------------------------------------
 
+async fn section_handle(stored: &Stored, name: &str) -> SectionHandle {
+    SectionHandle {
+        document: document_handle(stored).await,
+        section_key: stored
+            .index
+            .section_key(&stored.document.id, &section_id(name))
+            .await
+            .expect("section key")
+            .expect("stored section"),
+    }
+}
+
+fn read_command(from: String, max_chars: Option<usize>) -> ReadReadingCommand {
+    ReadReadingCommand {
+        from,
+        unit: RequestedTextUnitKind::Sentence,
+        max_chars,
+        direction: None,
+        back: 0,
+    }
+}
+
 #[tokio::test]
-async fn read_document_renders_a_subtree_from_the_light_document() {
+async fn v2_reads_from_every_anchor_match_on_the_light_document() {
     let stored = stored().await;
-    let document = &stored.document;
-    let full =
-        ReadDocumentUseCase::new(Arc::clone(&stored.full)).with_text_unit_index(stored.units());
-    let light =
-        ReadDocumentUseCase::new(Arc::clone(&stored.light)).with_text_unit_index(stored.units());
+    let full = ReadReadingUseCase::new(Arc::clone(&stored.full), stored.units());
+    let light = ReadReadingUseCase::new(Arc::clone(&stored.light), stored.units());
 
+    let mut anchors = vec![document_handle(&stored).await.to_string()];
     for name in ["root", "topic-a", "child", "topic-b", "empty"] {
-        let command = ReadSectionCommand {
-            document_id: document.id.clone(),
-            section_id: section_id(name),
-            max_chars: None,
-        };
-        let expected = full.execute(command.clone()).await.expect("full read");
-        let actual = light.execute(command).await.expect("light read");
-        assert_eq!(actual, expected, "section {name}");
+        anchors.push(section_handle(&stored, name).await.to_string());
+    }
+    for from in anchors {
+        let command = read_command(from.clone(), None);
+        let expected = full.execute(command.clone()).await;
+        let actual = light.execute(command).await;
+        assert_eq!(actual, expected, "from {from}");
 
-        // A small budget exercises the continuation cursor over the same rendered subtree.
-        let command = ReadSectionCommand {
-            document_id: document.id.clone(),
-            section_id: section_id(name),
-            max_chars: Some(12),
-        };
-        let expected = full.execute(command.clone()).await.expect("full read");
-        let actual = light.execute(command).await.expect("light read");
-        assert_eq!(actual, expected, "section {name} with max_chars");
-        if let Some(cursor) = actual.next_cursor.clone() {
-            let continuation = ContinueReadCommand {
-                document_id: document.id.clone(),
-                section_id: section_id(name),
-                cursor,
-                max_chars: Some(12),
-            };
-            let expected = full
-                .continue_read(continuation.clone())
-                .await
-                .expect("full continuation");
-            let actual = light
-                .continue_read(continuation)
-                .await
-                .expect("light continuation");
-            assert_eq!(actual, expected, "section {name} continuation");
+        // A small budget exercises the `next` continuation over the same stream.
+        let command = read_command(from.clone(), Some(12));
+        let expected = full.execute(command.clone()).await;
+        let actual = light.execute(command).await;
+        assert_eq!(actual, expected, "from {from} with max_chars");
+        if let Some(next) = actual.ok().and_then(|result| result.next) {
+            let expected = full.execute(read_command(next.clone(), Some(12))).await;
+            let actual = light.execute(read_command(next, Some(12))).await;
+            assert_eq!(actual, expected, "from {from} continuation");
         }
     }
-
-    // The parent's rendering really carries its child's text, so the comparison above cannot pass
-    // on two equally empty renderings.
-    let parent = light
-        .execute(ReadSectionCommand {
-            document_id: document.id.clone(),
-            section_id: section_id("root"),
-            max_chars: None,
-        })
-        .await
-        .expect("root read");
-    assert!(parent.content.contains("Root overview sentence."));
-    assert!(parent.content.contains("Child text one. Child text two."));
-    assert!(parent.content.contains("Beta one. Beta two."));
-    assert_eq!(parent.stream.total_chars, parent.content.chars().count());
 }
 
 #[tokio::test]
-async fn read_document_exact_reads_one_section_from_the_light_document() {
+async fn v2_read_at_a_paragraph_handle_matches_on_the_light_document() {
     let stored = stored().await;
-    let document = &stored.document;
-    let full =
-        ReadDocumentUseCase::new(Arc::clone(&stored.full)).with_text_unit_index(stored.units());
-    let light =
-        ReadDocumentUseCase::new(Arc::clone(&stored.light)).with_text_unit_index(stored.units());
+    let full = ReadReadingUseCase::new(Arc::clone(&stored.full), stored.units());
+    let light = ReadReadingUseCase::new(Arc::clone(&stored.light), stored.units());
 
-    let target = document
-        .find_section(&section_id("topic-a"))
-        .expect("topic A");
-    let command = ReadExactTargetCommand {
-        document_id: document.id.clone(),
-        target_locator: TextLocator::for_section(document, target),
-        max_chars: Some(7),
-    };
-    let expected = full.read_exact(command.clone()).await.expect("full");
-    let actual = light.read_exact(command).await.expect("light");
+    let section = section_handle(&stored, "topic-a").await;
+    let command = read_command(paragraph_handle(&section, 1), None);
+    let expected = full.execute(command.clone()).await.expect("full");
+    let actual = light.execute(command).await.expect("light");
     assert_eq!(actual, expected);
-    assert_eq!(actual.content, "Alpha o");
-}
-
-// ------------------------------------------------------------------------------------------------
-// v1 get_context
-// ------------------------------------------------------------------------------------------------
-
-#[tokio::test]
-async fn get_context_serves_every_relation_from_the_light_document() {
-    let stored = stored().await;
-    let document = &stored.document;
-    let full =
-        GetContextUseCase::new(Arc::clone(&stored.full)).with_text_unit_index(stored.units());
-    let light =
-        GetContextUseCase::new(Arc::clone(&stored.light)).with_text_unit_index(stored.units());
-
-    let neighbour = GetContextCommand {
-        document_id: document.id.clone(),
-        section_id: section_id("topic-a"),
-        before: 1,
-        after: 2,
-        max_chars: None,
-    };
-    let expected = full
-        .execute(neighbour.clone())
-        .await
-        .expect("full neighbour");
-    let actual = light.execute(neighbour).await.expect("light neighbour");
-    assert_eq!(actual, expected);
-    // The anchor section's own text and its neighbours' text are all in the answer.
-    assert!(actual.content.contains("Alpha one."));
-    assert!(actual.content.contains("Root overview sentence."));
-    assert!(actual.content.contains("Beta one."));
-    assert_eq!(actual.items.len(), 4);
-
-    for (label, target, relation) in [
-        (
-            "section container",
-            ContextTarget::Section(section_id("topic-a")),
-            ContextRelation::Container {
-                kind: ContextContainerKind::Section,
-            },
-        ),
-        (
-            "owner section",
-            ContextTarget::Section(section_id("topic-a")),
-            ContextRelation::Structural {
-                kind: StructuralContextKind::OwnerSection,
-            },
-        ),
-        (
-            "ancestors",
-            ContextTarget::Section(section_id("child")),
-            ContextRelation::Structural {
-                kind: StructuralContextKind::Ancestors,
-            },
-        ),
-        (
-            "siblings",
-            ContextTarget::Section(section_id("child")),
-            ContextRelation::Structural {
-                kind: StructuralContextKind::Siblings,
-            },
-        ),
-        (
-            "children",
-            ContextTarget::Section(section_id("topic-a")),
-            ContextRelation::Structural {
-                kind: StructuralContextKind::Children,
-            },
-        ),
-    ] {
-        let command = GetStructuredContextCommand {
-            document_id: document.id.clone(),
-            target,
-            relation,
-            max_chars: None,
-        };
-        let expected = full
-            .execute_structured(command.clone())
-            .await
-            .expect("full structured context");
-        let actual = light
-            .execute_structured(command)
-            .await
-            .expect("light structured context");
-        assert_eq!(actual, expected, "{label}");
-    }
-
-    // A paragraph locator anchor exercises `resolve_text_locator` on the light document.
-    let topic_a = document
-        .find_section(&section_id("topic-a"))
-        .expect("topic A");
-    let paragraph = document
-        .paragraph_text_units()
-        .units
-        .into_iter()
-        .find(|unit| unit.owner_section_id == topic_a.id && unit.paragraph_index == 2)
-        .expect("second paragraph");
-    let command = GetStructuredContextCommand {
-        document_id: document.id.clone(),
-        target: ContextTarget::Locator(TextLocator::for_paragraph(document, topic_a, &paragraph)),
-        relation: ContextRelation::Neighbor {
-            unit: ContextUnit::Paragraph,
-            before: 1,
-            after: 1,
-        },
-        max_chars: None,
-    };
-    let expected = full
-        .execute_structured(command.clone())
-        .await
-        .expect("full paragraph neighbours");
-    let actual = light
-        .execute_structured(command)
-        .await
-        .expect("light paragraph neighbours");
-    assert_eq!(actual, expected);
-    assert_eq!(
-        actual
-            .items
-            .iter()
-            .map(|item| item.content.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("Alpha one. Alpha two."), Some("Alpha three.")]
-    );
-}
-
-#[tokio::test]
-async fn get_context_section_container_reads_only_the_container_text() {
-    let stored = stored().await;
-    let document = &stored.document;
-    let full =
-        GetContextUseCase::new(Arc::clone(&stored.full)).with_text_unit_index(stored.units());
-    let light =
-        GetContextUseCase::new(Arc::clone(&stored.light)).with_text_unit_index(stored.units());
-    let command = GetStructuredContextCommand {
-        document_id: document.id.clone(),
-        target: ContextTarget::Section(section_id("child")),
-        relation: ContextRelation::Container {
-            kind: ContextContainerKind::Section,
-        },
-        max_chars: None,
-    };
-    let expected = full
-        .execute_structured(command.clone())
-        .await
-        .expect("full container");
-    let actual = light
-        .execute_structured(command)
-        .await
-        .expect("light container");
-    assert_eq!(actual, expected);
-    assert_eq!(
-        actual.content,
-        "### Topic A Child\n\nChild text one. Child text two."
-    );
-}
-
-// ------------------------------------------------------------------------------------------------
-// v1 get_text_units
-// ------------------------------------------------------------------------------------------------
-
-#[tokio::test]
-async fn get_text_units_reads_the_light_document_even_for_a_section_anchor() {
-    let stored = stored().await;
-    let document = &stored.document;
-    let full = GetTextUnitsUseCase::new(Arc::clone(&stored.full), stored.units());
-    let light = GetTextUnitsUseCase::new(Arc::clone(&stored.light), stored.units());
-
-    let topic_a = document
-        .find_section(&section_id("topic-a"))
-        .expect("topic A");
-    let section_locator = TextLocator::for_section(document, topic_a);
-    let expected = full
-        .execute_from_anchor(
-            command(document, RequestedTextUnitKind::Sentence),
-            section_locator.clone(),
-        )
-        .await
-        .expect_err("a section anchor is not part of a text-unit stream");
-    let actual = light
-        .execute_from_anchor(
-            command(document, RequestedTextUnitKind::Sentence),
-            section_locator,
-        )
-        .await
-        .expect_err("a section anchor is not part of a text-unit stream");
-    assert_eq!(actual, expected);
-
-    // A paragraph anchor is the supported shape for the paragraph stream, and it must be identical
-    // too.
-    let paragraph = document
-        .paragraph_text_units()
-        .units
-        .into_iter()
-        .find(|unit| unit.owner_section_id == topic_a.id && unit.paragraph_index == 1)
-        .expect("first paragraph");
-    let paragraph_locator = TextLocator::for_paragraph(document, topic_a, &paragraph);
-    let expected = full
-        .execute_from_anchor(
-            command(document, RequestedTextUnitKind::Paragraph),
-            paragraph_locator.clone(),
-        )
-        .await
-        .expect("full anchored read");
-    let actual = light
-        .execute_from_anchor(
-            command(document, RequestedTextUnitKind::Paragraph),
-            paragraph_locator,
-        )
-        .await
-        .expect("light anchored read");
-    assert_eq!(actual, expected);
-    assert!(!actual.items.is_empty());
-}
-
-fn command(document: &Document, kind: RequestedTextUnitKind) -> GetTextUnitsCommand {
-    GetTextUnitsCommand {
-        document_id: document.id.clone(),
-        section_id: section_id("topic-a"),
-        requested_kind: kind,
-        direction: TextUnitDirection::Forward,
-        coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-        max_items: 8,
-        max_chars: None,
-        cursor: None,
-    }
+    assert_eq!(actual.items[0].text, "Alpha one.");
 }
 
 // ------------------------------------------------------------------------------------------------

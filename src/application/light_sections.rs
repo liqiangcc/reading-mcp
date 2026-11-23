@@ -13,15 +13,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::application::ports::{ApplicationError, DocumentRepository};
-use crate::application::reading_support::SectionContents;
-use crate::domain::{Document, DocumentId, Section, SectionId};
+use crate::domain::{Document, DocumentId, SectionId};
 
 /// The section text and section lengths one reader call has asked for.
 pub(crate) struct SectionTexts<'a> {
     document: &'a Document,
     /// `None` when `document` carries its own section text.
     repository: Option<Arc<dyn DocumentRepository>>,
-    texts: HashMap<SectionId, String>,
     char_lens: HashMap<SectionId, usize>,
 }
 
@@ -31,7 +29,6 @@ impl<'a> SectionTexts<'a> {
         Self {
             document,
             repository: None,
-            texts: HashMap::new(),
             char_lens: HashMap::new(),
         }
     }
@@ -44,42 +41,8 @@ impl<'a> SectionTexts<'a> {
         Self {
             document,
             repository: Some(repository),
-            texts: HashMap::new(),
             char_lens: HashMap::new(),
         }
-    }
-
-    /// Loads one section's text into the cache, unless it is already there.
-    async fn load(&mut self, section_id: &SectionId) -> Result<(), ApplicationError> {
-        if self.texts.contains_key(section_id) {
-            return Ok(());
-        }
-        let text = match &self.repository {
-            None => self
-                .document
-                .find_section(section_id)
-                .map(|section| section.content.clone()),
-            Some(repository) => {
-                repository
-                    .load_section_text(&self.document.id, section_id)
-                    .await?
-            }
-        };
-        let text = text.ok_or_else(|| missing_text(&self.document.id, section_id))?;
-        self.texts.insert(section_id.clone(), text);
-        Ok(())
-    }
-
-    /// The normalized text of one section.
-    pub(crate) async fn text(
-        &mut self,
-        section_id: &SectionId,
-    ) -> Result<String, ApplicationError> {
-        self.load(section_id).await?;
-        self.texts
-            .get(section_id)
-            .cloned()
-            .ok_or_else(|| missing_text(&self.document.id, section_id))
     }
 
     /// The number of Unicode scalars of one section's normalized text.
@@ -105,25 +68,6 @@ impl<'a> SectionTexts<'a> {
         self.char_lens.insert(section_id.clone(), len);
         Ok(len)
     }
-
-    /// Loads the text of `section` and of every section below it, in document order.
-    pub(crate) async fn fill_subtree(&mut self, section: &Section) -> Result<(), ApplicationError> {
-        if self.repository.is_none() {
-            return Ok(());
-        }
-        for section_id in subtree_ids(section) {
-            self.load(&section_id).await?;
-        }
-        Ok(())
-    }
-
-    /// The texts loaded so far, as the renderers read them.
-    pub(crate) fn contents(&self) -> SectionContents<'_> {
-        match self.repository {
-            None => SectionContents::Inline,
-            Some(_) => SectionContents::Loaded(&self.texts),
-        }
-    }
 }
 
 /// A section of the document whose text the repository cannot produce is a broken store, not an
@@ -133,17 +77,4 @@ fn missing_text(document_id: &DocumentId, section_id: &SectionId) -> Application
         "section {} of document {} has no stored text",
         section_id.0, document_id.0
     ))
-}
-
-/// `section` and every section below it, in document order.
-fn subtree_ids(section: &Section) -> Vec<SectionId> {
-    fn collect(section: &Section, output: &mut Vec<SectionId>) {
-        output.push(section.id.clone());
-        for child in &section.children {
-            collect(child, output);
-        }
-    }
-    let mut output = Vec::new();
-    collect(section, &mut output);
-    output
 }

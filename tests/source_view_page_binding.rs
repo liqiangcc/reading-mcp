@@ -2,16 +2,14 @@ use std::sync::Arc;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Bookmark, Document as PdfDocument, Object, Stream, dictionary};
-use reading_mcp::application::get_text_units::{
-    GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
-    TextUnitDirection,
-};
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use reading_mcp::application::ports::RetrievalOptions;
+use reading_mcp::application::ports::{DocumentRepository, RetrievalOptions};
 use reading_mcp::application::source_view::{
     GetSourceViewCommand, SourceViewLimits, SourceViewRepresentation, SourceViewUseCase,
 };
-use reading_mcp::domain::{DocumentSource, ORIGINAL_SOURCE_BINDING_MODEL_VERSION, SectionId};
+use reading_mcp::domain::{
+    DocumentSource, ORIGINAL_SOURCE_BINDING_MODEL_VERSION, SectionId, TextLocator,
+};
 use reading_mcp::infrastructure::{
     InMemoryDocumentRepository, InMemorySearchIndex, InMemoryTextUnitIndex,
 };
@@ -43,26 +41,27 @@ async fn sentence_on_second_page_of_multi_page_toc_section_renders_page_two() {
     .await
     .expect("PDF should open");
 
-    let units = GetTextUnitsUseCase::new(repository.clone(), index)
-        .execute(GetTextUnitsCommand {
-            document_id: opened.document_id.clone(),
-            section_id: SectionId("section://chapter-a".into()),
-            requested_kind: RequestedTextUnitKind::Sentence,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 10,
-            max_chars: None,
-            cursor: None,
-        })
+    let document = repository
+        .get(&opened.document_id)
         .await
-        .expect("multi-page section sentences should be available");
-    let second_page = units
-        .items
-        .iter()
-        .find(|item| item.text.contains("SECOND PAGE SENTENCE"))
-        .expect("second-page sentence should be represented")
-        .locator
-        .clone();
+        .expect("stored document")
+        .expect("the opened document is stored");
+    let section_id = SectionId("section://chapter-a".into());
+    let section = document
+        .find_section(&section_id)
+        .expect("chapter-a section");
+    let second_page = TextLocator::for_sentence(
+        &document,
+        section,
+        document
+            .sentence_text_units()
+            .units
+            .iter()
+            .find(|unit| {
+                unit.owner_section_id == section_id && unit.text.contains("SECOND PAGE SENTENCE")
+            })
+            .expect("second-page sentence should be represented"),
+    );
 
     let result = SourceViewUseCase::new(
         repository,

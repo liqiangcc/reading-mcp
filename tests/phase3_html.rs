@@ -1,13 +1,22 @@
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use std::sync::Arc;
 
-use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
+use reading_mcp::application::outline_reading::{OutlineReadingCommand, OutlineReadingUseCase};
 use reading_mcp::application::ports::{
     ApplicationError, Parser, RetrievalOptions, RetrievedResource,
 };
-use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
+use reading_mcp::application::ports::{DocumentRepository, TextUnitIndex};
+use reading_mcp::application::read_reading::{
+    ReadReadingCommand, ReadReadingResult, ReadReadingUseCase,
+};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
-use reading_mcp::domain::{Document, DocumentSource, MediaType, SectionId};
+use reading_mcp::application::short_handle::{DocumentHandle, SectionHandle, handle_checksum};
+use reading_mcp::domain::{Document, DocumentId, DocumentSource, MediaType, SectionId};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
 use reading_mcp::parsing::{HtmlParser, ParserRouter};
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
@@ -64,23 +73,20 @@ async fn html_reuses_open_structure_search_and_read_without_special_use_cases() 
     assert_eq!(opened.media_type.0, "text/html");
     assert_eq!(opened.section_count, 3);
 
-    let structure = GetDocumentStructureUseCase::new(repository.clone())
-        .execute(opened.document_id.clone(), None)
+    let (units, document) = open_and_store(&repository, &opened.document_id).await;
+    let handle = document_handle(&units, &document).await;
+    let outline = OutlineReadingUseCase::new(repository.clone(), units.clone())
+        .execute(OutlineReadingCommand {
+            at: handle.to_string(),
+            depth: 4,
+            limit: 100,
+            cursor: None,
+        })
         .await
         .expect("HTML structure should be available");
-
-    assert_eq!(structure.sections.len(), 1);
-    let root = &structure.sections[0];
-    assert_eq!(root.section_id.0, "section://operating-systems");
-    assert_eq!(root.children.len(), 1);
-    assert_eq!(
-        root.children[0].section_id.0,
-        "section://operating-systems/virtual-memory"
-    );
-    assert_eq!(
-        root.children[0].children[0].section_id.0,
-        "section://operating-systems/virtual-memory/page-tables"
-    );
+    let levels: Vec<u8> = outline.items.iter().map(|item| item.level).collect();
+    assert_eq!(levels, vec![1, 2, 3]);
+    assert_eq!(outline.items[0].title, "Operating Systems");
 
     let searched = SearchDocumentUseCase::new(index, repository.clone())
         .execute(SearchDocumentCommand {
@@ -102,27 +108,47 @@ async fn html_reuses_open_structure_search_and_read_without_special_use_cases() 
             .contains("Page replacement algorithms")
     );
 
-    let read = ReadDocumentUseCase::new(repository)
-        .execute(ReadSectionCommand {
-            document_id: opened.document_id,
-            section_id: SectionId("section://operating-systems/virtual-memory".into()),
-            max_chars: None,
-        })
-        .await
-        .expect("existing read use case should work for HTML");
+    let section = section_handle(
+        &units,
+        &document,
+        "section://operating-systems/virtual-memory",
+    )
+    .await;
+    // A v2 `read` streams forward from the anchor to the end of the document.
+    let result = read(
+        repository.clone(),
+        units.clone(),
+        &section.to_string(),
+        Some(16_000),
+    )
+    .await;
+    let text = items_text(&result);
 
-    assert!(read.content.contains("Address spaces give each process"));
-    assert!(read.content.contains("Page replacement algorithms"));
-    assert!(read.content.contains("### Page Tables"));
+    assert!(text.contains("Address spaces give each process"));
+    assert!(text.contains("Page replacement algorithms"));
+    assert!(text.contains("Page table entries map virtual pages"));
+    assert!(!text.contains("Navigation noise"));
+    assert!(!text.contains("Footer noise"));
     assert!(
-        read.content
-            .contains("Page table entries map virtual pages")
+        result
+            .sections
+            .iter()
+            .any(|section| section.title == "Page Tables")
     );
-    assert!(!read.content.contains("Navigation noise"));
-    assert!(!read.content.contains("Footer noise"));
-    assert_eq!(read.location.anchor.as_deref(), Some("virtual-memory"));
+
+    // The section's locator still binds the HTML anchor.
+    let cite =
+        reading_mcp::application::cite_reading::CiteReadingUseCase::new(repository.clone(), units)
+            .execute(&[result.items[0].handle.clone()])
+            .await
+            .expect("cite");
     assert_eq!(
-        read.location.native_location.as_deref(),
+        cite.items[0]
+            .locator
+            .as_ref()
+            .expect("locator")
+            .native_location
+            .as_deref(),
         Some("html:#virtual-memory")
     );
 }
@@ -331,4 +357,80 @@ async fn phase1_router_remains_closed_to_html() {
         .expect_err("phase1 composition should not silently gain HTML support");
 
     assert!(error.to_string().contains("unsupported media type"));
+}
+
+// The v2 reading helpers: every reader below runs through the public v2 use cases.
+async fn open_and_store(
+    repository: &Arc<InMemoryDocumentRepository>,
+    document_id: &DocumentId,
+) -> (Arc<dyn TextUnitIndex>, Arc<reading_mcp::domain::Document>) {
+    let keyed = Arc::new(KeyedTextUnitIndex::default());
+    let document = repository
+        .get(document_id)
+        .await
+        .expect("stored document")
+        .expect("the opened document is stored");
+    keyed.store(&document).await;
+    let units: Arc<dyn TextUnitIndex> = keyed;
+    (units, document)
+}
+
+async fn document_handle(
+    units: &Arc<dyn TextUnitIndex>,
+    document: &reading_mcp::domain::Document,
+) -> DocumentHandle {
+    DocumentHandle {
+        doc_key: units
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
+    }
+}
+
+async fn section_handle(
+    units: &Arc<dyn TextUnitIndex>,
+    document: &reading_mcp::domain::Document,
+    section_id: &str,
+) -> SectionHandle {
+    SectionHandle {
+        document: document_handle(units, document).await,
+        section_key: units
+            .section_key(&document.id, &SectionId(section_id.into()))
+            .await
+            .expect("section key")
+            .expect("stored section"),
+    }
+}
+
+async fn read(
+    repository: Arc<dyn DocumentRepository>,
+    units: Arc<dyn TextUnitIndex>,
+    from: &str,
+    max_chars: Option<usize>,
+) -> ReadReadingResult {
+    ReadReadingUseCase::new(repository, units)
+        .execute(ReadReadingCommand {
+            from: from.to_string(),
+            unit: RequestedTextUnitKind::Sentence,
+            max_chars,
+            direction: None,
+            back: 0,
+        })
+        .await
+        .expect("read")
+}
+
+fn items_text(result: &ReadReadingResult) -> String {
+    result
+        .items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

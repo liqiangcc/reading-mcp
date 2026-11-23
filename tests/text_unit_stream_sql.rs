@@ -2,13 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use reading_mcp::application::derived_text_units::DerivedTextUnits;
-use reading_mcp::application::get_context::{
-    ContextContainerKind, ContextRelation, ContextTarget, ContextUnit, GetContextUseCase,
-    GetStructuredContextCommand,
-};
 use reading_mcp::application::get_text_units::{
-    EffectiveTextUnitKind, GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind,
-    TextUnitCoveragePolicy, TextUnitDirection,
+    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
 };
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, OwnedStreamUnit, Parser, RetrievedResource,
@@ -1217,17 +1212,14 @@ async fn missing_section_layout_is_reported_as_stale() {
         )
         .expect("section layout rows should be deleted");
 
-    let error = GetTextUnitsUseCase::new(repository, index)
-        .execute(GetTextUnitsCommand {
-            document_id: document.id.clone(),
-            section_id: document.root_sections[0].id.clone(),
-            requested_kind: RequestedTextUnitKind::Paragraph,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 8,
-            max_chars: None,
-            cursor: None,
-        })
+    let error = index
+        .section_unit(
+            &document.id,
+            &document.root_sections[0].id,
+            EffectiveTextUnitKind::Paragraph,
+            1,
+            None,
+        )
         .await
         .expect_err("a missing summary must fail closed");
     assert!(matches!(error, ApplicationError::StaleDocument(_)));
@@ -1364,11 +1356,9 @@ async fn sqlite_section_unit_matches_memory_and_derived_for_every_unit() {
 }
 
 #[tokio::test]
-async fn get_context_matches_derived_mode_for_every_anchor_and_window() {
+async fn neighbor_windows_match_derived_mode_for_every_anchor_and_window() {
     let directory = tempdir().expect("temporary directory should be created");
     let database = directory.path().join("state.sqlite");
-    let repository: Arc<dyn DocumentRepository> =
-        Arc::new(SqliteDocumentRepository::open(&database).expect("repository should open"));
     let index: Arc<dyn TextUnitIndex> =
         Arc::new(SqliteTextUnitIndex::open(&database).expect("index should open"));
 
@@ -1377,19 +1367,11 @@ async fn get_context_matches_derived_mode_for_every_anchor_and_window() {
         parse_markdown().await,
         parse_html().await,
     ] {
-        repository
-            .save(document.clone())
-            .await
-            .expect("document should persist");
         store_text_units(&*index, &document)
             .await
             .expect("units should persist");
         let derived: Arc<dyn TextUnitIndex> =
             Arc::new(DerivedTextUnits::new(Arc::new(document.clone())));
-        let stored_context =
-            GetContextUseCase::new(repository.clone()).with_text_unit_index(Arc::clone(&index));
-        let derived_context =
-            GetContextUseCase::new(repository.clone()).with_text_unit_index(derived);
         let paragraphs = document
             .try_paragraph_text_units()
             .expect("valid paragraph set");
@@ -1402,64 +1384,58 @@ async fn get_context_matches_derived_mode_for_every_anchor_and_window() {
             let mut anchors = Vec::new();
             for paragraph in &units.paragraphs {
                 anchors.push((
-                    ContextUnit::Paragraph,
+                    RequestedTextUnitKind::Paragraph,
                     TextLocator::for_paragraph(&document, &section, paragraph),
                 ));
             }
             for sentence in &units.sentences {
                 anchors.push((
-                    ContextUnit::Sentence,
+                    RequestedTextUnitKind::Sentence,
                     TextLocator::for_sentence(&document, &section, sentence),
                 ));
             }
 
-            for (unit, locator) in &anchors {
+            for (kind, locator) in &anchors {
                 for before in [0usize, 1, 2] {
                     for after in [0usize, 1, 2] {
-                        let command = GetStructuredContextCommand {
-                            document_id: document.id.clone(),
-                            target: ContextTarget::Locator(locator.clone()),
-                            relation: ContextRelation::Neighbor {
-                                unit: *unit,
-                                before,
-                                after,
-                            },
-                            max_chars: None,
-                        };
-                        let stored = stored_context
-                            .execute_structured(command.clone())
-                            .await
-                            .expect("stored context should succeed");
-                        let derived = derived_context
-                            .execute_structured(command)
-                            .await
-                            .expect("derived context should succeed");
+                        let stored = neighbor_window(
+                            &index, &document, &section, *kind, locator, before, after,
+                        )
+                        .await;
+                        let derived = neighbor_window(
+                            &derived, &document, &section, *kind, locator, before, after,
+                        )
+                        .await;
                         assert_eq!(
                             stored, derived,
-                            "neighbor disagreement for {}/{:?} before {before} after {after}",
-                            section.id.0, unit
+                            "neighbor disagreement for {}/{kind:?} before {before} after {after}",
+                            section.id.0
                         );
                     }
                 }
             }
 
             for (_, locator) in &anchors {
-                let command = GetStructuredContextCommand {
-                    document_id: document.id.clone(),
-                    target: ContextTarget::Locator(locator.clone()),
-                    relation: ContextRelation::Container {
-                        kind: ContextContainerKind::Paragraph,
-                    },
-                    max_chars: None,
-                };
-                let stored = stored_context
-                    .execute_structured(command.clone())
-                    .await
-                    .expect("stored paragraph container should succeed");
-                let derived = derived_context
-                    .execute_structured(command)
-                    .await
-                    .expect("derived paragraph container should succeed");
+                let stored = neighbor_window(
+                    &index,
+                    &document,
+                    &section,
+                    RequestedTextUnitKind::Paragraph,
+                    locator,
+                    0,
+                    0,
+                )
+                .await;
+                let derived = neighbor_window(
+                    &derived,
+                    &document,
+                    &section,
+                    RequestedTextUnitKind::Paragraph,
+                    locator,
+                    0,
+                    0,
+                )
+                .await;
                 assert_eq!(
                     stored,
                     derived,
@@ -1470,6 +1446,60 @@ async fn get_context_matches_derived_mode_for_every_anchor_and_window() {
             }
         }
     }
+}
+
+/// The stream window around `locator`: `before` items before the anchor's position and `after`
+/// after it, exactly the window a neighbor context reads.
+async fn neighbor_window(
+    index: &Arc<dyn TextUnitIndex>,
+    document: &Document,
+    section: &Section,
+    kind: RequestedTextUnitKind,
+    locator: &TextLocator,
+    before: usize,
+    after: usize,
+) -> Vec<StoredStreamItem> {
+    let key = TextUnitStreamKey {
+        document_id: &document.id,
+        section_id: &section.id,
+        kind,
+        policy: TextUnitCoveragePolicy::PreserveSource,
+    };
+    let summary = index
+        .section_stream_summary(key)
+        .await
+        .expect("stream summary")
+        .expect("stored units");
+    let unit_kind = match kind {
+        RequestedTextUnitKind::Paragraph => EffectiveTextUnitKind::Paragraph,
+        RequestedTextUnitKind::Sentence => EffectiveTextUnitKind::Sentence,
+    };
+    // A paragraph container probe names a paragraph even when the locator is a sentence.
+    let sentence_index = match unit_kind {
+        EffectiveTextUnitKind::Paragraph => None,
+        EffectiveTextUnitKind::Sentence => locator.sentence_index,
+    };
+    let position = index
+        .section_stream_position(
+            key,
+            unit_kind,
+            locator.paragraph_index.expect("paragraph index"),
+            sentence_index,
+        )
+        .await
+        .expect("stream position")
+        .unwrap_or_else(|| {
+            panic!(
+                "the anchor is not in the stream: section {} kind {kind:?} locator {locator:?}",
+                section.id.0
+            )
+        });
+    let start = position.saturating_sub(before);
+    let limit = (position + after + 1).min(summary.total_items) - start;
+    index
+        .section_stream_items(key, TextUnitDirection::Forward, start, limit)
+        .await
+        .expect("stream items")
 }
 
 #[tokio::test]
@@ -1506,20 +1536,14 @@ async fn stored_context_reports_stale_instead_of_deriving_after_stream_rows_are_
         .into_iter()
         .find(|unit| unit.owner_section_id == section.id)
         .expect("paragraph should exist");
-    let error = GetContextUseCase::new(repository)
-        .with_text_unit_index(index)
-        .execute_structured(GetStructuredContextCommand {
-            document_id: document.id.clone(),
-            target: ContextTarget::Locator(TextLocator::for_paragraph(
-                &document, &section, &paragraph,
-            )),
-            relation: ContextRelation::Neighbor {
-                unit: ContextUnit::Paragraph,
-                before: 2,
-                after: 2,
-            },
-            max_chars: None,
-        })
+    let error = index
+        .section_unit(
+            &document.id,
+            &section.id,
+            EffectiveTextUnitKind::Paragraph,
+            paragraph.paragraph_index,
+            None,
+        )
         .await
         .expect_err("missing stored units must fail closed");
     assert!(matches!(error, ApplicationError::StaleDocument(_)));

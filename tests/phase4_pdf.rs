@@ -1,13 +1,22 @@
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use std::sync::Arc;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Bookmark, Document as PdfDocument, Object, Stream, dictionary, text_string};
-use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
+use reading_mcp::application::outline_reading::{OutlineReadingCommand, OutlineReadingUseCase};
+use reading_mcp::application::ports::{DocumentRepository, TextUnitIndex};
 use reading_mcp::application::ports::{Parser, RetrievalOptions, RetrievedResource};
-use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
+use reading_mcp::application::read_reading::{
+    ReadReadingCommand, ReadReadingResult, ReadReadingUseCase,
+};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
-use reading_mcp::domain::{DocumentSource, MediaType, SectionId};
+use reading_mcp::application::short_handle::{DocumentHandle, SectionHandle, handle_checksum};
+use reading_mcp::domain::{DocumentId, DocumentSource, MediaType, SectionId};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
 use reading_mcp::parsing::{ParserRouter, PdfParser};
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
@@ -49,22 +58,26 @@ async fn pdf_toc_reuses_existing_open_structure_search_and_read_flow() {
     assert_eq!(opened.media_type.0, "application/pdf");
     assert_eq!(opened.section_count, 3);
 
-    let structure = GetDocumentStructureUseCase::new(repository.clone())
-        .execute(opened.document_id.clone(), None)
+    let (units, document) = open_and_store(&repository, &opened.document_id).await;
+    let handle = document_handle(&units, &document).await;
+    let outline = OutlineReadingUseCase::new(repository.clone(), units.clone())
+        .execute(OutlineReadingCommand {
+            at: handle.to_string(),
+            depth: 4,
+            limit: 100,
+            cursor: None,
+        })
         .await
         .expect("PDF structure should be available");
-
-    assert_eq!(structure.sections.len(), 2);
+    let shape: Vec<(&str, u8)> = outline
+        .items
+        .iter()
+        .map(|item| (item.title.as_str(), item.level))
+        .collect();
     assert_eq!(
-        structure.sections[0].section_id.0,
-        "section://virtual-memory"
+        shape,
+        vec![("Virtual Memory", 1), ("Page Tables", 2), ("Processes", 1),]
     );
-    assert_eq!(structure.sections[0].children.len(), 1);
-    assert_eq!(
-        structure.sections[0].children[0].section_id.0,
-        "section://virtual-memory/page-tables"
-    );
-    assert_eq!(structure.sections[1].section_id.0, "section://processes");
 
     let searched = SearchDocumentUseCase::new(index, repository.clone())
         .execute(SearchDocumentCommand {
@@ -82,20 +95,41 @@ async fn pdf_toc_reuses_existing_open_structure_search_and_read_flow() {
     );
     assert_eq!(searched.hits[0].location.page, Some(2));
 
-    let read = ReadDocumentUseCase::new(repository)
-        .execute(ReadSectionCommand {
-            document_id: opened.document_id,
-            section_id: SectionId("section://virtual-memory".into()),
-            max_chars: None,
-        })
-        .await
-        .expect("existing read use case should work for PDF");
+    let section = section_handle(&units, &document, "section://virtual-memory").await;
+    // A v2 `read` streams forward from the anchor to the end of the document.
+    let result = read(
+        repository.clone(),
+        units.clone(),
+        &section.to_string(),
+        Some(16_000),
+    )
+    .await;
+    let text = items_text(&result);
 
-    assert!(read.content.contains("Address spaces give each process"));
-    assert!(read.content.contains("## Page Tables"));
-    assert!(read.content.contains("physical frames"));
-    assert_eq!(read.location.page, Some(1));
-    assert_eq!(read.location.native_location.as_deref(), Some("pdf:page:1"));
+    assert!(text.contains("Address spaces give each process"));
+    assert!(text.contains("physical frames"));
+    assert!(
+        result
+            .sections
+            .iter()
+            .any(|section| section.title == "Page Tables")
+    );
+
+    // The first item still binds page 1 of the source.
+    let cite =
+        reading_mcp::application::cite_reading::CiteReadingUseCase::new(repository.clone(), units)
+            .execute(&[result.items[0].handle.clone()])
+            .await
+            .expect("cite");
+    assert_eq!(
+        cite.items[0]
+            .locator
+            .as_ref()
+            .expect("locator")
+            .native_location
+            .as_deref(),
+        Some("pdf:page:1")
+    );
 }
 
 #[tokio::test]
@@ -246,4 +280,80 @@ fn build_pdf_bytes(page_texts: &[&str], with_toc: bool) -> Vec<u8> {
         .save_to(&mut bytes)
         .expect("fixture PDF should serialize");
     bytes
+}
+
+// The v2 reading helpers: every reader below runs through the public v2 use cases.
+async fn open_and_store(
+    repository: &Arc<InMemoryDocumentRepository>,
+    document_id: &DocumentId,
+) -> (Arc<dyn TextUnitIndex>, Arc<reading_mcp::domain::Document>) {
+    let keyed = Arc::new(KeyedTextUnitIndex::default());
+    let document = repository
+        .get(document_id)
+        .await
+        .expect("stored document")
+        .expect("the opened document is stored");
+    keyed.store(&document).await;
+    let units: Arc<dyn TextUnitIndex> = keyed;
+    (units, document)
+}
+
+async fn document_handle(
+    units: &Arc<dyn TextUnitIndex>,
+    document: &reading_mcp::domain::Document,
+) -> DocumentHandle {
+    DocumentHandle {
+        doc_key: units
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
+    }
+}
+
+async fn section_handle(
+    units: &Arc<dyn TextUnitIndex>,
+    document: &reading_mcp::domain::Document,
+    section_id: &str,
+) -> SectionHandle {
+    SectionHandle {
+        document: document_handle(units, document).await,
+        section_key: units
+            .section_key(&document.id, &SectionId(section_id.into()))
+            .await
+            .expect("section key")
+            .expect("stored section"),
+    }
+}
+
+async fn read(
+    repository: Arc<dyn DocumentRepository>,
+    units: Arc<dyn TextUnitIndex>,
+    from: &str,
+    max_chars: Option<usize>,
+) -> ReadReadingResult {
+    ReadReadingUseCase::new(repository, units)
+        .execute(ReadReadingCommand {
+            from: from.to_string(),
+            unit: RequestedTextUnitKind::Sentence,
+            max_chars,
+            direction: None,
+            back: 0,
+        })
+        .await
+        .expect("read")
+}
+
+fn items_text(result: &ReadReadingResult) -> String {
+    result
+        .items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

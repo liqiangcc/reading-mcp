@@ -6,9 +6,6 @@ use std::sync::Arc;
 pub(crate) use ephemeral_state::EphemeralStateDir;
 
 use crate::application::cite_reading::CiteReadingUseCase;
-use crate::application::get_context::GetContextUseCase;
-use crate::application::get_document_structure::GetDocumentStructureUseCase;
-use crate::application::get_text_units::GetTextUnitsUseCase;
 use crate::application::list_directories::ListDirectoryUseCase;
 use crate::application::list_documents::ListDocumentsUseCase;
 use crate::application::open_document::OpenDocumentUseCase;
@@ -18,7 +15,6 @@ use crate::application::ports::{
     DocumentRepository, OpenResultStore, ParsedDocumentCache, Parser, RawResourceCache, Retriever,
     SearchIndex, SourcePolicy, TextUnitIndex,
 };
-use crate::application::read_document::ReadDocumentUseCase;
 use crate::application::read_reading::ReadReadingUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
 use crate::application::search_reading::SearchReadingUseCase;
@@ -40,7 +36,7 @@ use crate::retrieval::{
 };
 use crate::security::{HttpAccessPolicy, PublicHttpAccessPolicy};
 
-pub use config::{RuntimeConfig, ToolSet};
+pub use config::RuntimeConfig;
 
 struct RuntimeComponents {
     raw_cache: Arc<dyn RawResourceCache>,
@@ -244,17 +240,9 @@ pub fn build_server(
     );
     let list_documents = Arc::new(ListDocumentsUseCase::new(config.local_roots.clone()));
     let list_directory = Arc::new(ListDirectoryUseCase::new(config.local_roots.clone()));
-    let get_structure = Arc::new(GetDocumentStructureUseCase::new(repository.clone()));
-    let get_text_units = Arc::new(GetTextUnitsUseCase::new(
-        repository.clone(),
-        text_unit_index.clone(),
-    ));
     let search_document = Arc::new(
         SearchDocumentUseCase::new(search_index, repository.clone())
             .with_text_unit_index(text_unit_index.clone()),
-    );
-    let read_document = Arc::new(
-        ReadDocumentUseCase::new(repository.clone()).with_text_unit_index(text_unit_index.clone()),
     );
     let open_reading = Arc::new(OpenReadingUseCase::new(
         open_document.clone(),
@@ -278,25 +266,15 @@ pub fn build_server(
         repository.clone(),
         text_unit_index.clone(),
     ));
-    let get_context =
-        Arc::new(GetContextUseCase::new(repository).with_text_unit_index(text_unit_index.clone()));
-
     Ok(ReadingMcpServer::from_use_cases(
-        open_document,
         list_documents,
         list_directory,
-        get_structure,
-        get_text_units,
-        search_document,
-        read_document,
-        get_context,
         source_view,
         open_reading,
         read_reading,
         outline_reading,
         search_reading,
         cite_reading,
-        config.tools,
         ephemeral_state,
     ))
 }

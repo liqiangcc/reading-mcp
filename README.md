@@ -26,22 +26,8 @@ source_view
 - `open` 返回短文档句柄，`outline` / `search` / `read` 用句柄推进阅读；
 - `cite` 是唯一返回完整 locator 的 tool，`source_view` 负责从精确位置回到 identity-bound 原始视觉 Source，当前首个实现为 PDF page fidelity review。
 
-设置 `READING_MCP_TOOLS=v1` 仍可选择旧的 **9 个稳定 Tool**：
-
-```text
-list_documents
-list_directory
-open_document
-get_document_structure
-get_text_units
-search_document
-get_context
-read_document
-get_source_view
-```
-
-`READING_MCP_TOOLS=both` 同时暴露两套（16 个）。默认已从 v1 切换为 v2：既有 host
-service 配置若仍需旧 Tool，必须显式设置 `READING_MCP_TOOLS=v1`。详见
+v1 Tool 集合已删除：`READING_MCP_TOOLS` 只接受 `v2`（未设置时也是 v2），设置为
+`v1`、`both` 或其他值会在启动时拒绝服务。详见
 [Runtime Configuration](docs/runtime-configuration.md)。
 
 独立格式 Parser：
@@ -104,31 +90,21 @@ Repository  SearchIndex
 Agent 的推荐调用顺序：
 
 ```text
-list_directory（浏览授权 roots 和已知目录的直接 children）
+browse（浏览授权 roots 和已知目录，发现可打开文档）
       ↓
-list_documents（在已知目录中发现可打开文档）
+open
       ↓
-open_document
+outline / search
       ↓
-get_document_structure
+read
       ↓
-get_text_units / search_document
-      ↓
-get_context / read_document
-      ↓
-必要时：TextLocator → get_source_view（原始视觉 fidelity review）
+必要时：item handle → cite → source_view（原始视觉 fidelity review）
 ```
 
-需要逐句阅读时，在 `open_document` 后先读取 `reading_profile/v1`，再用
-`get_document_structure`（`StructureCursor`）枚举 Section，用
-`get_text_units(requested_kind=sentence, coverage_policy=preserve_source)` 按
-`TextLocator` 和 `TextUnitCursor` 逐项推进。`body-order/v1` 是整本/多 Section
+`open` 返回短句柄，`outline` / `search` / `read` 用句柄推进阅读；`read` 的 `next`
+字段是 continuation，语义同上：只表示 bounded stream 的进度，不是 citation，也不会
+fuzzy rebase；identity 变化会明确返回 stale。`body-order/v1` 是整本/多 Section
 组合的 canonical body 顺序；结构 preorder 不被当作 EPUB 正文阅读顺序。
-
-`list_directory` 使用独立的 `directory-cursor/v1` continuation；目录 entry 与 document
-candidate 有明确类型区分。`list_documents` 使用 `discovery-cursor/v1` continuation。所有 cursor 都只表示
-各自 bounded stream 的进度，不是 citation，也不会 fuzzy rebase；raw 或 normalized
-identity 变化会明确返回 stale。
 
 搜索单元可以是较小段落或精确 Sentence，但读取单元保持 canonical source identity：
 
@@ -139,26 +115,26 @@ Search ≠ Read
 Original visual view ≠ Canonical normalized text
 ```
 
-`search_document` 的 `SearchHit.text_locator` 可以直接交给 `read_document`、
-`get_context`、anchored `get_text_units`，或在需要视觉核对时交给 `get_source_view`；禁止复制 snippet 后重新搜索定位。
+`search` 的 hit handle 可以直接交给 `read`，或在需要视觉核对时交给 `source_view`；
+`cite` 返回的完整 `TextLocator` 是 citation 身份。禁止复制 snippet 后重新搜索定位。
 
 ## Original Source View / Source Fidelity
 
 正常阅读仍然走：
 
 ```text
-TextLocator
-→ read_document
+item handle
+→ read
 → exact canonical normalized source
 ```
 
 只有公式、Figure / Table、多栏排版、特殊符号或 parser fidelity 可疑时，才进入：
 
 ```text
-TextLocator normalized range
+item handle
 → original-source-binding/v1
 → original PDF page
-→ get_source_view
+→ source_view
 → image/png
 ```
 
@@ -211,7 +187,7 @@ Parsed Cache 只保存 PDF 的解析结果：PDF layout/OCR 解析代价高，�
 EPUB、HTML、Markdown 与纯文本重新解析很便宜，所以不再缓存，也不再在内存和磁盘上多留副本。
 PDF 的解析缓存位于 `<state>/cache/parsed-v2`；旧的 `<state>/cache/parsed` 在启动时被删除。
 
-MCP 进程重启后，已经打开过的 `document_id` 仍可直接用于 `read_document` / `search_document`。
+MCP 进程重启后，已经打开过的文档句柄仍可直接用于 `read` / `search` / `cite`。
 
 如果需要完全临时运行：
 

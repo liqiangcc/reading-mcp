@@ -137,93 +137,6 @@ impl DocumentView {
             .section_children(&self.header.id, parent_key, limit)
             .await
     }
-
-    /// The ancestors of `section_key`, root first and excluding the section itself.
-    pub(crate) async fn ancestors(
-        &self,
-        section_key: i64,
-    ) -> Result<Vec<SectionRow>, ApplicationError> {
-        if let Some(document) = &self.full {
-            return Ok(section_rows::section_ancestors(document, section_key));
-        }
-        self.repository
-            .section_ancestors(&self.header.id, section_key)
-            .await
-    }
-
-    /// The rows whose keys are in `[from_key, to_key_inclusive]`, in ascending key order.
-    pub(crate) async fn key_range(
-        &self,
-        from_key: i64,
-        to_key_inclusive: i64,
-    ) -> Result<Vec<SectionRow>, ApplicationError> {
-        let limit = usize::try_from(to_key_inclusive.saturating_sub(from_key).saturating_add(1))
-            .unwrap_or(usize::MAX);
-        if let Some(document) = &self.full {
-            return Ok(section_rows::sections_in_key_range(
-                document,
-                from_key,
-                to_key_inclusive,
-                limit,
-            ));
-        }
-        self.repository
-            .sections_in_key_range(&self.header.id, from_key, to_key_inclusive, limit)
-            .await
-    }
-
-    /// The rows of `row`'s subtree in key order: one key-range read.
-    pub(crate) async fn subtree(
-        &self,
-        row: &SectionRow,
-    ) -> Result<Vec<SectionRow>, ApplicationError> {
-        self.key_range(row.section_key, row.subtree_end_key).await
-    }
-
-    /// One section as a `Section` value: the full document's own section when the caller holds it,
-    /// otherwise the row carrier (which a renderer must not use).
-    pub(crate) async fn section_of(
-        &self,
-        section_id: &SectionId,
-    ) -> Result<Option<Section>, ApplicationError> {
-        if let Some(document) = &self.full {
-            return Ok(document.find_section(section_id).cloned());
-        }
-        Ok(self
-            .section_by_id(section_id)
-            .await?
-            .map(|row| carrier_section(&row)))
-    }
-
-    /// The subtree of `section_id` nested into a `Section` tree, the only form a renderer may see:
-    /// the full document's own section when the caller holds it, otherwise one key-range read.
-    pub(crate) async fn subtree_of(
-        &self,
-        section_id: &SectionId,
-    ) -> Result<Option<Section>, ApplicationError> {
-        if let Some(document) = &self.full {
-            return Ok(document.find_section(section_id).cloned());
-        }
-        match self.section_by_id(section_id).await? {
-            Some(row) => Ok(Some(self.subtree_section(&row).await?)),
-            None => Ok(None),
-        }
-    }
-
-    /// `row`'s subtree nested back into a `Section`, the only form a renderer may see. One key-range
-    /// read of the subtree, which is exactly what rendering it costs.
-    pub(crate) async fn subtree_section(
-        &self,
-        row: &SectionRow,
-    ) -> Result<Section, ApplicationError> {
-        let rows = self.subtree(row).await?;
-        subtree_from_rows(&rows).ok_or_else(|| {
-            ApplicationError::RepositoryFailed(format!(
-                "section {} of document {} is not in the stored section rows",
-                row.id.0, self.header.id.0
-            ))
-        })
-    }
 }
 
 /// The identity-only `Document` of a header: `id`, `source`, `title`, `media_type`, `content_hash`
@@ -257,8 +170,7 @@ pub(crate) fn carrier_section(row: &SectionRow) -> Section {
     }
 }
 
-/// `rows` nested into a `Section` tree: `rows[0]` is the root of the subtree, every later row is
-/// inside its subtree, and each child's subtree is contiguous, so one pass rebuilds the nesting.
+#[cfg(test)]
 fn subtree_from_rows(rows: &[SectionRow]) -> Option<Section> {
     fn build(rows: &[SectionRow], index: usize) -> (Section, usize) {
         let row = &rows[index];

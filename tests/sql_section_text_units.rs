@@ -2,12 +2,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use reading_mcp::application::get_text_units::{
-    GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
-    TextUnitDirection,
+    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
 };
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, Parser, RetrievedResource, SectionTextUnits,
-    TextUnitIndex,
+    TextUnitIndex, TextUnitStreamKey,
 };
 use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{Document, DocumentId, DocumentSource, MediaType, Section, SectionId};
@@ -79,8 +78,8 @@ async fn get_text_units_is_identical_for_in_memory_and_sqlite_indexes() {
             .await
             .expect("document should persist");
 
-        let memory_use_case = GetTextUnitsUseCase::new(repository.clone(), memory_index);
-        let sqlite_use_case = GetTextUnitsUseCase::new(repository.clone(), sqlite_index);
+        let memory_index: Arc<dyn TextUnitIndex> = memory_index;
+        let sqlite_index: Arc<dyn TextUnitIndex> = sqlite_index;
 
         let sections = all_sections(&document);
         for section in &sections {
@@ -94,10 +93,10 @@ async fn get_text_units_is_identical_for_in_memory_and_sqlite_indexes() {
                 ] {
                     for direction in [TextUnitDirection::Forward, TextUnitDirection::Backward] {
                         compare_pages(
-                            &memory_use_case,
-                            &sqlite_use_case,
-                            document.id.clone(),
-                            section.id.clone(),
+                            &memory_index,
+                            &sqlite_index,
+                            &document.id,
+                            &section.id,
                             requested_kind,
                             coverage_policy,
                             direction,
@@ -110,57 +109,62 @@ async fn get_text_units_is_identical_for_in_memory_and_sqlite_indexes() {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn compare_pages(
-    memory_use_case: &GetTextUnitsUseCase,
-    sqlite_use_case: &GetTextUnitsUseCase,
-    document_id: DocumentId,
-    section_id: SectionId,
+    memory_index: &Arc<dyn TextUnitIndex>,
+    sqlite_index: &Arc<dyn TextUnitIndex>,
+    document_id: &DocumentId,
+    section_id: &SectionId,
     requested_kind: RequestedTextUnitKind,
     coverage_policy: TextUnitCoveragePolicy,
     direction: TextUnitDirection,
 ) {
-    let base = GetTextUnitsCommand {
+    let key = TextUnitStreamKey {
         document_id,
         section_id,
-        requested_kind,
-        direction,
-        coverage_policy,
-        max_items: 2,
-        max_chars: None,
-        cursor: None,
+        kind: requested_kind,
+        policy: coverage_policy,
     };
-
-    let mut memory_cursor: Option<String> = None;
-    let mut sqlite_cursor: Option<String> = None;
+    let memory_summary = memory_index
+        .section_stream_summary(key)
+        .await
+        .expect("memory summary");
+    let sqlite_summary = sqlite_index
+        .section_stream_summary(key)
+        .await
+        .expect("sqlite summary");
+    assert_eq!(
+        memory_summary, sqlite_summary,
+        "summary disagreement for {section_id:?} {requested_kind:?} {coverage_policy:?}"
+    );
+    let total = memory_summary.expect("stored units").total_items;
+    let mut position = match direction {
+        TextUnitDirection::Forward => 0,
+        TextUnitDirection::Backward => total,
+    };
     let mut pages = 0usize;
     loop {
-        let mut memory_command = base.clone();
-        memory_command.cursor = memory_cursor.clone();
-        let mut sqlite_command = base.clone();
-        sqlite_command.cursor = sqlite_cursor.clone();
-
-        let memory_result = memory_use_case
-            .execute(memory_command)
+        let memory_items = memory_index
+            .section_stream_items(key, direction, position, 2)
             .await
             .expect("enumeration through the in-memory index should succeed");
-        let sqlite_result = sqlite_use_case
-            .execute(sqlite_command)
+        let sqlite_items = sqlite_index
+            .section_stream_items(key, direction, position, 2)
             .await
             .expect("enumeration through the sqlite index should succeed");
-        assert_eq!(memory_result, sqlite_result);
+        assert_eq!(
+            memory_items, sqlite_items,
+            "page {pages} of {section_id:?} {requested_kind:?} {coverage_policy:?} {direction:?}"
+        );
 
         pages += 1;
         assert!(pages <= 4096, "page loop must terminate");
-
-        match (memory_result.next_cursor, sqlite_result.next_cursor) {
-            (None, None) => break,
-            (Some(memory_next), Some(sqlite_next)) => {
-                memory_cursor = Some(memory_next);
-                sqlite_cursor = Some(sqlite_next);
-            }
-            cursors => panic!("cursor disagreement between read paths: {cursors:?}"),
+        if memory_items.len() < 2 {
+            break;
         }
+        position = match direction {
+            TextUnitDirection::Forward => position + memory_items.len(),
+            TextUnitDirection::Backward => position - memory_items.len(),
+        };
     }
 }
 
@@ -187,18 +191,14 @@ async fn never_stored_document_has_no_section_units_and_fails_as_stale() {
         None
     );
 
-    let use_case = GetTextUnitsUseCase::new(repository, index);
-    let error = use_case
-        .execute(GetTextUnitsCommand {
-            document_id: document.id,
-            section_id,
-            requested_kind: RequestedTextUnitKind::Paragraph,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 2,
-            max_chars: None,
-            cursor: None,
-        })
+    let error = index
+        .section_unit(
+            &document.id,
+            &section_id,
+            EffectiveTextUnitKind::Paragraph,
+            1,
+            None,
+        )
         .await
         .expect_err("a document that was never stored must not be read");
     assert!(matches!(error, ApplicationError::StaleDocument(_)));

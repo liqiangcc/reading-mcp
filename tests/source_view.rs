@@ -3,10 +3,6 @@ use std::sync::Arc;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
-use reading_mcp::application::get_text_units::{
-    GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
-    TextUnitDirection,
-};
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use reading_mcp::application::ports::{
     DocumentRepository, RetrievalOptions, RetrievedResource, SourceViewRenderOptions,
@@ -15,7 +11,7 @@ use reading_mcp::application::ports::{
 use reading_mcp::application::source_view::{
     GetSourceViewCommand, SourceViewLimits, SourceViewRepresentation, SourceViewUseCase,
 };
-use reading_mcp::domain::{DocumentSource, MediaType, SectionId};
+use reading_mcp::domain::{DocumentSource, MediaType, SectionId, TextLocator};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use reading_mcp::parsing::{ParserRouter, PdfSourceViewRenderer};
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
@@ -46,20 +42,23 @@ async fn locator_resolves_to_original_pdf_page_and_renders_visual_fixture() {
     .await
     .expect("PDF should open");
 
-    let units = GetTextUnitsUseCase::new(repository.clone(), index)
-        .execute(GetTextUnitsCommand {
-            document_id: opened.document_id.clone(),
-            section_id: SectionId("section://page-2".into()),
-            requested_kind: RequestedTextUnitKind::Paragraph,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 8,
-            max_chars: None,
-            cursor: None,
-        })
+    let document = repository
+        .get(&opened.document_id)
         .await
-        .expect("page text units should be available");
-    let locator = units.items[0].locator.clone();
+        .expect("stored document")
+        .expect("the opened document is stored");
+    let section_id = SectionId("section://page-2".into());
+    let section = document.find_section(&section_id).expect("page-2 section");
+    let locator = TextLocator::for_paragraph(
+        &document,
+        section,
+        document
+            .paragraph_text_units()
+            .units
+            .iter()
+            .find(|unit| unit.owner_section_id == section_id)
+            .expect("a paragraph on page 2"),
+    );
 
     let result = SourceViewUseCase::new(
         repository.clone(),

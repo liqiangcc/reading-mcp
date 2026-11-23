@@ -8,8 +8,12 @@
 //! and 5; v1 response fields with no v2 name (`candidate_kind`, `resolved_target_locator`,
 //! `complete`) are dropped per §2.1 item 3, and their locators are asserted through `cite`.
 //!
-//! Gated exactly like the v1 file: `#[ignore = "requires pinned hosted OCR dependencies"]` and the
-//! same `READING_MCP_MIXED_ORDER_DIR` / `READING_MCP_PDF_LAYOUT_PYTHON` environment.
+//! Gated like the v1 file: `#[ignore]` with the same `READING_MCP_MIXED_ORDER_DIR` /
+//! `READING_MCP_PDF_LAYOUT_PYTHON` environment. Three tests keep the v1 gate verbatim; the fourth
+//! is a **v2 gap**: v2 `source_view` reports the default 16-MiB decoded-stream rejection as
+//! `internal` (`ApplicationError::SourceViewFailed` has no v2 code and `ErrorView` sends no
+//! detail), so the v1 `SOURCE_VIEW_FAILED` "decoded PDF stream exceeds configured limit" assertion
+//! cannot be expressed. Its body is unchanged, so it passes the day the mapping exists.
 
 #[path = "support/v2_mcp.rs"]
 mod v2_mcp;
@@ -318,7 +322,7 @@ async fn frozen_four_page_cold_and_restarted_warm_open_budgets() {
 }
 
 #[tokio::test]
-#[ignore = "requires pinned hosted OCR dependencies"]
+#[ignore = "v2 gap: v2 source_view reports the 16-MiB decoded-stream rejection as `internal` (SourceViewFailed has no v2 code and no detail is sent), so the v1 SOURCE_VIEW_FAILED message cannot be asserted; also requires pinned hosted OCR dependencies"]
 async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let directory = tempfile::tempdir().unwrap();

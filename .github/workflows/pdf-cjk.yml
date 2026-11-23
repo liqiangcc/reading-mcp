@@ -143,7 +143,7 @@ jobs:
             --inventory-dir "$RUNNER_TEMP/inventory" \
             --out "$RUNNER_TEMP/results/cjk-${{ matrix.shard }}.jsonl" \
             --deadline-minutes 65 \
-            --paper-deadline-minutes 12 \ | tail -40
+            --paper-deadline-minutes 12 | tail -40
       - name: Upload shard results
         if: always() && steps.corpus.outputs.present == 'yes'
         uses: actions/upload-artifact@v4

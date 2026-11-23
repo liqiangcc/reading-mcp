@@ -138,7 +138,7 @@ jobs:
             --state-root "$RUNNER_TEMP/state" \
             --out "$RUNNER_TEMP/results/sweep-${{ matrix.shard }}.jsonl" \
             --deadline-minutes 40 \
-            --per-document-minutes 4.5 \ | tail -150
+            --per-document-minutes 4.5 | tail -150
       - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v4

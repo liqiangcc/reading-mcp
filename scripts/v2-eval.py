@@ -55,7 +55,6 @@ def load_probe():
 probe = load_probe()
 
 SENTENCES_T2 = 500
-V1 = "v1"
 V2 = "v2"
 
 # T3 search then read closely; T4 jump via outline; T5 cite.
@@ -72,7 +71,6 @@ T5_MAX_CHARS = 400
 T3_TERMS = {"zh-classic": "寶玉", "en-novel": "Pierre"}
 T4_BOOKS = frozenset({"zh-large"})
 T5_BOOKS = frozenset({"zh-classic"})
-EXTENDED_TASKS = ("T3", "T4", "T5")
 # The tools that return reading items: v2 pages them with `read`.
 READ_TOOLS = frozenset({"read"})
 
@@ -178,9 +176,6 @@ def starts_section(payload) -> bool:
         return False
     return bool(payload.get("section")) or bool(payload.get("sections"))
 
-
-def tool_arguments(**kwargs) -> dict:
-    return {key: value for key, value in kwargs.items() if value is not None}
 
 
 def call(server, name: str, arguments: dict, deadline: float, record: TaskResult) -> dict:
@@ -471,155 +466,21 @@ def table(rows: list[dict], tools_tokens: dict[str, float]) -> str:
     return "\n".join(lines)
 
 
-def ratio(v2_tokens: float, v1_tokens: float) -> float | None:
-    if not v1_tokens:
-        return None
-    return 100.0 * v2_tokens / v1_tokens
-
-
 def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[str], dict]:
-    lines: list[str] = []
-    summary: dict = {"ratios": {}, "checks": []}
-    # Rows are per (book, tool set); a criterion compares the two tool sets of one book.
-    books: dict[str, dict[str, dict[str, TaskResult]]] = {}
-    for row in rows:
-        by_task = books.setdefault(row["book"], {})
-        for task in row["tasks"]:
-            by_task.setdefault(task.task, {})[task.toolset] = task
-    for book, by_task in books.items():
-        for name in ("T1", "T2"):
-            pair = by_task.get(name) or {}
-            left = pair.get(V1)
-            right = pair.get(V2)
-            if left is None or right is None:
-                continue
-            v1_total = left.total_tokens(tools_tokens.get(V1, 0.0))
-            v2_total = right.total_tokens(tools_tokens.get(V2, 0.0))
-            percent = ratio(v2_total, v1_total)
-            ok = percent is not None and percent <= 20.0
-            summary["ratios"][f"{book}-{name}"] = percent
-            lines.append(
-                "{} {book} {task} total tokens: v2 {v2} vs v1 {v1} = {pct}% (limit 20%)".format(
-                    "PASS" if ok else "FAIL",
-                    book=book,
-                    task=name,
-                    v2=fmt(v2_total, 0),
-                    v1=fmt(v1_total, 0),
-                    pct=fmt(percent),
-                )
-            )
-            summary["checks"].append(ok)
-            ok = right.calls <= left.calls
-            lines.append(
-                "{} {book} {task} calls: v2 {v2} vs v1 {v1}".format(
-                    "PASS" if ok else "FAIL",
-                    book=book,
-                    task=name,
-                    v2=right.calls,
-                    v1=left.calls,
-                )
-            )
-            summary["checks"].append(ok)
-            extra = right.extra_tokens_per_sentence()
-            ok = extra is not None and extra <= 30.0
-            lines.append(
-                "{} {book} {task} v2 extra tokens per sentence on read calls: {extra} (limit 30)".format(
-                    "PASS" if ok else "FAIL",
-                    book=book,
-                    task=name,
-                    extra=fmt(extra),
-                )
-            )
-            summary["checks"].append(ok)
-    # T3-T5: the extended tasks. Per-task numbers are reported; the gate is the T3-T5 total,
-    # exactly as the task states: total tokens not higher than v1 and calls not more than v1.
-    extended: dict[str, dict[str, float]] = {}
-    for book, by_task in books.items():
-        for name in EXTENDED_TASKS:
-            pair = by_task.get(name) or {}
-            left = pair.get(V1)
-            right = pair.get(V2)
-            if left is None or right is None:
-                continue
-            v1_total = left.total_tokens(tools_tokens.get(V1, 0.0))
-            v2_total = right.total_tokens(tools_tokens.get(V2, 0.0))
-            percent = ratio(v2_total, v1_total)
-            lines.append(
-                "INFO {book} {task} total tokens: v2 {v2} vs v1 {v1} = {pct}%".format(
-                    book=book,
-                    task=name,
-                    v2=fmt(v2_total, 0),
-                    v1=fmt(v1_total, 0),
-                    pct=fmt(percent),
-                )
-            )
-            lines.append(
-                "INFO {book} {task} calls: v2 {v2} vs v1 {v1}".format(
-                    book=book,
-                    task=name,
-                    v2=right.calls,
-                    v1=left.calls,
-                )
-            )
-            accumulator = extended.setdefault(
-                name,
-                {"v1_tokens": 0.0, "v2_tokens": 0.0, "v1_calls": 0, "v2_calls": 0},
-            )
-            accumulator["v1_tokens"] += v1_total
-            accumulator["v2_tokens"] += v2_total
-            accumulator["v1_calls"] += left.calls
-            accumulator["v2_calls"] += right.calls
-    for name in EXTENDED_TASKS:
-        accumulator = extended.get(name)
-        if accumulator is None:
-            continue
-        summary["ratios"][name] = ratio(
-            accumulator["v2_tokens"], accumulator["v1_tokens"]
-        )
-    combined = {
-        key: sum(accumulator[key] for accumulator in extended.values())
-        for key in ("v1_tokens", "v2_tokens", "v1_calls", "v2_calls")
+    """Only the v2 legs exist: the table reports the per-task numbers, nothing to gate."""
+    summary: dict = {
+        "ratios": {},
+        "checks": [],
+        "t3_t5": {
+            "v1_tokens": 0,
+            "v2_tokens": 0,
+            "v1_calls": 0,
+            "v2_calls": 0,
+            "percent": None,
+        },
+        "all_pass": True,
     }
-    combined_pct = ratio(combined["v2_tokens"], combined["v1_tokens"])
-    if not extended and combined["v1_calls"] == 0:
-        # Only the v2 legs ran: there is no v1 baseline to gate against.
-        lines.append("INFO T3-T5 skipped: no v1 leg was run")
-        summary["t3_t5"] = {
-            "v1_tokens": combined["v1_tokens"],
-            "v2_tokens": combined["v2_tokens"],
-            "v1_calls": combined["v1_calls"],
-            "v2_calls": combined["v2_calls"],
-            "percent": combined_pct,
-        }
-        summary["all_pass"] = all(summary["checks"]) if summary["checks"] else True
-        return lines, summary
-    tokens_ok = combined_pct is not None and combined_pct <= 100.0
-    calls_ok = combined["v2_calls"] <= combined["v1_calls"]
-    lines.append(
-        "{} T3-T5 total tokens: v2 {v2} vs v1 {v1} = {pct}% (limit 100%)".format(
-            "PASS" if tokens_ok else "FAIL",
-            v2=fmt(combined["v2_tokens"], 0),
-            v1=fmt(combined["v1_tokens"], 0),
-            pct=fmt(combined_pct),
-        )
-    )
-    lines.append(
-        "{} T3-T5 calls: v2 {v2} vs v1 {v1}".format(
-            "PASS" if calls_ok else "FAIL",
-            v2=combined["v2_calls"],
-            v1=combined["v1_calls"],
-        )
-    )
-    summary["checks"].extend([tokens_ok, calls_ok])
-    summary["t3_t5"] = {
-        "v1_tokens": combined["v1_tokens"],
-        "v2_tokens": combined["v2_tokens"],
-        "v1_calls": combined["v1_calls"],
-        "v2_calls": combined["v2_calls"],
-        "percent": combined_pct,
-    }
-    summary["all_pass"] = all(summary["checks"]) if summary["checks"] else False
-    return lines, summary
+    return ["INFO T3-T5 skipped: no v1 leg was run"], summary
 
 
 def parse_documents(spec: str) -> list[tuple[str, str]]:

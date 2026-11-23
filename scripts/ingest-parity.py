@@ -1097,9 +1097,6 @@ def safe_label(label: str) -> str:
     )
 
 
-CURSOR_CHECKSUM_DOMAIN = b"reading-mcp/text-unit-cursor-checksum/v1\0"
-
-
 def run_read_probe(
     binary: str,
     source: str,

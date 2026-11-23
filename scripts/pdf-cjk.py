@@ -33,7 +33,6 @@ import importlib.util
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import urllib.error
@@ -850,7 +849,6 @@ def read_backend(probe, binary: str, pdf_path: str, backend: str, layout_python:
         "read_error": None, "chars": 0, "cjk_chars": 0,
     }
     texts: list[str] = []
-    seen_sections: set[str] = set()
     state_dir = os.path.join(state_root, f"{label}-{backend}")
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)

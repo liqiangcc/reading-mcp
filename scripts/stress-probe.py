@@ -27,9 +27,7 @@ import math
 import os
 import queue
 import shutil
-import signal
 import subprocess
-import sys
 import threading
 import time
 
@@ -38,11 +36,6 @@ INITIALIZE_PARAMS = {
     "protocolVersion": "2025-06-18",
     "capabilities": {},
     "clientInfo": {"name": "stress-probe", "version": "0"},
-}
-TEXT_UNIT_BASE = {
-    "requested_kind": "sentence",
-    "direction": "forward",
-    "coverage_policy": "preserve_source",
 }
 POSITIONS = [0.0, 0.25, 0.5, 0.75, 0.99]
 MAX_STREAM_SECTIONS = 3000
@@ -447,7 +440,6 @@ def deep_probe_v2(server: Server, doc_handle: str, sections: list[dict], deadlin
             # The reach itself was the untimed prep walk; report its call-equivalent batches.
             row["calls_to_reach"] = max(1, math.ceil((global_index + 1) * 60 / V2_BATCH_CHARS))
             row["reach_s"] = time.perf_counter() - reach_start
-            next_handle = handles[global_index + 1] if global_index + 1 < len(handles) else None
 
             next_ms: list[float] = []
             from_handle = item_handle
@@ -711,7 +703,6 @@ def read_mode(args) -> int:
                 out["partial"] = True
                 break
             section_id = sections[index]["section_id"]
-            cursor = None
             from_handle = section_id
             in_section = 0
             while True:

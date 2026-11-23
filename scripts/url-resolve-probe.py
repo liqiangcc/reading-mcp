@@ -475,7 +475,7 @@ def render_markdown(report: dict) -> str:
             f"| {id_equal} | {text_equal} | {sentences} |"
         )
     tools = report.get("tools_list", {})
-    for toolset in ("v1", "v2"):
+    for toolset in ("v2",):
         entry = tools.get(toolset) or {}
         lines.append(
             f"\n`tools/list` {toolset}: {entry.get('tools', 0)} tools, "
@@ -502,11 +502,7 @@ def main(argv: list[str]) -> int:
     os.makedirs(state_dir, exist_ok=True)
 
     report = run_probe(binary, state_dir, args.timeout)
-    # The v1 tool set is deleted: a server started with READING_MCP_TOOLS=v1 refuses before
-    # initialize, which is the fixed record the old probe wrote for the v1 leg. The constant
-    # keeps the report's tools_list shape identical without re-measuring a deleted tool set.
     report["tools_list"] = {
-        "v1": {"tools": 0, "bytes": 0, "error": "initialize: server closed stdout"},
         "v2": measure_tools_list(binary, state_dir, "v2", args.timeout),
     }
     markdown = render_markdown(report)

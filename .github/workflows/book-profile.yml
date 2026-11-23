@@ -248,7 +248,7 @@ jobs:
               [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
             done
             mkdir -p "disk-$side"
-            python3 scripts/memory-profile.py \ \
+            python3 scripts/memory-profile.py \
               --binary "$bin" --states dir --disk --cjk-sizes-mb 64 \
               --documents "$docs" \
               --parse-timeout-seconds 900 --run-timeout-seconds 900 \

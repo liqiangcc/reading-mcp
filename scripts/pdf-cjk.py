@@ -61,6 +61,11 @@ READ_BATCH = 256
 RUN_MIN_LEN = 4
 GRAM = 5
 
+
+def is_ocr_required(code) -> bool:
+    """v1 reports `OCR_REQUIRED`; the v2 tools report `ocr_required`."""
+    return code in ("OCR_REQUIRED", "ocr_required")
+
 # Five papers already measured by PDF-1a (all CC-BY/-SA, all >= 200 CJK chars): 2610.18269 and
 # 2610.20785 are required members, the other three are the highest-yield known candidates.
 SEEDS = [
@@ -768,8 +773,66 @@ def per_font_survival(document, inventory: list[dict], default_text: str) -> dic
 # Backend runs
 # --------------------------------------------------------------------------------------------
 
+def _read_v2(probe, server, document_handle: str, sections: list[dict], record: dict,
+             deadline: float) -> list[str]:
+    """The v2 walk: sequential `read` batches, items grouped by the section in their handle.
+
+    `sentences` is the number of sentence items read (v1 sums each section's stream total on
+    every page, which counts a multi-page section once per page). The duplicate-section rule
+    is v1's: a section whose squashed text equals one already kept is dropped whole.
+    """
+    order = [section["section_id"] for section in sections]
+    by_section: dict[str, list[str]] = {section: [] for section in order}
+    from_handle = document_handle
+    seen: set[str] = set()
+    while True:
+        if record["units_read"] >= SENTENCE_CAP:
+            record["capped"] = True
+            break
+        if time.monotonic() > deadline:
+            record["partial"] = True
+            break
+        try:
+            data = probe.read_batch(server, from_handle)
+        except probe.ProbeError as exc:
+            record["read_error"] = str(exc)[:200]
+            break
+        for handle, text, _kind in probe.v2_items(data):
+            if record["units_read"] >= SENTENCE_CAP:
+                record["capped"] = True
+                break
+            by_section.setdefault(probe.handle_section(handle), []).append(text)
+            record["units_read"] += 1
+        if record["capped"]:
+            break
+        next_handle = data.get("next")
+        if not isinstance(next_handle, str):
+            break
+        if next_handle in seen:
+            record["read_error"] = "v2 read next handle repeated"
+            break
+        seen.add(next_handle)
+        from_handle = next_handle
+    record["sentences"] = record["units_read"] or None
+    seen_sections: set[str] = set()
+    texts: list[str] = []
+    ordered = order + [section for section in by_section if section not in order]
+    for section in ordered:
+        section_texts = by_section.get(section) or []
+        fingerprint = squash("\n".join(section_texts))
+        if fingerprint and fingerprint in seen_sections:
+            record["duplicate_sections"] += 1
+            continue
+        if fingerprint:
+            seen_sections.add(fingerprint)
+        record["units_kept"] += len(section_texts)
+        texts.extend(section_texts)
+    return texts
+
+
 def read_backend(probe, binary: str, pdf_path: str, backend: str, layout_python: str,
-                 state_root: str, label: str, deadline: float) -> tuple[dict, str]:
+                 state_root: str, label: str, deadline: float,
+                 tools: str = "v1") -> tuple[dict, str]:
     """Open and read the whole document through `get_text_units`, batching 256 items per call.
 
     The PDF section model can return the same text from two different sections (a heading
@@ -793,65 +856,68 @@ def read_backend(probe, binary: str, pdf_path: str, backend: str, layout_python:
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
     env = probe.server_env(state_dir, os.path.dirname(os.path.abspath(pdf_path)), backend,
-                           layout_python)
+                           layout_python, tools)
     server = probe.Server([binary], env, os.path.join(state_dir, "server.log"),
                           probe.TOOL_TIMEOUT_S)
     document_id = None
     try:
         server.initialize()
-        data, open_s, error = probe.open_document(server, pdf_path)
+        data, open_s, error = probe.open_document(server, pdf_path, tools)
         record["open_s"] = round(open_s, 3)
         if error is not None:
             record["error"] = str(error)[:500]
             record["error_code"] = error.code
         else:
             record["outcome"] = "ok"
-            document_id = data.get("document_id")
+            document_id = probe.document_handle(data, tools)
         if document_id:
-            sections = probe.read_sections(server, document_id)
+            sections = probe.read_sections(server, document_id, tools)
             record["sections"] = len(sections)
-            totals = 0
-            for section in sections:
-                if record["units_read"] >= SENTENCE_CAP:
-                    record["capped"] = True
-                    break
-                if time.monotonic() > deadline:
-                    record["partial"] = True
-                    break
-                cursor = None
-                section_texts: list[str] = []
-                while True:
+            if tools == "v2":
+                texts = _read_v2(probe, server, document_id, sections, record, deadline)
+            else:
+                totals = 0
+                for section in sections:
                     if record["units_read"] >= SENTENCE_CAP:
                         record["capped"] = True
                         break
                     if time.monotonic() > deadline:
                         record["partial"] = True
                         break
-                    arguments = probe.text_units(document_id, section["section_id"],
-                                                READ_BATCH, cursor)
-                    try:
-                        data = probe.payload(server.tool("get_text_units", arguments)) or {}
-                    except probe.ProbeError as exc:
-                        record["read_error"] = str(exc)[:200]
-                        break
-                    stream = data.get("stream") or {}
-                    totals += int(stream.get("total_items") or 0)
-                    for item in data.get("items") or []:
-                        record["units_read"] += 1
-                        section_texts.append(item.get("text") or "")
-                    cursor = data.get("next_cursor")
-                    if not cursor:
-                        break
-                section_text = "\n".join(section_texts)
-                fingerprint = squash(section_text)
-                if fingerprint and fingerprint in seen_sections:
-                    record["duplicate_sections"] += 1
-                    continue
-                if fingerprint:
-                    seen_sections.add(fingerprint)
-                record["units_kept"] += len(section_texts)
-                texts.extend(section_texts)
-            record["sentences"] = totals or None
+                    cursor = None
+                    section_texts: list[str] = []
+                    while True:
+                        if record["units_read"] >= SENTENCE_CAP:
+                            record["capped"] = True
+                            break
+                        if time.monotonic() > deadline:
+                            record["partial"] = True
+                            break
+                        arguments = probe.text_units(document_id, section["section_id"],
+                                                    READ_BATCH, cursor)
+                        try:
+                            data = probe.payload(server.tool("get_text_units", arguments)) or {}
+                        except probe.ProbeError as exc:
+                            record["read_error"] = str(exc)[:200]
+                            break
+                        stream = data.get("stream") or {}
+                        totals += int(stream.get("total_items") or 0)
+                        for item in data.get("items") or []:
+                            record["units_read"] += 1
+                            section_texts.append(item.get("text") or "")
+                        cursor = data.get("next_cursor")
+                        if not cursor:
+                            break
+                    section_text = "\n".join(section_texts)
+                    fingerprint = squash(section_text)
+                    if fingerprint and fingerprint in seen_sections:
+                        record["duplicate_sections"] += 1
+                        continue
+                    if fingerprint:
+                        seen_sections.add(fingerprint)
+                    record["units_kept"] += len(section_texts)
+                    texts.extend(section_texts)
+                record["sentences"] = totals or None
     except probe.ProbeError as exc:
         if record["open_s"] is None:
             record["error"] = str(exc)[:500]
@@ -950,7 +1016,8 @@ def process_paper(probe, entry: dict, args, deadline: float, inventory_dir: str)
         document.close()
 
     default_record, default_text = read_backend(
-        probe, args.binary, pdf_path, "default", "", args.state_root, entry["id"], deadline)
+        probe, args.binary, pdf_path, "default", "", args.state_root, entry["id"], deadline,
+        args.tools)
     record["default"] = default_record
 
     document = pymupdf.open(pdf_path)
@@ -992,7 +1059,7 @@ def process_paper(probe, entry: dict, args, deadline: float, inventory_dir: str)
 
     layout_record, _layout_text = read_backend(
         probe, args.binary, pdf_path, "layout", args.layout_python, args.state_root,
-        entry["id"], deadline)
+        entry["id"], deadline, args.tools)
     record["layout"] = layout_record
     record["seconds"] = round(time.perf_counter() - started, 1)
     return record
@@ -1178,11 +1245,13 @@ def aggregate_mode(args) -> int:
             "ok": len([paper for paper in papers
                        if (paper.get("layout") or {}).get("outcome") == "ok"]),
             "refused": len([paper for paper in papers
-                            if (paper.get("layout") or {}).get("error_code") == "OCR_REQUIRED"]),
+                            if is_ocr_required(
+                                (paper.get("layout") or {}).get("error_code"))]),
             "other": [(paper["id"], (paper.get("layout") or {}).get("error_code"))
                       for paper in papers
                       if (paper.get("layout") or {}).get("outcome") != "ok"
-                      and (paper.get("layout") or {}).get("error_code") != "OCR_REQUIRED"],
+                      and not is_ocr_required(
+                          (paper.get("layout") or {}).get("error_code"))],
             "cjk": sum((paper.get("layout") or {}).get("cjk_chars") or 0 for paper in papers),
         },
         "page_loss": [
@@ -1258,7 +1327,7 @@ def repro_mode(args) -> int:
             reference += sum(1 for char in page.get_text() if is_cjk(char))
     result, text = read_backend(probe, args.binary, repro_path, "default", "",
                                 args.state_root, f"repro-{record['id']}",
-                                time.monotonic() + 600)
+                                time.monotonic() + 600, args.tools)
     recovered = sum(1 for char in text if is_cjk(char))
     report = {
         "group": key, "paper": record["id"], "page": page_number,
@@ -1296,6 +1365,8 @@ def main() -> int:
     parser.add_argument("--per-shard", type=int, default=5)
     parser.add_argument("--deadline-minutes", type=float, default=70.0)
     parser.add_argument("--paper-deadline-minutes", type=float, default=12.0)
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
+                        help="tool set the server exposes: v1 (default) or v2")
     args = parser.parse_args()
     if args.select:
         if not args.out:

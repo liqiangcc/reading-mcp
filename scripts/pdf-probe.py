@@ -53,6 +53,8 @@ REAL_PAPER_SENTENCES = 200
 SIMILARITY_WINDOW = 2000
 FUZZY_MIN_RATIO = 0.90
 TOOL_TIMEOUT_S = 3600.0
+# The largest `max_chars` a v2 `read` batch accepts (read_reading.rs MAX_BATCH_CHARS).
+V2_READ_BATCH_CHARS = 16000
 
 # Characters the embedded fonts map to a different but visually identical code point on the way
 # back out (MuPDF builds ToUnicode from the glyph, not from the source string). Folded on both
@@ -121,7 +123,17 @@ def error_parts(response: dict) -> tuple[str | None, str] | None:
             for item in result.get("content", [])
             if isinstance(item, dict) and item.get("type") == "text"
         ]
-        return "tool_error", " ".join(texts) or "tool reported an error"
+        message = " ".join(texts) or "tool reported an error"
+        # The v2 tools answer an error with `isError` and one compact JSON body carrying the
+        # code (`{"code": "ocr_required", ...}`). v1 tool errors are JSON-RPC errors and never
+        # take this branch, so reading the code here changes only v2 records.
+        try:
+            body = json.loads(texts[0]) if texts else None
+        except json.JSONDecodeError:
+            body = None
+        if isinstance(body, dict) and isinstance(body.get("code"), str):
+            return body["code"], message
+        return "tool_error", message
     return None
 
 
@@ -223,7 +235,8 @@ class Server:
         return int(self.usage.ru_maxrss) if self.usage is not None else 0
 
 
-def server_env(state_dir: str, roots: str, backend: str, layout_python: str) -> dict:
+def server_env(state_dir: str, roots: str, backend: str, layout_python: str,
+               tools: str = "v1") -> dict:
     env = dict(os.environ)
     env.pop("READING_MCP_PDF_LAYOUT_PYTHON", None)
     env["READING_MCP_STATE_DIR"] = state_dir
@@ -232,8 +245,8 @@ def server_env(state_dir: str, roots: str, backend: str, layout_python: str) -> 
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
-    # The probe calls v1 tools only; pin v1 so a v2 default tool set does not drop them.
-    env["READING_MCP_TOOLS"] = "v1"
+    # v1 (the default) calls v1 tools only; v2 exposes only the seven v2 tools.
+    env["READING_MCP_TOOLS"] = tools
     # OCR is opt-in and stays off: an image-only PDF must report ocr_required.
     env["READING_MCP_OCR_ENABLED"] = "false"
     if backend == "layout":
@@ -298,7 +311,9 @@ def flatten_structure(nodes, out: dict) -> None:
         flatten_structure(node.get("children"), out)
 
 
-def read_sections(server: Server, document_id: str) -> list[dict]:
+def read_sections(server: Server, document_id: str, tools: str = "v1") -> list[dict]:
+    if tools == "v2":
+        return read_sections_v2(server, document_id)
     found: dict[str, dict] = {}
     cursor = None
     for _ in range(10000):
@@ -311,6 +326,97 @@ def read_sections(server: Server, document_id: str) -> list[dict]:
         if not cursor or data.get("complete") is True:
             break
     return sorted(found.values(), key=lambda node: node.get("body_order", 0))
+
+
+def read_sections_v2(server: Server, document_handle: str) -> list[dict]:
+    """The section tree through paginated `outline`, in preorder (the v1 body order)."""
+    sections: list[dict] = []
+    cursor = None
+    for _ in range(10000):
+        arguments: dict = {"at": document_handle, "depth": 32, "limit": 500}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        data = payload(server.tool("outline", arguments)) or {}
+        for item in data.get("items") or []:
+            if isinstance(item, (list, tuple)) and item and isinstance(item[0], str):
+                sections.append({
+                    "section_id": item[0],
+                    "title": item[1] if len(item) > 1 else "",
+                    "level": item[2] if len(item) > 2 else None,
+                    "chars": item[3] if len(item) > 3 else None,
+                })
+        cursor = data.get("next")
+        if not cursor:
+            break
+    else:
+        raise ProbeError("outline pagination did not terminate")
+    return sections
+
+
+def is_page_fallback(sections: list[dict], tools: str = "v1") -> bool:
+    """Whether the structure is one section per PDF page (the parser's page fallback)."""
+    if not sections:
+        return False
+    if tools == "v2":
+        return all(re.fullmatch(r"Page \d+", str(section.get("title") or ""))
+                   for section in sections)
+    return all(re.fullmatch(r"section://page-\d+", str(section.get("section_id", "")))
+               for section in sections)
+
+
+def handle_section(handle: str) -> str:
+    """The section part of a v2 item handle: `d3~9f2c.s12.p4.2` -> `d3~9f2c.s12`."""
+    return ".".join(handle.split(".")[:2])
+
+
+def handle_paragraph_index(handle: str) -> int | None:
+    """The paragraph index a v2 handle carries (`...s12.p4.2` -> 4), or None."""
+    parts = handle.split(".")
+    if len(parts) < 3 or not parts[2].startswith("p"):
+        return None
+    try:
+        return int(parts[2][1:])
+    except ValueError:
+        return None
+
+
+def v2_items(data: dict):
+    """The `[handle, text, kind?]` items of a v2 `read` batch."""
+    for item in data.get("items") or []:
+        if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[0], str):
+            text = item[1] if isinstance(item[1], str) else ""
+            kind = item[2] if len(item) > 2 and isinstance(item[2], str) else None
+            yield item[0], text, kind
+
+
+def read_batch(server: Server, from_handle: str, max_chars: int | None = V2_READ_BATCH_CHARS,
+               unit: str | None = None) -> dict:
+    """One v2 `read` call: a char-budgeted batch (the default) or a single item."""
+    arguments: dict = {"from": from_handle}
+    if max_chars is not None:
+        arguments["max_chars"] = max_chars
+    if unit is not None:
+        arguments["unit"] = unit
+    return payload(server.tool("read", arguments)) or {}
+
+
+def document_handle(data: dict, tools: str = "v1") -> str | None:
+    """The document identifier a v1 or v2 open answer carries."""
+    key = "document_id" if tools == "v1" else "doc"
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def opened_section_count(data: dict, tools: str = "v1"):
+    """The section count an open answer carries (`section_count` v1, `sections` v2)."""
+    key = "section_count" if tools == "v1" else "sections"
+    return data.get(key) if isinstance(data, dict) else None
+
+
+def opened_media_type(data: dict, tools: str = "v1"):
+    """The format an open answer carries (`media_type` v1, `format` v2)."""
+    key = "media_type" if tools == "v1" else "format"
+    return data.get(key) if isinstance(data, dict) else None
 
 
 def text_units(document_id: str, section_id: str, max_items: int, cursor=None) -> dict:
@@ -349,17 +455,19 @@ def page_count(path: str) -> int | None:
         return None
 
 
-def open_document(server: Server, source: str) -> tuple[dict, float, ProbeError | None]:
+def open_document(server: Server, source: str, tools: str = "v1") -> tuple[dict, float, ProbeError | None]:
     start = time.perf_counter()
     try:
-        result = server.tool("open_document", {"source": source})
+        result = server.tool("open_document" if tools == "v1" else "open", {"source": source})
     except ProbeError as exc:
         return {}, time.perf_counter() - start, exc
     return payload(result) or {}, time.perf_counter() - start, None
 
 
 def sentence_totals(server: Server, document_id: str, sections: list[dict],
-                    deadline: float) -> tuple[list[int], str | None]:
+                    deadline: float, tools: str = "v1") -> tuple[list[int], str | None]:
+    if tools == "v2":
+        return sentence_totals_v2(server, document_id, sections, deadline)
     totals: list[int] = []
     for section in sections:
         if time.monotonic() > deadline:
@@ -374,9 +482,44 @@ def sentence_totals(server: Server, document_id: str, sections: list[dict],
     return totals, None
 
 
+def sentence_totals_v2(server: Server, document_handle: str, sections: list[dict],
+                       deadline: float) -> tuple[list[int], str | None]:
+    """Per-section sentence counts from one sequential read to the end.
+
+    The section of every item comes from its handle (`s<N>.p…`), so the counts follow the same
+    sections `outline` listed, in the same order. A section the read never enters has 0.
+    """
+    counts: dict[str, int] = {}
+    from_handle = document_handle
+    seen: set[str] = set()
+    while True:
+        if time.monotonic() > deadline:
+            totals = [counts.get(section["section_id"], 0) for section in sections]
+            return totals, "job deadline during the per-section sentence count"
+        try:
+            data = read_batch(server, from_handle)
+        except ProbeError as exc:
+            totals = [counts.get(section["section_id"], 0) for section in sections]
+            return totals, str(exc)
+        for handle, _text, _kind in v2_items(data):
+            section = handle_section(handle)
+            counts[section] = counts.get(section, 0) + 1
+        next_handle = data.get("next")
+        if not isinstance(next_handle, str):
+            break
+        if next_handle in seen:
+            totals = [counts.get(section["section_id"], 0) for section in sections]
+            return totals, "v2 read next handle repeated"
+        seen.add(next_handle)
+        from_handle = next_handle
+    return [counts.get(section["section_id"], 0) for section in sections], None
+
+
 def read_sentences(server: Server, document_id: str, sections: list[dict], limit: int,
-                   deadline: float) -> dict:
+                   deadline: float, tools: str = "v1") -> dict:
     """Read sentence by sentence (one item per call) and time every call."""
+    if tools == "v2":
+        return read_sentences_v2(server, document_id, limit, deadline)
     texts: list[str] = []
     latencies: list[float] = []
     rss_samples: list[tuple[int, int]] = []
@@ -421,6 +564,65 @@ def read_sentences(server: Server, document_id: str, sections: list[dict], limit
             cursor = data.get("next_cursor")
             if not cursor:
                 break
+    return {
+        "texts": texts,
+        "calls": calls,
+        "latencies_ms": latencies,
+        "rss_samples": rss_samples,
+        "errors": errors,
+        "capped": capped,
+        "partial": partial,
+        "read_s": time.monotonic() - started,
+    }
+
+
+def read_sentences_v2(server: Server, document_handle: str, limit: int, deadline: float) -> dict:
+    """One-item `read` calls following `next` from the document handle.
+
+    The call shape is v1's (one item per call, every call timed); the walk crosses sections on
+    its own instead of restarting a cursor per section. That drops v1's one call per empty
+    section, so `calls` can be smaller by the number of empty sections.
+    """
+    texts: list[str] = []
+    latencies: list[float] = []
+    rss_samples: list[tuple[int, int]] = []
+    errors: list[str] = []
+    calls = 0
+    capped = False
+    partial = False
+    started = time.monotonic()
+    from_handle = document_handle
+    seen: set[str] = set()
+    while True:
+        if len(texts) >= limit:
+            capped = True
+            break
+        if time.monotonic() > deadline:
+            partial = True
+            break
+        began = time.perf_counter()
+        try:
+            data = read_batch(server, from_handle, max_chars=None)
+        except ProbeError as exc:
+            errors.append(str(exc))
+            break
+        latencies.append((time.perf_counter() - began) * 1000.0)
+        calls += 1
+        text = data.get("text")
+        if isinstance(text, str):
+            texts.append(text)
+        if calls % 500 == 0:
+            rss = peak_rss_kib(server.pid)
+            if rss is not None:
+                rss_samples.append((calls, rss))
+        next_handle = data.get("next")
+        if not isinstance(next_handle, str):
+            break
+        if next_handle in seen:
+            errors.append("v2 read next handle repeated")
+            break
+        seen.add(next_handle)
+        from_handle = next_handle
     return {
         "texts": texts,
         "calls": calls,
@@ -582,7 +784,7 @@ def real_paper_metrics(texts: list[str], errors: list[str]) -> dict:
 
 
 def run_caps(binary: str, label: str, source: str, state_root: str, backend: str,
-             layout_python: str, deadline: float) -> list[dict]:
+             layout_python: str, deadline: float, tools: str = "v1") -> list[dict]:
     records = []
     if not cap_available():
         return [{"kind_record": "caps", "input": label, "backend": backend, "cap": cap,
@@ -596,7 +798,8 @@ def run_caps(binary: str, label: str, source: str, state_root: str, backend: str
         state_dir = os.path.join(state_root, tag)
         shutil.rmtree(state_dir, ignore_errors=True)
         os.makedirs(state_dir)
-        env = server_env(state_dir, os.path.dirname(os.path.abspath(source)), backend, layout_python)
+        env = server_env(state_dir, os.path.dirname(os.path.abspath(source)), backend, layout_python,
+                         tools)
         server = Server(cap_command(binary, cap, env), env, os.path.join(state_dir, "server.log"),
                         TOOL_TIMEOUT_S)
         record: dict = {"kind_record": "caps", "input": label, "backend": backend, "cap": cap,
@@ -605,7 +808,7 @@ def run_caps(binary: str, label: str, source: str, state_root: str, backend: str
         try:
             server.initialize()
             after_open = None
-            _, open_s, error = open_document(server, source)
+            _, open_s, error = open_document(server, source, tools)
             record["open_s"] = open_s
             after_open = peak_rss_kib(server.pid)
             record["peak_rss_after_open_kib"] = after_open
@@ -657,7 +860,7 @@ def run_one(args) -> int:
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir)
     env = server_env(state_dir, os.path.dirname(os.path.abspath(source)), backend,
-                     args.layout_python)
+                     args.layout_python, args.tools)
     server = Server([args.binary], env, os.path.join(state_dir, "server.log"), TOOL_TIMEOUT_S)
     open_record = dict(base, kind_record="open", open_s=None, error_code=None, error=None,
                        killed=False, rc=None, peak_rss_after_open_kib=None,
@@ -674,7 +877,7 @@ def run_one(args) -> int:
     document_id = None
     try:
         server.initialize()
-        data, open_s, error = open_document(server, source)
+        data, open_s, error = open_document(server, source, args.tools)
         open_record["open_s"] = round(open_s, 3)
         open_record["peak_rss_after_open_kib"] = peak_rss_kib(server.pid)
         if error is not None:
@@ -682,14 +885,15 @@ def run_one(args) -> int:
             open_record["error_code"] = error.code
         else:
             open_record["outcome"] = "ok"
-            document_id = data.get("document_id")
-            open_record["sections_open"] = data.get("section_count")
+            document_id = document_handle(data, args.tools)
+            open_record["sections_open"] = opened_section_count(data, args.tools)
             open_record["title"] = (data.get("title") or "")[:80]
-            open_record["media_type"] = data.get("media_type")
+            open_record["media_type"] = opened_media_type(data, args.tools)
 
         if document_id:
-            sections = read_sections(server, document_id)
-            totals, totals_error = sentence_totals(server, document_id, sections, deadline)
+            sections = read_sections(server, document_id, args.tools)
+            totals, totals_error = sentence_totals(server, document_id, sections, deadline,
+                                                   args.tools)
             sentences = sum(totals) if totals and not totals_error else None
             structure_record.update({
                 "sections": len(sections), "sentences": sentences,
@@ -705,11 +909,11 @@ def run_one(args) -> int:
             # Memory caps first: a slow read must not eat the job deadline before they run.
             if args.caps:
                 records += run_caps(args.binary, label, source, args.state_root, backend,
-                                    args.layout_python, deadline)
+                                    args.layout_python, deadline, args.tools)
 
             limit = REAL_PAPER_SENTENCES if meta.get("kind", "real") == "real" else READ_CAP_SENTENCES
             if time.monotonic() < deadline:
-                read = read_sentences(server, document_id, sections, limit, deadline)
+                read = read_sentences(server, document_id, sections, limit, deadline, args.tools)
                 latencies = read["latencies_ms"]
                 read_record.update({
                     "sentences_read": len(read["texts"]), "calls": read["calls"],
@@ -796,7 +1000,7 @@ def run_one(args) -> int:
                      TOOL_TIMEOUT_S)
     try:
         server2.initialize()
-        _, reopen_s, error = open_document(server2, source)
+        _, reopen_s, error = open_document(server2, source, args.tools)
         reopen_record["reopen_s"] = round(reopen_s, 3)
         reopen_record["peak_rss_kib"] = peak_rss_kib(server2.pid)
         if error is not None:
@@ -1044,6 +1248,8 @@ def main() -> int:
     parser.add_argument("--jsonl-dir", default="")
     parser.add_argument("--caps", action="store_true")
     parser.add_argument("--deadline-minutes", type=float, default=150.0)
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
+                        help="tool set the server exposes: v1 (default) or v2")
     args = parser.parse_args()
     if args.mode == "run":
         if not args.binary or not args.input:

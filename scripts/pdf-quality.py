@@ -1329,10 +1329,12 @@ def refusal_reason(layout_python: str, worker_source: str, path: str) -> dict:
 # --------------------------------------------------------------------------------------------
 
 def collect_units(server, document_id: str, sections: list[dict], deadline: float,
-                  requested_kind: str = "sentence") -> dict:
+                  requested_kind: str = "sentence", tools: str = "v1") -> dict:
     """Every unit of `requested_kind`, with the unit kind and the degradation the server
     reports. `sentence` is the only kind a run without --keep-pdf-sentence-text asks for,
     and its stream is unchanged."""
+    if tools == "v2":
+        return collect_units_v2(server, document_id, deadline, requested_kind)
     units: list[dict] = []
     coverage: list[dict] = []
     calls = 0
@@ -1388,6 +1390,80 @@ def collect_units(server, document_id: str, sections: list[dict], deadline: floa
         if error:
             break
     return {"units": units, "coverage": coverage, "calls": calls, "chars": chars,
+            "truncated": truncated, "error": error,
+            "seconds": round(time.monotonic() - started, 2)}
+
+
+# The v2 `read` does not carry the v1 coverage block. The degradation and content-class strings
+# below are the ones the v1 stream writes for the same paragraph class (text_unit_stream.rs
+# `coarse_degradation` / `content_class`), so the v2 records stay comparable.
+V2_NON_PROSE_KINDS = ("code_block", "preformatted", "table")
+V2_CONTAINER_KINDS = ("block_quote", "list_item")
+
+
+def v2_unit_evidence(kind: str | None, requested_kind: str) -> tuple[str | None, str | None,
+                                                                   str | None, str | None]:
+    """(degradation, effective_kind, content_class, content_class_detail) for one v2 item."""
+    effective = "paragraph" if kind or requested_kind == "paragraph" else "sentence"
+    if kind is None:
+        return None, effective, None, None
+    if kind in V2_NON_PROSE_KINDS:
+        return ("requested_sentence_but_non_prose_is_paragraph_only", effective,
+                "non_prose", kind)
+    if kind in V2_CONTAINER_KINDS:
+        return ("flat_native_container_no_nested_textunit_evidence", effective, "unknown", kind)
+    return "requested_sentence_but_paragraph_is_coarse_only", effective, "unknown", kind
+
+
+def collect_units_v2(server, document_handle: str, deadline: float,
+                     requested_kind: str = "sentence") -> dict:
+    """Every unit of `requested_kind` through sequential v2 `read` batches to the end.
+
+    The section and paragraph of every item come from its handle (`s<N>.p<M>…`). There is no
+    v1 coverage block: `coverage` stays empty and the document record derives the paragraph
+    count from the distinct `(section, paragraph)` pairs in the handles.
+    """
+    units: list[dict] = []
+    calls = 0
+    chars = 0
+    truncated = False
+    error = None
+    started = time.monotonic()
+    unit = "paragraph" if requested_kind == "paragraph" else None
+    from_handle = document_handle
+    seen: set[str] = set()
+    while True:
+        if chars >= TEXT_BUDGET_CHARS or time.monotonic() > deadline:
+            truncated = True
+            break
+        try:
+            data = PROBE.read_batch(server, from_handle, unit=unit)
+        except PROBE.ProbeError as exc:
+            error = str(exc)[:200]
+            break
+        calls += 1
+        for handle, text, kind in PROBE.v2_items(data):
+            degradation, effective, content_class, detail = v2_unit_evidence(
+                kind, requested_kind)
+            units.append({
+                "text": text,
+                "degradation": degradation,
+                "effective_kind": effective,
+                "content_class": content_class,
+                "content_class_detail": detail,
+                "section_id": PROBE.handle_section(handle),
+                "paragraph_index": PROBE.handle_paragraph_index(handle),
+            })
+            chars += len(text)
+        next_handle = data.get("next")
+        if not isinstance(next_handle, str):
+            break
+        if next_handle in seen:
+            error = "v2 read next handle repeated"
+            break
+        seen.add(next_handle)
+        from_handle = next_handle
+    return {"units": units, "coverage": [], "calls": calls, "chars": chars,
             "truncated": truncated, "error": error,
             "seconds": round(time.monotonic() - started, 2)}
 
@@ -1642,7 +1718,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
     env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), args.backend,
-                           args.layout_python)
+                           args.layout_python, args.tools)
     cap = SWEEP.CAP if args.cap_available else None
     command = PROBE.cap_command(args.binary, cap, env)
     server = PROBE.Server(command, env, os.path.join(state_dir, "server.log"),
@@ -1660,7 +1736,8 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         record["phase"] = "open"
         open_started = time.perf_counter()
         try:
-            result = server.tool("open_document", {"source": path}, timeout=OPEN_TIMEOUT_S)
+            result = server.tool("open_document" if args.tools == "v1" else "open",
+                                 {"source": path}, timeout=OPEN_TIMEOUT_S)
         except PROBE.ProbeError as exc:
             # A worker that dies prints its whole traceback into the server's message, and the
             # Python layout worker's onnxruntime warnings come first, so the reason a document
@@ -1672,18 +1749,15 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         record["open_s"] = round(time.perf_counter() - open_started, 3)
         peak.snapshot()
         if result is not None:
-            document_id = (PROBE.payload(result) or {}).get("document_id")
+            document_id = PROBE.document_handle(PROBE.payload(result) or {}, args.tools)
         if document_id:
             record["phase"] = "structure"
-            sections = PROBE.read_sections(server, document_id)
+            sections = PROBE.read_sections(server, document_id, args.tools)
             record["sections"] = len(sections)
             record["structure_mode"] = (
-                "page_fallback"
-                if sections and all(re.fullmatch(r"section://page-\d+", str(section.get(
-                    "section_id", ""))) for section in sections)
-                else "headings")
+                "page_fallback" if PROBE.is_page_fallback(sections, args.tools) else "headings")
             record["phase"] = "read"
-            read = collect_units(server, document_id, sections, deadline)
+            read = collect_units(server, document_id, sections, deadline, tools=args.tools)
             units = read["units"]
             coverage = read["coverage"]
             record["read"] = {key: read[key] for key in
@@ -1697,7 +1771,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
             # locator carries.
             if args.keep_pdf_sentence_text:
                 paragraph_read = collect_units(server, document_id, sections, deadline,
-                                               "paragraph")
+                                               "paragraph", tools=args.tools)
                 record["paragraph_read"] = {key: paragraph_read[key] for key in
                                             ("calls", "chars", "truncated", "error",
                                              "seconds")}
@@ -1726,12 +1800,14 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
                 paragraph_records.append({
                     "kind_record": "pdf_stream_totals",
                     "id": entry["id"],
-                    "sentence_total_items": sum(
-                        int(item.get("total_items") or 0)
-                        for item in read["coverage"]),
-                    "paragraph_total_items": sum(
-                        int(item.get("total_items") or 0)
-                        for item in paragraph_read["coverage"]),
+                    "sentence_total_items": (
+                        sum(int(item.get("total_items") or 0)
+                            for item in read["coverage"])
+                        if args.tools == "v1" else len(read["units"])),
+                    "paragraph_total_items": (
+                        sum(int(item.get("total_items") or 0)
+                            for item in paragraph_read["coverage"])
+                        if args.tools == "v1" else len(paragraph_read["units"])),
                     "sentence_truncated": read["truncated"],
                     "paragraph_truncated": paragraph_read["truncated"],
                 })
@@ -1766,6 +1842,15 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     reference_share = whitespace_share(reference_text)
     paragraphs = sum(int((item["coverage"] or {}).get("paragraph_count") or 0)
                      for item in coverage)
+    if args.tools == "v2":
+        # No v1 coverage block: the paragraph count is the distinct (section, paragraph) pairs
+        # the sentence handles name. `sections_with_coverage` is the same set of sections.
+        paragraph_keys = {(unit["section_id"], unit["paragraph_index"])
+                          for unit in units if unit.get("paragraph_index") is not None}
+        paragraphs = len(paragraph_keys)
+        sections_with_coverage = len({unit["section_id"] for unit in units})
+    else:
+        sections_with_coverage = len(coverage)
     quality = {
         "containment_first20": gram_containment(reference["first20_text"], backend_text),
         "backend_chars": len(backend_text),
@@ -1791,7 +1876,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     record["paragraphs"] = {
         "count": paragraphs,
         "per_page": round(paragraphs / reference["pages"], 2) if reference["pages"] else None,
-        "sections_with_coverage": len(coverage),
+        "sections_with_coverage": sections_with_coverage,
     }
     record["quality"] = quality
     pages = unit_pages(units, page_index)
@@ -2676,6 +2761,8 @@ def main() -> int:
                              "full text plus the stream totals, as `pdf_paragraph` and "
                              "`pdf_stream_totals` records (PDF-6g; off by default, and the "
                              "default records are byte-identical)")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
+                        help="tool set the server exposes: v1 (default) or v2")
     args = parser.parse_args()
     if not args.keep_pdf_sentence_text:
         args.keep_pdf_sentence_text = False

@@ -7,6 +7,10 @@ on:
         description: 'Rebuild scripts/pdf-corpus-ids.txt (downloads candidates to check licence and pages)'
         type: boolean
         default: false
+      tools:
+        description: 'Tool set the probe servers expose'
+        required: false
+        default: 'v1'
   push:
     branches: ['bench/pdf1a-**']
 
@@ -125,7 +129,8 @@ jobs:
             --out "$RUNNER_TEMP/results/corpus-${{ matrix.shard }}.jsonl" \
             --deadline-minutes 65 \
             --paper-deadline-minutes 6 \
-            --worker-timeout 600 | tail -150
+            --worker-timeout 600 \
+            --tools "${{ inputs.tools || 'v1' }}" | tail -150
       - name: Upload shard results
         if: always() && steps.corpus.outputs.present == 'yes'
         uses: actions/upload-artifact@v4

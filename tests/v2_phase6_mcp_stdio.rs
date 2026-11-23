@@ -372,6 +372,56 @@ async fn v2_persistent_stdio_runtime_survives_server_restart() {
         .expect("second MCP process should close cleanly");
 }
 
+/// V2-4b PR-5: ports `tests/whole_document_reading.rs`'s reopen leg — after a restart the same
+/// document answers the stored open result, and reading from it still works.
+#[tokio::test]
+async fn v2_reopening_after_restart_returns_the_stored_open_result() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let state_dir = directory.path().join("state");
+    let document_path = directory.path().join("reopen.md");
+    tokio::fs::write(
+        &document_path,
+        "# Reopen\n\nFirst sentence. Second sentence.\n",
+    )
+    .await
+    .expect("reopen fixture should be written");
+
+    let first_client = start_client(directory.path(), &state_dir).await;
+    let opened = v2_open(&first_client, &document_path).await;
+    let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+    let first_read = payload(&v2_read(&first_client, &doc, json!({})).await);
+    first_client
+        .cancel()
+        .await
+        .expect("first MCP process should close cleanly");
+
+    let second_client = start_client(directory.path(), &state_dir).await;
+    let reopened = v2_open(&second_client, &document_path).await;
+    assert_eq!(
+        reopened, opened,
+        "the restart must answer the stored open result"
+    );
+
+    let read = payload(&v2_read(&second_client, &doc, json!({})).await);
+    assert_eq!(
+        flat_text(&read),
+        "First sentence.",
+        "the stored document still reads after the restart: {read}"
+    );
+    assert_eq!(
+        read, first_read,
+        "the same handle answers the same item before and after the restart"
+    );
+    // A v2 read is a pure function of `from`: asking again does not advance.
+    let again = payload(&v2_read(&second_client, &doc, json!({})).await);
+    assert_eq!(again, read, "a repeated read must not advance the stream");
+
+    second_client
+        .cancel()
+        .await
+        .expect("second MCP process should close cleanly");
+}
+
 /// The title of the nearest preceding outline row one level up: the parent in the preorder tree.
 fn parent_title(sections: &[serde_json::Value], index: usize) -> Option<String> {
     let level = sections[index][2].as_u64()?;

@@ -9,9 +9,6 @@ use reading_mcp::parsing::LayoutPdfParser;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-#[path = "support/ocr_private_mcp.rs"]
-mod private_mcp;
-
 #[tokio::test]
 #[ignore = "requires hosted root and verified offline runtime archive"]
 async fn archived_runtime_runs_rust_parser_and_persists_exact_f07() {

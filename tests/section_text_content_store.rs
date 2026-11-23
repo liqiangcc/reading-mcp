@@ -2,7 +2,6 @@
 //! document version, and reads it back on load.
 
 use std::collections::BTreeMap;
-use std::io::{Cursor, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,16 +18,10 @@ use reading_mcp::domain::{
 use reading_mcp::infrastructure::{
     SqliteDocumentRepository, SqliteSearchIndex, SqliteTextUnitIndex,
 };
-use reading_mcp::mcp::contracts::{GetDocumentStructureResponse, OpenDocumentResponse};
 use reading_mcp::parsing::MarkdownParser;
-use rmcp::ServiceExt;
-use rmcp::model::CallToolRequestParams;
-use rmcp::transport::TokioChildProcess;
 use rusqlite::{Connection, params};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tempfile::tempdir;
-use tokio::process::Command;
-use zip::write::SimpleFileOptions;
 
 const MARKDOWN: &str = "# Operating Systems\n\nCore concepts of the book.\n\n## Virtual Memory\n\nVirtual memory maps addresses. Page tables hold entries.\n\n## Processes\n\nA process owns an address space.\n";
 
@@ -494,192 +487,4 @@ async fn an_old_database_with_v1_tables_opens_and_reingests_on_the_next_open() {
         .expect("document should load")
         .expect("document should exist");
     assert_eq!(*loaded, document);
-}
-
-#[tokio::test]
-async fn stdio_responses_are_identical_after_a_restart() {
-    let directory = tempdir().expect("temporary directory should be created");
-    let epub = directory.path().join("book.epub");
-    std::fs::write(&epub, build_epub()).expect("EPUB fixture should be written");
-    let state = directory.path().join("state");
-
-    let first = run_stdio_session(directory.path(), &state, &epub).await;
-    let second = run_stdio_session(directory.path(), &state, &epub).await;
-    assert_eq!(
-        first, second,
-        "the same calls must answer identically from a fresh process"
-    );
-    assert_eq!(first.len(), 6, "every call must be compared");
-}
-
-async fn run_stdio_session(root: &Path, state: &Path, epub: &Path) -> Vec<(String, Vec<u8>)> {
-    let local_roots = std::env::join_paths([root]).expect("local roots should be valid");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
-    command
-        .env("READING_MCP_LOCAL_ROOTS", local_roots)
-        .env("READING_MCP_STATE_DIR", state)
-        .env("READING_MCP_TELEMETRY", "false")
-        .env("READING_MCP_TOOLS", "v1");
-    let transport = TokioChildProcess::new(command).expect("server process");
-    let client = ().serve(transport).await.expect("MCP initialize");
-
-    let mut responses = Vec::new();
-    let opened = client
-        .call_tool(
-            CallToolRequestParams::new("open_document").with_arguments(arguments(json!({
-                "source": epub.to_string_lossy()
-            }))),
-        )
-        .await
-        .expect("open should succeed");
-    let document_id = opened
-        .clone()
-        .into_typed::<OpenDocumentResponse>()
-        .expect("typed open")
-        .document_id;
-    responses.push((String::from("open_document"), json_bytes(&opened)));
-
-    let structure = client
-        .call_tool(
-            CallToolRequestParams::new("get_document_structure").with_arguments(arguments(json!({
-                "document_id": document_id
-            }))),
-        )
-        .await
-        .expect("structure should succeed");
-    let section_id = {
-        let typed = structure
-            .clone()
-            .into_typed::<GetDocumentStructureResponse>()
-            .expect("typed structure");
-        let root = typed
-            .sections
-            .first()
-            .expect("the EPUB should have a root section");
-        root.children.first().unwrap_or(root).section_id.clone()
-    };
-    responses.push((
-        String::from("get_document_structure"),
-        json_bytes(&structure),
-    ));
-
-    let units = client
-        .call_tool(
-            CallToolRequestParams::new("get_text_units").with_arguments(arguments(json!({
-                "document_id": document_id,
-                "section_id": section_id,
-                "requested_kind": "sentence",
-                "coverage_policy": "preserve_source",
-                "max_items": 10
-            }))),
-        )
-        .await
-        .expect("text units should succeed");
-    responses.push((String::from("get_text_units"), json_bytes(&units)));
-
-    let read = client
-        .call_tool(
-            CallToolRequestParams::new("read_document").with_arguments(arguments(json!({
-                "document_id": document_id,
-                "section_id": section_id
-            }))),
-        )
-        .await
-        .expect("read should succeed");
-    responses.push((String::from("read_document"), json_bytes(&read)));
-
-    let search = client
-        .call_tool(
-            CallToolRequestParams::new("search_document").with_arguments(arguments(json!({
-                "document_id": document_id,
-                "query": "memory",
-                "limit": 5
-            }))),
-        )
-        .await
-        .expect("search should succeed");
-    responses.push((String::from("search_document"), json_bytes(&search)));
-
-    let context = client
-        .call_tool(
-            CallToolRequestParams::new("get_context").with_arguments(arguments(json!({
-                "document_id": document_id,
-                "section_id": section_id,
-                "before": 1,
-                "after": 1
-            }))),
-        )
-        .await
-        .expect("context should succeed");
-    responses.push((String::from("get_context"), json_bytes(&context)));
-
-    client.cancel().await.expect("server should stop");
-    responses
-}
-
-fn json_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
-    serde_json::to_vec(value).expect("response should serialize")
-}
-
-fn arguments(value: Value) -> Map<String, Value> {
-    value
-        .as_object()
-        .expect("tool arguments should be a JSON object")
-        .clone()
-}
-
-fn build_epub() -> Vec<u8> {
-    build_zip(&[
-        ("mimetype", "application/epub+zip"),
-        (
-            "META-INF/container.xml",
-            r#"<?xml version="1.0"?>
-<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-  <rootfiles><rootfile full-path="OPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles>
-</container>"#,
-        ),
-        (
-            "OPS/package.opf",
-            r#"<?xml version="1.0"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Operating Systems EPUB</dc:title></metadata>
-  <manifest>
-    <item id="one" href="chapter-one.xhtml" media-type="application/xhtml+xml"/>
-    <item id="two" href="chapter-two.xhtml" media-type="application/xhtml+xml"/>
-  </manifest>
-  <spine><itemref idref="one"/><itemref idref="two"/></spine>
-</package>"#,
-        ),
-        (
-            "OPS/chapter-one.xhtml",
-            r#"<!doctype html><html><head><title>Virtual Memory</title></head><body><main>
-<h1 id="vm">Virtual Memory</h1><p>Orbital memory in EPUB. Page tables map addresses.</p>
-<h2 id="tables">Page Tables</h2><p>Page tables hold one entry per page.</p>
-</main></body></html>"#,
-        ),
-        (
-            "OPS/chapter-two.xhtml",
-            r#"<!doctype html><html><head><title>Processes</title></head><body><main>
-<h1 id="processes">Processes</h1><p>A process owns an address space and its memory.</p>
-</main></body></html>"#,
-        ),
-    ])
-}
-
-fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
-    let cursor = Cursor::new(Vec::new());
-    let mut writer = zip::ZipWriter::new(cursor);
-    let options = SimpleFileOptions::default();
-    for (name, content) in entries {
-        writer
-            .start_file(*name, options)
-            .expect("ZIP fixture entry should start");
-        writer
-            .write_all(content.as_bytes())
-            .expect("ZIP fixture entry should write");
-    }
-    writer
-        .finish()
-        .expect("ZIP fixture should finish")
-        .into_inner()
 }

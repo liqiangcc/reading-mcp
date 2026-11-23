@@ -29,8 +29,6 @@ on:
       - 'src/parsing/ocr_service_supervisor.py'
       - 'src/parsing/ocr_service_result.py'
       - 'src/parsing/ocr_worker_process.rs'
-      - 'tests/ocr_mcp_stdio.rs'
-      - 'tests/ocr_mcp_http.rs'
       - 'tests/v2_ocr_mcp_stdio.rs'
       - 'tests/v2_ocr_mcp_http.rs'
       - 'tests/support/v2_mcp.rs'
@@ -76,8 +74,6 @@ on:
       - 'src/parsing/ocr_service_supervisor.py'
       - 'src/parsing/ocr_service_result.py'
       - 'src/parsing/ocr_worker_process.rs'
-      - 'tests/ocr_mcp_stdio.rs'
-      - 'tests/ocr_mcp_http.rs'
       - 'tests/v2_ocr_mcp_stdio.rs'
       - 'tests/v2_ocr_mcp_http.rs'
       - 'tests/support/v2_mcp.rs'
@@ -153,7 +149,7 @@ jobs:
           # SourceViewFailed as `internal`), so it is skipped by name here: this
           # step runs --ignored, which would otherwise select it.
           gap_test=scanned_pdf_stdio_default_stream_limit_is_reported
-          for mcp_target in ocr_mcp_stdio ocr_mcp_http v2_ocr_mcp_stdio v2_ocr_mcp_http; do
+          for mcp_target in v2_ocr_mcp_stdio v2_ocr_mcp_http; do
             mcp_test=$(cargo test --locked --test "$mcp_target" --no-run --message-format=json | jq -sr --arg target "$mcp_target" '[.[] | select(.reason == "compiler-artifact" and .target.name == $target and .profile.test) | .executable][0]')
             test -x "$mcp_test"
             if [ "$mcp_target" = v2_ocr_mcp_stdio ]; then
@@ -161,7 +157,7 @@ jobs:
             else
               sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" READING_MCP_MIXED_ORDER_DIR="$READING_MCP_MIXED_ORDER_DIR" "$mcp_test" --ignored --nocapture --skip "$benchmark_test"
             fi
-            if [ "$mcp_target" = ocr_mcp_stdio ] || [ "$mcp_target" = v2_ocr_mcp_stdio ]; then
+            if [ "$mcp_target" = v2_ocr_mcp_stdio ]; then
               # Measure the single-service 45s/5s profile without other tests
               # starting independent servers. Dedicated queue/race tests remain.
               sudo env READING_MCP_PDF_LAYOUT_PYTHON="$READING_MCP_PDF_LAYOUT_PYTHON" "$mcp_test" --ignored --nocapture --exact "$benchmark_test"

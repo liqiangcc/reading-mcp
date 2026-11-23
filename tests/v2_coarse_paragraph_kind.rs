@@ -47,18 +47,14 @@ fn table_book() -> &'static str {
 // Transport helpers
 // ------------------------------------------------------------------------------------------------
 
-async fn start_client(local_root: &Path, state_dir: &Path, tools: Option<&str>) -> Client {
+async fn start_client(local_root: &Path, state_dir: &Path) -> Client {
     let local_roots = std::env::join_paths([local_root]).expect("local roots should be valid");
     let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", state_dir)
-        .env("READING_MCP_TELEMETRY", "false");
-    if let Some(tools) = tools {
-        command.env("READING_MCP_TOOLS", tools);
-    } else {
-        command.env_remove("READING_MCP_TOOLS");
-    }
+        .env("READING_MCP_TELEMETRY", "false")
+        .env_remove("READING_MCP_TOOLS");
     let transport = TokioChildProcess::new(command).expect("MCP process should start");
     ().serve(transport)
         .await
@@ -147,12 +143,7 @@ async fn a_guarded_paragraph_comes_back_whole_and_marked_in_both_read_views() {
     tokio::fs::write(&path, coarse_prose_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -216,12 +207,7 @@ async fn a_normal_sentence_answer_is_byte_identical() {
     tokio::fs::write(&path, coarse_prose_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -268,12 +254,7 @@ async fn paragraph_mode_on_a_guarded_paragraph_is_unchanged() {
     tokio::fs::write(&path, coarse_prose_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -332,12 +313,7 @@ async fn a_table_paragraph_keeps_its_own_kind() {
     tokio::fs::write(&path, table_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -381,12 +357,7 @@ async fn cite_reports_why_a_paragraph_handle_is_whole() {
     tokio::fs::write(&path, coarse_prose_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -438,12 +409,7 @@ async fn cite_reports_the_non_prose_code_of_a_table_paragraph() {
     tokio::fs::write(&path, table_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -475,12 +441,7 @@ async fn cite_reports_the_non_prose_code_of_a_table_paragraph() {
 #[tokio::test]
 async fn the_tool_descriptions_name_the_new_fields() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let tools = client
         .list_all_tools()
         .await

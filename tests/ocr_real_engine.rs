@@ -2,6 +2,7 @@
 mod keyed_index;
 use keyed_index::KeyedTextUnitIndex;
 
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::ports::OcrEvidenceStore;
 use reading_mcp::application::ports::{Parser, RetrievedResource};
 use reading_mcp::domain::{DocumentSource, MediaType, OcrConfig};
@@ -289,7 +290,13 @@ async fn real_f14_long_sentence_survives_sqlite_reopen_and_exact_read() {
     units_index.store(&restored).await;
     let units: Arc<dyn reading_mcp::application::ports::TextUnitIndex> = units_index;
     let from = handle_for_locator(&units, &restored, &locator).await;
-    let read = read_handle(repository.clone(), units.clone(), &from).await;
+    let read = read_handle(
+        repository.clone(),
+        units.clone(),
+        &from,
+        RequestedTextUnitKind::Sentence,
+    )
+    .await;
     assert_eq!(read.items[0].text, sentence.text);
     let cite = CiteReadingUseCase::new(repository.clone(), units.clone())
         .execute(&[read.items[0].handle.clone()])
@@ -789,13 +796,13 @@ async fn read_handle(
     repository: Arc<dyn reading_mcp::application::ports::DocumentRepository>,
     units: Arc<dyn reading_mcp::application::ports::TextUnitIndex>,
     from: &str,
+    unit: RequestedTextUnitKind,
 ) -> reading_mcp::application::read_reading::ReadReadingResult {
-    use reading_mcp::application::get_text_units::RequestedTextUnitKind;
     use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
     ReadReadingUseCase::new(repository, units)
         .execute(ReadReadingCommand {
             from: from.to_string(),
-            unit: RequestedTextUnitKind::Sentence,
+            unit,
             max_chars: Some(8192),
             direction: None,
             back: 0,

@@ -26,9 +26,7 @@ use reading_mcp::domain::{
     Document, DocumentSource, MediaType, NormalizedTextRange, ParagraphTextUnitSet,
     SentenceEligibility, SentenceTextUnitSet, TextLocator, TextUnitId,
 };
-use reading_mcp::infrastructure::{
-    ResourceBudget, SqliteDocumentRepository,
-};
+use reading_mcp::infrastructure::{ResourceBudget, SqliteDocumentRepository};
 use reading_mcp::parsing::{
     ArchiveLimits, EpubParser, LayoutPdfParser, PersistedDocumentReliabilityInspector,
 };
@@ -164,7 +162,11 @@ async fn units_report(
                 let mut equal = 0usize;
                 for (locator, text) in targets {
                     let from = handle_for_locator(&units, &restored, &locator).await;
-                    let result = read_handle(repository.clone(), units.clone(), &from).await;
+                    let unit = match locator.sentence_index {
+                        Some(_) => RequestedTextUnitKind::Sentence,
+                        None => RequestedTextUnitKind::Paragraph,
+                    };
+                    let result = read_handle(repository.clone(), units.clone(), &from, unit).await;
                     let cite = CiteReadingUseCase::new(repository.clone(), units.clone())
                         .execute(&[result.items[0].handle.clone()])
                         .await
@@ -368,11 +370,12 @@ async fn read_handle(
     repository: Arc<dyn reading_mcp::application::ports::DocumentRepository>,
     units: Arc<dyn reading_mcp::application::ports::TextUnitIndex>,
     from: &str,
+    unit: RequestedTextUnitKind,
 ) -> reading_mcp::application::read_reading::ReadReadingResult {
     ReadReadingUseCase::new(repository, units)
         .execute(ReadReadingCommand {
             from: from.to_string(),
-            unit: RequestedTextUnitKind::Sentence,
+            unit,
             max_chars: Some(8192),
             direction: None,
             back: 0,

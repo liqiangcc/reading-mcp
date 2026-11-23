@@ -16,8 +16,7 @@ use reading_mcp::domain::{
     TextLocator,
 };
 use reading_mcp::infrastructure::{
-    FileOcrEvidenceStore, ResourceBudget, SqliteDocumentRepository,
-    build_ocr_runtime_identity,
+    FileOcrEvidenceStore, ResourceBudget, SqliteDocumentRepository, build_ocr_runtime_identity,
 };
 use reading_mcp::parsing::{LayoutPdfParser, PersistedDocumentReliabilityInspector};
 use serde_json::json;
@@ -158,7 +157,11 @@ async fn export_real_canonical_boundaries_without_gold_input() {
                     "{case}"
                 );
                 let from = handle_for_locator(&units, &restored, &locator).await;
-                let result = read_handle(repository.clone(), units.clone(), &from).await;
+                let unit = match locator.sentence_index {
+                    Some(_) => RequestedTextUnitKind::Sentence,
+                    None => RequestedTextUnitKind::Paragraph,
+                };
+                let result = read_handle(repository.clone(), units.clone(), &from, unit).await;
                 assert_eq!(result.items[0].text, text, "{case}");
                 let cite = CiteReadingUseCase::new(repository.clone(), units.clone())
                     .execute(&[result.items[0].handle.clone()])
@@ -248,11 +251,12 @@ async fn read_handle(
     repository: Arc<dyn reading_mcp::application::ports::DocumentRepository>,
     units: Arc<dyn reading_mcp::application::ports::TextUnitIndex>,
     from: &str,
+    unit: RequestedTextUnitKind,
 ) -> reading_mcp::application::read_reading::ReadReadingResult {
     ReadReadingUseCase::new(repository, units)
         .execute(ReadReadingCommand {
             from: from.to_string(),
-            unit: RequestedTextUnitKind::Sentence,
+            unit,
             max_chars: Some(8192),
             direction: None,
             back: 0,

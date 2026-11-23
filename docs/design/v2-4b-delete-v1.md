@@ -52,6 +52,7 @@ test files only *mention* a v1 name in a fixture or a v1/v2 comparison — 73 fi
 | `src/application/structure_cursor.rs` | 234 | v1 `get_document_structure` cursor |
 | `src/runtime/config.rs` `ToolSet` + parse | ~35 | enum, `ToolSet::parse`, the `READING_MCP_TOOLS` env parse, its unit tests |
 | `src/runtime/mod.rs` wiring | ~30 | `ToolSet` re-export, `build_server` match on `config.tools` |
+| `src/mcp/profile_mapping.rs` | 122 | maps `ReadingProfile` to the v1 `ReadingProfileDto` (`contracts.rs`); v2 `open` never surfaces it (§2.1 item 5). `src/application/reading_profile.rs` stays: v2 `open` reads `canonical_text_coverage.owner_chars` from it |
 | `src/mcp/ocr_error_tests.rs` + `src/mcp/server.rs` v1 fields | — | server fields `open_document`…`get_context` stay: v2 uses the same use-case objects |
 
 ### 1.3 src/ files v1 calls into but v2 keeps — deletion must not touch
@@ -66,7 +67,6 @@ test files only *mention* a v1 name in a fixture or a v1/v2 comparison — 73 fi
 | `src/application/source_view.rs` | 324 | shared renderer for `get_source_view` and `source_view` |
 | `src/application/locator_resolution.rs` | 258 | v2 `cite`/`read` resolve the same locators |
 | `src/application/section_rows.rs`, `handle_reading.rs`, `short_handle.rs`, `section_view.rs`, `reading_support.rs`, `derived_text_units.rs`, `light_sections.rs`, `discovery_cursor.rs`, `directory_cursor.rs` | ~2300 | shared plumbing used by both routers |
-| `src/mcp/profile_mapping.rs` | 122 | reading-profile mapping used by both `open_document` and `open` |
 
 Partial-delete files: `get_text_units.rs` and `search_document.rs` keep their shared
 internals and lose only the v1 use-case entry points and DTO plumbing; `server.rs` loses
@@ -88,7 +88,7 @@ The 24 files that run v1 tools (`READING_MCP_TOOLS=v1|both` or literal v1 `tools
 | 5 | `tests/normalized_text_contract_mcp.rs` | open response carries `normalized_document_hash(_version)`, `normalization_version`, `normalized_text_coordinate_space`; read stream's coordinate space differs | none — v2 DTOs do not surface `normalized_text_coordinate_space`; hash identity lives inside `cite` items | **new v2 test** of the kept slice (hash/version fields on `open`/`cite` payload); the coordinate-space field assertion is **dropped** (v1-only output field) |
 | 6 | `tests/ocr_mcp_stdio.rs` | real OCR over stdio: mixed native order, disabled-OCR rejection, cold/warm open budgets, saved locator re-read after restart | `src/mcp/ocr_error_tests.rs` is v1 too; `tests/ocr_private_mcp.rs` support also v1; v2 has no OCR-over-MCP test | **port**: same four tests on `open`/`read`/`source_view` |
 | 7 | `tests/ocr_mcp_http.rs` | real-OCR saved locator survives an HTTP server restart | none | **port** to `open`+`cite`/`read` |
-| 8 | `tests/open_reading_profile_stdio.rs` | `open` response carries the reading profile; tool surface unchanged | v2 `open` returns the profile too (`profile_mapping.rs` shared) but no v2 test asserts it | **new v2 test**: `open` response profile fields |
+| 8 | `tests/open_reading_profile_stdio.rs` | `open` response carries the reading profile; tool surface unchanged | none — v2 `open` answers with `OpenView` (`doc`, `title`, `format`, `sections`, `chars`, `top`, `more_top`) and no profile; PR-1 (#258) found this gap | **dropped** (decided 2026-11-23, §2.1 item 5); the tool-surface leg is covered by `the_default_tool_set_is_the_seven_v2_tools` |
 | 9 | `tests/parsed_cache_pdf_only_stdio.rs` | opening Markdown writes no parsed-cache entry | none over MCP | **port** to `open` (or drop — `parsed_cache` behaviour is covered non-MCP; see file) |
 | 10 | `tests/phase6_mcp_stdio.rs` | end-to-end stdio reading flow incl. restart persistence | `v2_open_read`+`v2_tools` cover the calls but not the journey + restart | **port** to v2 tools (the journey is the coverage) |
 | 11 | `tests/phase8_http_reading_lifecycle.rs` | same journey over streamable HTTP + restart resume | none — all v2 tests are stdio | **port** to v2 tools; keeps the only HTTP lifecycle test |
@@ -129,6 +129,11 @@ silently:
 4. The `READING_MCP_TOOLS` switch itself — `tools_switch_selects_the_registered_tools`,
    `v1_stays_selectable`, `the_default_tool_set_is_the_seven_v2_tools` becomes the only
    remaining list test.
+5. The `open` reading profile (`reading_profile`: schema version, capabilities such as
+   paragraph enumeration, reliability summary) — `open_reading_profile_stdio.rs`. v2 `open`
+   answers with `OpenView` and no profile; the versions a caller needs to pin are on `cite`
+   (`doc.seg`, `doc.norm`, `doc.ndh`). **Decided 2026-11-23: drop it; v2 `open` does not grow
+   a profile.** PR-1 (#258) had added an ignored v2 test for it; that test is removed.
 
 ## 3. Scripts and workflows still on v1
 

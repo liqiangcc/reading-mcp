@@ -36,6 +36,7 @@ import sqlite3
 import statistics
 import sys
 import time
+import zlib
 
 ARXIV_PDF = "https://arxiv.org/pdf/{id}"
 FETCH_DELAY_S = 2.0
@@ -276,6 +277,154 @@ def stored_metadata(state_dir: str) -> dict:
     return {}
 
 
+# The section location blob is the format encode_section_location writes: one flags byte,
+# then LEB128 varints and varint-length-prefixed UTF-8 strings in field order. Only the
+# fields used here are decoded; the layout mirrors decode_section_location in sqlite.rs.
+_LOC_PAGE = 1
+_LOC_CHAPTER = 2
+_LOC_ANCHOR = 4
+_LOC_PARAGRAPH = 8
+_LOC_CHAR_START = 16
+_LOC_CHAR_END = 32
+_LOC_NATIVE = 64
+_LOC_PATH_IS_TITLE = 128
+
+
+def _varint(blob: bytes, pos: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while True:
+        byte = blob[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+
+
+def _section_string(blob: bytes, pos: int) -> tuple[str, int]:
+    length, pos = _varint(blob, pos)
+    return blob[pos:pos + length].decode("utf-8", "replace"), pos + length
+
+
+def decode_section_location(blob: bytes) -> tuple[int | None, str | None]:
+    """`(location.page, native_location)` out of a `document_sections_v1.location_json` row."""
+    flags = blob[0]
+    pos = 1
+    page = None
+    native = None
+    if flags & _LOC_PAGE:
+        page, pos = _varint(blob, pos)
+    if flags & _LOC_CHAPTER:
+        _, pos = _section_string(blob, pos)
+    if not flags & _LOC_PATH_IS_TITLE:
+        count, pos = _varint(blob, pos)
+        for _ in range(count):
+            _, pos = _section_string(blob, pos)
+    if flags & _LOC_ANCHOR:
+        _, pos = _section_string(blob, pos)
+    if flags & _LOC_PARAGRAPH:
+        _, pos = _varint(blob, pos)
+    if flags & _LOC_CHAR_START:
+        _, pos = _varint(blob, pos)
+    if flags & _LOC_CHAR_END:
+        _, pos = _varint(blob, pos)
+    if flags & _LOC_NATIVE:
+        native, pos = _section_string(blob, pos)
+    return page, native
+
+
+def _section_text(data: bytes, encoding: int) -> str:
+    if encoding == 0:
+        return data.decode("utf-8", "replace")
+    try:
+        return zlib.decompress(data).decode("utf-8", "replace")
+    except zlib.error:
+        return ""
+
+
+def stored_sections(state_dir: str) -> list[dict]:
+    """Every stored section in document order with its outline page, the page range its
+    text is served from, its opening characters, and whether it holds any text."""
+    database = os.path.join(state_dir, "reading-mcp.sqlite")
+    if not os.path.isfile(database):
+        return []
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT section_key, title, location_json FROM document_sections_v1 "
+                "ORDER BY section_key"
+            ).fetchall()
+            texts: dict[int, str] = {}
+            for section_key, chunk_no, encoding, data in connection.execute(
+                "SELECT section_key, chunk_no, encoding, data FROM section_text_v3 "
+                "ORDER BY section_key, chunk_no"
+            ):
+                texts[section_key] = texts.get(section_key, "") + _section_text(
+                    data, encoding
+                )
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return []
+    sections = []
+    for section_key, title, blob in rows:
+        entry_page, native = decode_section_location(blob)
+        first = last = None
+        match = PAGES_RE.match(native or "") or PAGE_RE.match(native or "")
+        if match:
+            first = int(match.group(1))
+            last = int(match.group(2)) if match.lastindex == 2 else first
+        text = texts.get(section_key) or ""
+        sections.append({
+            "title": title,
+            "entry_page": entry_page,
+            "first_page": first,
+            "last_page": last,
+            "has_text": bool(text),
+            "first_char": next(
+                (char for char in text if not char.isspace()), ""
+            ),
+        })
+    return sections
+
+
+def section_drift(sections: list[dict]) -> list[dict]:
+    """Per stored section, `first page its text is served from` minus `outline entry page`.
+
+    A heading match always starts on the entry page, so drift is only possible after a
+    fallback cut; the allowed fallback is one page later and only when a previous cut sits
+    inside the entry page — i.e. the nearest earlier section that holds text serves that
+    page. Anything else is a bug.
+    """
+    drifted = []
+    previous_nonempty = None
+    for section in sections:
+        entry_page = section.get("entry_page")
+        first = section.get("first_page")
+        if section.get("has_text") and isinstance(first, int) and isinstance(entry_page, int):
+            drift = first - entry_page
+            if drift != 0:
+                covers = (
+                    previous_nonempty is not None
+                    and previous_nonempty["first_page"] <= entry_page
+                    <= previous_nonempty["last_page"]
+                )
+                drifted.append({
+                    "title": section["title"],
+                    "entry_page": entry_page,
+                    "first_page": first,
+                    "drift": drift,
+                    "allowed": drift == 1 and covers,
+                    "previous_title": (previous_nonempty or {}).get("title"),
+                })
+            previous_nonempty = section
+        elif section.get("has_text"):
+            previous_nonempty = section
+    return drifted
+
+
 def measure_document(entry: dict, args, deadline: float) -> dict:
     identifier = entry["id"]
     record: dict = {"id": identifier, "group": entry.get("group"), "outcome": "ok"}
@@ -362,6 +511,24 @@ def measure_document(entry: dict, args, deadline: float) -> dict:
     record["provenance"] = metadata.get("pdf_structure_provenance")
     record["toc_entries"] = _int_or_none(metadata.get("pdf_toc_entries"))
     record["heading_fallbacks"] = _int_or_none(metadata.get("pdf_toc_heading_fallbacks"))
+
+    # TOC-dup2: per stored section, the first page its text is served from minus its
+    # outline entry page. >1 is never allowed; ==1 is only allowed behind a mid-page cut.
+    sections_stored = stored_sections(state_dir)
+    drift = section_drift(sections_stored)
+    record["drift"] = drift
+    record["drift_gt1"] = sum(1 for row in drift if row["drift"] > 1)
+    record["drift_eq1_disallowed"] = [
+        row for row in drift if row["drift"] == 1 and not row["allowed"]
+    ]
+    record["empty_sections"] = sum(
+        1 for section in sections_stored if not section["has_text"]
+    )
+    record["lowercase_sections"] = sum(
+        1
+        for section in sections_stored
+        if section["has_text"] and section["first_char"].islower()
+    )
 
     # Lost characters: reference page text inside the outline-covered range (the first
     # outline entry's start page through the last page) that no served paragraph carries,
@@ -513,6 +680,25 @@ def summarise(
             }
             for record in worst
         ],
+        "drift_gt1": sum(record.get("drift_gt1") or 0 for record in toc),
+        "drift_eq1": [
+            {
+                "id": record["id"],
+                "title": row["title"],
+                "entry_page": row["entry_page"],
+                "first_page": row["first_page"],
+                "allowed": row["allowed"],
+                "previous_title": row["previous_title"],
+            }
+            for record in toc
+            for row in (record.get("drift") or [])
+            if row["drift"] == 1
+        ],
+        "drift_eq1_disallowed": sum(
+            len(record.get("drift_eq1_disallowed") or []) for record in toc
+        ),
+        "empty_sections": sum(record.get("empty_sections") or 0 for record in toc),
+        "lowercase_sections": sum(record.get("lowercase_sections") or 0 for record in toc),
         "open_median": percentile(opens, 0.5),
         "open_p95": percentile(opens, 0.95),
     }
@@ -541,6 +727,16 @@ def print_summary(summary: dict) -> None:
         print("  five worst fallback papers:")
         for row in summary["worst_fallbacks"]:
             print(f"    {row['id']}: {row['fallbacks']} of {row['entries']} entries")
+    print(f"section page drift > 1 (must be 0): {summary['drift_gt1']}")
+    print(f"section page drift == 1: {len(summary['drift_eq1'])} "
+          f"({summary['drift_eq1_disallowed']} outside the allowed cause)")
+    for row in summary["drift_eq1"]:
+        cause = ("fallback one page later behind a mid-page cut"
+                 if row["allowed"] else "UNEXPECTED")
+        print(f"    {row['id']} {row['title']!r}: entry p{row['entry_page']} -> "
+              f"served p{row['first_page']} after {row['previous_title']!r} [{cause}]")
+    print(f"empty sections: {summary['empty_sections']}")
+    print(f"sections whose content starts lowercase: {summary['lowercase_sections']}")
     print(f"open seconds: median {summary['open_median']}  p95 {summary['open_p95']}")
     print()
 

@@ -9,11 +9,12 @@
 //! `complete`) are dropped per §2.1 item 3, and their locators are asserted through `cite`.
 //!
 //! Gated like the v1 file: `#[ignore]` with the same `READING_MCP_MIXED_ORDER_DIR` /
-//! `READING_MCP_PDF_LAYOUT_PYTHON` environment. Three tests keep the v1 gate verbatim; the fourth
-//! is a **v2 gap**: v2 `source_view` reports the default 16-MiB decoded-stream rejection as
-//! `internal` (`ApplicationError::SourceViewFailed` has no v2 code and `ErrorView` sends no
-//! detail), so the v1 `SOURCE_VIEW_FAILED` "decoded PDF stream exceeds configured limit" assertion
-//! cannot be expressed. Its body is unchanged, so it passes the day the mapping exists.
+//! `READING_MCP_PDF_LAYOUT_PYTHON` environment. The four ported tests keep the v1 gate verbatim.
+//! One extra test, `scanned_pdf_stdio_default_stream_limit_is_reported`, is a **v2 gap**: v2
+//! `source_view` reports the default 16-MiB decoded-stream rejection as `internal`
+//! (`ApplicationError::SourceViewFailed` has no v2 code and `ErrorView` sends no detail), so the v1
+//! `SOURCE_VIEW_FAILED` "decoded PDF stream exceeds configured limit" assertion cannot be
+//! expressed. Its body is unchanged, so it passes the day the mapping exists.
 
 #[path = "support/v2_mcp.rs"]
 mod v2_mcp;
@@ -322,7 +323,7 @@ async fn frozen_four_page_cold_and_restarted_warm_open_budgets() {
 }
 
 #[tokio::test]
-#[ignore = "v2 gap: v2 source_view reports the 16-MiB decoded-stream rejection as `internal` (SourceViewFailed has no v2 code and no detail is sent), so the v1 SOURCE_VIEW_FAILED message cannot be asserted; also requires pinned hosted OCR dependencies"]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let directory = tempfile::tempdir().unwrap();
@@ -334,10 +335,10 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
         let raw_hash = format!("sha256:{:x}", sha2::Sha256::digest(&raw));
         let state = directory.path().join("state");
         let mut saved: Option<(Value, String, Value)> = None;
-        // The 300-DPI RGB fixture decodes to about 26.1 MB. Preserve the
-        // default 16-MiB rejection, then test an explicit development profile.
-        // This does not change defaults or approve a production budget change.
-        for stream_limit in [16 * 1024 * 1024_u64, 32 * 1024 * 1024, 32 * 1024 * 1024] {
+        // The 300-DPI RGB fixture decodes to about 26.1 MB. The explicit development
+        // profile renders it; the default 16-MiB rejection is the recorded gap test
+        // below. This does not change defaults or approve a production budget change.
+        for stream_limit in [32 * 1024 * 1024_u64, 32 * 1024 * 1024] {
             let mut command = server_command(directory.path(), &state);
             command
                 // Existing #92 deployment profile; retain the production and
@@ -433,15 +434,6 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
             let read = payload(&v2_read(&client, &sentence, json!({})).await);
             assert_eq!(&flat_text(&read), saved_text);
             let result = call(&client, "source_view", json!({ "at": sentence })).await;
-            if stream_limit == 16 * 1024 * 1024 {
-                let error = tool_error(&result);
-                assert_eq!(
-                    error["error"], "too_large",
-                    "the default decoded-stream limit rejects the page: {error}"
-                );
-                client.cancel().await.unwrap();
-                continue;
-            }
             assert!(
                 result.is_error != Some(true),
                 "source view should render: {result:?}"
@@ -464,4 +456,65 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
     })
     .await
     .expect("OCR stdio lifecycle exceeded the hosted test deadline");
+}
+
+/// The v1 default-limit leg, recorded as a **v2 gap** and skipped by name in
+/// `.github/workflows/ocr-first-engine-probe.yml` (the workflow runs `--ignored`, so an ignored
+/// test still runs unless it is skipped).
+///
+/// v1 asserted that the default 16-MiB decoded-stream limit rejects the 26.1-MB page with
+/// `SOURCE_VIEW_FAILED` and the message "decoded PDF stream exceeds configured limit". v2
+/// `source_view` maps `ApplicationError::SourceViewFailed` to the `internal` code and `ErrorView`
+/// sends no detail, so the rejection is indistinguishable from a storage failure and the reason is
+/// lost. The assertion is kept unchanged, so it passes the day v2 grows a source-view code.
+#[tokio::test]
+#[ignore = "v2 gap: v2 source_view reports the 16-MiB decoded-stream rejection as `internal` (SourceViewFailed has no v2 code and no detail is sent), so the v1 SOURCE_VIEW_FAILED message cannot be asserted; also requires pinned hosted OCR dependencies"]
+async fn scanned_pdf_stdio_default_stream_limit_is_reported() {
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("public-F07.pdf");
+        let raw = std::fs::read("tests/fixtures/scanned_pdf/pdf/F07.pdf").unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let state = directory.path().join("state");
+        let mut command = server_command(directory.path(), &state);
+        command
+            // Existing #92 deployment profile; retain the production and
+            // default guards rather than bypassing embedded-image checks.
+            .env("READING_MCP_SOURCE_VIEW_MAX_PIXELS", "16000000")
+            .env(
+                "READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES",
+                (16 * 1024 * 1024_u64).to_string(),
+            )
+            .env(
+                "READING_MCP_PDF_LAYOUT_PYTHON",
+                std::env::var("READING_MCP_PDF_LAYOUT_PYTHON").unwrap(),
+            )
+            .env("READING_MCP_OCR_ENABLED", "true")
+            .env("READING_MCP_OCR_ENGINE", "/usr/bin/tesseract")
+            .env(
+                "READING_MCP_OCR_TESSDATA",
+                "/usr/share/tesseract-ocr/5/tessdata",
+            )
+            .env("READING_MCP_OCR_LANG", "chi_sim")
+            .env("READING_MCP_OCR_REVISION", "1")
+            .kill_on_drop(true);
+        let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+        let opened = v2_open(&client, &path).await;
+        let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+        let page = section_handle_of(&client, &doc, "section://pdf-layout/1").await;
+        let units = payload(&v2_read(&client, &page, json!({})).await);
+        let sentence = units["at"]
+            .as_str()
+            .expect("the first sentence's own handle")
+            .to_owned();
+        let result = call(&client, "source_view", json!({ "at": sentence })).await;
+        let error = tool_error(&result);
+        assert_eq!(
+            error["error"], "too_large",
+            "the default decoded-stream limit rejects the page: {error}"
+        );
+        client.cancel().await.unwrap();
+    })
+    .await
+    .expect("the default-limit rejection exceeded the hosted test deadline");
 }

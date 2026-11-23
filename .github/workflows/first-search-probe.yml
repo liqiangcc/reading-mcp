@@ -12,7 +12,7 @@ on:
       tools:
         description: 'Tool set the probe servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['first-search-*']
 jobs:
@@ -80,7 +80,7 @@ jobs:
             fi
             local prewarm=1
             [ "$side" = "prewarm-off" ] && prewarm=0
-            python3 scripts/first-search-probe.py --tools "${{ inputs.tools || 'v1' }}" \
+            python3 scripts/first-search-probe.py --tools "${{ inputs.tools || 'v2' }}" \
               --binary target/release/reading-mcp \
               --document "$doc" \
               --label "$label" \
@@ -124,7 +124,7 @@ jobs:
             fi
             local prewarm=1
             [ "$side" = "prewarm-off-2cpu" ] && prewarm=0
-            taskset -c 0,1 python3 scripts/first-search-probe.py --tools "${{ inputs.tools || 'v1' }}" \
+            taskset -c 0,1 python3 scripts/first-search-probe.py --tools "${{ inputs.tools || 'v2' }}" \
               --binary target/release/reading-mcp \
               --document "$doc" \
               --label "$label" \

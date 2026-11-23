@@ -10,7 +10,7 @@ on:
       tools:
         description: 'Tool set the probe servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['bench/pdf1a-**']
 
@@ -130,7 +130,7 @@ jobs:
             --deadline-minutes 65 \
             --paper-deadline-minutes 6 \
             --worker-timeout 600 \
-            --tools "${{ inputs.tools || 'v1' }}" | tail -150
+            --tools "${{ inputs.tools || 'v2' }}" | tail -150
       - name: Upload shard results
         if: always() && steps.corpus.outputs.present == 'yes'
         uses: actions/upload-artifact@v4

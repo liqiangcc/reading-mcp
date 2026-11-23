@@ -424,7 +424,7 @@ def reference_prefix(page_texts: list[str], target_chars: int) -> tuple[str, int
 
 def backend_run(probe, binary: str, pdf_path: str, backend: str, layout_python: str,
                 state_root: str, label: str, deadline: float,
-                tools: str = "v1") -> tuple[dict, list[str]]:
+                tools: str = "v2") -> tuple[dict, list[str]]:
     import shutil
 
     record: dict = {
@@ -1227,8 +1227,8 @@ def main() -> int:
     parser.add_argument("--deadline-minutes", type=float, default=75.0)
     parser.add_argument("--paper-deadline-minutes", type=float, default=6.0)
     parser.add_argument("--worker-timeout", type=float, default=900.0)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
-                        help="tool set the server exposes: v1 (default) or v2")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
+                        help="tool set the server exposes: v2 (default) or v1")
     parser.add_argument("--pdf", default="")
     parser.add_argument("--worker", default="")
     args = parser.parse_args()

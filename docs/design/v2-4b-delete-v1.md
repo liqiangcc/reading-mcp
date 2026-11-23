@@ -6,8 +6,9 @@ The default tool set has been v2 (`open`, `read`, `browse`, `outline`, `search`,
 `read_document`, `get_source_view`, `get_context` — still exist behind
 `READING_MCP_TOOLS=v1|both` (`src/runtime/config.rs:170`, `src/mcp/server.rs:166`) because
 tests, measurement scripts and CI gates call them. V2-4a (`v2-4a-measurement-in-v2.md`,
-merged PR #246) gave every measurement script an opt-in `--tools v2`. This document is the
-plan for deleting v1 without losing test coverage. It changes no code.
+merged PR #246) gave every measurement script an opt-in `--tools v2`; V2-4b PR-4 flipped every
+script and workflow default to `v2`, so v1 is now only reachable by asking for it. This document
+is the plan for deleting v1 without losing test coverage. It changes no code.
 
 The inventory below is generated; re-run it before each PR:
 
@@ -136,26 +137,40 @@ silently:
    (`doc.seg`, `doc.norm`, `doc.ndh`). **Decided 2026-11-23: drop it; v2 `open` does not grow
    a profile.** PR-1 (#258) had added an ignored v2 test for it; that test is removed.
 
-## 3. Scripts and workflows still on v1
+## 3. Scripts and workflows: the defaults are v2
 
-V2-4a (PR #246, merged) already added `--tools v1|v2` (default `v1`) to:
+PR-1 (#258), PR-2 (#262) and PR-3 (#260, PDF batch; #261, memory batch) are merged. PR-4
+(#265, this PR) flips every measurement default from v1 to v2: every script that has `--tools v1|v2` now
+defaults to `v2`, and every workflow `tools` input defaults to `v2` (push, pull_request and
+schedule events use the `${{ inputs.tools || 'v2' }}` fallback). v1 stays selectable with
+`--tools v1` / `tools=v1` for rollback until PR-6 deletes it.
+
+The 17 scripts with the flag, all defaulting to `v2`:
 `deep-next-probe.py`, `doc-read-probe.py`, `first-search-probe.py`, `ingest-parity.py`,
-`long-read-probe.py`, `mem-profile-now.py`, `pdf-open-profile.py`,
+`long-read-probe.py`, `mem-profile-now.py`, `memory-profile.py`, `pdf-cjk.py`,
+`pdf-corpus.py`, `pdf-probe.py`, `pdf-quality.py`, `pdf-sweep.py`,
 `sequential-read-probe.py`, `stress-probe.py`, `url-resolve-probe.py`, `v2-eval.py`, and
-the `tools` workflow input on `book-profile`, `doc-read-profile`, `section-scale`,
-`url-resolve-probe`. Those need only a default flip, not a port.
+`scripts/pdf-layout/smoke.py`.
 
-Still hard-wired to v1 names:
+The 18 workflows whose `tools` input now defaults to `v2` (and whose fallback is `v2`):
+`book-profile`, `cpu-profile`, `doc-read-profile`, `first-search-probe`, `heap-profile`,
+`ingest-parity`, `leak-profile`, `mem-profile-now`, `memory-profile`, `pdf-cjk`,
+`pdf-corpus`, `pdf-profile`, `pdf-quality`, `pdf-sweep`, `pdf2c-measure`, `section-scale`,
+`stress-profile`, `url-resolve-probe`.
 
-| script | workflows that run it | state |
-|---|---|---|
-| `scripts/pdf-probe.py` | `pdf-profile.yml`, `pdf2c-measure.yml`, and its helpers are imported by `pdf-corpus.py` | **port after the PDF-6 / LAYOUT-1 PRs merge** — open PRs touching this area: #247 (`perf/layout1-compact-layout`), #248 (`feat/pdf7b1-positional-lines`); PDF-6 PRs #233/#236/#237/#242/#245 are merged |
-| `scripts/pdf-quality.py` | `pdf-quality.yml` | same — port after #247/#248 |
-| `scripts/pdf-sweep.py` | `pdf-sweep.yml` | same — port after #247/#248 |
-| `scripts/pdf-cjk.py` | `pdf-cjk.yml` | same — port after #247/#248 |
-| `scripts/pdf-corpus.py` | `pdf-corpus.yml` | calls `pdf-probe.py` helpers (`open_document`, `read_sections`, `sentence_totals`) — ports for free once `pdf-probe.py` grows v2 helpers; **port after #247/#248** |
-| `scripts/pdf-layout/smoke.py` | none (dev smoke) | literal v1 calls — port with the PDF batch |
-| `scripts/memory-profile.py` | `memory-profile.yml`, `heap-profile.yml`, `cpu-profile.yml`, `book-profile.yml`, `doc-read-profile.yml`, `first-search-probe.yml`, `ingest-parity.yml` (7 workflows embed or import it) | **port after the PDF-6 / LAYOUT-1 PRs merge** per the task split; highest blast radius of any script |
+Not flipped, and why:
+
+| script | why the default stays v1 |
+|---|---|
+| `scripts/pdf-open-profile.py` | has no `--tools` and calls v1 tools only; `pdf2c-measure.yml` runs it beside the now-v2 `memory-profile.py` and its input description says so. It is ported or deleted with the OCR/PDF leftovers in PR-5/PR-6, not here. |
+
+The workflows that add `--env READING_MCP_TOOLS=both` only in v1 mode keep that expression; it
+now fires only when a run asks for `tools=v1`.
+
+Before the flip, the `ingest-parity.py` v2 sequence gained the coverage the v1 legs carried
+(`outline` first page + `next`, `search` with the v1 body term and section title, `cite` of the
+first read item, a `next` item and the first search hit), so the default gate keeps search and
+structure coverage in v2 mode. `run_v1_reads` and every v1 code path stay for PR-6.
 
 Every other script mention (`v2-eval.py`'s v1 legs, etc.) is the already-gated `--tools`
 machinery; `v2-eval.py`'s v1 legs and the workflows' `tools` inputs are deleted with the
@@ -188,10 +203,10 @@ Ordered so every PR is reviewable and the tree is green at each step.
 
 | PR | content | gate | risk |
 |---|---|---|---|
-| **1. v2 tests for the uncovered behaviours** | new v2 tests: acceptance matrix, browse→open journey, `read` small-`max_chars` continuation, `outline` forest cursor, `read{"from":handle}` exclusive continuation, `open` reading-profile fields, cite/read context slice, OCR-over-MCP (stdio + HTTP + `ocr_error_tests.rs` ported to `open`), v2 HTTP lifecycle; normalized-hash slice | `CI` | low — pure test additions; may expose real v2 gaps (that is the point) |
-| **2. Re-cover or rewire** | port `phase6_mcp_stdio`, `phase8_http_reading_lifecycle`, `source_view_stdio`, `source_view_http`, `read_continuation_mcp`, `parsed_cache_pdf_only_stdio`, `section_text_content_store`, `ocr_mcp_stdio`, `ocr_mcp_http`, `ocr_private_mcp` helper to v2 names; `stdio_initialization_guard` s/`list_documents`/`browse`/ | `CI` | medium — big diff, mechanical; risk is a subtly weaker assertion |
-| **3. Port the deferred scripts** | `pdf-probe.py` (+`pdf-corpus.py` helpers), `pdf-quality.py`, `pdf-sweep.py`, `pdf-cjk.py`, `pdf-layout/smoke.py`, `memory-profile.py` grow the V2-4a `--tools` mode | `CI`; each workflow's dispatch runs once with `--tools v2` before merge | medium — measurement drift; must land **after** PDF-6/LAYOUT-1 PRs (#247, #248) merge |
-| **4. Flip every default to v2** | `--tools` default `v1`→`v2` in the 11 scripts; workflow `tools` input defaults; drop v1 legs from `ingest-parity.py`, `v2-eval.py` | `CI` + one dispatch each | low — v1 still exists for rollback |
+| **1. v2 tests for the uncovered behaviours** — merged, #258 | new v2 tests: acceptance matrix, browse→open journey, `read` small-`max_chars` continuation, `outline` forest cursor, `read{"from":handle}` exclusive continuation, `open` reading-profile fields, cite/read context slice, OCR-over-MCP (stdio + HTTP + `ocr_error_tests.rs` ported to `open`), v2 HTTP lifecycle; normalized-hash slice | `CI` | low — pure test additions; may expose real v2 gaps (that is the point) |
+| **2. Re-cover or rewire** — merged, #262 | port `phase6_mcp_stdio`, `phase8_http_reading_lifecycle`, `source_view_stdio`, `source_view_http`, `read_continuation_mcp`, `parsed_cache_pdf_only_stdio`, `section_text_content_store`, `ocr_mcp_stdio`, `ocr_mcp_http`, `ocr_private_mcp` helper to v2 names; `stdio_initialization_guard` s/`list_documents`/`browse`/ | `CI` | medium — big diff, mechanical; risk is a subtly weaker assertion |
+| **3. Port the deferred scripts** — merged, #260 (PDF batch) and #261 (memory batch) | `pdf-probe.py` (+`pdf-corpus.py` helpers), `pdf-quality.py`, `pdf-sweep.py`, `pdf-cjk.py`, `pdf-layout/smoke.py`, `memory-profile.py` grow the V2-4a `--tools` mode | `CI`; each workflow's dispatch runs once with `--tools v2` before merge | medium — measurement drift; must land **after** PDF-6/LAYOUT-1 PRs (#247, #248) merge |
+| **4. Flip every default to v2** — this PR, #265 | `--tools` default `v1`→`v2` in all 17 scripts that have the flag; the `tools` default and `\|\|` fallback in all 18 workflows; the new `outline`/`search`/`cite` coverage in `ingest-parity.py`'s v2 sequence. The v1 legs of `ingest-parity.py` and `v2-eval.py` stay until PR-6. | `CI` + one default-mode dispatch each | low — v1 still exists for rollback |
 | **5. Delete the v1 tests** | delete tests 1–21 legs that are now duplicated, plus `v2_book_equivalence`/`v2_open_read`/`v2_tools` v1 legs | `CI` | low — coverage already re-built in PRs 1–2 |
 | **6. Delete the v1 server code and the switch** | `tool_router_v1` block, `contracts.rs`, the v1-only use cases/cursors, `ToolSet`/`READING_MCP_TOOLS` (keep the refuse-to-start check per §4), `ocr_error_tests.rs` v1 remnants; workflow `tools` inputs removed | `CI` | the point of no return; also the biggest line-count win (~4.5k lines) |
 

@@ -5,7 +5,7 @@ on:
       tools:
         description: 'Tool set the profile servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['bench/memory-profile-**']
 jobs:
@@ -22,7 +22,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --bin reading-mcp
       - name: Profile open memory
-        run: python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v1' }}" --binary target/release/reading-mcp --sizes-mb 0.25,1,4 --run-timeout-seconds 480 --out memory-profile.json
+        run: python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v2' }}" --binary target/release/reading-mcp --sizes-mb 0.25,1,4 --run-timeout-seconds 480 --out memory-profile.json
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4

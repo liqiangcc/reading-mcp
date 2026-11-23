@@ -356,7 +356,7 @@ class Server:
             pass
 
 
-def server_environment(roots: str, state_dir: str, tools: str = "v1") -> dict:
+def server_environment(roots: str, state_dir: str, tools: str = "v2") -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
@@ -1308,7 +1308,7 @@ def probe_book(
     path: str,
     state_root: str,
     max_seconds: float,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> dict:
     book: dict = {
         "label": label,
@@ -1557,8 +1557,8 @@ def main() -> int:
     parser.add_argument(
         "--tools",
         choices=("v1", "v2"),
-        default="v1",
-        help="tool set the server exposes: v1 (default) or v2",
+        default="v2",
+        help="tool set the server exposes: v2 (default) or v1",
     )
     args = parser.parse_args()
 

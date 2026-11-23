@@ -197,7 +197,7 @@ def drop_wall_clock(value):
     return value
 
 
-def server_environment(state_dir: str, roots: str, tools: str = "v1") -> dict:
+def server_environment(state_dir: str, roots: str, tools: str = "v2") -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
@@ -215,7 +215,7 @@ def run_open(
     state_dir: str,
     timeout: float,
     log_path: str,
-    tools: str = "v1",
+    tools: str = "v2",
 ):
     """Opens `source` once on a fresh state directory and returns the payload or its error."""
     os.makedirs(state_dir, exist_ok=True)
@@ -1649,14 +1649,17 @@ def run_read_probe(
     state_dir: str,
     timeout: float,
     log_path: str,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> list[dict]:
     """Reopens the stored state and records the v1 and v2 read sequences, both tools registered.
 
     The v1 sequence (`run_v1_reads`) covers text units, context, reads and search; then `open`
     returns the short document handle, five `read` calls follow `next`, the next call uses `back=2`
-    and the last one asks for a 2000-char batch from the section start. Every response is kept so
-    two binaries can be compared call by call.
+    and the last one asks for a 2000-char batch from the section start. In v2 mode the v2 sequence
+    also covers what the v1 legs covered: the first `outline` page and its continuation, `search`
+    with the same body term and section title `run_v1_reads` uses, and `cite` of the first read
+    item, one `next` item and the first search hit. Every response is kept so two binaries can be
+    compared call by call.
     """
     env = server_environment(state_dir, os.path.dirname(os.path.abspath(source)))
     env["READING_MCP_TOOLS"] = "both" if tools == "v1" else "v2"
@@ -1724,12 +1727,23 @@ def run_read_probe(
 
             payload = call("read", {"from": section})
             records.append({"step": "read from section", "payload": payload})
+            first_item = (
+                payload.get("at") or section if isinstance(payload, dict) else section
+            )
+            first_text = payload.get("text") if isinstance(payload, dict) else None
             cursor = payload.get("next") if isinstance(payload, dict) else None
+            next_item = None
             for index in range(5):
                 if not isinstance(cursor, str):
                     break
                 payload = call("read", {"from": cursor})
                 records.append({"step": f"read next {index + 1}", "payload": payload})
+                if next_item is None:
+                    next_item = (
+                        payload.get("at") or cursor
+                        if isinstance(payload, dict)
+                        else cursor
+                    )
                 cursor = payload.get("next") if isinstance(payload, dict) else None
 
             back_from = cursor if isinstance(cursor, str) else section
@@ -1792,6 +1806,34 @@ def run_read_probe(
                     }
                 )
 
+            # In v1 mode `run_v1_reads` already covers the structure pages, the searches and
+            # the locator reads; in v2 mode this sequence is the whole `reads` column, so it
+            # must cover the same stored state. The added steps stay out of v1 mode so its
+            # records stay byte-identical to the pre-V2-4b gate.
+            if tools == "v2":
+                # The v1 leg records the structure's first page and its continuation; `outline`
+                # answers the same preorder, so one node plus one `next` page keeps that coverage.
+                outline_first = call("outline", {"at": document, "depth": 2, "limit": 1})
+                records.append({"step": "outline first page", "payload": outline_first})
+                outline_next = (
+                    outline_first.get("next") if isinstance(outline_first, dict) else None
+                )
+                if isinstance(outline_next, str):
+                    records.append(
+                        {
+                            "step": "outline next page",
+                            "payload": call(
+                                "outline",
+                                {
+                                    "at": document,
+                                    "depth": 2,
+                                    "limit": 1,
+                                    "cursor": outline_next,
+                                },
+                            ),
+                        }
+                    )
+
             # `search` resolves its document handle from the header; the query is the section
             # title, which the scan answers with a section-kind hit on inputs that have one.
             title = None
@@ -1799,17 +1841,47 @@ def run_read_probe(
                 first = top[0]
                 if isinstance(first, (list, tuple)) and len(first) > 1:
                     title = first[1]
+            title_search = None
             if isinstance(title, str) and title.strip():
-                records.append(
-                    {
-                        "step": "search title",
-                        "payload": call(
-                            "search", {"doc": document, "query": title.strip()[:24], "limit": 5}
-                        ),
-                    }
+                title_search = call(
+                    "search", {"doc": document, "query": title.strip()[:24], "limit": 5}
                 )
+                records.append({"step": "search title", "payload": title_search})
 
-            # `cite` returns the canonical locators of the handles it is given.
+            if tools == "v2":
+                # The v1 leg also searches a term from the picked section's first sentence.
+                # `read` above returned that sentence, so the same query goes to `search` here.
+                body_query = (
+                    first_text.strip()[:24] if isinstance(first_text, str) else ""
+                ) or "reading"
+                body_search = call(
+                    "search", {"doc": document, "query": body_query, "limit": 5}
+                )
+                records.append({"step": "search body term", "payload": body_search})
+
+                # `cite` returns the canonical locators of the handles it is given. The three
+                # handles are the v1 leg's locator-based reads and its search hit.
+                hit = None
+                for result in (body_search, title_search):
+                    hits = result.get("hits") if isinstance(result, dict) else None
+                    if (
+                        isinstance(hits, list)
+                        and hits
+                        and isinstance(hits[0], (list, tuple))
+                        and hits[0]
+                    ):
+                        hit = hits[0][0]
+                        break
+                for step, handle in (
+                    ("cite first read item", first_item),
+                    ("cite next item", next_item),
+                    ("cite first search hit", hit),
+                ):
+                    if isinstance(handle, str):
+                        records.append(
+                            {"step": step, "payload": call("cite", {"at": [handle]})}
+                        )
+
             records.append(
                 {"step": "cite section", "payload": call("cite", {"at": [section]})}
             )
@@ -1846,7 +1918,7 @@ def run_side(
     path: str,
     out_dir: str,
     timeout: float,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> dict:
     """Opens `path` with `binary` on a fresh state directory and returns its comparable facts."""
     side_dir = os.path.join(out_dir, "runs", safe_label(label), side)
@@ -1995,8 +2067,8 @@ def main() -> int:
     parser.add_argument(
         "--tools",
         choices=("v1", "v2"),
-        default="v1",
-        help="tool set the servers expose: v1 (default) or v2",
+        default="v2",
+        help="tool set the servers expose: v2 (default) or v1",
     )
     args = parser.parse_args()
 

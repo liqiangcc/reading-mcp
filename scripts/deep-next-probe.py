@@ -1055,8 +1055,8 @@ def main() -> int:
     parser.add_argument(
         "--tools",
         choices=("v1", "v2"),
-        default="v1",
-        help="tool set the server exposes: v1 (default) or v2; --policy is v1-only",
+        default="v2",
+        help="tool set the server exposes: v2 (default) or v1; --policy is v1-only",
     )
     parser.add_argument("--out", required=True, help="JSON result path")
     args = parser.parse_args()

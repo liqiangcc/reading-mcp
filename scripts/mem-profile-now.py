@@ -348,7 +348,7 @@ def run_timeline(
     sample_interval: float,
     timeout: float,
     env_extra: dict | None,
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> dict:
     """Run one open, its settle wait, three tool calls and a second open, sampling RSS throughout."""
     memory_profile = load_module("memory_profile", "memory-profile.py")
@@ -1044,7 +1044,7 @@ def run_open_under_heaptrack(
     timeout: float,
     env_extra: dict | None,
     variant: str = "default",
-    tools: str = "v1",
+    tools: str = "v2",
 ) -> dict:
     """Open the document once under heaptrack, then summarize the global heap peak."""
     memory_profile = load_module("memory_profile", "memory-profile.py")
@@ -1462,8 +1462,8 @@ def main() -> int:
     prof.add_argument("--timeout-seconds", type=float, default=900.0)
     prof.add_argument("--variant", default="default")
     prof.add_argument("--malloc-arena-max", default=None)
-    prof.add_argument("--tools", choices=("v1", "v2"), default="v1",
-                      help="tool set the server exposes: v1 (default) or v2")
+    prof.add_argument("--tools", choices=("v1", "v2"), default="v2",
+                      help="tool set the server exposes: v2 (default) or v1")
 
     rep = sub.add_parser("report", help="aggregate the profile JSON into markdown")
     rep.add_argument("--dir", required=True)

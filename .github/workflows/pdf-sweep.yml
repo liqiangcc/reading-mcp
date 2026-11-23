@@ -10,7 +10,7 @@ on:
       tools:
         description: 'Tool set the probe servers expose'
         required: false
-        default: 'v1'
+        default: 'v2'
   push:
     branches: ['bench/pdf5a-**']
 
@@ -143,7 +143,7 @@ jobs:
             --out "$RUNNER_TEMP/results/sweep-${{ matrix.shard }}.jsonl" \
             --deadline-minutes 40 \
             --per-document-minutes 4.5 \
-            --tools "${{ inputs.tools || 'v1' }}" | tail -150
+            --tools "${{ inputs.tools || 'v2' }}" | tail -150
       - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v4

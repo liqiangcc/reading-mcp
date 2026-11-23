@@ -2,13 +2,15 @@
 """Live check that a paper's landing-page link reads the paper (PDF-3).
 
 The probe speaks newline-delimited JSON-RPC MCP over stdio against a release binary built from
-this branch, with ``READING_MCP_TOOLS=v1``.  For every pinned link it calls ``open_document`` and
-then reads the first 200 sentences of the opened document (``get_document_structure`` for the root
-section, then ``read_document`` on it).  Every non-control link is compared with the same paper
-opened through its direct ``.pdf`` link:
+this branch, with ``READING_MCP_TOOLS=v2`` by default.  For every pinned link it calls ``open`` and
+then reads the first 200 sentences with ``read`` batches from the document handle.  ``--tools v1``
+uses the v1 calls instead (``open_document``, ``get_document_structure`` for the root section, then
+``read_document`` on it).  Every non-control link is compared with the same paper opened through
+its direct ``.pdf`` link:
 
 * ``document_id`` — the id derives from the final source plus the content hash, so a resolved
-  landing-page link and the direct PDF link of the same paper must give the *same* id;
+  landing-page link and the direct PDF link of the same paper must give the *same* id (the doc
+  handle in v2 mode);
 * the first 200 sentences — the same text, whitespace-normalised.
 
 ``open`` does not expose which rule fired (the v2 tool budget forbids a new field), so the rule is
@@ -263,7 +265,7 @@ def first_sentences(text: str, limit: int = SENTENCE_LIMIT) -> tuple[int, str]:
 
 
 def open_and_sample(
-    server: Server, url: str, timeout: float, tools: str = "v1"
+    server: Server, url: str, timeout: float, tools: str = "v2"
 ) -> dict:
     """Open one URL, then read the first sentences of its root section."""
     started = time.monotonic()
@@ -384,7 +386,7 @@ def measure_tools_list(binary: str, state_dir: str, toolset: str, timeout: float
             server.close()
 
 
-def server_environment(state_dir: str, state: str, tools: str = "v1") -> dict:
+def server_environment(state_dir: str, state: str, tools: str = "v2") -> dict:
     environment = dict(os.environ)
     environment.update(
         {
@@ -398,7 +400,7 @@ def server_environment(state_dir: str, state: str, tools: str = "v1") -> dict:
     return environment
 
 
-def run_probe(binary: str, state_dir: str, timeout: float, tools: str = "v1") -> dict:
+def run_probe(binary: str, state_dir: str, timeout: float, tools: str = "v2") -> dict:
     state = os.path.join(state_dir, "links")
     os.makedirs(state, exist_ok=True)
     server = Server(
@@ -524,8 +526,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--tools",
         choices=("v1", "v2"),
-        default="v1",
-        help="tool set the probe's servers expose: v1 (default) or v2",
+        default="v2",
+        help="tool set the probe's servers expose: v2 (default) or v1",
     )
     parser.add_argument("--md", help="write the Markdown table here")
     args = parser.parse_args(argv)

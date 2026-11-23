@@ -928,8 +928,8 @@ def main() -> int:
     parser.add_argument(
         "--tools",
         choices=("v1", "v2"),
-        default="v1",
-        help="which legs run: v1 (default) replays both tool sets; v2 only the v2 legs",
+        default="v2",
+        help="which legs run: v2 (default) only the v2 legs; v1 replays both tool sets",
     )
     args = parser.parse_args()
 

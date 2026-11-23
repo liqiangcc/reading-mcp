@@ -9,7 +9,7 @@ on:
         description: 'Tool set memory-profile.py exposes (pdf-open-profile.py stays v1)'
         type: choice
         options: [v1, v2]
-        default: v1
+        default: v2
   push:
     branches: ['bench/pdf2c**']
 
@@ -154,7 +154,7 @@ jobs:
           IN="$RUNNER_TEMP/inputs"
           BIN="$RUNNER_TEMP/bin/reading-mcp"
           mkdir -p heap
-          python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v1' }}" \
+          python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v2' }}" \
             --binary "$BIN" --states dir \
             --parse-timeout-seconds 600 --run-timeout-seconds 600 \
             --documents "p2401.14345=$IN/2401.14345.pdf,p2403.19144=$IN/2403.19144.pdf,text-long-cjk-300=$IN/text-long-cjk-300.pdf,text-long-en-300=$IN/text-long-en-300.pdf" \

@@ -832,7 +832,7 @@ def _read_v2(probe, server, document_handle: str, sections: list[dict], record: 
 
 def read_backend(probe, binary: str, pdf_path: str, backend: str, layout_python: str,
                  state_root: str, label: str, deadline: float,
-                 tools: str = "v1") -> tuple[dict, str]:
+                 tools: str = "v2") -> tuple[dict, str]:
     """Open and read the whole document through `get_text_units`, batching 256 items per call.
 
     The PDF section model can return the same text from two different sections (a heading
@@ -1365,8 +1365,8 @@ def main() -> int:
     parser.add_argument("--per-shard", type=int, default=5)
     parser.add_argument("--deadline-minutes", type=float, default=70.0)
     parser.add_argument("--paper-deadline-minutes", type=float, default=12.0)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v1",
-                        help="tool set the server exposes: v1 (default) or v2")
+    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
+                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if args.select:
         if not args.out:

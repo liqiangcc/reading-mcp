@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use async_trait::async_trait;
 use lopdf::{Document as LopdfDocument, Object, ObjectId, TocType, decode_text_string};
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::application::ports::{ApplicationError, OcrRequiredDetail, Parser, RetrievedResource};
 use crate::domain::{
     ContentHash, Document, Location, NormalizedTextRange, OriginalSourceBinding,
@@ -38,6 +40,9 @@ const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";
 const PDF_STRUCTURE_INFERRED_NUMBERED_HEADINGS: &str = "inferred_numbered_headings";
 const PDF_STRUCTURE_PAGE_FALLBACK: &str = "page_fallback";
+/// How many native-outline entries started their section at a page-boundary fallback because
+/// their heading was not found on the entry's start page (`build_toc_sections_inner`).
+const PDF_TOC_HEADING_FALLBACKS_METADATA_KEY: &str = "pdf_toc_heading_fallbacks";
 const PDF_HEADING_INFERENCE_VERSION_METADATA_KEY: &str = "pdf_heading_inference_version";
 const PDF_HEADING_INFERENCE_COUNT_METADATA_KEY: &str = "pdf_heading_inference_count";
 const PDF_HEADING_INFERENCE_VERSION: &str = "pdf-numbered-heading-inference/v2";
@@ -247,7 +252,13 @@ impl PdfParser {
                     PDF_STRUCTURE_PROVENANCE_METADATA_KEY.into(),
                     PDF_STRUCTURE_NATIVE_TOC.into(),
                 );
-                build_toc_sections(&entries, &pages, max_page)
+                let ((sections, bindings), heading_fallbacks) =
+                    build_toc_sections_inner(&entries, &pages);
+                metadata.insert(
+                    PDF_TOC_HEADING_FALLBACKS_METADATA_KEY.into(),
+                    heading_fallbacks.to_string(),
+                );
+                (sections, bindings)
             }
             PdfStructure::Inferred {
                 headings,
@@ -979,14 +990,54 @@ fn build_page_sections(pages: Vec<PageText>) -> (Vec<Section>, Vec<OriginalSourc
     (sections, bindings)
 }
 
+/// A byte position inside one page's text: where a section starts in document order.
+/// Ordering is document order — page first, then the offset inside that page's text.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TextCut {
+    page: u32,
+    offset: usize,
+}
+
+#[cfg(test)]
 fn build_toc_sections(
     entries: &[PdfTocEntry],
     pages: &[PageText],
-    max_page: u32,
 ) -> (Vec<Section>, Vec<OriginalSourceBinding>) {
+    build_toc_sections_inner(entries, pages).0
+}
+
+/// Sections from the PDF outline (bookmarks).
+///
+/// An outline entry starts its section at the line on its start page that reads as its
+/// heading (`find_heading_cut`), so a page holding three headings is cut three ways instead
+/// of being served three times. Entries are cut in outline order and a cut is never placed
+/// before the previous one, so every character of the covered page text lands in exactly one
+/// section: the first entry starts at the top of its start page (the front matter above its
+/// heading stays with it, as before), every later section runs from its own cut to the next
+/// entry's cut, and the last runs to the end of the text. The text above a heading on its
+/// page therefore belongs to the previous entry in document order, at whatever level, and a
+/// parent keeps the text between its own heading and its first child's heading.
+///
+/// When the heading is not found on the entry's start page the cut falls back to a page
+/// boundary: the first page boundary at or after the later of the top of the entry's own
+/// start page and the previous section's cut (`fallback_cut`). A fallback cut therefore sits
+/// on a page boundary and never goes backwards, so a page is never given to two sections by
+/// it; a section can end up empty when the next entry's cut lands on the same boundary, but
+/// then the text sits in exactly one neighbour. An entry whose page is already behind the
+/// previous cut is out of outline order — its page is long served — so it produces no
+/// boundary at all: its section is empty and the previous section runs on to the next cut.
+/// The returned count is how many entries took the fallback (the first entry never
+/// searches: it keeps its whole start page).
+fn build_toc_sections_inner(
+    entries: &[PdfTocEntry],
+    pages: &[PageText],
+) -> ((Vec<Section>, Vec<OriginalSourceBinding>), usize) {
+    if entries.is_empty() {
+        return ((Vec::new(), Vec::new()), 0);
+    }
     let page_map = pages
         .iter()
-        .map(|page| (page.number, page.text.as_str()))
+        .map(|page| (page.number, page))
         .collect::<BTreeMap<_, _>>();
     let mut nodes = Vec::<SectionNode>::with_capacity(entries.len());
     let mut last_at_level: [Option<usize>; 6] = [None; 6];
@@ -1035,50 +1086,111 @@ fn build_toc_sections(
         });
     }
 
+    let mut cuts = Vec::<TextCut>::with_capacity(entries.len());
+    cuts.push(TextCut {
+        page: entries[0].page,
+        offset: 0,
+    });
+    // A suppressed entry produced no boundary: it is an out-of-order outline entry whose
+    // claimed page is behind the previous cut, so its section stays empty and the previous
+    // section runs on to the next cut instead of the entry dragging its section's text
+    // pages backwards or forwards.
+    let mut suppressed = vec![false; entries.len()];
+    let mut fallbacks = 0_usize;
+    for index in 1..entries.len() {
+        let entry = &entries[index];
+        let previous = cuts[index - 1];
+        suppressed[index] = entry.page < previous.page;
+        let cut = if suppressed[index] {
+            previous
+        } else {
+            let title_key = heading_key(&entry.title);
+            page_map
+                .get(&entry.page)
+                .and_then(|page| {
+                    let min_offset = if previous.page == entry.page {
+                        previous.offset
+                    } else {
+                        0
+                    };
+                    find_heading_cut(page, &title_key, min_offset)
+                })
+                .map(|offset| TextCut {
+                    page: entry.page,
+                    offset,
+                })
+                .unwrap_or_else(|| {
+                    fallbacks += 1;
+                    fallback_cut(entry.page, previous)
+                })
+        };
+        cuts.push(cut);
+    }
+
     let mut bindings = Vec::new();
     for index in 0..nodes.len() {
-        let start_page = nodes[index].start_page;
-        let first_child_page = nodes
+        let start = cuts[index];
+        // The next cut that is a boundary ends this section; suppressed entries are passed
+        // over so the text they would have claimed stays with this section.
+        let end = cuts
             .iter()
-            .filter(|candidate| candidate.parent == Some(index))
-            .map(|candidate| candidate.start_page)
-            .min();
-
-        let end_page = if let Some(child_page) = first_child_page {
-            child_page.checked_sub(1).filter(|page| *page >= start_page)
-        } else {
-            let next_boundary = nodes
-                .iter()
-                .skip(index + 1)
-                .find(|candidate| candidate.level <= nodes[index].level)
-                .map(|candidate| candidate.start_page);
-
-            Some(match next_boundary {
-                Some(page) if page > start_page => page - 1,
-                Some(_) => start_page,
-                None => max_page,
-            })
-        };
-
-        let (content, section_bindings) = end_page
-            .map(|end| {
-                source_text_and_bindings_for_page_range(
-                    &page_map,
-                    &nodes[index].id,
-                    start_page,
-                    end,
-                )
-            })
-            .unwrap_or_default();
-        bindings.extend(section_bindings);
-        let native_location = match end_page {
-            Some(end) if end > start_page => format!("pdf:pages:{start_page}-{end}"),
-            _ => format!("pdf:page:{start_page}"),
+            .copied()
+            .zip(suppressed.iter().copied())
+            .skip(index + 1)
+            .find(|(_, is_suppressed)| !is_suppressed)
+            .map(|(cut, _)| cut)
+            .unwrap_or(TextCut {
+                page: u32::MAX,
+                offset: 0,
+            });
+        let mut content = String::new();
+        let mut first_page = None;
+        let mut last_page = None;
+        for page in pages {
+            if suppressed[index] || page.number < start.page || page.number > end.page {
+                continue;
+            }
+            let slice_start = if page.number == start.page {
+                start.offset
+            } else {
+                0
+            };
+            let slice_end = if page.number == end.page {
+                end.offset
+            } else {
+                page.text.len()
+            };
+            let Some(piece) = page.text.get(slice_start..slice_end) else {
+                continue;
+            };
+            if piece.is_empty() {
+                continue;
+            }
+            first_page = first_page.or(Some(page.number));
+            last_page = Some(page.number);
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            let range_start = content.chars().count();
+            content.push_str(piece);
+            let range_end = content.chars().count();
+            bindings.push(OriginalSourceBinding {
+                owner_section_id: nodes[index].id.clone(),
+                normalized_range: NormalizedTextRange::new(range_start, range_end)
+                    .expect("section slice range must be ordered"),
+                target: OriginalSourceTarget::Page {
+                    page_number: page.number,
+                },
+            });
+        }
+        let native_location = match (first_page, last_page) {
+            (Some(first), Some(last)) => pdf_page_range_location(first, last),
+            _ => format!("pdf:page:{}", nodes[index].start_page),
         };
 
         nodes[index].content = content;
         nodes[index].location = Location {
-            page: Some(start_page),
+            page: Some(nodes[index].start_page),
             chapter: nodes[index].path.first().cloned(),
             section_path: nodes[index].path.clone(),
             native_location: Some(native_location),
@@ -1092,40 +1204,238 @@ fn build_toc_sections(
         .filter(|(_, node)| node.parent.is_none())
         .map(|(index, _)| build_section(index, &nodes))
         .collect();
-    (sections, bindings)
+    ((sections, bindings), fallbacks)
 }
 
-fn source_text_and_bindings_for_page_range(
-    pages: &BTreeMap<u32, &str>,
-    owner_section_id: &SectionId,
-    start_page: u32,
-    end_page: u32,
-) -> (String, Vec<OriginalSourceBinding>) {
-    let mut content = String::new();
-    let mut bindings = Vec::new();
+/// The most chunks a heading can span (`find_heading_cut`): small caps arrive as one short
+/// run per capital group — `R EFLECT S UMM` is four pieces — so a heading is a short run of
+/// consecutive pieces, not necessarily a single one.
+const MAX_HEADING_CHUNKS: usize = 16;
 
-    for page_number in start_page..=end_page {
-        let Some(text) = pages.get(&page_number).copied() else {
-            continue;
-        };
-        if text.trim().is_empty() {
-            continue;
+/// The page boundary a not-found entry's section starts at: the first boundary at or after
+/// the later of the top of the entry's own page and the previous cut. A previous cut sitting
+/// at a page top leaves that same boundary available — the previous section may then end up
+/// empty — while a previous cut inside a page owns the rest of that page, so the fallback
+/// moves one page boundary later (the only case where a section may start a page after its
+/// entry's page). An entry whose page is already behind the previous cut is out of outline
+/// order; it is suppressed in `build_toc_sections_inner` and never reaches this function.
+fn fallback_cut(entry_page: u32, previous: TextCut) -> TextCut {
+    let page = if previous.offset == 0 {
+        entry_page
+    } else {
+        entry_page.max(previous.page.saturating_add(1))
+    };
+    TextCut { page, offset: 0 }
+}
+
+/// The byte offset where the section's heading starts on its page: the first candidate
+/// starting at or after `min_offset` that `heading_key_matches`. Candidates are the page's
+/// own text pieces — every `\n` line plus every run of up to `MAX_HEADING_CHUNKS` consecutive
+/// chunks — because the backend may glue a heading to body text on one extracted line while
+/// still emitting it as its own chunk. A mention of the title inside a longer piece, such as
+/// "see Related Work" inside a paragraph, is never a candidate: the heading must be the whole
+/// piece.
+fn find_heading_cut(page: &PageText, title_key: &str, min_offset: usize) -> Option<usize> {
+    let text = page.text.as_str();
+    let mut best: Option<usize> = None;
+
+    let mut line_start = 0_usize;
+    for line in text.split('\n') {
+        if line_start >= min_offset
+            && starts_like_heading(line)
+            && heading_key_matches(&heading_key(line), title_key)
+        {
+            best = Some(line_start);
+            break;
         }
-        if !content.is_empty() {
-            content.push_str("\n\n");
-        }
-        let start = content.chars().count();
-        content.push_str(text);
-        let end = content.chars().count();
-        bindings.push(OriginalSourceBinding {
-            owner_section_id: owner_section_id.clone(),
-            normalized_range: NormalizedTextRange::new(start, end)
-                .expect("page binding range must be ordered"),
-            target: OriginalSourceTarget::Page { page_number },
-        });
+        line_start += line.len() + 1;
     }
 
-    (content, bindings)
+    // Each chunk is the trim of its piece of the page text, so it occurs exactly once at or
+    // after the previous chunk: a sequential scan recovers its byte offset. Folding every
+    // chunk once also lets a run key be the concatenation of its chunks' keys — a `match`
+    // run is built only where the first chunk can still start `numbering + title`, and the
+    // scan ends at the earliest match found.
+    let chunk_keys = page
+        .chunks
+        .iter()
+        .map(|chunk| heading_key(chunk))
+        .collect::<Vec<_>>();
+    let mut chunk_starts = Vec::with_capacity(page.chunks.len());
+    let mut cursor = 0_usize;
+    for chunk in &page.chunks {
+        let Some(relative) = text[cursor..].find(chunk.as_str()) else {
+            break;
+        };
+        chunk_starts.push(cursor + relative);
+        cursor += relative + chunk.len();
+    }
+    for (index, &start) in chunk_starts.iter().enumerate() {
+        if start < min_offset {
+            continue;
+        }
+        if best.is_some_and(|current| start >= current) {
+            break;
+        }
+        let first = &chunk_keys[index];
+        if !(starts_like_heading(&page.chunks[index])
+            && (title_key.starts_with(first.as_str())
+                || is_numbering_prefix(first)
+                || numbering_title_span(first, title_key)))
+        {
+            continue;
+        }
+        let mut run = String::new();
+        for (inner, chunk) in page.chunks.iter().enumerate().skip(index) {
+            run.push_str(&chunk_keys[inner]);
+            let run_end = chunk_starts[inner] + chunk.len();
+            if run.len() > title_key.len() + MAX_NUMBERING_CHARS {
+                break;
+            }
+            // A mention styled into its own chunks ("...and extractive summarization model...")
+            // also matches a whole run, but the sentence continues with a lowercase word; a
+            // real heading is followed by a new sentence, a list item or the page end.
+            if !text[run_end..]
+                .chars()
+                .find(|character| !character.is_whitespace())
+                .is_some_and(|character| character.is_lowercase())
+                && heading_key_matches(&run, title_key)
+            {
+                best = Some(start);
+            }
+            if inner - index + 1 >= MAX_HEADING_CHUNKS {
+                break;
+            }
+        }
+    }
+    best
+}
+
+/// Whether `text` can begin a heading line or chunk run: a real heading opens with an
+/// uppercase letter, a digit or a roman numeral — never a lowercase word. The lowercase
+/// `rerandomization` on its own line is a mention of the title inside running text, and
+/// the `n` of `2^n.` glued onto `n . B Numerical Computation` is the tail of an equation,
+/// not numbering; cutting at either would steal the previous section's running text. A
+/// lowercase roman numeral (`iv. methods`) still heads a section.
+fn starts_like_heading(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    if !first.is_lowercase() {
+        return true;
+    }
+    let token = trimmed.split_whitespace().next().unwrap_or_default();
+    let stem = token.trim_end_matches(['.', ':', ')']);
+    stem.len() >= 2 && stem.bytes().all(|byte| b"ivxlcdm".contains(&byte))
+}
+
+/// The key a line and an outline title compare by: NFKC (so a ligature equals its letters),
+/// the same dash/quote fold the reference probes apply, every whitespace character dropped
+/// and case folded — so arXiv's small caps, extracted as `R EFLECT S UMM`, match `Reflect
+/// Summ`, and an extracted `BART’s` matches the outline's `BART's`.
+fn heading_key(text: &str) -> String {
+    text.nfkc()
+        .map(|character| match character {
+            '\u{2010}'..='\u{2014}' | '\u{2212}' => '-',
+            '\u{00AD}' | '\u{200B}' => ' ',
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            other => other,
+        })
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The longest leading token `heading_key_matches` drops as numbering: `appendix` plus a
+/// short label is the longest form below.
+const MAX_NUMBERING_CHARS: usize = 24;
+
+/// Whether `key` (a `heading_key` result, so case and whitespace are already folded) is
+/// exactly the outline title — exactly enough that a body-text mention of the title inside a
+/// longer piece cannot match — or the title preceded only by a numbering token.
+fn heading_key_matches(key: &str, title_key: &str) -> bool {
+    if key == title_key {
+        return true;
+    }
+    for (index, _) in key.char_indices().take(MAX_NUMBERING_CHARS + 1) {
+        if index == 0 || !is_numbering_prefix(&key[..index]) {
+            continue;
+        }
+        let remainder = key[index..].trim_start_matches(['.', ':', '-', '–', '—']);
+        if remainder == title_key {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `first`, the folded key of a run's first chunk, can begin `numbering + title`
+/// across the numbering/title split: some prefix of it is numbering and the rest is the
+/// start of the title. Lets `find_heading_cut` skip runs whose first chunk is plain body
+/// text without making a glued numbering-plus-title chunk (`3.1.Dataset`) invisible.
+fn numbering_title_span(first: &str, title_key: &str) -> bool {
+    first
+        .char_indices()
+        .take(MAX_NUMBERING_CHARS + 1)
+        .skip(1)
+        .any(|(index, _)| {
+            is_numbering_prefix(&first[..index])
+                && title_key
+                    .starts_with(first[index..].trim_start_matches(['.', ':', '-', '–', '—']))
+        })
+}
+
+/// Whether `prefix`, a whitespace- and case-folded leading token of a line, is outline
+/// numbering rather than title text: digits and dots (`3`, `3.`, `3.1`, `3.1.2.`), a
+/// letter-led segment path (`A`, `A.`, `A.2`, `B.1.3`), a roman numeral (`iv`, `IV.`,
+/// `xii`), or `appendix` with an optional label (`appendix`, `appendixa`, `appendixb.2`).
+fn is_numbering_prefix(prefix: &str) -> bool {
+    let stripped = prefix.trim_end_matches(['.', ':']);
+    if stripped.is_empty() {
+        return false;
+    }
+    if stripped
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && stripped.bytes().any(|byte| byte.is_ascii_digit())
+        && !stripped.starts_with('.')
+        && !stripped.contains("..")
+    {
+        return true;
+    }
+    if stripped.len() >= 2 && stripped.bytes().all(|byte| b"ivxlcdm".contains(&byte)) {
+        return true;
+    }
+    if let Some(rest) = stripped.strip_prefix("appendix") {
+        return rest.is_empty()
+            || rest.split('.').all(|part| {
+                !part.is_empty()
+                    && part.len() <= 3
+                    && part.bytes().all(|b| b.is_ascii_alphanumeric())
+            });
+    }
+    let mut chars = stripped.chars();
+    if chars
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic())
+    {
+        let rest = chars.as_str();
+        if rest.is_empty() {
+            return true;
+        }
+        if let Some(path) = rest.strip_prefix('.') {
+            // Every segment is short: a number (`A.2`, `B.1.3`) or a short letter token
+            // (`A.b`, `A.iv`) — never a word, so `c.evaluationmetricsc.1` is not a path.
+            return path.split('.').all(|part| {
+                !part.is_empty()
+                    && (part.bytes().all(|byte| byte.is_ascii_digit())
+                        || (part.len() <= 2 && part.bytes().all(|byte| byte.is_ascii_alphabetic())))
+            });
+        }
+    }
+    false
 }
 
 fn build_section(index: usize, nodes: &[SectionNode]) -> Section {
@@ -2363,7 +2673,7 @@ mod tests {
                 page: 2,
             },
         ];
-        let (sections, bindings) = build_toc_sections(&entries, &pages, 2);
+        let (sections, bindings) = build_toc_sections(&entries, &pages);
         assert_bindings_slice_their_pages("native TOC", &sections, &bindings, &pages, true);
 
         let mut fragmented = pages.clone();
@@ -2389,6 +2699,351 @@ mod tests {
         ];
         let (sections, bindings) = build_inferred_heading_sections(&headings, &fragments);
         assert_bindings_slice_their_pages("inferred headings", &sections, &bindings, &pages, false);
+    }
+
+    fn toc_test_pages(texts: &[&str]) -> Vec<PageText> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| PageText {
+                number: index as u32 + 1,
+                text: (*text).to_string(),
+                chunks: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn toc_test_entries(entries: &[(u8, &str, u32)]) -> Vec<PdfTocEntry> {
+        entries
+            .iter()
+            .map(|(level, title, page)| PdfTocEntry {
+                level: *level,
+                title: (*title).to_string(),
+                page: *page,
+            })
+            .collect()
+    }
+
+    /// Every section's `(id, title, content)` flattened in document order.
+    fn flatten_toc_sections(sections: &[Section]) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        fn walk(section: &Section, out: &mut Vec<(String, String, String)>) {
+            out.push((
+                section.id.0.clone(),
+                section.title.clone(),
+                section.content.clone(),
+            ));
+            for child in &section.children {
+                walk(child, out);
+            }
+        }
+        for section in sections {
+            walk(section, &mut out);
+        }
+        out
+    }
+
+    fn whitespace_free(text: &str) -> String {
+        text.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    /// TOC-dup: three headings share one page. Each section starts at its heading and no page
+    /// text is served twice; the first entry still owns the front matter above its heading.
+    #[test]
+    fn toc_sections_cut_each_heading_on_a_shared_page() {
+        let pages = toc_test_pages(&["cover\nOne\nbody one\nTwo\nbody two\nThree\nbody three"]);
+        let entries = toc_test_entries(&[(1, "One", 1), (1, "Two", 1), (1, "Three", 1)]);
+        let (sections, bindings) = build_toc_sections(&entries, &pages);
+        assert_bindings_slice_their_pages("native TOC", &sections, &bindings, &pages, false);
+
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat.len(), 3);
+        assert_eq!(flat[0].2, "cover\nOne\nbody one\n");
+        assert_eq!(flat[1].2, "Two\nbody two\n");
+        assert_eq!(flat[2].2, "Three\nbody three");
+        let joined = flat
+            .iter()
+            .map(|(_, _, content)| content.as_str())
+            .collect::<String>();
+        assert_eq!(whitespace_free(&joined), whitespace_free(&pages[0].text));
+    }
+
+    /// TOC-dup: a parent whose first child starts on the parent's own page keeps the text
+    /// between its own heading and the child's heading instead of whole pages or nothing.
+    #[test]
+    fn a_toc_parent_keeps_only_its_own_text() {
+        let pages = toc_test_pages(&["Chapter\nown words\nSection A\na words\nSection B\nb words"]);
+        let entries =
+            toc_test_entries(&[(1, "Chapter", 1), (2, "Section A", 1), (2, "Section B", 1)]);
+        let (sections, _) = build_toc_sections(&entries, &pages);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].children.len(), 2);
+
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "Chapter\nown words\n");
+        assert_eq!(flat[1].2, "Section A\na words\n");
+        assert_eq!(flat[2].2, "Section B\nb words");
+    }
+
+    /// TOC-dup: a heading that is not on the entry's start page falls back to a page boundary.
+    /// `Beta`'s title is absent from page 1 and the previous cut sits at the top of page 1,
+    /// so the fallback reuses that same boundary — `Alpha` ends up empty and page 1's text
+    /// sits in exactly one neighbour instead of pushing `Beta` a page late. `Gamma` is found
+    /// at the top of page 2. Nothing repeats and nothing is lost.
+    #[test]
+    fn a_toc_entry_whose_heading_is_missing_falls_back_to_a_page_boundary() {
+        let pages = toc_test_pages(&["Alpha\nalpha words\nBeta text", "Gamma\ng body"]);
+        let entries = toc_test_entries(&[(1, "Alpha", 1), (1, "Beta", 1), (1, "Gamma", 2)]);
+        let ((sections, _), fallbacks) = build_toc_sections_inner(&entries, &pages);
+        assert_eq!(fallbacks, 1);
+
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "");
+        assert_eq!(flat[1].2, "Alpha\nalpha words\nBeta text");
+        assert_eq!(flat[2].2, "Gamma\ng body");
+        let joined = flat
+            .iter()
+            .map(|(_, _, content)| content.as_str())
+            .collect::<String>();
+        assert_eq!(
+            whitespace_free(&joined),
+            whitespace_free(&format!("{}\n{}", pages[0].text, pages[1].text))
+        );
+    }
+
+    /// TOC-dup: consecutive not-found entries on one page fall back to the same boundary —
+    /// each previous section goes empty — instead of pushing one page later every time, so
+    /// no section ever starts more than one page after its entry page and the drift cannot
+    /// accumulate.
+    #[test]
+    fn fallback_cuts_on_one_page_do_not_drift() {
+        let pages = toc_test_pages(&[
+            "p1",
+            "p2",
+            "p3",
+            "p4",
+            "five words",
+            "six words",
+            "seven words",
+        ]);
+        let entries = toc_test_entries(&[
+            (1, "Alpha", 5),
+            (1, "Beta", 5),
+            (1, "Gamma", 5),
+            (1, "Delta", 6),
+            (1, "Epsilon", 7),
+        ]);
+        let ((sections, _), fallbacks) = build_toc_sections_inner(&entries, &pages);
+        assert_eq!(fallbacks, 4);
+
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "");
+        assert_eq!(flat[1].2, "");
+        assert_eq!(flat[2].2, "five words");
+        assert_eq!(flat[3].2, "six words");
+        assert_eq!(flat[4].2, "seven words");
+    }
+
+    /// TOC-dup: an out-of-order outline entry whose claimed page is behind the previous cut
+    /// produces no boundary — its section is empty and the previous section runs on to the
+    /// next cut — so a misplaced entry can never drag a section's text pages away.
+    #[test]
+    fn an_out_of_order_entry_stays_empty() {
+        let pages = toc_test_pages(&[
+            "p1",
+            "p2",
+            "p3",
+            "p4",
+            "p5",
+            "six start\nsix words",
+            "seven words",
+        ]);
+        let entries = toc_test_entries(&[(1, "Six", 6), (1, "Misplaced", 3), (1, "Seven", 7)]);
+        let ((sections, _), fallbacks) = build_toc_sections_inner(&entries, &pages);
+        // `Misplaced` is suppressed, not a heading fallback; only `Seven` fell back.
+        assert_eq!(fallbacks, 1);
+
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "six start\nsix words");
+        assert_eq!(flat[1].2, "");
+        assert_eq!(flat[2].2, "seven words");
+    }
+
+    /// TOC-dup: when the heading is not found and the previous section ended on an earlier
+    /// page, the fallback cut is the top of the entry's own start page — today's whole-page
+    /// shape, without the repeats.
+    #[test]
+    fn a_fallback_cut_is_the_top_of_the_entry_page() {
+        let pages = toc_test_pages(&["Alpha\na text", "plain words\nno heading", "Gamma\ng text"]);
+        let entries = toc_test_entries(&[(1, "Alpha", 1), (1, "Beta", 2), (1, "Gamma", 3)]);
+        let ((sections, _), fallbacks) = build_toc_sections_inner(&entries, &pages);
+        assert_eq!(fallbacks, 1);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "Alpha\na text");
+        assert_eq!(flat[1].2, "plain words\nno heading");
+        assert_eq!(flat[2].2, "Gamma\ng text");
+    }
+
+    /// TOC-dup: a lowercase mention of the title on its own line is running text, not the
+    /// heading — `rerandomization` sits in the previous section's list and the cut lands
+    /// at the numbered `6.1 Rerandomization` line instead.
+    #[test]
+    fn a_lowercase_mention_of_a_title_does_not_cut() {
+        let pages = toc_test_pages(&["Top\nlist tail\nrerandomization\nregression \
+                                    adjustment\n6.1 Rerandomization\nreal body"]);
+        let entries = toc_test_entries(&[(1, "Top", 1), (2, "Rerandomization", 1)]);
+        let (sections, _) = build_toc_sections(&entries, &pages);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(
+            flat[0].2,
+            "Top\nlist tail\nrerandomization\nregression adjustment\n"
+        );
+        assert_eq!(flat[1].2, "6.1 Rerandomization\nreal body");
+    }
+
+    /// TOC-dup: glued running text that parses as numbering (`n .` — the tail of `2^n.` —
+    /// before `B Numerical Computation`) does not pull the cut into the previous section;
+    /// the cut lands on the title chunk itself.
+    #[test]
+    fn glued_equation_tail_does_not_steal_the_cut() {
+        let text = "eq 2\nn . B Numerical Computation We perform";
+        let page = PageText {
+            number: 1,
+            text: text.to_string(),
+            chunks: ["eq 2", "n . B", "Numerical Computation", "We perform"]
+                .iter()
+                .map(|chunk| (*chunk).to_string())
+                .collect(),
+        };
+        let entries = toc_test_entries(&[(1, "Intro", 1), (1, "Numerical Computation", 1)]);
+        let (sections, _) = build_toc_sections(&entries, &[page]);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "eq 2\nn . B ");
+        assert_eq!(flat[1].2, "Numerical Computation We perform");
+    }
+
+    /// TOC-dup: a lowercase roman numeral is still numbering — `iv. Numerical methods`
+    /// cuts at its heading.
+    #[test]
+    fn a_lowercase_roman_numeral_heading_still_cuts() {
+        let pages = toc_test_pages(&["Top\nwords\niv. Numerical methods\nbody"]);
+        let entries = toc_test_entries(&[(1, "Top", 1), (1, "Numerical methods", 1)]);
+        let (sections, _) = build_toc_sections(&entries, &pages);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[1].2, "iv. Numerical methods\nbody");
+    }
+
+    /// TOC-dup: a mention of the next title inside a longer line is not a heading. `Two`
+    /// still cuts at the line that is the heading alone.
+    #[test]
+    fn a_body_text_mention_of_a_later_title_does_not_cut() {
+        let pages =
+            toc_test_pages(&["One\nwords\nsee Two later for details\nmore words\nTwo\ntwo text"]);
+        let entries = toc_test_entries(&[(1, "One", 1), (1, "Two", 1)]);
+        let (sections, _) = build_toc_sections(&entries, &pages);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(
+            flat[0].2,
+            "One\nwords\nsee Two later for details\nmore words\n"
+        );
+        assert_eq!(flat[1].2, "Two\ntwo text");
+    }
+
+    /// TOC-dup: small-caps spacing (`R EFLECT S UMM`) and numbering prefixes (`3.1 `, `A `)
+    /// still match the outline title.
+    #[test]
+    fn small_caps_spacing_and_numbering_prefixes_still_match() {
+        let pages = toc_test_pages(&["R EFLECT S UMM\nx\n3.1 Methods\ny\nA Results\nz"]);
+        let entries =
+            toc_test_entries(&[(1, "Reflect Summ", 1), (1, "Methods", 1), (1, "Results", 1)]);
+        let (sections, _) = build_toc_sections(&entries, &pages);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "R EFLECT S UMM\nx\n");
+        assert_eq!(flat[1].2, "3.1 Methods\ny\n");
+        assert_eq!(flat[2].2, "A Results\nz");
+    }
+
+    /// TOC-dup: a heading glued to body text inside one extracted line still cuts when the
+    /// backend emits it as its own chunks, and a title mention whose chunk run is followed
+    /// by lowercase prose does not cut.
+    #[test]
+    fn a_heading_glued_into_a_line_cuts_at_its_chunks() {
+        let text = "words 3.1. Dataset Collection and Annotation\nNext para\nand \
+                    extractive summarization model works";
+        let page = PageText {
+            number: 1,
+            text: text.to_string(),
+            chunks: [
+                "words",
+                "3.1.",
+                "Dataset",
+                "Collection",
+                "and",
+                "Annotation",
+                "Next para",
+                "and",
+                "extractive",
+                "summarization",
+                "model works",
+            ]
+            .iter()
+            .map(|chunk| (*chunk).to_string())
+            .collect(),
+        };
+        let entries = toc_test_entries(&[
+            (1, "Intro", 1),
+            (1, "Dataset Collection and Annotation", 1),
+            (1, "Extractive Summarization", 1),
+        ]);
+        let (sections, _) = build_toc_sections(&entries, &[page]);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "words ");
+        assert_eq!(
+            flat[1].2,
+            "3.1. Dataset Collection and Annotation\nNext para\nand extractive summarization \
+             model works"
+        );
+        // The mention of `extractive summarization` continues with a lowercase word, so it
+        // is not a heading; the fallback pushes `Extractive Summarization` to the next page
+        // boundary, past the last page, so it is empty and nothing repeats.
+        assert_eq!(flat[2].2, "");
+    }
+
+    /// TOC-dup: the sections in document order cover exactly the page text the old builder
+    /// covered — from the first entry's start page to the last page — with the repeats gone.
+    #[test]
+    fn joined_toc_sections_cover_the_old_page_text_without_repeats() {
+        let pages = toc_test_pages(&[
+            "C One\np1 words",
+            "lead\nC Two\nt2\nC Three\nt3",
+            "C Four\np3 end",
+        ]);
+        let entries = toc_test_entries(&[
+            (1, "C One", 1),
+            (1, "C Two", 2),
+            (1, "C Three", 2),
+            (1, "C Four", 3),
+        ]);
+        let (sections, _) = build_toc_sections(&entries, &pages);
+        let flat = flatten_toc_sections(&sections);
+        assert_eq!(flat[0].2, "C One\np1 words\n\nlead\n");
+        assert_eq!(flat[1].2, "C Two\nt2\n");
+        assert_eq!(flat[2].2, "C Three\nt3");
+        assert_eq!(flat[3].2, "C Four\np3 end");
+
+        // The old builder covered pages 1, 2, 2, 2 and 3: the joined text is the same
+        // coverage with each page present once.
+        let old_coverage = format!(
+            "{}\n\n{}\n\n{}",
+            pages[0].text, pages[1].text, pages[2].text
+        );
+        let joined = flat
+            .iter()
+            .map(|(_, _, content)| content.as_str())
+            .collect::<String>();
+        assert_eq!(whitespace_free(&joined), whitespace_free(&old_coverage));
     }
 
     fn push_section_golden(out: &mut String, section: &Section) {

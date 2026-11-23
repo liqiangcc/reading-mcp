@@ -27,7 +27,10 @@ pub const TEXT_UNIT_STREAM_VERSION: &str = "text-unit-stream/v1";
 /// v12 (LAYOUT-1) changes the `section_layout_v2` row shape: the paragraph coverage and the four
 /// stream coverages are varint blobs instead of JSON text, the paragraph coverage no longer repeats
 /// the section id it is stored under, and the section id lookup index is `(doc_key, id_hash)`.
-pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v12";
+///
+/// v13 (#250) adds the `original_source_bindings_v1` rows `cite` reads a unit's own page from:
+/// a document stored before them has no rows, so it re-ingests once on its next open.
+pub const TEXT_UNIT_STORE_VERSION: &str = "text-unit-store/v13";
 
 /// A borrowed unit of a section stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

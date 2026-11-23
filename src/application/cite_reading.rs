@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::application::handle_reading::{resolve_header, resolve_locator};
+use crate::application::handle_reading::{ResolvedHeader, resolve_header, resolve_locator};
 use crate::application::ports::{DocumentRepository, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::carrier_section;
@@ -99,7 +99,9 @@ impl CiteReadingUseCase {
             let source_position = locator
                 .as_ref()
                 .and_then(|locator| locator.native_location.clone());
-            let page = source_position.as_deref().and_then(page_of);
+            let page = self
+                .cite_page(&resolved, locator.as_ref(), source_position.as_deref())
+                .await?;
             items.push(CiteReadingItem {
                 at: at.clone(),
                 locator,
@@ -113,6 +115,48 @@ impl CiteReadingUseCase {
             });
         }
         Ok(CiteReadingResult { items })
+    }
+
+    /// The page one cited handle sits on.
+    ///
+    /// A paragraph or sentence handle of a PDF reports the page of the unit's first character,
+    /// read from the owner section's original-source bindings — the page `source_view` renders
+    /// for the unit when it sits inside one page, and still its first page when the unit crosses
+    /// a page break. A section or document handle, and every handle of a non-PDF document, keeps
+    /// the page its `src` names.
+    async fn cite_page(
+        &self,
+        resolved: &ResolvedHeader,
+        locator: Option<&TextLocator>,
+        source_position: Option<&str>,
+    ) -> Result<Option<u32>, ReadingError> {
+        let Some(locator) = locator else {
+            return Ok(None);
+        };
+        let Some(range) = locator.normalized_range else {
+            return Ok(source_position.and_then(page_of));
+        };
+        if !resolved.header().media_type.is_pdf() {
+            return Ok(source_position.and_then(page_of));
+        }
+        if let Some(page) = self
+            .repository
+            .original_source_page_at(resolved.id(), &locator.owner_section_id, range.start())
+            .await?
+        {
+            return Ok(Some(page));
+        }
+        match source_position {
+            // A one-page section needs no binding row to name its page: a stored PDF written
+            // before the rows existed still answers.
+            Some(position) if position.starts_with("pdf:page:") => Ok(page_of(position)),
+            // A PDF unit whose section has no binding that covers it was stored before the rows
+            // existed; reopening re-ingests it. The section's start page would be the wrong page.
+            Some(position) if position.starts_with("pdf:") => Err(ReadingError::stale_handle(
+                "the stored PDF keeps no original-source binding that covers this unit; open the document again",
+            )),
+            _ => Ok(None),
+        }
     }
 
     /// The v1 locator `source_view` renders for a handle.

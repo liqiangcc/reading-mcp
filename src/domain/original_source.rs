@@ -120,6 +120,22 @@ impl Document {
 }
 
 impl OriginalSourceBindingMap {
+    /// The page of the binding of `owner_section_id` whose normalized range contains `offset`
+    /// (`start <= offset < end`), or `None` when no stored binding covers it. A validated map
+    /// never holds two bindings of one section that cover the same offset.
+    pub fn page_at_offset(&self, owner_section_id: &SectionId, offset: usize) -> Option<u32> {
+        self.bindings
+            .iter()
+            .filter(|binding| &binding.owner_section_id == owner_section_id)
+            .find(|binding| {
+                binding.normalized_range.start() <= offset
+                    && offset < binding.normalized_range.end()
+            })
+            .map(|binding| match binding.target {
+                OriginalSourceTarget::Page { page_number } => page_number,
+            })
+    }
+
     /// The binding of `owner_section_id` that contains `range`, or the error a lookup reports.
     pub fn target_for_range(
         &self,

@@ -1,6 +1,6 @@
-//! V2-4b PR-2, §5: the ported `ocr_private_mcp` helper. It is `tests/support/ocr_private_mcp.rs`
-//! on the v2 tools: `open` instead of `open_document`, and `cite` for the normalized identity that
-//! the v1 response carried. Everything it asserts is storage-level and unchanged: the publication
+//! V2-4b PR-2, §5: the ported `ocr_private_mcp` helper. It replaces
+//! `tests/support/ocr_private_mcp.rs` (deleted in PR-5) on the v2 tools: `open` instead of
+//! `open_document`, and `cite` for the normalized identity that the v1 response carried. Everything it asserts is storage-level and unchanged: the publication
 //! row, the OCR evidence blob, the runtime package manifest, the parsed-cache telemetry, the
 //! corrupted-package boot rejection and the post-startup model-drift rejection.
 //!

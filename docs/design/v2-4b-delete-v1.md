@@ -105,6 +105,7 @@ The 24 files that run v1 tools (`READING_MCP_TOOLS=v1|both` or literal v1 `tools
 | 22 | `tests/v2_coarse_paragraph_kind.rs` | v2 `read`/`cite` mark a whole-paragraph answer; env helper tolerates absent `READING_MCP_TOOLS` | v2 already | **keep as-is** (env helper just stops setting the var) |
 | 23 | `tests/v2_open_read.rs` | v2 open/read contract **plus** v1 tools/list byte-pin, switch behaviour, v1 comparators | the v1 comparators exist only to prove v2==v1 | **keep v2 tests**; delete `tools_switch_*` v1 legs, `DEFAULT_TOOLS_LIST_BYTES`, `v1_*` helpers |
 | 24 | `tests/v2_tools.rs` | v2 browse/outline/search/cite/source_view contracts; `cite`/v1 locator equality; `v1_stays_selectable` | — | **keep**; drop the `get_text_units` rejection check and `v1_*` helpers, keep `cite` locator assertions against stored locators |
+| 25 | `tests/whole_document_reading.rs` | whole-document composition in body order with truthful completion; a saved locator resumes after a restart and questions do not advance; reopening after a restart returns the stored open result | `v2_phase8_http_reading_lifecycle` and `v2_phase6_mcp_stdio` cover the saved-locator restart; the composition and the stored-open reopen are not covered | **port** the composition and the reopen to `v2_open_read`/`v2_phase6_mcp_stdio`; the v1 cursor "questions do not advance" is dropped (§2.1 item 3) |
 
 Plus `src/mcp/ocr_error_tests.rs` (in-crate): binds `ToolSet::V1` + `open_document` to prove
 OCR errors stay actionable and private. **Port** to `ToolSet::V2` + `open` — trivial, same

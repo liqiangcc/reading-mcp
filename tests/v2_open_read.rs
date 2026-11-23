@@ -1,12 +1,9 @@
-//! The v2 `open`/`read` contract: short handles, sequence equivalence with v1, `back`, errors and
-//! the `READING_MCP_TOOLS` switch.
+//! The v2 `open`/`read` contract: short handles, the reading order of every format, `back` and
+//! errors.
 
 use std::io::{Cursor, Write};
 use std::path::Path;
 
-use reading_mcp::mcp::contracts::{
-    GetDocumentStructureResponse, GetTextUnitsResponse, OpenDocumentResponse, SectionNode,
-};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::transport::TokioChildProcess;
@@ -15,18 +12,6 @@ use tokio::process::Command;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ()>;
-
-const V1_TOOLS: [&str; 9] = [
-    "get_context",
-    "get_document_structure",
-    "get_source_view",
-    "get_text_units",
-    "list_directory",
-    "list_documents",
-    "open_document",
-    "read_document",
-    "search_document",
-];
 
 /// The v2 tool set: `open`, `read` and the five navigation/citation tools, as `tools/list`
 /// returns them (alphabetical).
@@ -39,10 +24,6 @@ const V2_TOOLS: [&str; 7] = [
     "search",
     "source_view",
 ];
-
-/// The byte size of the `tools/list` result with `READING_MCP_TOOLS=v1` on `main`. The v2 switch
-/// must not move it.
-const DEFAULT_TOOLS_LIST_BYTES: usize = 38_773;
 
 // ------------------------------------------------------------------------------------------------
 // Fixtures
@@ -130,18 +111,14 @@ fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
 // Transport helpers
 // ------------------------------------------------------------------------------------------------
 
-async fn start_client(local_root: &Path, state_dir: &Path, tools: Option<&str>) -> Client {
+async fn start_client(local_root: &Path, state_dir: &Path) -> Client {
     let local_roots = std::env::join_paths([local_root]).expect("local roots should be valid");
     let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", state_dir)
-        .env("READING_MCP_TELEMETRY", "false");
-    if let Some(tools) = tools {
-        command.env("READING_MCP_TOOLS", tools);
-    } else {
-        command.env_remove("READING_MCP_TOOLS");
-    }
+        .env("READING_MCP_TELEMETRY", "false")
+        .env_remove("READING_MCP_TOOLS");
     let transport = TokioChildProcess::new(command).expect("MCP process should start");
     ().serve(transport)
         .await
@@ -293,85 +270,6 @@ async fn v2_walk(client: &Client, from: &str, extra: Value) -> (Vec<V2Item>, Vec
     (collected, boundaries)
 }
 
-async fn v1_open(client: &Client, path: &Path) -> OpenDocumentResponse {
-    client
-        .call_tool(
-            CallToolRequestParams::new("open_document")
-                .with_arguments(arguments(json!({ "source": path.to_string_lossy() }))),
-        )
-        .await
-        .expect("open_document should succeed")
-        .into_typed::<OpenDocumentResponse>()
-        .expect("open response should deserialize")
-}
-
-/// Every section of a document with its v1 body order.
-async fn v1_sections(client: &Client, document_id: &str) -> Vec<(usize, String)> {
-    let mut sections = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..10_000 {
-        let mut value = Map::new();
-        value.insert("document_id".into(), json!(document_id));
-        value.insert("max_nodes".into(), json!(200));
-        if let Some(cursor) = &cursor {
-            value.insert("cursor".into(), json!(cursor));
-        }
-        let response = client
-            .call_tool(CallToolRequestParams::new("get_document_structure").with_arguments(value))
-            .await
-            .expect("get_document_structure should succeed")
-            .into_typed::<GetDocumentStructureResponse>()
-            .expect("structure response should deserialize");
-        collect_sections(&response.sections, &mut sections);
-        cursor = response.next_cursor;
-        if cursor.is_none() || response.complete {
-            break;
-        }
-    }
-    sections.sort_by_key(|(order, _)| *order);
-    sections
-}
-
-fn collect_sections(nodes: &[SectionNode], output: &mut Vec<(usize, String)>) {
-    for node in nodes {
-        output.push((node.body_order, node.section_id.clone()));
-        collect_sections(&node.children, output);
-    }
-}
-
-/// The v1 reference text sequence: every section in body order, in the requested stream.
-async fn v1_texts(client: &Client, document_id: &str, kind: &str) -> Vec<String> {
-    let mut texts = Vec::new();
-    for (_, section_id) in v1_sections(client, document_id).await {
-        let mut cursor: Option<String> = None;
-        for _ in 0..100_000 {
-            let mut value = Map::new();
-            value.insert("document_id".into(), json!(document_id));
-            value.insert("section_id".into(), json!(section_id));
-            value.insert("requested_kind".into(), json!(kind));
-            value.insert("direction".into(), json!("forward"));
-            value.insert("coverage_policy".into(), json!("preserve_source"));
-            value.insert("max_items".into(), json!(256));
-            if let Some(cursor) = &cursor {
-                value.insert("cursor".into(), json!(cursor));
-            }
-            let response = client
-                .call_tool(CallToolRequestParams::new("get_text_units").with_arguments(value))
-                .await
-                .expect("get_text_units should succeed")
-                .into_typed::<GetTextUnitsResponse>()
-                .expect("text-unit response should deserialize");
-            texts.extend(response.items.into_iter().map(|item| item.text));
-            if response.complete {
-                break;
-            }
-            cursor = response.next_cursor;
-            assert!(cursor.is_some(), "an incomplete page must carry a cursor");
-        }
-    }
-    texts
-}
-
 fn texts_of(items: &[V2Item]) -> Vec<String> {
     items.iter().map(|item| item.text.clone()).collect()
 }
@@ -381,18 +279,80 @@ fn arguments(value: Value) -> Map<String, Value> {
 }
 
 // ------------------------------------------------------------------------------------------------
-// 2. Sequence equivalence: the main gate
+// 2. Reading order: the main gate
 // ------------------------------------------------------------------------------------------------
 
+/// The exact sentence sequence, paragraph sequence and section-start positions of each fixture.
+///
+/// These are the fixtures' own texts. The v1 comparison that used to produce them is gone with the
+/// v1 tools; a v2 change that reorders, drops or repeats an item fails here.
+fn expected_reading(name: &str) -> (Vec<&'static str>, Vec<&'static str>, Vec<usize>) {
+    match name {
+        "markdown.md" => (
+            vec![
+                "Introduction sentence.",
+                "Second introduction sentence.",
+                "Alpha one is the first sentence.",
+                "Alpha two is the second sentence.",
+                "Alpha three is the third sentence.",
+                "Beta one is the first sentence.",
+                "Beta two is the second sentence.",
+                "Beta three is the third sentence.",
+            ],
+            vec![
+                "Introduction sentence. Second introduction sentence.",
+                "Alpha one is the first sentence. Alpha two is the second sentence. Alpha three is the third sentence.",
+                "Beta one is the first sentence. Beta two is the second sentence. Beta three is the third sentence.",
+            ],
+            vec![0, 2, 5],
+        ),
+        "plain.txt" => (
+            vec![
+                "Plain first sentence.",
+                "Plain second sentence.",
+                "Plain third sentence.",
+            ],
+            vec![
+                "Plain first sentence. Plain second sentence.",
+                "Plain third sentence.",
+            ],
+            vec![0],
+        ),
+        "page.html" => (
+            vec!["Html one.", "Html two.", "Html three."],
+            vec!["Html one. Html two.", "Html three."],
+            vec![0, 2],
+        ),
+        "book.epub" => (
+            vec![
+                "Second one.",
+                "Second two.",
+                "First one.",
+                "First two.",
+                "cell",
+            ],
+            vec!["Second one. Second two.", "First one. First two.", "cell"],
+            vec![0, 2],
+        ),
+        other => panic!("no expected reading for {other}"),
+    }
+}
+
+fn assert_sequence(items: &[V2Item], expected: &[&str], name: &str, mode: &str) {
+    assert_eq!(
+        texts_of(items),
+        expected
+            .iter()
+            .map(|text| (*text).to_owned())
+            .collect::<Vec<_>>(),
+        "{name}: the {mode} sequence"
+    );
+}
+
 #[tokio::test]
-async fn v2_reading_matches_v1_section_by_section_for_every_format() {
+async fn reads_every_format_in_the_expected_sentence_order() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     for (name, bytes) in fixtures() {
         let path = directory.path().join(name);
@@ -400,58 +360,37 @@ async fn v2_reading_matches_v1_section_by_section_for_every_format() {
             .await
             .expect("fixture should be written");
 
-        let opened = v1_open(&client, &path).await;
-        let opened_v2 = v2_open(&client, &path).await;
-        let doc = opened_v2["doc"].as_str().expect("doc handle").to_owned();
+        let doc = v2_open(&client, &path).await["doc"]
+            .as_str()
+            .expect("doc handle")
+            .to_owned();
+        let (sentence, paragraph, starts) = expected_reading(name);
 
         // Sentence-step mode: one item per call, following `next`.
         let (sentence_items, boundaries) = v2_walk(&client, &doc, json!({})).await;
+        assert_sequence(&sentence_items, &sentence, name, "sentence");
         assert_eq!(
-            texts_of(&sentence_items),
-            v1_texts(&client, &opened.document_id, "sentence").await,
-            "sentence-step sequence diverged for {name}"
+            boundaries.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+            starts,
+            "{name}: the sections start at the first item of their own stream"
         );
 
-        // The section boundaries are exactly the section-stream position 0 items.
-        let section_count = v1_sections(&client, &opened.document_id).await.len();
-        assert!(
-            boundaries.len() <= section_count,
-            "{name} reported more section boundaries than sections"
-        );
-        assert_eq!(
-            boundaries.first().map(|(at, _)| *at),
-            (!sentence_items.is_empty()).then_some(0),
-            "{name} must report the first section at item 0"
-        );
-
-        // Batch mode at two very different budgets.
+        // Batch mode at two very different budgets: the same sequence, never a repeat or a gap.
         for max_chars in [4000usize, 37] {
             let (batch_walked, _) = v2_walk(&client, &doc, json!({ "max_chars": max_chars })).await;
-            assert_eq!(
-                texts_of(&batch_walked),
-                texts_of(&sentence_items),
-                "batch max_chars={max_chars} sequence diverged for {name}"
-            );
+            assert_sequence(&batch_walked, &sentence, name, "batched sentence");
         }
 
-        // Paragraph mode against the v1 paragraph stream.
+        // Paragraph mode: one item per paragraph, in the same body order.
         let (paragraph_items, _) = v2_walk(&client, &doc, json!({ "unit": "paragraph" })).await;
-        assert_eq!(
-            texts_of(&paragraph_items),
-            v1_texts(&client, &opened.document_id, "paragraph").await,
-            "paragraph sequence diverged for {name}"
-        );
+        assert_sequence(&paragraph_items, &paragraph, name, "paragraph");
 
         // Backward from the end reverses the forward sentence sequence.
         if let Some(last) = sentence_items.last() {
             let (mut backward_items, _) =
                 v2_walk(&client, &last.handle, json!({ "direction": "backward" })).await;
             backward_items.reverse();
-            assert_eq!(
-                texts_of(&backward_items),
-                texts_of(&sentence_items),
-                "backward sequence diverged for {name}"
-            );
+            assert_sequence(&backward_items, &sentence, name, "backward sentence");
         }
     }
 
@@ -465,12 +404,7 @@ async fn v2_reading_matches_v1_section_by_section_for_every_format() {
 #[tokio::test]
 async fn forward_next_is_the_next_items_own_handle() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     for (name, bytes) in fixtures() {
         let path = directory.path().join(name);
@@ -522,12 +456,7 @@ async fn every_item_handle_starts_at_its_own_item() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
@@ -565,12 +494,7 @@ async fn back_returns_the_previous_items_plus_the_anchor() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
@@ -616,12 +540,7 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
@@ -711,12 +630,7 @@ async fn at_names_the_item_only_when_from_is_not_its_own_handle() {
 #[tokio::test]
 async fn section_marks_exactly_the_first_item_of_each_section() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     for (name, bytes) in fixtures() {
         let path = directory.path().join(name);
@@ -782,12 +696,7 @@ fn section_of(handle: &str) -> String {
 #[tokio::test]
 async fn kind_marks_non_prose_items_and_stays_off_prose() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     // The EPUB fixture carries a real table next to prose.
     let path = directory.path().join("book.epub");
@@ -860,12 +769,7 @@ async fn errors_use_the_v2_vocabulary() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
@@ -948,109 +852,10 @@ async fn errors_use_the_v2_vocabulary() {
     client.cancel().await.expect("client should close cleanly");
 }
 
-// ------------------------------------------------------------------------------------------------
-// 8. Switch
-// ------------------------------------------------------------------------------------------------
-
-#[tokio::test]
-async fn tools_switch_selects_the_registered_tools() {
-    let directory = tempfile::tempdir().expect("temporary directory should be created");
-
-    let v1 = start_client(directory.path(), &directory.path().join("v1"), Some("v1")).await;
-    let tools = v1
-        .list_all_tools()
-        .await
-        .expect("tools/list should succeed");
-    let names = tools
-        .iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        V1_TOOLS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>(),
-        "the v1 tool set is the nine stable tools"
-    );
-    let bytes = serde_json::to_string(&json!({ "tools": tools }))
-        .expect("tools serialize")
-        .len();
-    assert_eq!(
-        bytes, DEFAULT_TOOLS_LIST_BYTES,
-        "the v1 tools/list must stay byte-identical to main; measured {bytes} bytes"
-    );
-    // An unregistered v2 tool is rejected.
-    let rejected = v1
-        .call_tool(
-            CallToolRequestParams::new("open")
-                .with_arguments(arguments(json!({ "source": "unused" }))),
-        )
-        .await;
-    assert!(
-        rejected.is_err(),
-        "v2 tools must not be callable in v1 mode"
-    );
-    v1.cancel().await.expect("client should close cleanly");
-
-    let v2 = start_client(directory.path(), &directory.path().join("v2"), Some("v2")).await;
-    let names = v2
-        .list_all_tools()
-        .await
-        .expect("tools/list should succeed")
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        V2_TOOLS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>()
-    );
-    let rejected = v2
-        .call_tool(
-            CallToolRequestParams::new("get_text_units").with_arguments(arguments(json!({
-                "document_id": "unused",
-                "section_id": "unused"
-            }))),
-        )
-        .await;
-    assert!(
-        rejected.is_err(),
-        "v1 tools must not be callable in v2 mode"
-    );
-    v2.cancel().await.expect("client should close cleanly");
-
-    let both = start_client(
-        directory.path(),
-        &directory.path().join("both"),
-        Some("both"),
-    )
-    .await;
-    let mut names = both
-        .list_all_tools()
-        .await
-        .expect("tools/list should succeed")
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    names.sort();
-    let mut expected = V1_TOOLS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    expected.extend(V2_TOOLS.iter().map(|name| (*name).to_owned()));
-    expected.sort();
-    assert_eq!(names, expected);
-    assert_eq!(names.len(), 16);
-    both.cancel().await.expect("client should close cleanly");
-}
-
 #[tokio::test]
 async fn the_default_tool_set_is_the_seven_v2_tools() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(directory.path(), &directory.path().join("default"), None).await;
+    let client = start_client(directory.path(), &directory.path().join("default")).await;
     let names = client
         .list_all_tools()
         .await
@@ -1072,7 +877,7 @@ async fn the_default_tool_set_is_the_seven_v2_tools() {
 #[tokio::test]
 async fn the_seven_v2_tool_definitions_stay_compact() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(directory.path(), &directory.path().join("v2"), Some("v2")).await;
+    let client = start_client(directory.path(), &directory.path().join("v2")).await;
     let tools = client
         .list_all_tools()
         .await
@@ -1084,5 +889,192 @@ async fn the_seven_v2_tool_definitions_stay_compact() {
         bytes < 3_600,
         "the seven v2 tools must stay under 3600 bytes of tools/list JSON, got {bytes}"
     );
+    client.cancel().await.expect("client should close cleanly");
+}
+
+// ------------------------------------------------------------------------------------------------
+// 9. Exclusive continuation after a handle anchor
+// ------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn read_from_a_handle_continues_exclusively_at_the_next_item() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let path = directory.path().join("anchor.md");
+    tokio::fs::write(
+        &path,
+        "# Root\n\nOne. Two. Three. Four.\n\n# Next\n\nDo not enumerate this section.\n",
+    )
+    .await
+    .expect("fixture should be written");
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
+
+    let doc = v2_open(&client, &path).await["doc"]
+        .as_str()
+        .expect("doc handle")
+        .to_owned();
+    let (walked, _) = v2_walk(&client, &doc, json!({})).await;
+    assert_eq!(
+        texts_of(&walked),
+        vec![
+            "One.",
+            "Two.",
+            "Three.",
+            "Four.",
+            "Do not enumerate this section.",
+        ],
+        "the fixture must walk in body order"
+    );
+
+    // The anchor reads at its own item; the continuation after it is the next item, exclusively:
+    // the anchor is never repeated, and every step follows the previous answer's own `next`.
+    let anchor = walked[1].clone();
+    let anchored = payload(&v2_read(&client, &anchor.handle, json!({})).await);
+    assert_eq!(flat_item(&anchored, &anchor.handle), Some(anchor.clone()));
+    assert!(
+        anchored.get("at").is_none(),
+        "the anchor's own handle must not repeat itself in `at`: {anchored}"
+    );
+
+    let mut from = next_of(&anchored).expect("the anchor continues");
+    let mut expected = 2usize;
+    let mut seen = vec![anchor.handle.clone()];
+    loop {
+        let step = payload(&v2_read(&client, &from, json!({})).await);
+        let item = flat_item(&step, &from).expect("a single item");
+        assert_eq!(
+            item.text, walked[expected].text,
+            "the continuation must read the item after the anchor"
+        );
+        assert!(
+            !seen.contains(&item.handle),
+            "the continuation must never repeat an item: {seen:?} then {item:?}"
+        );
+        seen.push(item.handle.clone());
+        expected += 1;
+        match next_of(&step) {
+            Some(next) => {
+                assert_ne!(next, anchor.handle, "the anchor must not come back");
+                from = next;
+            }
+            None => break,
+        }
+    }
+    assert_eq!(
+        expected,
+        walked.len(),
+        "the continuation must reach the end of the document exactly once"
+    );
+
+    // Paragraph mode: the paragraph handle continues at the next paragraph, not at itself.
+    let (paragraphs, _) = v2_walk(&client, &doc, json!({ "unit": "paragraph" })).await;
+    assert_eq!(
+        texts_of(&paragraphs),
+        vec!["One. Two. Three. Four.", "Do not enumerate this section."]
+    );
+    let first_paragraph = payload(
+        &v2_read(
+            &client,
+            &paragraphs[0].handle,
+            json!({ "unit": "paragraph" }),
+        )
+        .await,
+    );
+    let next_paragraph = next_of(&first_paragraph).expect("the paragraph continues");
+    assert_ne!(next_paragraph, paragraphs[0].handle);
+    let second_paragraph =
+        payload(&v2_read(&client, &next_paragraph, json!({ "unit": "paragraph" })).await);
+    assert_eq!(
+        flat_item(&second_paragraph, &next_paragraph).map(|item| item.text),
+        Some(paragraphs[1].text.clone()),
+        "the paragraph continuation is the next paragraph"
+    );
+
+    client.cancel().await.expect("client should close cleanly");
+}
+
+// ------------------------------------------------------------------------------------------------
+// 10. Whole-document composition in body order
+// ------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reads_every_section_in_body_order_without_repeating_an_item() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let path = directory.path().join("book.md");
+    tokio::fs::write(
+        &path,
+        "# Book\n\nIntroduction.\n\n## Duplicate\n\nParent sentence. Child-independent sentence.\n\n### Empty\n\n## Duplicate\n\nSibling sentence.\n",
+    )
+    .await
+    .expect("fixture should be written");
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
+
+    let doc = v2_open(&client, &path).await["doc"]
+        .as_str()
+        .expect("doc handle")
+        .to_owned();
+    let outline = payload(
+        &client
+            .call_tool(
+                CallToolRequestParams::new("outline")
+                    .with_arguments(arguments(json!({ "at": doc, "depth": 8, "limit": 100 }))),
+            )
+            .await
+            .expect("outline should answer"),
+    );
+    let rows = outline["items"].as_array().expect("outline items");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row[1].as_str().expect("title"))
+            .collect::<Vec<_>>(),
+        vec!["Book", "Duplicate", "Empty", "Duplicate"],
+        "the duplicate titles are separate sections"
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row[2].as_u64().expect("level"))
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 2]
+    );
+    let sections = rows
+        .iter()
+        .map(|row| row[0].as_str().expect("section handle").to_owned())
+        .collect::<Vec<_>>();
+
+    // The whole book, one item at a time: every section in body order, the empty one contributing
+    // nothing, and no item read twice.
+    let (walked, _) = v2_walk(&client, &doc, json!({})).await;
+    assert_eq!(
+        texts_of(&walked),
+        vec![
+            "Introduction.",
+            "Parent sentence.",
+            "Child-independent sentence.",
+            "Sibling sentence.",
+        ]
+    );
+    let owners = walked
+        .iter()
+        .map(|item| section_of(&item.handle))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        vec![
+            sections[0].clone(),
+            sections[1].clone(),
+            sections[1].clone(),
+            sections[3].clone(),
+        ],
+        "the items follow their sections' body order"
+    );
+    assert!(
+        !owners.contains(&sections[2]),
+        "the empty section owns no item"
+    );
+    let mut unique = std::collections::BTreeSet::new();
+    assert!(
+        walked.iter().all(|item| unique.insert(item.handle.clone())),
+        "no item may be read twice: {walked:?}"
+    );
+
     client.cancel().await.expect("client should close cleanly");
 }

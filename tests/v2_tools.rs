@@ -1,12 +1,14 @@
 //! The v2 `browse`, `outline`, `search`, `cite` and `source_view` contracts: happy paths, every
-//! error code they can produce, handle round-trips into `read`, and `cite`/v1 locator equality.
+//! error code they can produce, handle round-trips into `read`, and the stored locators `cite`
+//! reports.
 
 use std::io::{Cursor, Write};
 use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
-use reading_mcp::mcp::contracts::{GetTextUnitsResponse, OpenDocumentResponse, TextLocatorDto};
+use reading_mcp::domain::{ContentHash, DocumentId, DocumentSource};
+use reading_mcp::mcp::contracts::{NormalizedRangeDto, TextLocatorDto};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::transport::TokioChildProcess;
@@ -125,18 +127,14 @@ fn build_pdf() -> Vec<u8> {
 // Transport helpers
 // ------------------------------------------------------------------------------------------------
 
-async fn start_client(local_root: &Path, state_dir: &Path, tools: Option<&str>) -> Client {
+async fn start_client(local_root: &Path, state_dir: &Path) -> Client {
     let local_roots = std::env::join_paths([local_root]).expect("local roots should be valid");
     let mut command = Command::new(env!("CARGO_BIN_EXE_reading-mcp"));
     command
         .env("READING_MCP_LOCAL_ROOTS", local_roots)
         .env("READING_MCP_STATE_DIR", state_dir)
-        .env("READING_MCP_TELEMETRY", "false");
-    if let Some(tools) = tools {
-        command.env("READING_MCP_TOOLS", tools);
-    } else {
-        command.env_remove("READING_MCP_TOOLS");
-    }
+        .env("READING_MCP_TELEMETRY", "false")
+        .env_remove("READING_MCP_TOOLS");
     let transport = TokioChildProcess::new(command).expect("MCP process should start");
     ().serve(transport)
         .await
@@ -179,43 +177,6 @@ async fn v2_open(client: &Client, path: &Path) -> Value {
     payload(&call(client, "open", json!({ "source": path.to_string_lossy() })).await)
 }
 
-async fn v1_open(client: &Client, path: &Path) -> OpenDocumentResponse {
-    call(
-        client,
-        "open_document",
-        json!({ "source": path.to_string_lossy() }),
-    )
-    .await
-    .into_typed::<OpenDocumentResponse>()
-    .expect("open response should deserialize")
-}
-
-async fn v1_text_units(
-    client: &Client,
-    document_id: &str,
-    section_id: &str,
-    extra: Value,
-) -> GetTextUnitsResponse {
-    let mut value = Map::new();
-    value.insert("document_id".into(), json!(document_id));
-    value.insert("section_id".into(), json!(section_id));
-    value.insert("requested_kind".into(), json!("sentence"));
-    value.insert("direction".into(), json!("forward"));
-    value.insert("coverage_policy".into(), json!("preserve_source"));
-    value.insert("max_items".into(), json!(1));
-    if let Some(extra) = extra.as_object() {
-        for (key, item) in extra {
-            value.insert(key.clone(), item.clone());
-        }
-    }
-    client
-        .call_tool(CallToolRequestParams::new("get_text_units").with_arguments(value))
-        .await
-        .expect("get_text_units should succeed")
-        .into_typed::<GetTextUnitsResponse>()
-        .expect("text-unit response should deserialize")
-}
-
 fn locator_of(cite: &Value, index: usize) -> TextLocatorDto {
     serde_json::from_value(cite["items"][index]["locator"].clone())
         .expect("cite returns a v1 TextLocator")
@@ -244,12 +205,7 @@ async fn browse_lists_documents_and_directories_as_compact_triples() {
     tokio::fs::create_dir(directory.path().join("nested"))
         .await
         .expect("nested directory should be created");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
 
     // No path: the documents under the configured roots.
     let roots = payload(&call(&client, "browse", json!({})).await);
@@ -286,12 +242,7 @@ async fn browse_lists_documents_and_directories_as_compact_triples() {
 #[tokio::test]
 async fn browse_rejects_a_path_outside_the_authorized_roots() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let error = tool_error(&call(&client, "browse", json!({ "path": "/etc" })).await);
     assert_eq!(error["error"], "blocked_source");
     client.cancel().await.expect("client should close cleanly");
@@ -308,13 +259,7 @@ async fn outline_lists_the_tree_and_its_handles_read() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
-    let opened = v1_open(&client, &path).await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -344,20 +289,38 @@ async fn outline_lists_the_tree_and_its_handles_read() {
         "a section reports its chars"
     );
 
-    // The first section handle reads at its first sentence, exactly like v1.
+    // The first section handle reads at its first sentence, and the two cited locators agree: the
+    // section locator names no sentence, the sentence locator names the same owner and identity.
     let first = items[1][0].as_str().expect("section handle").to_owned();
     let cite = payload(&call(&client, "cite", json!({ "at": [first.clone()] })).await);
-    let locator = locator_of(&cite, 0);
-    assert_eq!(locator.paragraph_index, None);
-    let v1 = v1_text_units(
-        &client,
-        &opened.document_id,
-        &locator.owner_section_id,
-        json!({}),
-    )
-    .await;
+    let section_locator = locator_of(&cite, 0);
+    assert_eq!(section_locator.paragraph_index, None);
+    assert_eq!(section_locator.sentence_index, None);
     let read = payload(&call(&client, "read", json!({ "from": first })).await);
-    assert_eq!(flat_text(&read), v1.items[0].text);
+    let sentence = read["at"]
+        .as_str()
+        .expect("the section's first item is its own handle")
+        .to_owned();
+    let sentence_cite = payload(&call(&client, "cite", json!({ "at": [sentence] })).await);
+    let sentence_locator = locator_of(&sentence_cite, 0);
+    assert_eq!(
+        sentence_locator.owner_section_id,
+        section_locator.owner_section_id
+    );
+    assert_eq!(
+        sentence_locator.document_id, section_locator.document_id,
+        "both locators name the stored document"
+    );
+    assert_eq!(sentence_locator.content_hash, section_locator.content_hash);
+    assert!(
+        sentence_locator.paragraph_index.is_some() && sentence_locator.sentence_index.is_some(),
+        "a sentence locator names its paragraph and sentence: {sentence_locator:?}"
+    );
+    assert_eq!(
+        flat_text(&read),
+        "Alpha one is the first sentence.",
+        "the section handle reads at its first sentence"
+    );
 
     // A truncated outline continues with its cursor and repeats nothing.
     let page = payload(
@@ -407,12 +370,7 @@ async fn outline_errors_use_the_v2_vocabulary() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -459,12 +417,7 @@ async fn search_returns_sentence_handles_that_read_at_the_match() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -507,12 +460,7 @@ async fn search_errors_use_the_v2_vocabulary() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -559,68 +507,99 @@ async fn search_errors_use_the_v2_vocabulary() {
 // ------------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn cite_returns_the_same_locator_v1_produces_for_that_sentence() {
+async fn cite_returns_the_stored_locator_of_the_sentence() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let path = directory.path().join("book.md");
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("both"),
-    )
-    .await;
-    let opened = v1_open(&client, &path).await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
         .to_owned();
 
-    // The first sentence of the book, as v1 reports it.
+    // The first sentence of the book: its cite locator is the exact locator the store keeps for
+    // that sentence. These are the values the deleted v1 comparison produced on `main`
+    // (`v1_locator == v1_sentence.items[0].locator`); a cite that returned a different paragraph,
+    // sentence or range fails here.
     let read = payload(&call(&client, "read", json!({ "from": doc })).await);
     let sentence = read["at"]
         .as_str()
         .expect("the first item's own handle")
         .to_owned();
-    let cite = payload(&call(&client, "cite", json!({ "at": [sentence] })).await);
+    let cite = payload(&call(&client, "cite", json!({ "at": [sentence.clone()] })).await);
     assert_eq!(cite["items"].as_array().expect("items").len(), 1);
-    let v1_locator = locator_of(&cite, 0);
-    let v1_sentence = v1_text_units(
-        &client,
-        &opened.document_id,
-        &v1_locator.owner_section_id,
-        json!({}),
-    )
-    .await;
-    assert_eq!(v1_locator, v1_sentence.items[0].locator);
+    let locator = locator_of(&cite, 0);
+    // The document id is derived independently of `cite`: the server's own rule over the canonical
+    // source and the content hash (the v1 open response carried this same id on `main`).
+    let content_hash = "sha256:83770fabe10fb5024a3c6eef2358b4210d223185692ce8e88fe46969a013627b";
+    let document_id = DocumentId::derive(
+        &DocumentSource(format!(
+            "file://{}",
+            path.canonicalize()
+                .expect("the fixture has a canonical path")
+                .to_string_lossy()
+        )),
+        &ContentHash(content_hash.to_owned()),
+    );
+    let expected_sentence = TextLocatorDto {
+        document_id: document_id.0.clone(),
+        content_hash: content_hash.into(),
+        normalized_document_hash:
+            "sha256:f53db39534433f381297ddfc6afb722097fdceb3e4178f176ae2bbf6733073f5".into(),
+        owner_section_id: "section://book".into(),
+        section_path: vec!["Book".into()],
+        paragraph_index: Some(1),
+        sentence_index: Some(1),
+        normalized_range: Some(NormalizedRangeDto { start: 0, end: 22 }),
+        segmentation_version: Some("text-segmentation/v3".into()),
+        native_location: Some("markdown:line:1".into()),
+    };
+    assert_eq!(locator, expected_sentence);
+    // The v1 open response's document id and content hash: `cite` must not report a different
+    // identity than the one the locator was stored under.
     assert_eq!(
         cite["items"][0]["doc"]["id"].as_str(),
-        Some(opened.document_id.as_str()),
+        Some(document_id.0.as_str()),
         "cite carries the document identity"
     );
     assert_eq!(
         cite["items"][0]["doc"]["content_hash"].as_str(),
-        Some(opened.content_hash.as_str())
+        Some(content_hash),
+        "cite carries the content hash"
     );
     assert!(
         cite["items"][0]["src"].is_string(),
         "cite carries a source position"
     );
+    let again = payload(&call(&client, "cite", json!({ "at": [sentence] })).await);
+    assert_eq!(
+        locator_of(&again, 0),
+        locator,
+        "the same handle cites the same stored locator"
+    );
 
-    // A section handle cites the v1 section locator.
+    // A section handle cites the exact stored section locator the deleted v1 comparison asserted
+    // (`section_locator == v1_section_units.target_section_locator`): no paragraph, no sentence and
+    // no range, and the same document identity.
     let outline = payload(&call(&client, "outline", json!({ "at": doc, "depth": 2 })).await);
     let section = outline["items"][0][0].as_str().unwrap().to_owned();
     let cite = payload(&call(&client, "cite", json!({ "at": [section.clone()] })).await);
     let section_locator = locator_of(&cite, 0);
-    let v1_section_units = v1_text_units(
-        &client,
-        &opened.document_id,
-        &section_locator.owner_section_id,
-        json!({}),
-    )
-    .await;
-    assert_eq!(section_locator, v1_section_units.target_section_locator);
+    let expected_section = TextLocatorDto {
+        document_id: expected_sentence.document_id.clone(),
+        content_hash: expected_sentence.content_hash.clone(),
+        normalized_document_hash: expected_sentence.normalized_document_hash.clone(),
+        owner_section_id: "section://book".into(),
+        section_path: vec!["Book".into()],
+        paragraph_index: None,
+        sentence_index: None,
+        normalized_range: None,
+        segmentation_version: None,
+        native_location: Some("markdown:line:1".into()),
+    };
+    assert_eq!(section_locator, expected_section);
 
     // Several handles in one call, in request order.
     let cite = payload(
@@ -645,12 +624,7 @@ async fn cite_errors_use_the_v2_vocabulary() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -684,12 +658,7 @@ async fn source_view_renders_the_page_of_a_handle() {
     tokio::fs::write(&path, build_pdf())
         .await
         .expect("PDF fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -725,12 +694,7 @@ async fn source_view_errors_use_the_v2_vocabulary() {
     tokio::fs::write(&path, markdown_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")
@@ -750,48 +714,6 @@ async fn source_view_errors_use_the_v2_vocabulary() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// The switch: v1 stays byte-identical, v2 has exactly the seven tools.
-// ------------------------------------------------------------------------------------------------
-
-#[tokio::test]
-async fn v2_registers_exactly_the_seven_tools_and_v1_stays_selectable() {
-    let directory = tempfile::tempdir().expect("temporary directory should be created");
-
-    let v1 = start_client(directory.path(), &directory.path().join("v1"), Some("v1")).await;
-    let names = v1
-        .list_all_tools()
-        .await
-        .expect("tools/list should succeed")
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(names.len(), 9, "the v1 tool set is the nine stable tools");
-    v1.cancel().await.expect("client should close cleanly");
-
-    let v2 = start_client(directory.path(), &directory.path().join("v2"), Some("v2")).await;
-    let names = v2
-        .list_all_tools()
-        .await
-        .expect("tools/list should succeed")
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        vec![
-            "browse",
-            "cite",
-            "open",
-            "outline",
-            "read",
-            "search",
-            "source_view"
-        ]
-    );
-    v2.cancel().await.expect("client should close cleanly");
-}
-
-// ------------------------------------------------------------------------------------------------
 // An EPUB source position is the file and anchor.
 // ------------------------------------------------------------------------------------------------
 
@@ -802,12 +724,7 @@ async fn cite_reports_the_epub_file_and_anchor() {
     tokio::fs::write(&path, epub_book())
         .await
         .expect("fixture should be written");
-    let client = start_client(
-        directory.path(),
-        &directory.path().join("state"),
-        Some("v2"),
-    )
-    .await;
+    let client = start_client(directory.path(), &directory.path().join("state")).await;
     let doc = v2_open(&client, &path).await["doc"]
         .as_str()
         .expect("doc handle")

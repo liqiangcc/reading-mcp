@@ -7,7 +7,8 @@ use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
-use reading_mcp::mcp::contracts::TextLocatorDto;
+use reading_mcp::domain::{ContentHash, DocumentId, DocumentSource};
+use reading_mcp::mcp::contracts::{NormalizedRangeDto, TextLocatorDto};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::transport::TokioChildProcess;
@@ -518,8 +519,10 @@ async fn cite_returns_the_stored_locator_of_the_sentence() {
         .expect("doc handle")
         .to_owned();
 
-    // The first sentence of the book: its cite locator is the locator the store keeps for that
-    // sentence, and it names the identity `cite` reports for the document.
+    // The first sentence of the book: its cite locator is the exact locator the store keeps for
+    // that sentence. These are the values the deleted v1 comparison produced on `main`
+    // (`v1_locator == v1_sentence.items[0].locator`); a cite that returned a different paragraph,
+    // sentence or range fails here.
     let read = payload(&call(&client, "read", json!({ "from": doc })).await);
     let sentence = read["at"]
         .as_str()
@@ -528,27 +531,43 @@ async fn cite_returns_the_stored_locator_of_the_sentence() {
     let cite = payload(&call(&client, "cite", json!({ "at": [sentence.clone()] })).await);
     assert_eq!(cite["items"].as_array().expect("items").len(), 1);
     let locator = locator_of(&cite, 0);
+    // The document id is derived independently of `cite`: the server's own rule over the canonical
+    // source and the content hash (the v1 open response carried this same id on `main`).
+    let content_hash = "sha256:83770fabe10fb5024a3c6eef2358b4210d223185692ce8e88fe46969a013627b";
+    let document_id = DocumentId::derive(
+        &DocumentSource(format!(
+            "file://{}",
+            path.canonicalize()
+                .expect("the fixture has a canonical path")
+                .to_string_lossy()
+        )),
+        &ContentHash(content_hash.to_owned()),
+    );
+    let expected_sentence = TextLocatorDto {
+        document_id: document_id.0.clone(),
+        content_hash: content_hash.into(),
+        normalized_document_hash:
+            "sha256:f53db39534433f381297ddfc6afb722097fdceb3e4178f176ae2bbf6733073f5".into(),
+        owner_section_id: "section://book".into(),
+        section_path: vec!["Book".into()],
+        paragraph_index: Some(1),
+        sentence_index: Some(1),
+        normalized_range: Some(NormalizedRangeDto { start: 0, end: 22 }),
+        segmentation_version: Some("text-segmentation/v3".into()),
+        native_location: Some("markdown:line:1".into()),
+    };
+    assert_eq!(locator, expected_sentence);
+    // The v1 open response's document id and content hash: `cite` must not report a different
+    // identity than the one the locator was stored under.
     assert_eq!(
-        locator.document_id,
-        cite["items"][0]["doc"]["id"].as_str().expect("doc id"),
-        "the locator names the cited document"
+        cite["items"][0]["doc"]["id"].as_str(),
+        Some(document_id.0.as_str()),
+        "cite carries the document identity"
     );
     assert_eq!(
-        locator.content_hash,
-        cite["items"][0]["doc"]["content_hash"]
-            .as_str()
-            .expect("content hash")
-    );
-    assert_eq!(
-        locator.normalized_document_hash,
-        cite["items"][0]["doc"]["normalized_document_hash"]
-            .as_str()
-            .expect("normalized hash")
-    );
-    assert_eq!(locator.owner_section_id, "section://book");
-    assert!(
-        locator.paragraph_index.is_some() && locator.sentence_index.is_some(),
-        "a sentence locator names its paragraph and sentence: {locator:?}"
+        cite["items"][0]["doc"]["content_hash"].as_str(),
+        Some(content_hash),
+        "cite carries the content hash"
     );
     assert!(
         cite["items"][0]["src"].is_string(),
@@ -561,17 +580,26 @@ async fn cite_returns_the_stored_locator_of_the_sentence() {
         "the same handle cites the same stored locator"
     );
 
-    // A section handle cites the stored section locator: no paragraph and no sentence, and the
-    // same document identity.
+    // A section handle cites the exact stored section locator the deleted v1 comparison asserted
+    // (`section_locator == v1_section_units.target_section_locator`): no paragraph, no sentence and
+    // no range, and the same document identity.
     let outline = payload(&call(&client, "outline", json!({ "at": doc, "depth": 2 })).await);
     let section = outline["items"][0][0].as_str().unwrap().to_owned();
     let cite = payload(&call(&client, "cite", json!({ "at": [section.clone()] })).await);
     let section_locator = locator_of(&cite, 0);
-    assert_eq!(section_locator.document_id, locator.document_id);
-    assert_eq!(section_locator.content_hash, locator.content_hash);
-    assert_eq!(section_locator.owner_section_id, "section://book");
-    assert_eq!(section_locator.paragraph_index, None);
-    assert_eq!(section_locator.sentence_index, None);
+    let expected_section = TextLocatorDto {
+        document_id: expected_sentence.document_id.clone(),
+        content_hash: expected_sentence.content_hash.clone(),
+        normalized_document_hash: expected_sentence.normalized_document_hash.clone(),
+        owner_section_id: "section://book".into(),
+        section_path: vec!["Book".into()],
+        paragraph_index: None,
+        sentence_index: None,
+        normalized_range: None,
+        segmentation_version: None,
+        native_location: Some("markdown:line:1".into()),
+    };
+    assert_eq!(section_locator, expected_section);
 
     // Several handles in one call, in request order.
     let cite = payload(

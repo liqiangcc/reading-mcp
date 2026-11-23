@@ -52,7 +52,7 @@ d.save(sys.argv[1])
             self.assertTrue(output.read_bytes().startswith(b"\x89PNG"))
             pixels = subprocess.run([PYTHON, "-I", "-c", "import pymupdf,sys; p=pymupdf.Pixmap(sys.argv[1]); print(sum(v<200 for v in p.samples))", str(output)], check=True, capture_output=True, text=True)
             self.assertGreater(int(pixels.stdout), 100, "source preview must not be an empty white image")
-            for index, limit, message in [(12, "100", "dimensions"), (13, "8", "byte limit"), (14, "1", "stream")]:
+            for index, limit, message in [(12, "100", "pixel count"), (13, "8", "byte limit"), (14, "1", "stream")]:
                 limited = args.copy(); limited[index] = limit
                 failure = subprocess.run(limited, capture_output=True, text=True)
                 self.assertNotEqual(failure.returncode, 0)

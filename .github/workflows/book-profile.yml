@@ -74,7 +74,8 @@ jobs:
               docs="${docs:+$docs,}$label=$file"
             fi
           done
-          args=(--binary target/release/reading-mcp --states dir --sizes-mb 4
+          args=(--tools "${{ inputs.tools || 'v1' }}" \
+            --binary target/release/reading-mcp --states dir --sizes-mb 4
             --cjk-sizes-mb 1,4 --markdown-sections 2000 --reopen --telemetry --rss-phases --disk
             --parse-timeout-seconds 900 --run-timeout-seconds 900 --out book/runs.json
             --probe-query "en-novel=Pierre" --probe-query "zh-classic=寶玉"
@@ -148,7 +149,8 @@ jobs:
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p book
-          args=(--binary target/release/reading-mcp --states dir --markdown-sections 2000
+          args=(--tools "${{ inputs.tools || 'v1' }}" \
+            --binary target/release/reading-mcp --states dir --markdown-sections 2000
             --cjk-sizes-mb 4,16
             --parse-timeout-seconds 900 --run-timeout-seconds 900
             --wrapper "heaptrack -o book/{label}" --out book/runs-heap.json)
@@ -256,6 +258,7 @@ jobs:
             done
             mkdir -p "disk-$side"
             python3 scripts/memory-profile.py \
+              --tools "${{ inputs.tools || 'v1' }}" \
               --binary "$bin" --states dir --disk --cjk-sizes-mb 64 \
               --documents "$docs" \
               --parse-timeout-seconds 900 --run-timeout-seconds 900 \

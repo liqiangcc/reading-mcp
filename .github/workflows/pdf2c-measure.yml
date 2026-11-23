@@ -3,11 +3,10 @@ run-name: PDF2c open memory (before/after)
 on:
   workflow_dispatch:
     inputs:
-      # This workflow runs pdf-open-profile.py and memory-profile.py, which stay v1-only until
-      # the memory-profile PR. The input exists for parity with the other PDF workflows and is
-      # wired nowhere: v2 is rejected below rather than silently ignored.
+      # memory-profile.py takes the input; pdf-open-profile.py still runs v1 only (it is not
+      # ported yet), so a v2 run measures the memory profile in v2 and the open profile in v1.
       tools:
-        description: 'Tool set (v1; v2 arrives with the memory-profile PR)'
+        description: 'Tool set memory-profile.py exposes (pdf-open-profile.py stays v1)'
         type: choice
         options: [v1, v2]
         default: v1
@@ -59,11 +58,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Check the tool set
-        if: inputs.tools == 'v2'
-        run: |
-          echo "::error::pdf2c-measure runs pdf-open-profile.py and memory-profile.py, which are v1-only until the memory-profile PR"
-          exit 1
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -160,7 +154,8 @@ jobs:
           IN="$RUNNER_TEMP/inputs"
           BIN="$RUNNER_TEMP/bin/reading-mcp"
           mkdir -p heap
-          python3 scripts/memory-profile.py --binary "$BIN" --states dir \
+          python3 scripts/memory-profile.py --tools "${{ inputs.tools || 'v1' }}" \
+            --binary "$BIN" --states dir \
             --parse-timeout-seconds 600 --run-timeout-seconds 600 \
             --documents "p2401.14345=$IN/2401.14345.pdf,p2403.19144=$IN/2403.19144.pdf,text-long-cjk-300=$IN/text-long-cjk-300.pdf,text-long-en-300=$IN/text-long-en-300.pdf" \
             --wrapper "heaptrack -o heap/{label}" --out heap/runs.json 2>&1 | tail -20

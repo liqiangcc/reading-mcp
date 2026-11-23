@@ -125,14 +125,17 @@ def error_parts(response: dict) -> tuple[str | None, str] | None:
         ]
         message = " ".join(texts) or "tool reported an error"
         # The v2 tools answer an error with `isError` and one compact JSON body carrying the
-        # code (`{"code": "ocr_required", ...}`). v1 tool errors are JSON-RPC errors and never
-        # take this branch, so reading the code here changes only v2 records.
+        # code under `error` (`{"error": "ocr_required", "hint": ...}`). v1 tool errors are
+        # JSON-RPC errors and never take this branch, so reading the code here changes only
+        # v2 records.
         try:
             body = json.loads(texts[0]) if texts else None
         except json.JSONDecodeError:
             body = None
-        if isinstance(body, dict) and isinstance(body.get("code"), str):
-            return body["code"], message
+        if isinstance(body, dict):
+            code = body.get("error") or body.get("code")
+            if isinstance(code, str):
+                return code, message
         return "tool_error", message
     return None
 

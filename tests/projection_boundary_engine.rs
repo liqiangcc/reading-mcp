@@ -9,6 +9,10 @@
 //!
 //! Hosted-only: requires the pinned layout Python (READING_MCP_PDF_LAYOUT_PYTHON).
 
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use reading_mcp::application::cite_reading::CiteReadingUseCase;
 use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::ports::{
@@ -18,13 +22,12 @@ use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseC
 use reading_mcp::application::short_handle::{
     DocumentHandle, SectionHandle, handle_checksum, paragraph_handle, sentence_handle,
 };
-use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     Document, DocumentSource, MediaType, NormalizedTextRange, ParagraphTextUnitSet,
     SentenceEligibility, SentenceTextUnitSet, TextLocator, TextUnitId,
 };
 use reading_mcp::infrastructure::{
-    InMemoryTextUnitIndex, ResourceBudget, SqliteDocumentRepository,
+    ResourceBudget, SqliteDocumentRepository,
 };
 use reading_mcp::parsing::{
     ArchiveLimits, EpubParser, LayoutPdfParser, PersistedDocumentReliabilityInspector,
@@ -108,10 +111,8 @@ async fn units_report(
     }
     let repository = Arc::new(SqliteDocumentRepository::open(&database).unwrap());
     let restored = repository.get(&document.id).await.unwrap().unwrap();
-    let units_index: Arc<InMemoryTextUnitIndex> = Arc::new(InMemoryTextUnitIndex::default());
-    store_text_units(units_index.as_ref(), &restored)
-        .await
-        .expect("text units should store");
+    let units_index = Arc::new(KeyedTextUnitIndex::default());
+    units_index.store(&restored).await;
     let units: Arc<dyn reading_mcp::application::ports::TextUnitIndex> = units_index;
     let mut exact_reads = 0usize;
     let mut equal_reads = 0usize;

@@ -1,3 +1,7 @@
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use reading_mcp::application::cite_reading::CiteReadingUseCase;
 use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::ports::{
@@ -7,13 +11,12 @@ use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseC
 use reading_mcp::application::short_handle::{
     DocumentHandle, SectionHandle, handle_checksum, paragraph_handle, sentence_handle,
 };
-use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
     Document, DocumentSource, MediaType, OcrConfig, OriginalSourceTarget, SentenceEligibility,
     TextLocator,
 };
 use reading_mcp::infrastructure::{
-    FileOcrEvidenceStore, InMemoryTextUnitIndex, ResourceBudget, SqliteDocumentRepository,
+    FileOcrEvidenceStore, ResourceBudget, SqliteDocumentRepository,
     build_ocr_runtime_identity,
 };
 use reading_mcp::parsing::{LayoutPdfParser, PersistedDocumentReliabilityInspector};
@@ -111,10 +114,8 @@ async fn export_real_canonical_boundaries_without_gold_input() {
         let restored = repository.get(&document.id).await.unwrap().unwrap();
         assert_eq!(restored.try_paragraph_text_units().unwrap(), paragraphs);
         assert_eq!(restored.try_sentence_text_units().unwrap(), sentences);
-        let units_index: Arc<InMemoryTextUnitIndex> = Arc::new(InMemoryTextUnitIndex::default());
-        store_text_units(units_index.as_ref(), &restored)
-            .await
-            .expect("text units should store");
+        let units_index = Arc::new(KeyedTextUnitIndex::default());
+        units_index.store(&restored).await;
         let units: Arc<dyn reading_mcp::application::ports::TextUnitIndex> = units_index;
         let mut exact_reads = 0;
         for (index, paragraph) in paragraphs.units.iter().enumerate() {

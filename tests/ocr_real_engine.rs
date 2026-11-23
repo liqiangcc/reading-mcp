@@ -1,3 +1,7 @@
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use reading_mcp::application::ports::OcrEvidenceStore;
 use reading_mcp::application::ports::{Parser, RetrievedResource};
 use reading_mcp::domain::{DocumentSource, MediaType, OcrConfig};
@@ -202,9 +206,8 @@ async fn real_f14_long_sentence_survives_sqlite_reopen_and_exact_read() {
     use reading_mcp::application::ports::DocumentRepository;
     use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
     use reading_mcp::application::reading_error::ReadingErrorCode;
-    use reading_mcp::application::text_unit_store::store_text_units;
     use reading_mcp::domain::{OriginalSourceTarget, TextLocator};
-    use reading_mcp::infrastructure::{InMemoryTextUnitIndex, SqliteDocumentRepository};
+    use reading_mcp::infrastructure::SqliteDocumentRepository;
 
     let directory = tempdir().unwrap();
     let store = Arc::new(FileOcrEvidenceStore::new(directory.path().join("evidence")));
@@ -282,10 +285,8 @@ async fn real_f14_long_sentence_survives_sqlite_reopen_and_exact_read() {
         restored.original_source_binding_map().unwrap(),
         document.original_source_binding_map().unwrap()
     );
-    let units_index: Arc<InMemoryTextUnitIndex> = Arc::new(InMemoryTextUnitIndex::default());
-    store_text_units(units_index.as_ref(), &restored)
-        .await
-        .expect("text units should store");
+    let units_index = Arc::new(KeyedTextUnitIndex::default());
+    units_index.store(&restored).await;
     let units: Arc<dyn reading_mcp::application::ports::TextUnitIndex> = units_index;
     let from = handle_for_locator(&units, &restored, &locator).await;
     let read = read_handle(repository.clone(), units.clone(), &from).await;

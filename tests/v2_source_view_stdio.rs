@@ -16,14 +16,15 @@ use std::time::Duration;
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
 use reading_mcp::application::ports::{
-    ApplicationError, SourceViewRenderOptions, SourceViewRenderer,
+    ApplicationError, SourceViewLimitKind, SourceViewRenderOptions, SourceViewRenderer,
 };
-use reading_mcp::domain::NORMALIZED_DOCUMENT_HASH_VERSION;
+use reading_mcp::domain::{MediaType, NORMALIZED_DOCUMENT_HASH_VERSION};
 use reading_mcp::parsing::FileProcessIsolatedPdfSourceViewRenderer;
 use serde_json::json;
 
 use v2_mcp::{
-    call, cite_one, flat_text, identity_of, locator_of, payload, start_client, v2_open, v2_read,
+    call, cite_one, flat_text, identity_of, locator_of, payload, start_client,
+    start_client_with_env, tool_error, v2_open, v2_read,
 };
 
 #[tokio::test]
@@ -107,6 +108,162 @@ async fn v2_stdio_source_view_returns_page_metadata_and_png_image_block() {
         .expect("MCP process should close cleanly");
 }
 
+/// #264: a page whose decoded image stream is above the configured source-view
+/// limit answers `too_large` with a hint naming the page and both numbers, and
+/// the same handle renders when the limit is raised. The fixture's 9-megapixel
+/// image also trips the default `max_pixels`, so the deployment profile's
+/// 16M-pixel budget is set like the OCR tests do.
+#[tokio::test]
+async fn v2_stdio_source_view_reports_decoded_stream_limit_and_renders_above_it() {
+    let root = tempfile::tempdir().expect("source root should be created");
+    let path = root.path().join("big_stream.pdf");
+    tokio::fs::write(
+        &path,
+        std::fs::read("tests/fixtures/source_view/big_stream.pdf").unwrap(),
+    )
+    .await
+    .expect("fixture should be copied");
+
+    for stream_limit in [16 * 1024 * 1024_u64, 64 * 1024 * 1024] {
+        let state = root.path().join(format!("state-{stream_limit}"));
+        let stream_limit = stream_limit.to_string();
+        let env = [
+            ("READING_MCP_SOURCE_VIEW_MAX_PIXELS", "16000000"),
+            (
+                "READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES",
+                stream_limit.as_str(),
+            ),
+        ];
+        let client = start_client_with_env(root.path(), &state, &env).await;
+
+        let opened = v2_open(&client, &path).await;
+        let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+        let first = payload(&v2_read(&client, &doc, json!({})).await);
+        let sentence = first["at"].as_str().expect("sentence handle").to_owned();
+
+        let result = call(&client, "source_view", json!({ "at": sentence })).await;
+        if stream_limit == "16777216" {
+            let error = tool_error(&result);
+            assert_eq!(error["error"], "too_large", "{error}");
+            let hint = error["hint"].as_str().expect("a too_large hint");
+            assert!(hint.contains("第 1 页"), "{hint}");
+            assert!(hint.contains("27,000,000"), "{hint}");
+            assert!(hint.contains("16,777,216"), "{hint}");
+            assert!(hint.contains("read"), "{hint}");
+            assert!(
+                error.get("retry").is_none(),
+                "a too_large answer is not retryable: {error}"
+            );
+        } else {
+            assert!(
+                result.is_error != Some(true),
+                "the same page renders above its decoded size: {result:?}"
+            );
+            let wire = serde_json::to_value(&result).expect("tool result should serialize");
+            assert!(
+                wire["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|block| block["type"] == "image" && block["mimeType"] == "image/png"),
+                "the page renders as a PNG image block: {wire}"
+            );
+            assert_eq!(payload(&result)["page"], 1);
+        }
+        client
+            .cancel()
+            .await
+            .expect("MCP process should close cleanly");
+    }
+}
+
+/// The PyMuPDF worker reports the same rejection through the same error record;
+/// gated on the layout-python environment like the OCR tests, since CI's normal
+/// job has no PyMuPDF.
+#[tokio::test]
+#[ignore = "requires READING_MCP_PDF_LAYOUT_PYTHON with PyMuPDF 1.28.2"]
+async fn v2_stdio_pymupdf_source_view_reports_decoded_stream_limit() {
+    let python = std::env::var("READING_MCP_PDF_LAYOUT_PYTHON")
+        .expect("READING_MCP_PDF_LAYOUT_PYTHON names the PyMuPDF interpreter");
+    let root = tempfile::tempdir().expect("source root should be created");
+    let path = root.path().join("big_stream.pdf");
+    tokio::fs::write(
+        &path,
+        std::fs::read("tests/fixtures/source_view/big_stream.pdf").unwrap(),
+    )
+    .await
+    .expect("fixture should be copied");
+
+    for stream_limit in ["16777216", "67108864"] {
+        let state = root.path().join(format!("state-pymupdf-{stream_limit}"));
+        let env = [
+            ("READING_MCP_SOURCE_VIEW_MAX_PIXELS", "16000000"),
+            (
+                "READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES",
+                stream_limit,
+            ),
+            ("READING_MCP_PDF_LAYOUT_PYTHON", python.as_str()),
+        ];
+        let client = start_client_with_env(root.path(), &state, &env).await;
+
+        let opened = v2_open(&client, &path).await;
+        let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+        let first = payload(&v2_read(&client, &doc, json!({})).await);
+        let sentence = first["at"].as_str().expect("sentence handle").to_owned();
+
+        let result = call(&client, "source_view", json!({ "at": sentence })).await;
+        if stream_limit == "16777216" {
+            let error = tool_error(&result);
+            assert_eq!(error["error"], "too_large", "{error}");
+            let hint = error["hint"].as_str().expect("a too_large hint");
+            assert!(hint.contains("第 1 页"), "{hint}");
+            assert!(hint.contains("27,000,000"), "{hint}");
+            assert!(hint.contains("16,777,216"), "{hint}");
+        } else {
+            assert!(
+                result.is_error != Some(true),
+                "the same page renders above its decoded size: {result:?}"
+            );
+        }
+        client
+            .cancel()
+            .await
+            .expect("MCP process should close cleanly");
+    }
+}
+
+/// A corrupt input is not a limit rejection: the isolated worker cannot open
+/// it as a PDF and the parent reports `SourceViewFailed`, which v2 maps to
+/// `internal`. Exercised at the worker boundary because a corrupt file never
+/// produces a document handle to call `source_view` with.
+#[test]
+fn isolated_worker_reports_a_corrupt_pdf_as_source_view_failure() {
+    let renderer = FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_reading-mcp")),
+        Duration::from_secs(30),
+    );
+    let error = renderer
+        .render(
+            b"not a pdf at all".to_vec(),
+            MediaType("application/pdf".into()),
+            1,
+            SourceViewRenderOptions {
+                dpi: 72,
+                max_pages: 2_000,
+                max_width: 2_400,
+                max_height: 3_200,
+                max_pixels: 4_000_000,
+                max_image_bytes: 8 * 1024 * 1024,
+                max_decoded_stream_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .expect_err("a corrupt PDF must not render");
+    assert!(
+        matches!(error, ApplicationError::SourceViewFailed(_)),
+        "corrupt input stays SourceViewFailed: {error:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
@@ -141,7 +298,12 @@ fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
             },
         )
         .expect_err("deadline must terminate the worker process");
-    assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
+    let ApplicationError::SourceViewLimitExceeded(detail) = error else {
+        panic!("a worker deadline is a source-view limit rejection: {error:?}");
+    };
+    assert_eq!(detail.page, 1);
+    assert_eq!(detail.kind, SourceViewLimitKind::Timeout);
+    assert_eq!(detail.limit, Some(25));
 }
 
 fn build_pdf() -> Vec<u8> {

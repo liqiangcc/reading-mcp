@@ -8,12 +8,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use image::{ImageFormat, RgbaImage};
-use pdf_render::pdf_interpret::InterpreterSettings;
-use pdf_render::pdf_syntax::{Pdf, PdfLoadLimits};
+use pdf_render::pdf_interpret::{InterpreterSettings, InterpreterWarning};
+use pdf_render::pdf_syntax::{self, LoadPdfError, Pdf, PdfLoadLimits};
 use serde::{Deserialize, Serialize};
 
 use crate::application::ports::{
-    ApplicationError, RenderedSourceView, SourceViewRenderOptions, SourceViewRenderer,
+    ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
+    SourceViewRenderOptions, SourceViewRenderer,
 };
 use crate::domain::MediaType;
 
@@ -21,6 +22,108 @@ const SOURCE_VIEW_WORKER_FLAG: &str = "--reading-mcp-source-view-worker";
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const MAX_WORKER_DIAGNOSTIC_CHARS: usize = 4_096;
 static WORKER_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// The marker prefix of the JSON limit record a source-view worker prints on
+/// stderr when it rejects a page over a configured limit. Both workers — the
+/// pinned PyMuPDF script and this crate's `--reading-mcp-source-view-*-worker`
+/// modes — use the same record, so the parent reads `kind`, `measured` and
+/// `limit` as data and never matches on message text. Any other stderr is a
+/// crash or an invalid PDF and stays `SourceViewFailed`.
+pub(crate) const WORKER_LIMIT_STDERR_MARKER: &str = "READING-MCP-SOURCE-VIEW-LIMIT ";
+
+/// The JSON record a worker emits behind [`WORKER_LIMIT_STDERR_MARKER`]. The
+/// PyMuPDF worker writes the same fields by name.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct WorkerLimitRecord {
+    pub kind: WorkerLimitKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+/// The wire names of [`SourceViewLimitKind`]; keep in sync with
+/// `pdf_source_view_worker.py`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkerLimitKind {
+    DecodedStreamBytes,
+    EmbeddedImagePixels,
+    PageDimensions,
+    RenderedPixels,
+    ImageBytes,
+    PageCount,
+    DocumentObjects,
+    Timeout,
+}
+
+impl From<WorkerLimitKind> for SourceViewLimitKind {
+    fn from(kind: WorkerLimitKind) -> Self {
+        match kind {
+            WorkerLimitKind::DecodedStreamBytes => Self::DecodedStreamBytes,
+            WorkerLimitKind::EmbeddedImagePixels => Self::EmbeddedImagePixels,
+            WorkerLimitKind::PageDimensions => Self::PageDimensions,
+            WorkerLimitKind::RenderedPixels => Self::RenderedPixels,
+            WorkerLimitKind::ImageBytes => Self::ImageBytes,
+            WorkerLimitKind::PageCount => Self::PageCount,
+            WorkerLimitKind::DocumentObjects => Self::DocumentObjects,
+            WorkerLimitKind::Timeout => Self::Timeout,
+        }
+    }
+}
+
+impl From<SourceViewLimitKind> for WorkerLimitKind {
+    fn from(kind: SourceViewLimitKind) -> Self {
+        match kind {
+            SourceViewLimitKind::DecodedStreamBytes => Self::DecodedStreamBytes,
+            SourceViewLimitKind::EmbeddedImagePixels => Self::EmbeddedImagePixels,
+            SourceViewLimitKind::PageDimensions => Self::PageDimensions,
+            SourceViewLimitKind::RenderedPixels => Self::RenderedPixels,
+            SourceViewLimitKind::ImageBytes => Self::ImageBytes,
+            SourceViewLimitKind::PageCount => Self::PageCount,
+            SourceViewLimitKind::DocumentObjects => Self::DocumentObjects,
+            SourceViewLimitKind::Timeout => Self::Timeout,
+        }
+    }
+}
+
+/// Parses the worker's stderr for the limit record and turns it into the
+/// detail the parent reports: the record carries the kind and the numbers; the
+/// parent adds the page it asked for. `None` means the worker failed for a
+/// non-limit reason (crash, invalid PDF, bad arguments).
+pub(crate) fn worker_limit_detail(stderr: &[u8], page: u32) -> Option<SourceViewLimitDetail> {
+    let text = String::from_utf8_lossy(stderr);
+    for line in text.lines() {
+        let Some(record) = line.strip_prefix(WORKER_LIMIT_STDERR_MARKER) else {
+            continue;
+        };
+        let record: WorkerLimitRecord = serde_json::from_str(record).ok()?;
+        return Some(SourceViewLimitDetail::new(
+            page,
+            record.kind.into(),
+            record.measured,
+            record.limit,
+        ));
+    }
+    None
+}
+
+/// Prints the worker's limit record on stderr and passes the error through as
+/// the exit the `main` wrapper reports. A worker reports a limit only this
+/// way; every other error keeps propagating as before.
+pub(crate) fn report_worker_limit(error: ApplicationError) -> Box<dyn std::error::Error> {
+    if let ApplicationError::SourceViewLimitExceeded(detail) = &error {
+        let record = WorkerLimitRecord {
+            kind: detail.kind.into(),
+            measured: detail.measured,
+            limit: detail.limit,
+        };
+        if let Ok(json) = serde_json::to_string(&record) {
+            eprintln!("{WORKER_LIMIT_STDERR_MARKER}{json}");
+        }
+    }
+    error.into()
+}
 
 #[derive(Default)]
 pub struct PdfSourceViewRenderer;
@@ -44,16 +147,46 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
             .max_object_depth(64)
             .max_image_pixels(options.max_pixels)
             .max_stream_bytes(options.max_decoded_stream_bytes);
-        let pdf = Pdf::new_with_limits(bytes, load_limits).map_err(|error| {
-            ApplicationError::SourceViewFailed(format!("invalid PDF source view: {error:?}"))
+        let pdf = Pdf::new_with_limits(bytes, load_limits).map_err(|error| match error {
+            // `TooLarge` is the only `LoadPdfError` that is a limit rejection
+            // (the parser's object/page caps); `Invalid` and `Decryption` mean
+            // a corrupt or encrypted PDF and stay `internal`.
+            LoadPdfError::TooLarge(objects, pages) => {
+                let (kind, measured, limit) = if objects > pdf_syntax::MAX_OBJECTS {
+                    (
+                        SourceViewLimitKind::DocumentObjects,
+                        objects as u64,
+                        pdf_syntax::MAX_OBJECTS as u64,
+                    )
+                } else {
+                    (
+                        SourceViewLimitKind::PageCount,
+                        pages as u64,
+                        pdf_syntax::MAX_PAGES as u64,
+                    )
+                };
+                ApplicationError::SourceViewLimitExceeded(SourceViewLimitDetail::new(
+                    page,
+                    kind,
+                    Some(measured),
+                    Some(limit),
+                ))
+            }
+            LoadPdfError::Invalid | LoadPdfError::Decryption(_) => {
+                ApplicationError::SourceViewFailed(format!("invalid PDF source view: {error:?}"))
+            }
         })?;
         let pages = pdf.pages();
         let page_count = pages.len();
         if page_count > options.max_pages {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "PDF has {page_count} pages; source-view limit is {} pages",
-                options.max_pages
-            )));
+            return Err(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::PageCount,
+                    Some(page_count as u64),
+                    Some(options.max_pages as u64),
+                ),
+            ));
         }
 
         let page_index = page
@@ -70,23 +203,50 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
 
         let (base_width, base_height) = source_page.render_dimensions();
         let scale = options.dpi as f32 / 72.0;
-        let width = checked_dimension(base_width, scale, options.max_width, "width")?;
-        let height = checked_dimension(base_height, scale, options.max_height, "height")?;
+        let width = checked_dimension(base_width, scale, options.max_width, "width", page)?;
+        let height = checked_dimension(base_height, scale, options.max_height, "height", page)?;
         let pixels = u64::from(width)
             .checked_mul(u64::from(height))
             .ok_or_else(|| {
-                ApplicationError::ResourceLimitExceeded("source-view pixel count overflowed".into())
+                ApplicationError::SourceViewLimitExceeded(SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::RenderedPixels,
+                    None,
+                    Some(options.max_pixels),
+                ))
             })?;
         if pixels > options.max_pixels {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "source-view image has {pixels} pixels; limit is {}",
-                options.max_pixels
-            )));
+            return Err(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::RenderedPixels,
+                    Some(pixels),
+                    Some(options.max_pixels),
+                ),
+            ));
         }
 
+        // A stream over `max_decoded_stream_bytes` reaches the interpreter as
+        // the typed `StreamTooLarge` warning, never as a render error, so the
+        // sink is the only place the rejection is observable — capture the
+        // first one and reject after the pass instead of returning an image
+        // with the oversized stream silently missing.
+        let stream_limit = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let warning_slot = std::sync::Arc::clone(&stream_limit);
+        let interpreter = InterpreterSettings {
+            warning_sink: std::sync::Arc::new(move |warning| {
+                if let InterpreterWarning::StreamTooLarge { observed, limit } = warning
+                    && let Ok(mut slot) = warning_slot.lock()
+                    && slot.is_none()
+                {
+                    *slot = Some((observed, limit));
+                }
+            }),
+            ..Default::default()
+        };
         let pixmap = pdf_render::render(
             source_page,
-            &InterpreterSettings::default(),
+            &interpreter,
             &pdf_render::RenderSettings {
                 x_scale: scale,
                 y_scale: scale,
@@ -96,6 +256,18 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
                 ..Default::default()
             },
         );
+
+        let stream_hit = stream_limit.lock().ok().and_then(|slot| *slot);
+        if let Some((observed, limit)) = stream_hit {
+            return Err(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::DecodedStreamBytes,
+                    Some(observed),
+                    Some(limit),
+                ),
+            ));
+        }
 
         let image = RgbaImage::from_raw(
             u32::from(pixmap.width()),
@@ -117,11 +289,14 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
             })?;
         let encoded = encoded.into_inner();
         if encoded.len() > options.max_image_bytes {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "source-view image is {} bytes; limit is {} bytes",
-                encoded.len(),
-                options.max_image_bytes
-            )));
+            return Err(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::ImageBytes,
+                    Some(encoded.len() as u64),
+                    Some(options.max_image_bytes as u64),
+                ),
+            ));
         }
 
         Ok(RenderedSourceView {
@@ -176,7 +351,7 @@ impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
             )));
         }
         if self.timeout.is_zero() {
-            return Err(ApplicationError::ResourceLimitExceeded(
+            return Err(ApplicationError::SourceViewFailed(
                 "source-view worker timeout must be greater than zero".into(),
             ));
         }
@@ -230,10 +405,14 @@ impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
             if started.elapsed() >= self.timeout {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(ApplicationError::ResourceLimitExceeded(format!(
-                    "source view renderer exceeded {:?} timeout and was terminated",
-                    self.timeout
-                )));
+                return Err(ApplicationError::SourceViewLimitExceeded(
+                    SourceViewLimitDetail::new(
+                        page,
+                        SourceViewLimitKind::Timeout,
+                        Some(started.elapsed().as_millis() as u64),
+                        Some(self.timeout.as_millis() as u64),
+                    ),
+                ));
             }
             thread::sleep(WORKER_POLL_INTERVAL);
         };
@@ -241,6 +420,9 @@ impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
         let stdout = read_child_pipe(child.stdout.take(), "stdout")?;
         let stderr = read_child_pipe(child.stderr.take(), "stderr")?;
         if !status.success() {
+            if let Some(detail) = worker_limit_detail(&stderr, page) {
+                return Err(ApplicationError::SourceViewLimitExceeded(detail));
+            }
             return Err(ApplicationError::SourceViewFailed(format!(
                 "isolated source-view worker exited with {status}: {}",
                 bounded_diagnostic(&stderr)
@@ -257,10 +439,21 @@ impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
                 "failed to read isolated source-view image: {error}"
             ))
         })?;
-        if encoded.len() > options.max_image_bytes || encoded.len() != metadata.image_bytes {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "isolated source-view image size {} violates declared/maximum size",
-                encoded.len()
+        if encoded.len() > options.max_image_bytes {
+            return Err(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::ImageBytes,
+                    Some(encoded.len() as u64),
+                    Some(options.max_image_bytes as u64),
+                ),
+            ));
+        }
+        if encoded.len() != metadata.image_bytes {
+            return Err(ApplicationError::SourceViewFailed(format!(
+                "isolated source-view image size {} violates declared size {}",
+                encoded.len(),
+                metadata.image_bytes
             )));
         }
 
@@ -307,20 +500,22 @@ pub fn run_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error:
 
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes)?;
-    let rendered = PdfSourceViewRenderer.render(
-        bytes,
-        MediaType("application/pdf".into()),
-        page,
-        SourceViewRenderOptions {
-            dpi,
-            max_pages,
-            max_width,
-            max_height,
-            max_pixels,
-            max_image_bytes,
-            max_decoded_stream_bytes,
-        },
-    )?;
+    let rendered = PdfSourceViewRenderer
+        .render(
+            bytes,
+            MediaType("application/pdf".into()),
+            page,
+            SourceViewRenderOptions {
+                dpi,
+                max_pages,
+                max_width,
+                max_height,
+                max_pixels,
+                max_image_bytes,
+                max_decoded_stream_bytes,
+            },
+        )
+        .map_err(report_worker_limit)?;
     fs::write(&output_path, &rendered.bytes)?;
     let metadata = WorkerMetadata {
         width: rendered.width,
@@ -442,6 +637,7 @@ fn checked_dimension(
     scale: f32,
     limit: u32,
     label: &str,
+    page: u32,
 ) -> Result<u32, ApplicationError> {
     let scaled = f64::from(base) * f64::from(scale);
     if !scaled.is_finite() || scaled <= 0.0 {
@@ -455,19 +651,33 @@ fn checked_dimension(
             "PDF page has an unusable {label} dimension"
         )));
     }
+    let measured = dimension as u64;
     if dimension > f64::from(limit) {
-        return Err(ApplicationError::ResourceLimitExceeded(format!(
-            "source-view image {label} is {dimension:.0}px; limit is {limit}px"
-        )));
+        return Err(ApplicationError::SourceViewLimitExceeded(
+            SourceViewLimitDetail::new(
+                page,
+                SourceViewLimitKind::PageDimensions,
+                Some(measured),
+                Some(u64::from(limit)),
+            ),
+        ));
     }
     if dimension > f64::from(u16::MAX) {
-        return Err(ApplicationError::ResourceLimitExceeded(format!(
-            "source-view image {label} exceeds renderer dimensions"
-        )));
+        return Err(ApplicationError::SourceViewLimitExceeded(
+            SourceViewLimitDetail::new(
+                page,
+                SourceViewLimitKind::PageDimensions,
+                Some(measured),
+                Some(u64::from(u16::MAX)),
+            ),
+        ));
     }
-    u32::try_from(dimension as u64).map_err(|_| {
-        ApplicationError::ResourceLimitExceeded(format!(
-            "source-view image {label} exceeds supported dimensions"
+    u32::try_from(measured).map_err(|_| {
+        ApplicationError::SourceViewLimitExceeded(SourceViewLimitDetail::new(
+            page,
+            SourceViewLimitKind::PageDimensions,
+            Some(measured),
+            Some(u64::from(u32::MAX)),
         ))
     })
 }

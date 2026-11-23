@@ -9,11 +9,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::application::ports::{
-    ApplicationError, RenderedSourceView, SourceViewRenderOptions, SourceViewRenderer,
+    ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
+    SourceViewRenderOptions, SourceViewRenderer,
 };
 use crate::domain::MediaType;
 
 use super::PdfSourceViewRenderer;
+use super::source_view::{report_worker_limit, worker_limit_detail};
 
 const FILE_SOURCE_VIEW_WORKER_FLAG: &str = "--reading-mcp-source-view-file-worker";
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -69,7 +71,7 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
             )));
         }
         if self.timeout.is_zero() {
-            return Err(ApplicationError::ResourceLimitExceeded(
+            return Err(ApplicationError::SourceViewFailed(
                 "source-view worker timeout must be greater than zero".into(),
             ));
         }
@@ -132,16 +134,23 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
             if started.elapsed() >= self.timeout {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(ApplicationError::ResourceLimitExceeded(format!(
-                    "source view renderer exceeded {:?} timeout and was terminated",
-                    self.timeout
-                )));
+                return Err(ApplicationError::SourceViewLimitExceeded(
+                    SourceViewLimitDetail::new(
+                        page,
+                        SourceViewLimitKind::Timeout,
+                        Some(started.elapsed().as_millis() as u64),
+                        Some(self.timeout.as_millis() as u64),
+                    ),
+                ));
             }
             thread::sleep(WORKER_POLL_INTERVAL);
         };
 
         if !status.success() {
             let diagnostic = fs::read(&stderr_path).unwrap_or_default();
+            if let Some(detail) = worker_limit_detail(&diagnostic, page) {
+                return Err(ApplicationError::SourceViewLimitExceeded(detail));
+            }
             return Err(ApplicationError::SourceViewFailed(format!(
                 "isolated source-view worker exited with {status}: {}",
                 bounded_diagnostic(&diagnostic)
@@ -159,17 +168,28 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
                     "invalid source-view worker metadata: {error}"
                 ))
             })?;
-        validate_metadata(&metadata, &options)?;
+        validate_metadata(&metadata, &options, page)?;
 
         let encoded = fs::read(&output_path).map_err(|error| {
             ApplicationError::SourceViewFailed(format!(
                 "failed to read isolated source-view image: {error}"
             ))
         })?;
-        if encoded.len() > options.max_image_bytes || encoded.len() != metadata.image_bytes {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "isolated source-view image size {} violates declared/maximum size",
-                encoded.len()
+        if encoded.len() > options.max_image_bytes {
+            return Err(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::ImageBytes,
+                    Some(encoded.len() as u64),
+                    Some(options.max_image_bytes as u64),
+                ),
+            ));
+        }
+        if encoded.len() != metadata.image_bytes {
+            return Err(ApplicationError::SourceViewFailed(format!(
+                "isolated source-view image size {} violates declared size {}",
+                encoded.len(),
+                metadata.image_bytes
             )));
         }
 
@@ -217,20 +237,22 @@ pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::e
     }
 
     let bytes = fs::read(&input_path)?;
-    let rendered = PdfSourceViewRenderer.render(
-        bytes,
-        MediaType("application/pdf".into()),
-        page,
-        SourceViewRenderOptions {
-            dpi,
-            max_pages,
-            max_width,
-            max_height,
-            max_pixels,
-            max_image_bytes,
-            max_decoded_stream_bytes,
-        },
-    )?;
+    let rendered = PdfSourceViewRenderer
+        .render(
+            bytes,
+            MediaType("application/pdf".into()),
+            page,
+            SourceViewRenderOptions {
+                dpi,
+                max_pages,
+                max_width,
+                max_height,
+                max_pixels,
+                max_image_bytes,
+                max_decoded_stream_bytes,
+            },
+        )
+        .map_err(report_worker_limit)?;
     fs::write(&output_path, &rendered.bytes)?;
     let metadata = WorkerMetadata {
         width: rendered.width,
@@ -245,41 +267,66 @@ pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::e
 fn validate_metadata(
     metadata: &WorkerMetadata,
     options: &SourceViewRenderOptions,
+    page: u32,
 ) -> Result<(), ApplicationError> {
+    let limit = |kind, measured, limit| {
+        ApplicationError::SourceViewLimitExceeded(SourceViewLimitDetail::new(
+            page,
+            kind,
+            Some(measured),
+            Some(limit),
+        ))
+    };
     if metadata.page_count > options.max_pages {
-        return Err(ApplicationError::ResourceLimitExceeded(format!(
-            "isolated source-view page count {} exceeds limit {}",
-            metadata.page_count, options.max_pages
-        )));
+        return Err(limit(
+            SourceViewLimitKind::PageCount,
+            metadata.page_count as u64,
+            options.max_pages as u64,
+        ));
     }
-    if metadata.width == 0
-        || metadata.height == 0
-        || metadata.width > options.max_width
-        || metadata.height > options.max_height
-    {
-        return Err(ApplicationError::ResourceLimitExceeded(format!(
-            "isolated source-view dimensions {}x{} violate configured limits",
+    if metadata.width == 0 || metadata.height == 0 {
+        return Err(ApplicationError::SourceViewFailed(format!(
+            "isolated source-view metadata declares invalid dimensions {}x{}",
             metadata.width, metadata.height
         )));
+    }
+    if metadata.width > options.max_width {
+        return Err(limit(
+            SourceViewLimitKind::PageDimensions,
+            u64::from(metadata.width),
+            u64::from(options.max_width),
+        ));
+    }
+    if metadata.height > options.max_height {
+        return Err(limit(
+            SourceViewLimitKind::PageDimensions,
+            u64::from(metadata.height),
+            u64::from(options.max_height),
+        ));
     }
     let pixels = u64::from(metadata.width)
         .checked_mul(u64::from(metadata.height))
         .ok_or_else(|| {
-            ApplicationError::ResourceLimitExceeded(
-                "isolated source-view pixel count overflowed".into(),
-            )
+            ApplicationError::SourceViewLimitExceeded(SourceViewLimitDetail::new(
+                page,
+                SourceViewLimitKind::RenderedPixels,
+                None,
+                Some(options.max_pixels),
+            ))
         })?;
     if pixels > options.max_pixels {
-        return Err(ApplicationError::ResourceLimitExceeded(format!(
-            "isolated source-view image has {pixels} pixels; limit is {}",
-            options.max_pixels
-        )));
+        return Err(limit(
+            SourceViewLimitKind::RenderedPixels,
+            pixels,
+            options.max_pixels,
+        ));
     }
     if metadata.image_bytes > options.max_image_bytes {
-        return Err(ApplicationError::ResourceLimitExceeded(format!(
-            "isolated source-view metadata declares {} image bytes; limit is {}",
-            metadata.image_bytes, options.max_image_bytes
-        )));
+        return Err(limit(
+            SourceViewLimitKind::ImageBytes,
+            metadata.image_bytes as u64,
+            options.max_image_bytes as u64,
+        ));
     }
     Ok(())
 }

@@ -483,6 +483,24 @@ impl DocumentRepository for ObservedDocumentRepository {
         self.inner.load_section_char_len(id, section_id).await
     }
 
+    async fn original_source_page_at(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+        offset: usize,
+    ) -> Result<Option<u32>, ApplicationError> {
+        self.inner
+            .original_source_page_at(id, section_id, offset)
+            .await
+    }
+
+    async fn original_source_bindings_stale(
+        &self,
+        id: &DocumentId,
+    ) -> Result<bool, ApplicationError> {
+        self.inner.original_source_bindings_stale(id).await
+    }
+
     async fn body_order(
         &self,
         id: &DocumentId,

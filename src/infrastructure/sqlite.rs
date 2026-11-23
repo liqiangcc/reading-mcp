@@ -821,7 +821,15 @@ impl SqliteDocumentRepository {
                     PRIMARY KEY(document_id, ord)
                  ) WITHOUT ROWID;
                  CREATE UNIQUE INDEX IF NOT EXISTS idx_document_body_order_rows_v1_key
-                    ON document_body_order_rows_v1(document_id, section_key);",
+                    ON document_body_order_rows_v1(document_id, section_key);
+                 CREATE TABLE IF NOT EXISTS original_source_bindings_v1 (
+                    document_id TEXT NOT NULL,
+                    owner_section_id TEXT NOT NULL,
+                    range_start INTEGER NOT NULL,
+                    range_end INTEGER NOT NULL,
+                    page_number INTEGER NOT NULL,
+                    PRIMARY KEY(document_id, owner_section_id, range_start)
+                 ) WITHOUT ROWID;",
             )
             .map_err(repository_error)?;
         ensure_normalized_document_hash_column(&connection)?;
@@ -975,6 +983,38 @@ impl DocumentRepository for SqliteDocumentRepository {
                     &normalized_document_hash,
                     &body_order,
                 )?;
+                // The cite page lookup reads one row per unit handle: the validated bindings are
+                // stored as their own rows so a per-call read never decodes the whole map. A
+                // document whose metadata entry is absent or not a valid map writes no rows, and
+                // a reader resolves such a section from its `pdf:page:<n>` location or refuses.
+                transaction
+                    .execute(
+                        "DELETE FROM original_source_bindings_v1 WHERE document_id = ?1",
+                        params![document.id.0],
+                    )
+                    .map_err(repository_error)?;
+                if let Ok(Some(map)) = document.original_source_binding_map() {
+                    let mut statement = transaction
+                        .prepare_cached(
+                            "INSERT INTO original_source_bindings_v1(
+                                document_id, owner_section_id, range_start, range_end, page_number
+                             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        )
+                        .map_err(repository_error)?;
+                    for binding in &map.bindings {
+                        let crate::domain::OriginalSourceTarget::Page { page_number } =
+                            binding.target;
+                        statement
+                            .execute(params![
+                                document.id.0,
+                                binding.owner_section_id.0,
+                                usize_to_i64(binding.normalized_range.start())?,
+                                usize_to_i64(binding.normalized_range.end())?,
+                                page_number,
+                            ])
+                            .map_err(repository_error)?;
+                    }
+                }
                 transaction.commit().map_err(repository_error)?;
                 Ok(())
             },
@@ -1108,6 +1148,86 @@ impl DocumentRepository for SqliteDocumentRepository {
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| load_one_section_char_len(connection, &id, &section_id),
+        )
+        .await
+    }
+
+    /// The page of the binding row that contains `offset`: the greatest `range_start` not past
+    /// the offset, because a section's stored rows never overlap. One index probe, not the map.
+    async fn original_source_page_at(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+        offset: usize,
+    ) -> Result<Option<u32>, ApplicationError> {
+        let id = id.clone();
+        let section_id = section_id.clone();
+        let offset = usize_to_i64(offset)?;
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                connection
+                    .query_row(
+                        "SELECT range_end, page_number FROM original_source_bindings_v1
+                          WHERE document_id = ?1 AND owner_section_id = ?2 AND range_start <= ?3
+                          ORDER BY range_start DESC LIMIT 1",
+                        params![id.0, section_id.0, offset],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()
+                    .map_err(repository_error)?
+                    .filter(|(range_end, _)| offset < *range_end)
+                    .map(|(_, page)| {
+                        u32::try_from(page).map_err(|_| {
+                            ApplicationError::RepositoryFailed(format!(
+                                "persisted original source page {page} is outside u32 range"
+                            ))
+                        })
+                    })
+                    .transpose()
+            },
+        )
+        .await
+    }
+
+    async fn original_source_bindings_stale(
+        &self,
+        id: &DocumentId,
+    ) -> Result<bool, ApplicationError> {
+        let id = id.clone();
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let has_rows: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM original_source_bindings_v1
+                          WHERE document_id = ?1)",
+                        params![id.0],
+                        |row| row.get(0),
+                    )
+                    .map_err(repository_error)?;
+                if has_rows {
+                    return Ok(false);
+                }
+                // A document with no rows is fixable only when its open result predates this
+                // store version: the startup prune already deleted stale results and their
+                // documents, so a survivor with rows missing was ingested fresh and reopening
+                // it cannot add the rows it lacks.
+                if !has_table(connection, "open_results_v1")? {
+                    return Ok(true);
+                }
+                let current: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM open_results_v1
+                          WHERE document_id = ?1 AND fingerprint LIKE ?2)",
+                        params![id.0, format!("%|{TEXT_UNIT_STORE_VERSION}")],
+                        |row| row.get(0),
+                    )
+                    .map_err(repository_error)?;
+                Ok(!current)
+            },
         )
         .await
     }
@@ -3358,6 +3478,7 @@ fn delete_unreachable_document(
         "document_body_order_rows_v1",
         "document_meta_v1",
         "document_meta_v2",
+        "original_source_bindings_v1",
     ] {
         if has_table(transaction, table)? {
             report.rows_removed += transaction

@@ -458,3 +458,56 @@ async fn put_keeps_one_open_result_per_document() {
         .expect("one result should exist");
     assert_eq!(stored_fingerprint, current_fingerprint);
 }
+
+#[tokio::test]
+async fn the_prune_removes_the_binding_rows_of_the_unreachable_document() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let database = directory.path().join("state.sqlite");
+    let orphan = document("orphan");
+    {
+        let repository = SqliteDocumentRepository::open(&database).expect("repository should open");
+        repository
+            .save(orphan.clone())
+            .await
+            .expect("unreachable document should save");
+    }
+    {
+        let connection = Connection::open(&database).expect("database should open directly");
+        connection
+            .execute(
+                "INSERT INTO original_source_bindings_v1(
+                    document_id, owner_section_id, range_start, range_end, page_number)
+                 VALUES (?1, 'section://orphan/root', 0, 10, 1)",
+                params![orphan.id.0],
+            )
+            .expect("binding row should be inserted");
+        assert_eq!(
+            count(
+                &connection,
+                "SELECT COUNT(*) FROM original_source_bindings_v1 WHERE document_id = ?1",
+                &orphan.id.0,
+            ),
+            1
+        );
+    }
+
+    let store = SqliteOpenResultStore::open(&database).expect("open result store should open");
+    let report = store
+        .prune_stale_and_unreachable(64)
+        .expect("prune should succeed");
+    assert_eq!(
+        report.documents_removed, 1,
+        "the unreachable document is removed"
+    );
+
+    let connection = Connection::open(&database).expect("database should reopen directly");
+    assert_eq!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM original_source_bindings_v1 WHERE document_id = ?1",
+            &orphan.id.0,
+        ),
+        0,
+        "its original-source binding rows are removed with it"
+    );
+}

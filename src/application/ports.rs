@@ -449,6 +449,44 @@ pub trait DocumentRepository: Send + Sync {
             .map(|text| text.chars().count()))
     }
 
+    /// The original-source page the normalized offset `offset` of `section_id` binds to: the
+    /// stored binding whose range contains the offset (`start <= offset < end`). `Ok(None)` when
+    /// no stored binding covers it — the section has no binding rows, or the offset falls between
+    /// them. The default loads the whole document and scans its persisted binding map; a store
+    /// that keeps the bindings as indexed rows overrides it with one row read.
+    async fn original_source_page_at(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+        offset: usize,
+    ) -> Result<Option<u32>, ApplicationError> {
+        let Some((document, _)) = self.get_with_hash(id).await? else {
+            return Ok(None);
+        };
+        let Some(map) = document
+            .original_source_binding_map()
+            .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(map.page_at_offset(section_id, offset))
+    }
+
+    /// True when this document predates the original-source binding rows in a way a reopen
+    /// fixes: it keeps no `original_source_bindings_v1` rows at all and its stored open result
+    /// is absent or not of the current `TEXT_UNIT_STORE_VERSION`. A document with any rows, or
+    /// one ingested under the current version, reports false — reopening it cannot add rows.
+    /// The default answers false, so a store that cannot see the open-result version falls back
+    /// to the section's own page or to no page rather than to a `stale_handle` a reopen would
+    /// not fix.
+    async fn original_source_bindings_stale(
+        &self,
+        id: &DocumentId,
+    ) -> Result<bool, ApplicationError> {
+        let _ = id;
+        Ok(false)
+    }
+
     /// The document's canonical body order as `section_body_order` computes it: the section ids in
     /// body order, or the exact error that function returns for this document. `Ok(None)` when this
     /// repository holds no body order for `id`.

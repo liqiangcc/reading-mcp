@@ -1198,7 +1198,7 @@ fn build_toc_sections_inner(
 const MAX_HEADING_CHUNKS: usize = 16;
 
 /// The byte offset where the section's heading starts on its page: the first candidate
-/// starting at or after `min_offset` that `heading_line_matches`. Candidates are the page's
+/// starting at or after `min_offset` that `heading_key_matches`. Candidates are the page's
 /// own text pieces — every `\n` line plus every run of up to `MAX_HEADING_CHUNKS` consecutive
 /// chunks — because the backend may glue a heading to body text on one extracted line while
 /// still emitting it as its own chunk. A mention of the title inside a longer piece, such as
@@ -1207,23 +1207,26 @@ const MAX_HEADING_CHUNKS: usize = 16;
 fn find_heading_cut(page: &PageText, title_key: &str, min_offset: usize) -> Option<usize> {
     let text = page.text.as_str();
     let mut best: Option<usize> = None;
-    let mut consider = |span: &str, offset: usize| {
-        if offset >= min_offset
-            && best.is_none_or(|current| offset < current)
-            && heading_line_matches(span, title_key)
-        {
-            best = Some(offset);
-        }
-    };
 
     let mut line_start = 0_usize;
     for line in text.split('\n') {
-        consider(line, line_start);
+        if line_start >= min_offset && heading_key_matches(&heading_key(line), title_key) {
+            best = Some(line_start);
+            break;
+        }
         line_start += line.len() + 1;
     }
 
     // Each chunk is the trim of its piece of the page text, so it occurs exactly once at or
-    // after the previous chunk: a sequential scan recovers its byte offset.
+    // after the previous chunk: a sequential scan recovers its byte offset. Folding every
+    // chunk once also lets a run key be the concatenation of its chunks' keys — a `match`
+    // run is built only where the first chunk can still start `numbering + title`, and the
+    // scan ends at the earliest match found.
+    let chunk_keys = page
+        .chunks
+        .iter()
+        .map(|chunk| heading_key(chunk))
+        .collect::<Vec<_>>();
     let mut chunk_starts = Vec::with_capacity(page.chunks.len());
     let mut cursor = 0_usize;
     for chunk in &page.chunks {
@@ -1234,26 +1237,34 @@ fn find_heading_cut(page: &PageText, title_key: &str, min_offset: usize) -> Opti
         cursor += relative + chunk.len();
     }
     for (index, &start) in chunk_starts.iter().enumerate() {
+        if start < min_offset {
+            continue;
+        }
+        if best.is_some_and(|current| start >= current) {
+            break;
+        }
+        let first = &chunk_keys[index];
+        if !(title_key.starts_with(first.as_str())
+            || is_numbering_prefix(first)
+            || numbering_title_span(first, title_key))
+        {
+            continue;
+        }
         let mut run = String::new();
         for (inner, chunk) in page.chunks.iter().enumerate().skip(index) {
-            if inner > index {
-                run.push(' ');
-            }
-            run.push_str(chunk);
+            run.push_str(&chunk_keys[inner]);
             let run_end = chunk_starts[inner] + chunk.len();
-            if run.len() > title_key.len() + MAX_NUMBERING_CHARS + MAX_HEADING_CHUNKS {
+            if run.len() > title_key.len() + MAX_NUMBERING_CHARS {
                 break;
             }
             // A mention styled into its own chunks ("...and extractive summarization model...")
             // also matches a whole run, but the sentence continues with a lowercase word; a
             // real heading is followed by a new sentence, a list item or the page end.
-            if start >= min_offset
-                && best.is_none_or(|current| start < current)
-                && !text[run_end..]
-                    .chars()
-                    .find(|character| !character.is_whitespace())
-                    .is_some_and(|character| character.is_lowercase())
-                && heading_line_matches(&run, title_key)
+            if !text[run_end..]
+                .chars()
+                .find(|character| !character.is_whitespace())
+                .is_some_and(|character| character.is_lowercase())
+                && heading_key_matches(&run, title_key)
             {
                 best = Some(start);
             }
@@ -1283,15 +1294,14 @@ fn heading_key(text: &str) -> String {
         .collect()
 }
 
-/// The longest leading token `heading_line_matches` drops as numbering: `appendix` plus a
+/// The longest leading token `heading_key_matches` drops as numbering: `appendix` plus a
 /// short label is the longest form below.
 const MAX_NUMBERING_CHARS: usize = 24;
 
-/// Whether `line`, with case and whitespace ignored, is exactly the outline title — exactly
-/// enough that a body-text mention of the title on a longer line cannot match — or the title
-/// preceded only by a numbering token.
-fn heading_line_matches(line: &str, title_key: &str) -> bool {
-    let key = heading_key(line);
+/// Whether `key` (a `heading_key` result, so case and whitespace are already folded) is
+/// exactly the outline title — exactly enough that a body-text mention of the title inside a
+/// longer piece cannot match — or the title preceded only by a numbering token.
+fn heading_key_matches(key: &str, title_key: &str) -> bool {
     if key == title_key {
         return true;
     }
@@ -1305,6 +1315,22 @@ fn heading_line_matches(line: &str, title_key: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether `first`, the folded key of a run's first chunk, can begin `numbering + title`
+/// across the numbering/title split: some prefix of it is numbering and the rest is the
+/// start of the title. Lets `find_heading_cut` skip runs whose first chunk is plain body
+/// text without making a glued numbering-plus-title chunk (`3.1.Dataset`) invisible.
+fn numbering_title_span(first: &str, title_key: &str) -> bool {
+    first
+        .char_indices()
+        .take(MAX_NUMBERING_CHARS + 1)
+        .skip(1)
+        .any(|(index, _)| {
+            is_numbering_prefix(&first[..index])
+                && title_key
+                    .starts_with(first[index..].trim_start_matches(['.', ':', '-', '–', '—']))
+        })
 }
 
 /// Whether `prefix`, a whitespace- and case-folded leading token of a line, is outline

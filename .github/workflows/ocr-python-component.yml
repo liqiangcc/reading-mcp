@@ -15,6 +15,8 @@ on:
       - 'tests/ocr/test_download_retry.py'
       - 'tests/ocr_private_runtime.rs'
       - 'tests/support/ocr_private_mcp.rs'
+      - 'tests/v2_ocr_private_mcp.rs'
+      - 'tests/support/v2_ocr_private_mcp.rs'
       - 'tests/ocr/test_runtime_inventory.py'
       - 'src/runtime/**'
       - 'src/domain/ocr*.rs'
@@ -40,6 +42,8 @@ on:
       - 'tests/ocr/test_download_retry.py'
       - 'tests/ocr_private_runtime.rs'
       - 'tests/support/ocr_private_mcp.rs'
+      - 'tests/v2_ocr_private_mcp.rs'
+      - 'tests/support/v2_ocr_private_mcp.rs'
       - 'tests/ocr/test_runtime_inventory.py'
       - 'src/runtime/**'
       - 'src/domain/ocr*.rs'
@@ -172,6 +176,14 @@ jobs:
           test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "ocr_private_runtime" and .executable != null) | .executable' "$RUNNER_TEMP/ocr-private-rust-build.jsonl")
           test -x "$test_binary"
           sudo env OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" OCR_TEST_RUNTIME_MANIFEST="$RUNNER_TEMP/ocr-private-package/runtime-manifest.json" "$test_binary" --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/ocr-private-rust-test.log"
+      - name: Compile the v2 private-runtime Rust integration on hosted runner
+        run: cargo test --locked --test v2_ocr_private_mcp --no-run --message-format=json > "$RUNNER_TEMP/ocr-private-rust-v2-build.jsonl"
+      - name: Rust v2 tools publication with verified private runtime and no host interpreter
+        run: |
+          set -euo pipefail
+          test_binary=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "v2_ocr_private_mcp" and .executable != null) | .executable' "$RUNNER_TEMP/ocr-private-rust-v2-build.jsonl")
+          test -x "$test_binary"
+          sudo env OCR_TEST_VERIFIED_ROOT="$RUNNER_TEMP/verified-ocr-runtime" OCR_TEST_ARCHIVE_REPORT="$RUNNER_TEMP/ocr-private-archive-smoke.json" OCR_TEST_RUNTIME_MANIFEST="$RUNNER_TEMP/ocr-private-package/runtime-manifest.json" "$test_binary" --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/ocr-private-rust-v2-test.log"
       - name: Capture native import backtrace in the same private root on failure
         if: failure() && (steps.initial_private_smoke.conclusion == 'failure' || steps.archive_smoke.conclusion == 'failure')
         env:

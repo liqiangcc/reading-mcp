@@ -3,7 +3,7 @@
 //! The v1 tools keep their own `ApplicationError` mapping. The v2 tools speak only the codes of the
 //! approved contract, so every failure passes through this type before it reaches the wire.
 
-use crate::application::ports::ApplicationError;
+use crate::application::ports::{ApplicationError, SourceViewLimitDetail};
 
 /// The v2 error codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +53,10 @@ pub struct ReadingError {
     pub pages: Option<usize>,
     /// The character count an `ocr_required` answer found, when the parser measured it.
     pub characters: Option<usize>,
+    /// The page, limit kind and numbers behind a source-view `too_large`
+    /// answer, when the renderer reported them. Boxed to keep the `Err` side
+    /// of `Result` small; a source-view limit is the rare case.
+    pub source_view: Option<Box<SourceViewLimitDetail>>,
 }
 
 impl ReadingError {
@@ -64,6 +68,7 @@ impl ReadingError {
             chars: None,
             pages: None,
             characters: None,
+            source_view: None,
         }
     }
 
@@ -105,9 +110,14 @@ impl From<ApplicationError> for ReadingError {
         let detail = error.to_string();
         // `ocr_required` keeps the parser's evidence, so the v2 hint can say what the source lacks.
         // The layout backend's worker path measures neither count and stays unmeasured.
-        let (pages, characters) = match &error {
-            ApplicationError::OcrRequired(evidence) => (evidence.pages, evidence.characters),
-            _ => (None, None),
+        // `source_view` keeps the renderer's limit evidence the same way, so the
+        // hint names the page, the limit and the two numbers.
+        let (pages, characters, source_view) = match &error {
+            ApplicationError::OcrRequired(evidence) => (evidence.pages, evidence.characters, None),
+            ApplicationError::SourceViewLimitExceeded(detail) => {
+                (None, None, Some(Box::new(*detail)))
+            }
+            _ => (None, None, None),
         };
         // No wildcard arm: a new `ApplicationError` variant must pick its v2 code here.
         let code = match &error {
@@ -122,9 +132,9 @@ impl From<ApplicationError> for ReadingError {
             | ApplicationError::StaleCursor(_)
             | ApplicationError::CursorTargetMismatch(_)
             | ApplicationError::CursorEncodingFailed(_) => ReadingErrorCode::InvalidArgument,
-            ApplicationError::ResourceLimitExceeded(_) | ApplicationError::OcrResourceLimit => {
-                ReadingErrorCode::TooLarge
-            }
+            ApplicationError::ResourceLimitExceeded(_)
+            | ApplicationError::OcrResourceLimit
+            | ApplicationError::SourceViewLimitExceeded(_) => ReadingErrorCode::TooLarge,
             ApplicationError::BlockedSource(_) | ApplicationError::AuthenticationFailed(_) => {
                 ReadingErrorCode::BlockedSource
             }
@@ -147,6 +157,7 @@ impl From<ApplicationError> for ReadingError {
         Self {
             pages,
             characters,
+            source_view,
             ..Self::new(code, detail)
         }
     }

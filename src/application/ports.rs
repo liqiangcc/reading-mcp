@@ -160,6 +160,82 @@ impl std::fmt::Display for OcrRequiredDetail {
     }
 }
 
+/// The source-view render limit a page hit. The workers report it as data, so
+/// the parent never matches on message text to tell a limit rejection from a
+/// crash or an invalid PDF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceViewLimitKind {
+    /// A decoded PDF stream exceeded `max_decoded_stream_bytes`.
+    DecodedStreamBytes,
+    /// An embedded image's pixel count exceeded `max_pixels`.
+    EmbeddedImagePixels,
+    /// A page dimension exceeded `max_width`, `max_height` or the renderer's
+    /// own dimension cap.
+    PageDimensions,
+    /// The rendered pixel count exceeded `max_pixels`.
+    RenderedPixels,
+    /// The encoded page image exceeded `max_image_bytes`.
+    ImageBytes,
+    /// The document's page count exceeded `max_pages`.
+    PageCount,
+    /// The document's object count exceeded the parser's object cap.
+    DocumentObjects,
+    /// The renderer exceeded the worker wall-clock timeout. `measured` and
+    /// `limit` are milliseconds.
+    Timeout,
+}
+
+/// The evidence behind a source-view `too_large` answer: the page that could
+/// not be rendered, which limit it hit, and the measured value vs. the
+/// configured limit when the renderer knows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SourceViewLimitDetail {
+    /// The 1-based page the render was asked for.
+    pub page: u32,
+    pub kind: SourceViewLimitKind,
+    pub measured: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+impl SourceViewLimitDetail {
+    pub const fn new(
+        page: u32,
+        kind: SourceViewLimitKind,
+        measured: Option<u64>,
+        limit: Option<u64>,
+    ) -> Self {
+        Self {
+            page,
+            kind,
+            measured,
+            limit,
+        }
+    }
+}
+
+impl std::fmt::Display for SourceViewLimitDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let base = match self.kind {
+            SourceViewLimitKind::DecodedStreamBytes => {
+                "decoded PDF stream exceeds configured limit"
+            }
+            SourceViewLimitKind::EmbeddedImagePixels => "embedded image exceeds pixel limit",
+            SourceViewLimitKind::PageDimensions => {
+                "source-view dimensions exceed configured limits"
+            }
+            SourceViewLimitKind::RenderedPixels => "rendered dimensions exceed configured limits",
+            SourceViewLimitKind::ImageBytes => "source-view image exceeds byte limit",
+            SourceViewLimitKind::PageCount => "PDF page count exceeds configured limit",
+            SourceViewLimitKind::DocumentObjects => "PDF object count exceeds configured limit",
+            SourceViewLimitKind::Timeout => "source-view render exceeded configured timeout",
+        };
+        match (self.measured, self.limit) {
+            (Some(measured), Some(limit)) => write!(formatter, "{base} ({measured} > {limit})"),
+            _ => formatter.write_str(base),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ApplicationError {
     #[error("source blocked: {0}")]
@@ -220,6 +296,8 @@ pub enum ApplicationError {
     InvalidRequest(String),
     #[error("source view failed: {0}")]
     SourceViewFailed(String),
+    #[error("{0}")]
+    SourceViewLimitExceeded(SourceViewLimitDetail),
 }
 
 #[async_trait]

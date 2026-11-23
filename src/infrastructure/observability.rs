@@ -828,6 +828,7 @@ fn error_class(error: &ApplicationError) -> &'static str {
         ApplicationError::OcrResourceLimit => "ocr_resource_limit",
         ApplicationError::OcrNoSupportedProjection => "ocr_no_supported_projection",
         ApplicationError::SourceViewFailed(_) => "source_view_failed",
+        ApplicationError::SourceViewLimitExceeded(_) => "source_view_failed",
         ApplicationError::ResourceLimitExceeded(_) => "resource_limit",
         ApplicationError::AuthenticationFailed(_) => "authentication_failed",
         ApplicationError::RepositoryFailed(_) => "repository_failed",

@@ -10,11 +10,11 @@
 //!
 //! Gated like the v1 file: `#[ignore]` with the same `READING_MCP_MIXED_ORDER_DIR` /
 //! `READING_MCP_PDF_LAYOUT_PYTHON` environment. The four ported tests keep the v1 gate verbatim.
-//! One extra test, `scanned_pdf_stdio_default_stream_limit_is_reported`, is a **v2 gap**: v2
-//! `source_view` reports the default 16-MiB decoded-stream rejection as `internal`
-//! (`ApplicationError::SourceViewFailed` has no v2 code and `ErrorView` sends no detail), so the v1
-//! `SOURCE_VIEW_FAILED` "decoded PDF stream exceeds configured limit" assertion cannot be
-//! expressed. Its body is unchanged, so it passes the day the mapping exists.
+//! One extra test, `scanned_pdf_stdio_default_stream_limit_is_reported`, was a **v2 gap** until
+//! #264: v2 `source_view` reported the default 16-MiB decoded-stream rejection as `internal`
+//! because `ApplicationError::SourceViewFailed` had no v2 code. The worker now reports the
+//! rejection as data (`ApplicationError::SourceViewLimitExceeded`), so the test asserts
+//! `too_large` and a hint naming the page, the decoded size and the limit.
 
 #[path = "support/v2_mcp.rs"]
 mod v2_mcp;
@@ -458,17 +458,16 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
     .expect("OCR stdio lifecycle exceeded the hosted test deadline");
 }
 
-/// The v1 default-limit leg, recorded as a **v2 gap** and skipped by name in
-/// `.github/workflows/ocr-first-engine-probe.yml` (the workflow runs `--ignored`, so an ignored
-/// test still runs unless it is skipped).
+/// The v1 default-limit leg, which ran skipped by name in
+/// `.github/workflows/ocr-first-engine-probe.yml` while the mapping was a v2 gap. #264 made the
+/// worker report the rejection as data, so v2 now answers `too_large` with the page, the decoded
+/// size and the limit in the hint.
 ///
 /// v1 asserted that the default 16-MiB decoded-stream limit rejects the 26.1-MB page with
-/// `SOURCE_VIEW_FAILED` and the message "decoded PDF stream exceeds configured limit". v2
-/// `source_view` maps `ApplicationError::SourceViewFailed` to the `internal` code and `ErrorView`
-/// sends no detail, so the rejection is indistinguishable from a storage failure and the reason is
-/// lost. The assertion is kept unchanged, so it passes the day v2 grows a source-view code.
+/// `SOURCE_VIEW_FAILED` and the message "decoded PDF stream exceeds configured limit"; v1 keeps
+/// that code and message. v2 `source_view` maps the same rejection to `too_large`.
 #[tokio::test]
-#[ignore = "v2 gap: v2 source_view reports the 16-MiB decoded-stream rejection as `internal` (SourceViewFailed has no v2 code and no detail is sent), so the v1 SOURCE_VIEW_FAILED message cannot be asserted; also requires pinned hosted OCR dependencies"]
+#[ignore = "requires pinned hosted OCR dependencies"]
 async fn scanned_pdf_stdio_default_stream_limit_is_reported() {
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let directory = tempfile::tempdir().unwrap();
@@ -513,6 +512,10 @@ async fn scanned_pdf_stdio_default_stream_limit_is_reported() {
             error["error"], "too_large",
             "the default decoded-stream limit rejects the page: {error}"
         );
+        let hint = error["hint"].as_str().expect("a too_large hint");
+        assert!(hint.contains("第 1 页"), "{hint}");
+        assert!(hint.contains("26,106,960"), "{hint}");
+        assert!(hint.contains("16,777,216"), "{hint}");
         client.cancel().await.unwrap();
     })
     .await

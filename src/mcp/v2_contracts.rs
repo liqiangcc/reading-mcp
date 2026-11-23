@@ -16,6 +16,7 @@ use crate::application::open_reading::OpenReadingResult;
 use crate::application::outline_reading::{
     DEFAULT_OUTLINE_DEPTH, DEFAULT_OUTLINE_LIMIT, OutlineReadingResult,
 };
+use crate::application::ports::{SourceViewLimitDetail, SourceViewLimitKind};
 use crate::application::read_reading::{ReadReadingItem, ReadReadingResult};
 use crate::application::reading_error::{ReadingError, ReadingErrorCode};
 use crate::application::search_reading::{DEFAULT_SEARCH_LIMIT, SearchReadingResult};
@@ -394,9 +395,7 @@ fn hint(error: &ReadingError) -> String {
         }
         ReadingErrorCode::TooLong => too_long_hint(error),
         ReadingErrorCode::InvalidArgument => invalid_argument_hint(error),
-        ReadingErrorCode::TooLarge => {
-            "来源超出资源上限（文件或 OCR 输入过大），请换一个更小的来源。".to_owned()
-        }
+        ReadingErrorCode::TooLarge => too_large_hint(error),
         ReadingErrorCode::BlockedSource => {
             "该来源被安全策略拒绝：只允许已授权的本地目录和公开 HTTPS 地址。".to_owned()
         }
@@ -421,6 +420,57 @@ pub const FETCH_RETRY_WAIT_SECONDS: u64 = 30;
 /// server that runs OCR. Enabling OCR locally is not among them, because a reader cannot.
 const OCR_REQUIRED_ROUTES: &str =
     "请改用带文字层的版本（例如离线 OCR 后的 PDF 或文本），或在支持 OCR 的服务上重新 open。";
+
+/// A `too_large` answer is source-view specific when the renderer reported which limit a page
+/// hit: the document is fine, only the original-page image cannot be rendered, and the text is
+/// still readable. Every other limit rejection keeps the generic advice.
+fn too_large_hint(error: &ReadingError) -> String {
+    match &error.source_view {
+        Some(detail) => source_view_limit_hint(detail),
+        None => "来源超出资源上限（文件或 OCR 输入过大），请换一个更小的来源。".to_owned(),
+    }
+}
+
+/// The source-view `too_large` hint names the page, the limit and the two numbers when the
+/// renderer measured them, e.g. "第 3 页的原页图像超出渲染上限（解码后的 PDF 流 27,000,000 字节
+/// > 上限 16,777,216 字节），无法显示；正文仍可用 read / cite 阅读。"
+fn source_view_limit_hint(detail: &SourceViewLimitDetail) -> String {
+    let (name, unit) = match detail.kind {
+        SourceViewLimitKind::DecodedStreamBytes => ("解码后的 PDF 流", "字节"),
+        SourceViewLimitKind::EmbeddedImagePixels => ("嵌入图像的像素数", "像素"),
+        SourceViewLimitKind::PageDimensions => ("页面尺寸", "像素"),
+        SourceViewLimitKind::RenderedPixels => ("渲染像素数", "像素"),
+        SourceViewLimitKind::ImageBytes => ("图像字节数", "字节"),
+        SourceViewLimitKind::PageCount => ("页数", "页"),
+        SourceViewLimitKind::DocumentObjects => ("文档对象数", "个"),
+        SourceViewLimitKind::Timeout => ("渲染时间", "毫秒"),
+    };
+    let page = detail.page;
+    let reason = match (detail.measured, detail.limit) {
+        (Some(measured), Some(limit)) => format!(
+            "{name} {} {unit} > 上限 {} {unit}",
+            grouped(measured),
+            grouped(limit)
+        ),
+        _ => format!("{name}超出上限"),
+    };
+    format!(
+        "第 {page} 页的原页图像超出渲染上限（{reason}），无法显示；正文仍可用 read / cite 阅读。"
+    )
+}
+
+/// `27_000_000` renders as `27,000,000`, matching the grouped numbers in the other v2 hints.
+fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
 
 /// `ocr_required` says what was found when the parser measured it, and offers the same two routes
 /// either way.
@@ -529,7 +579,9 @@ mod tests {
     use crate::application::cite_reading::{CiteReadingItem, CiteReadingResult};
     use crate::application::open_reading::OpenReadingResult;
     use crate::application::outline_reading::{OutlineReadingItem, OutlineReadingResult};
-    use crate::application::ports::{ApplicationError, OcrRequiredDetail};
+    use crate::application::ports::{
+        ApplicationError, OcrRequiredDetail, SourceViewLimitDetail, SourceViewLimitKind,
+    };
     use crate::application::read_reading::{
         ReadReadingItem, ReadReadingResult, ReadReadingSection,
     };
@@ -869,6 +921,16 @@ mod tests {
                 "internal",
                 false,
             ),
+            (
+                ApplicationError::SourceViewLimitExceeded(SourceViewLimitDetail::new(
+                    3,
+                    SourceViewLimitKind::DecodedStreamBytes,
+                    Some(27_000_000),
+                    Some(16_777_216),
+                )),
+                "too_large",
+                false,
+            ),
         ];
         for (error, code, has_retry) in cases {
             let mapped = ReadingError::from(error);
@@ -888,6 +950,99 @@ mod tests {
         }
         // `too_long` is built by `read` itself, and its retry needs the request.
         assert!(retry_for(&ReadingError::too_long(900)).is_none());
+    }
+
+    /// Every source-view limit kind answers `too_large` with a hint naming the page, and the
+    /// measured value and configured limit when the renderer knows them.
+    #[test]
+    fn source_view_limit_hint_names_the_page_the_limit_and_the_numbers() {
+        let cases = [
+            (
+                SourceViewLimitKind::DecodedStreamBytes,
+                "解码后的 PDF 流 27,000,000 字节 > 上限 16,777,216 字节",
+                27_000_000,
+                16_777_216,
+            ),
+            (
+                SourceViewLimitKind::EmbeddedImagePixels,
+                "嵌入图像的像素数 9,000,000 像素 > 上限 4,000,000 像素",
+                9_000_000,
+                4_000_000,
+            ),
+            (
+                SourceViewLimitKind::PageDimensions,
+                "页面尺寸 3,400 像素 > 上限 2,400 像素",
+                3_400,
+                2_400,
+            ),
+            (
+                SourceViewLimitKind::RenderedPixels,
+                "渲染像素数 9,000,000 像素 > 上限 4,000,000 像素",
+                9_000_000,
+                4_000_000,
+            ),
+            (
+                SourceViewLimitKind::ImageBytes,
+                "图像字节数 9,000,000 字节 > 上限 8,388,608 字节",
+                9_000_000,
+                8_388_608,
+            ),
+            (
+                SourceViewLimitKind::PageCount,
+                "页数 3,000 页 > 上限 2,000 页",
+                3_000,
+                2_000,
+            ),
+            (
+                SourceViewLimitKind::DocumentObjects,
+                "文档对象数 600,000 个 > 上限 500,000 个",
+                600_000,
+                500_000,
+            ),
+            (
+                SourceViewLimitKind::Timeout,
+                "渲染时间 10,000 毫秒 > 上限 10,000 毫秒",
+                10_000,
+                10_000,
+            ),
+        ];
+        for (kind, expected_reason, measured, limit) in cases {
+            let error = ReadingError::from(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(3, kind, Some(measured), Some(limit)),
+            ));
+            assert_eq!(error.code, super::ReadingErrorCode::TooLarge, "{kind:?}");
+            let hint = super::hint(&error);
+            assert_eq!(
+                hint,
+                format!(
+                    "第 3 页的原页图像超出渲染上限（{expected_reason}），无法显示；正文仍可用 read / cite 阅读。"
+                ),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// Without measured numbers the hint still names the page and the limit kind.
+    #[test]
+    fn source_view_limit_hint_stays_named_when_unmeasured() {
+        let error = ReadingError::from(ApplicationError::SourceViewLimitExceeded(
+            SourceViewLimitDetail::new(7, SourceViewLimitKind::RenderedPixels, None, None),
+        ));
+        assert_eq!(
+            super::hint(&error),
+            "第 7 页的原页图像超出渲染上限（渲染像素数超出上限），无法显示；正文仍可用 read / cite 阅读。"
+        );
+    }
+
+    /// A `too_large` that is not a source-view limit keeps the generic advice.
+    #[test]
+    fn other_too_large_keeps_the_generic_hint() {
+        let error = ReadingError::from(ApplicationError::ResourceLimitExceeded("big".into()));
+        assert!(error.source_view.is_none());
+        assert_eq!(
+            super::hint(&error),
+            "来源超出资源上限（文件或 OCR 输入过大），请换一个更小的来源。"
+        );
     }
 
     #[test]

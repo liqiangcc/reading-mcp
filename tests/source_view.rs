@@ -179,10 +179,17 @@ async fn source_view_enforces_render_dimensions_before_allocating_image() {
         },
     )
     .expect_err("oversized source-view dimensions must be rejected");
-    assert!(matches!(
+    assert_eq!(
         error,
-        reading_mcp::application::ports::ApplicationError::ResourceLimitExceeded(_)
-    ));
+        reading_mcp::application::ports::ApplicationError::SourceViewLimitExceeded(
+            reading_mcp::application::ports::SourceViewLimitDetail::new(
+                1,
+                reading_mcp::application::ports::SourceViewLimitKind::PageDimensions,
+                Some(1_190),
+                Some(100),
+            )
+        )
+    );
 }
 
 fn build_fidelity_pdf() -> Vec<u8> {

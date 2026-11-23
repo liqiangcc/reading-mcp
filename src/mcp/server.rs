@@ -1331,6 +1331,7 @@ fn to_mcp_error(error: ApplicationError) -> ErrorData {
         | ApplicationError::OcrTimeout
         | ApplicationError::OcrResourceLimit
         | ApplicationError::SourceViewFailed(_)
+        | ApplicationError::SourceViewLimitExceeded(_)
         | ApplicationError::DocumentNotFound
         | ApplicationError::SectionNotFound => ErrorData::invalid_params(message, data),
         ApplicationError::CursorEncodingFailed(_)
@@ -1366,6 +1367,9 @@ fn error_descriptor(error: &ApplicationError) -> (&'static str, bool) {
         ApplicationError::OcrTimeout => ("OCR_TIMEOUT", true),
         ApplicationError::OcrResourceLimit => ("OCR_RESOURCE_LIMIT", false),
         ApplicationError::SourceViewFailed(_) => ("SOURCE_VIEW_FAILED", false),
+        // v1 reported a worker's limit rejection as `SourceViewFailed`, so the
+        // structured variant keeps that code and its detail message.
+        ApplicationError::SourceViewLimitExceeded(_) => ("SOURCE_VIEW_FAILED", false),
         ApplicationError::DocumentNotFound => ("DOCUMENT_NOT_FOUND", false),
         ApplicationError::SectionNotFound => ("SECTION_NOT_FOUND", false),
         ApplicationError::RepositoryFailed(_) => ("REPOSITORY_FAILED", true),

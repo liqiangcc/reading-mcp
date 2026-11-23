@@ -12,7 +12,6 @@ async fn preinitialize_tool_call_is_rejected_without_terminating_stdio_server() 
     command
         .env("READING_MCP_STATE_DIR", "memory")
         .env("READING_MCP_TELEMETRY", "false")
-        .env("READING_MCP_TOOLS", "v1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -37,7 +36,7 @@ async fn preinitialize_tool_call_is_rejected_without_terminating_stdio_server() 
             "id": 41,
             "method": "tools/call",
             "params": {
-                "name": "list_documents",
+                "name": "browse",
                 "arguments": {}
             }
         }),
@@ -110,7 +109,7 @@ async fn preinitialize_tool_call_is_rejected_without_terminating_stdio_server() 
         .filter_map(|tool| tool["name"].as_str())
         .collect::<Vec<_>>();
     assert_eq!(tools["id"], 43);
-    assert!(tool_names.contains(&"list_documents"));
+    assert!(tool_names.contains(&"browse"));
 
     drop(stdin);
     let status = timeout(Duration::from_secs(5), child.wait())

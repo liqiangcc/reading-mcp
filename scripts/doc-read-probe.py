@@ -5,18 +5,18 @@ The probe speaks newline-delimited JSON-RPC MCP over stdio against a release bin
 
 1. open the document and read its structure, without timing;
 2. seek to `--start-fraction` of the 50% section's sentence stream, without timing, and take the
-   locator of the unit at that position (the anchor every non-cursor shape uses);
-3. time `--calls` calls of every read shape:
-   - `get_text_units`: forward sentence pages of `--max-items`, following `next_cursor` (and
-     restarting from the first cursor when the stream ends, counted in `restarts`);
-   - `get_context`: two sentence neighbours each side of the anchor locator;
-   - `read_document`: the anchor's exact locator;
-   - `search_document`: a term taken from the middle of the anchor's text;
-   - `get_document_structure`: the first page of the document;
-   - `v2_read`: the v2 `read` follow-up after one v2 `open`, following `next`; skipped when the
-     server does not expose the v2 tools (`READING_MCP_TOOLS`);
+   handle of the item at that position (the anchor every non-cursor shape uses);
+3. time `--calls` calls of every read shape (the labels are the record's historical names; every
+   call is a v2 tool):
+   - `get_text_units`: `read` follow-ups from the anchor, following `next` (and restarting from
+     the anchor when the stream ends, counted in `restarts`);
+   - `get_context`: `read` two items back from the anchor (`{"from": anchor, "back": 2}`);
+   - `read_document`: `read` at the anchor's exact handle;
+   - `search_document`: `search` for a term taken from the middle of the anchor's text;
+   - `get_document_structure`: `outline` the first page of the document;
+   - `v2_read`: `read` follow-ups after one `open`, following `next`;
 4. sample the server's RSS in the background for the whole run and report its peak, plus the RSS
-   right after `open_document` and after the timed loops.
+   right after `open` and after the timed loops.
 
 `--io-bytes` records the `/proc/<pid>/io` `rchar`/`read_bytes` deltas around every timed call.
 `--side` names the binary in the report (`main` or `branch`); there is no document-cache dimension.
@@ -45,7 +45,7 @@ import threading
 import time
 
 REQUEST_TIMEOUT = 1800.0
-SEEK_PAGE = 256  # the server caps get_text_units max_items at 256
+SEEK_PAGE = 256  # --max-items is validated against the old v1 page cap
 SHAPES = (
     "get_text_units",
     "get_context",
@@ -301,44 +301,6 @@ def wait_for_warm(
         time.sleep(0.002)
 
 
-def flatten_structure(structure_result: dict) -> list[dict]:
-    flattened: dict[str, dict] = {}
-
-    def walk(nodes) -> None:
-        if not isinstance(nodes, list):
-            return
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            section_id = node.get("section_id")
-            if isinstance(section_id, str) and section_id not in flattened:
-                flattened[section_id] = node
-            walk(node.get("children"))
-
-    walk(structure_result.get("sections"))
-    return sorted(flattened.values(), key=lambda node: node.get("body_order", 0))
-
-
-def read_structure(server: Server, document_id: str) -> list[dict]:
-    sections: dict[str, dict] = {}
-    cursor = None
-    for _ in range(10_000):
-        arguments = {"document_id": document_id, "max_nodes": 500}
-        if cursor is not None:
-            arguments["cursor"] = cursor
-        payload = tool_payload(server.tool("get_document_structure", arguments))
-        if not isinstance(payload, dict):
-            raise ProbeError("get_document_structure returned no JSON object")
-        for node in flatten_structure(payload):
-            sections.setdefault(node["section_id"], node)
-        cursor = payload.get("next_cursor")
-        if not cursor or payload.get("complete") is True:
-            break
-    else:
-        raise ProbeError("structure pagination did not terminate")
-    return sorted(sections.values(), key=lambda node: node.get("body_order", 0))
-
-
 V2_BATCH_CHARS = 16000
 
 
@@ -423,49 +385,6 @@ def v2_seek(
     position = min(target, total_items - 1)
     text = texts[position] if position < len(texts) else ""
     return handles[position], position, text, next_handle, total_items
-
-
-def text_units(server: Server, arguments: dict) -> dict:
-    payload = tool_payload(server.tool("get_text_units", arguments))
-    if not isinstance(payload, dict):
-        raise ProbeError("get_text_units returned no JSON object")
-    stream = payload.get("stream")
-    if not isinstance(stream, dict):
-        raise ProbeError("get_text_units returned no stream segment")
-    return payload
-
-
-def seek(
-    server: Server, document_id: str, section_id: str, target: int
-) -> tuple[str | None, int, dict | None]:
-    """Page forward to `target` stream position; returns (cursor, position, last item)."""
-    position = 0
-    cursor = None
-    last_item = None
-    while position < target:
-        want = min(SEEK_PAGE, target - position)
-        arguments = {
-            "document_id": document_id,
-            "section_id": section_id,
-            "requested_kind": "sentence",
-            "direction": "forward",
-            "coverage_policy": "preserve_source",
-            "max_items": want,
-        }
-        if cursor is not None:
-            arguments["cursor"] = cursor
-        payload = text_units(server, arguments)
-        items = payload.get("items")
-        if isinstance(items, list) and items:
-            last_item = items[-1]
-        end = payload["stream"].get("end_index")
-        if not isinstance(end, int) or end <= position:
-            raise ProbeError(f"seek made no progress at position {position} (end_index {end!r})")
-        position = end
-        cursor = payload.get("next_cursor")
-        if not cursor:
-            break
-    return cursor, position, last_item
 
 
 def search_term(text: str) -> str:
@@ -654,7 +573,6 @@ def probe(args: argparse.Namespace) -> int:
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
-    env["READING_MCP_TOOLS"] = "both" if args.tools == "v1" else "v2"
     env["READING_MCP_TELEMETRY"] = "true"
     for item in args.env:
         key, separator, value = item.partition("=")
@@ -675,24 +593,14 @@ def probe(args: argparse.Namespace) -> int:
     rss_after_calls = None
     try:
         server.initialize()
-        tool_names = server.tool_names()
         open_log_offset = server.log_offset()
         opened = time.monotonic()
-        open_tool = "open_document" if args.tools == "v1" else "open"
-        payload = tool_payload(server.tool(open_tool, {"source": document}))
+        payload = tool_payload(server.tool("open", {"source": document}))
         open_seconds = time.monotonic() - opened
         rss_after_open = proc_rss_kib(server.process.pid)
-        anchor_handle = None
-        if args.tools == "v2":
-            if not isinstance(payload, dict) or not isinstance(payload.get("doc"), str):
-                raise ProbeError("open did not return a doc handle")
-            doc_handle = payload["doc"]
-        else:
-            if not isinstance(payload, dict) or not isinstance(
-                payload.get("document_id"), str
-            ):
-                raise ProbeError("open_document did not return a document_id")
-            doc_handle = payload["document_id"]
+        if not isinstance(payload, dict) or not isinstance(payload.get("doc"), str):
+            raise ProbeError("open did not return a doc handle")
+        doc_handle = payload["doc"]
         # The warm starts after the open returns. Wait for its end event before any timed call, so
         # the per-call rchar measures the read path and not the warm; the wait itself is reported.
         if args.wait_for_warm and not warm_off:
@@ -701,42 +609,14 @@ def probe(args: argparse.Namespace) -> int:
                     server, open_log_offset, args.warm_timeout_seconds, "open_document"
                 )
             )
-        if args.tools == "v2":
-            sections = outline_sections(server, doc_handle)
-        else:
-            sections = read_structure(server, doc_handle)
+        sections = outline_sections(server, doc_handle)
         if not sections:
             raise ProbeError("document has no sections")
         index = min(len(sections) - 1, int(len(sections) * args.start_fraction))
         section_id = sections[index]["section_id"]
-        if args.tools == "v2":
-            anchor_handle, start_position, anchor_text, _, total_items = v2_seek(
-                server, section_id, args.start_fraction
-            )
-            locator = {"handle": anchor_handle}
-            cursor = None
-        else:
-            head = text_units(
-                server,
-                {
-                    "document_id": doc_handle,
-                    "section_id": section_id,
-                    "requested_kind": "sentence",
-                    "direction": "forward",
-                    "coverage_policy": "preserve_source",
-                    "max_items": 1,
-                },
-            )
-            total_items = head["stream"].get("total_items")
-            if not isinstance(total_items, int) or total_items <= 0:
-                raise ProbeError(f"section reported {total_items!r} sentence items")
-            cursor, start_position, item = seek(
-                server, doc_handle, section_id, int(total_items * args.start_fraction)
-            )
-            if not isinstance(item, dict) or not isinstance(item.get("locator"), dict):
-                raise ProbeError("the seek position has no sentence locator")
-            locator = item["locator"]
-            anchor_text = str(item.get("text", ""))
+        anchor_handle, start_position, anchor_text, _, total_items = v2_seek(
+            server, section_id, args.start_fraction
+        )
         query = search_term(anchor_text)
         print(
             f"{args.label}: opened in {open_seconds:.2f} s; section {index}/{len(sections)} has "
@@ -744,79 +624,37 @@ def probe(args: argparse.Namespace) -> int:
             flush=True,
         )
 
-        if args.tools == "v2":
-            seconds, io_per_call, restarts = run_cursor_series(
-                server,
-                "read",
-                {"from": anchor_handle},
-                "from",
-                "next",
-                None,
-                args.calls,
-                args.io_bytes,
-            )
-        else:
-            base_units = {
-                "document_id": doc_handle,
-                "section_id": section_id,
-                "requested_kind": "sentence",
-                "direction": "forward",
-                "coverage_policy": "preserve_source",
-                "max_items": args.max_items,
-            }
-            seconds, io_per_call, restarts = run_cursor_series(
-                server,
-                "get_text_units",
-                base_units,
-                "cursor",
-                "next_cursor",
-                cursor,
-                args.calls,
-                args.io_bytes,
-            )
+        seconds, io_per_call, restarts = run_cursor_series(
+            server,
+            "read",
+            {"from": anchor_handle},
+            "from",
+            "next",
+            None,
+            args.calls,
+            args.io_bytes,
+        )
         shapes["get_text_units"] = {
             **summarize(seconds),
             **summarize_io(io_per_call),
             "restarts": restarts,
         }
 
-        if args.tools == "v2":
-            context_arguments = {"from": anchor_handle, "back": 2}
-            seconds, io_per_call = run_repeated(
-                server, "read", context_arguments, args.calls, args.io_bytes
-            )
-        else:
-            context_arguments = {
-                "document_id": doc_handle,
-                "target_locator": locator,
-                "relation": {"type": "neighbor", "unit": "sentence", "before": 2, "after": 2},
-            }
-            seconds, io_per_call = run_repeated(
-                server, "get_context", context_arguments, args.calls, args.io_bytes
-            )
+        seconds, io_per_call = run_repeated(
+            server, "read", {"from": anchor_handle, "back": 2}, args.calls, args.io_bytes
+        )
         shapes["get_context"] = {**summarize(seconds), **summarize_io(io_per_call)}
 
-        if args.tools == "v2":
-            read_arguments = {"from": anchor_handle}
-            read_tool = "read"
-        else:
-            read_arguments = {"document_id": doc_handle, "target_locator": locator}
-            read_tool = "read_document"
         seconds, io_per_call = run_repeated(
-            server, read_tool, read_arguments, args.calls, args.io_bytes
+            server, "read", {"from": anchor_handle}, args.calls, args.io_bytes
         )
         shapes["read_document"] = {**summarize(seconds), **summarize_io(io_per_call)}
 
-        if args.tools == "v2":
-            search_arguments = {"doc": doc_handle, "query": query, "limit": 10}
-            search_tool = "search"
-        else:
-            search_arguments = {"document_id": doc_handle, "query": query, "limit": 10}
-            search_tool = "search_document"
+        search_arguments = {"doc": doc_handle, "query": query, "limit": 10}
         seconds, io_per_call = run_repeated(
-            server, search_tool, search_arguments, args.calls, args.io_bytes
+            server, "search", search_arguments, args.calls, args.io_bytes
         )
-        hits = tool_payload(server.tool(search_tool, search_arguments))
+        hits = tool_payload(server.tool("search", search_arguments))
         shapes["search_document"] = {
             **summarize(seconds),
             **summarize_io(io_per_call),
@@ -824,70 +662,26 @@ def probe(args: argparse.Namespace) -> int:
             "query": query,
         }
 
-        if args.tools == "v2":
-            structure_arguments = {"at": doc_handle, "limit": 50}
-            structure_tool = "outline"
-        else:
-            structure_arguments = {"document_id": doc_handle, "max_nodes": 50}
-            structure_tool = "get_document_structure"
         seconds, io_per_call = run_repeated(
-            server, structure_tool, structure_arguments, args.calls, args.io_bytes
+            server, "outline", {"at": doc_handle, "limit": 50}, args.calls, args.io_bytes
         )
         shapes["get_document_structure"] = {**summarize(seconds), **summarize_io(io_per_call)}
 
-        if args.tools == "v1" and "open" in tool_names and "read" in tool_names:
-            v2_open_log_offset = server.log_offset()
-            opened_v2 = tool_payload(server.tool("open", {"source": document}))
-            # The v2 open triggers its own warm too; wait for it before timing `v2_read`, so the
-            # timed calls do not overlap it.
-            if args.wait_for_warm and not warm_off:
-                warm_waits.append(
-                    wait_for_warm(
-                        server, v2_open_log_offset, args.warm_timeout_seconds, "open"
-                    )
-                )
-            handle = opened_v2.get("doc") if isinstance(opened_v2, dict) else None
-            if not isinstance(handle, str):
-                skipped.append({"shape": "v2_read", "reason": "v2 open returned no handle"})
-            else:
-                seconds, io_per_call, restarts = run_cursor_series(
-                    server,
-                    "read",
-                    {"from": handle},
-                    "from",
-                    "next",
-                    handle,
-                    args.calls,
-                    args.io_bytes,
-                )
-                shapes["v2_read"] = {
-                    **summarize(seconds),
-                    **summarize_io(io_per_call),
-                    "restarts": restarts,
-                }
-        elif args.tools == "v2":
-            seconds, io_per_call, restarts = run_cursor_series(
-                server,
-                "read",
-                {"from": anchor_handle},
-                "from",
-                "next",
-                None,
-                args.calls,
-                args.io_bytes,
-            )
-            shapes["v2_read"] = {
-                **summarize(seconds),
-                **summarize_io(io_per_call),
-                "restarts": restarts,
-            }
-        else:
-            skipped.append(
-                {
-                    "shape": "v2_read",
-                    "reason": "the server exposes no v2 open/read tools",
-                }
-            )
+        seconds, io_per_call, restarts = run_cursor_series(
+            server,
+            "read",
+            {"from": anchor_handle},
+            "from",
+            "next",
+            None,
+            args.calls,
+            args.io_bytes,
+        )
+        shapes["v2_read"] = {
+            **summarize(seconds),
+            **summarize_io(io_per_call),
+            "restarts": restarts,
+        }
 
         rss_after_calls = proc_rss_kib(server.process.pid)
     finally:
@@ -971,7 +765,7 @@ def main() -> int:
         "--max-items",
         type=int,
         default=1,
-        help="items per timed get_text_units page (server limit 256)",
+        help="items per timed read page (validated against the old page limit 256)",
     )
     parser.add_argument(
         "--io-bytes",
@@ -990,12 +784,6 @@ def main() -> int:
         help="give up waiting for the warm after this long (the timeout is reported)",
     )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="tool set the server exposes: v2 (default) or v1",
-    )
     parser.add_argument("--out", required=True, help="JSON result path")
     args = parser.parse_args()
     try:

@@ -12,7 +12,7 @@ Two modes:
   `scripts/pdf-sweep-ids.txt`, download the PDF, measure a PyMuPDF reference (per-page text,
   per-page lines, fonts), open the document through stdio MCP with the **default** backend
   inside the same 600 MB cap the sweep uses, read every sentence unit with
-  `get_text_units`, and record the measurements of PDF-6a:
+  `read`, and record the measurements of PDF-6a:
 
   1. whitespace (H1): the whitespace share of the backend text against PyMuPDF's
      `page.get_text()` on the same pages, per document;
@@ -1329,69 +1329,11 @@ def refusal_reason(layout_python: str, worker_source: str, path: str) -> dict:
 # --------------------------------------------------------------------------------------------
 
 def collect_units(server, document_id: str, sections: list[dict], deadline: float,
-                  requested_kind: str = "sentence", tools: str = "v2") -> dict:
+                  requested_kind: str = "sentence") -> dict:
     """Every unit of `requested_kind`, with the unit kind and the degradation the server
     reports. `sentence` is the only kind a run without --keep-pdf-sentence-text asks for,
     and its stream is unchanged."""
-    if tools == "v2":
-        return collect_units_v2(server, document_id, deadline, requested_kind)
-    units: list[dict] = []
-    coverage: list[dict] = []
-    calls = 0
-    chars = 0
-    truncated = False
-    error = None
-    started = time.monotonic()
-    for section in sections:
-        if chars >= TEXT_BUDGET_CHARS or time.monotonic() > deadline:
-            truncated = True
-            break
-        cursor = None
-        first = True
-        while True:
-            if chars >= TEXT_BUDGET_CHARS or time.monotonic() > deadline:
-                truncated = True
-                break
-            arguments = PROBE.text_units(document_id, section["section_id"],
-                                         QUALITY_BATCH_ITEMS, cursor)
-            arguments["requested_kind"] = requested_kind
-            try:
-                data = PROBE.payload(server.tool("get_text_units", arguments)) or {}
-            except PROBE.ProbeError as exc:
-                error = str(exc)[:200]
-                break
-            calls += 1
-            if first:
-                coverage.append({
-                    "section_id": section["section_id"],
-                    "coverage": data.get("coverage") or {},
-                    "total_items": (data.get("stream") or {}).get("total_items"),
-                    "native_location": (data.get("target_section_locator") or {}).get(
-                        "native_location"),
-                    "page": ((section.get("location") or {}).get("page")),
-                })
-                first = False
-            for item in data.get("items") or []:
-                text = item.get("text") or ""
-                locator = item.get("locator") or {}
-                units.append({
-                    "text": text,
-                    "degradation": item.get("degradation"),
-                    "effective_kind": item.get("effective_kind"),
-                    "content_class": item.get("content_class"),
-                    "content_class_detail": item.get("content_class_detail"),
-                    "section_id": section["section_id"],
-                    "paragraph_index": locator.get("paragraph_index"),
-                })
-                chars += len(text)
-            cursor = data.get("next_cursor")
-            if not cursor:
-                break
-        if error:
-            break
-    return {"units": units, "coverage": coverage, "calls": calls, "chars": chars,
-            "truncated": truncated, "error": error,
-            "seconds": round(time.monotonic() - started, 2)}
+    return collect_units_v2(server, document_id, deadline, requested_kind)
 
 
 # The v2 `read` does not carry the v1 coverage block. The degradation and content-class strings
@@ -1718,7 +1660,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
     env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), args.backend,
-                           args.layout_python, args.tools)
+                           args.layout_python)
     cap = SWEEP.CAP if args.cap_available else None
     command = PROBE.cap_command(args.binary, cap, env)
     server = PROBE.Server(command, env, os.path.join(state_dir, "server.log"),
@@ -1736,7 +1678,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         record["phase"] = "open"
         open_started = time.perf_counter()
         try:
-            result = server.tool("open_document" if args.tools == "v1" else "open",
+            result = server.tool("open",
                                  {"source": path}, timeout=OPEN_TIMEOUT_S)
         except PROBE.ProbeError as exc:
             # A worker that dies prints its whole traceback into the server's message, and the
@@ -1749,15 +1691,15 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
         record["open_s"] = round(time.perf_counter() - open_started, 3)
         peak.snapshot()
         if result is not None:
-            document_id = PROBE.document_handle(PROBE.payload(result) or {}, args.tools)
+            document_id = PROBE.document_handle(PROBE.payload(result) or {})
         if document_id:
             record["phase"] = "structure"
-            sections = PROBE.read_sections(server, document_id, args.tools)
+            sections = PROBE.read_sections(server, document_id)
             record["sections"] = len(sections)
             record["structure_mode"] = (
-                "page_fallback" if PROBE.is_page_fallback(sections, args.tools) else "headings")
+                "page_fallback" if PROBE.is_page_fallback(sections) else "headings")
             record["phase"] = "read"
-            read = collect_units(server, document_id, sections, deadline, tools=args.tools)
+            read = collect_units(server, document_id, sections, deadline)
             units = read["units"]
             coverage = read["coverage"]
             record["read"] = {key: read[key] for key in
@@ -1771,7 +1713,7 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
             # locator carries.
             if args.keep_pdf_sentence_text:
                 paragraph_read = collect_units(server, document_id, sections, deadline,
-                                               "paragraph", tools=args.tools)
+                                               "paragraph")
                 record["paragraph_read"] = {key: paragraph_read[key] for key in
                                             ("calls", "chars", "truncated", "error",
                                              "seconds")}
@@ -1800,14 +1742,8 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
                 paragraph_records.append({
                     "kind_record": "pdf_stream_totals",
                     "id": entry["id"],
-                    "sentence_total_items": (
-                        sum(int(item.get("total_items") or 0)
-                            for item in read["coverage"])
-                        if args.tools == "v1" else len(read["units"])),
-                    "paragraph_total_items": (
-                        sum(int(item.get("total_items") or 0)
-                            for item in paragraph_read["coverage"])
-                        if args.tools == "v1" else len(paragraph_read["units"])),
+                    "sentence_total_items": len(read["units"]),
+                    "paragraph_total_items": len(paragraph_read["units"]),
                     "sentence_truncated": read["truncated"],
                     "paragraph_truncated": paragraph_read["truncated"],
                 })
@@ -1842,15 +1778,12 @@ def document_record(entry: dict, args, deadline: float) -> tuple[dict, list[dict
     reference_share = whitespace_share(reference_text)
     paragraphs = sum(int((item["coverage"] or {}).get("paragraph_count") or 0)
                      for item in coverage)
-    if args.tools == "v2":
-        # No v1 coverage block: the paragraph count is the distinct (section, paragraph) pairs
-        # the sentence handles name. `sections_with_coverage` is the same set of sections.
-        paragraph_keys = {(unit["section_id"], unit["paragraph_index"])
-                          for unit in units if unit.get("paragraph_index") is not None}
-        paragraphs = len(paragraph_keys)
-        sections_with_coverage = len({unit["section_id"] for unit in units})
-    else:
-        sections_with_coverage = len(coverage)
+    # No v1 coverage block: the paragraph count is the distinct (section, paragraph) pairs
+    # the sentence handles name. `sections_with_coverage` is the same set of sections.
+    paragraph_keys = {(unit["section_id"], unit["paragraph_index"])
+                      for unit in units if unit.get("paragraph_index") is not None}
+    paragraphs = len(paragraph_keys)
+    sections_with_coverage = len({unit["section_id"] for unit in units})
     quality = {
         "containment_first20": gram_containment(reference["first20_text"], backend_text),
         "backend_chars": len(backend_text),
@@ -2761,8 +2694,6 @@ def main() -> int:
                              "full text plus the stream totals, as `pdf_paragraph` and "
                              "`pdf_stream_totals` records (PDF-6g; off by default, and the "
                              "default records are byte-identical)")
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
-                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if not args.keep_pdf_sentence_text:
         args.keep_pdf_sentence_text = False

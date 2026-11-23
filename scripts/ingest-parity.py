@@ -2,7 +2,7 @@
 """Prove two reading-mcp binaries ingest the same bytes into the same stored facts.
 
 For every input and every binary the probe starts one server over stdio on a fresh `dir` state
-directory, calls `open_document`, saves the tool payload, stops the server, and dumps the state
+directory, calls `open`, saves the tool payload, stops the server, and dumps the state
 database into one text file per side:
 
 - `documents`: `id`, `content_hash` and `document_json`, compared as parsed objects after the
@@ -20,7 +20,7 @@ database into one text file per side:
 - sections: the section tree rebuilt from `document_sections_v1` plus `document_header_v1` (or, on
   a side without those rows, from `document_json`), compared field by field in depth-first order,
   and the body order rebuilt from `document_body_order_rows_v1` (or `document_body_order_v1`);
-- reads: the v1 text-unit/context/read/search sequence and the v2 short-handle sequence, on one
+- reads: the v2 short-handle sequence, on one
   server per side, every payload compared byte for byte after wall-clock keys are dropped.
 
 It then compares A against B per input, prints one markdown table and writes unified diffs (first
@@ -68,7 +68,7 @@ OPEN_MESSAGE = {
     "jsonrpc": "2.0",
     "id": 2,
     "method": "tools/call",
-    "params": {"name": "open_document", "arguments": {}},
+    "params": {"name": "open", "arguments": {}},
 }
 
 STATE_DATABASE = "reading-mcp.sqlite"
@@ -197,12 +197,11 @@ def drop_wall_clock(value):
     return value
 
 
-def server_environment(state_dir: str, roots: str, tools: str = "v2") -> dict:
+def server_environment(state_dir: str, roots: str) -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
     env["READING_MCP_TELEMETRY"] = "false"
-    env["READING_MCP_TOOLS"] = tools
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
@@ -215,12 +214,11 @@ def run_open(
     state_dir: str,
     timeout: float,
     log_path: str,
-    tools: str = "v2",
 ):
     """Opens `source` once on a fresh state directory and returns the payload or its error."""
     os.makedirs(state_dir, exist_ok=True)
     roots = os.path.dirname(os.path.abspath(source))
-    env = server_environment(state_dir, roots, tools)
+    env = server_environment(state_dir, roots)
     with open(log_path, "wb") as log_handle:
         process = subprocess.Popen(
             [binary],
@@ -244,8 +242,6 @@ def run_open(
             else:
                 send(process, INITIALIZED_NOTIFICATION)
                 message = json.loads(json.dumps(OPEN_MESSAGE))
-                if tools == "v2":
-                    message["params"]["name"] = "open"
                 message["params"]["arguments"] = {"source": os.path.abspath(source)}
                 send(process, message)
                 response = read_response(responses, 2, timeout)
@@ -1104,565 +1100,23 @@ def safe_label(label: str) -> str:
 CURSOR_CHECKSUM_DOMAIN = b"reading-mcp/text-unit-cursor-checksum/v1\0"
 
 
-def pick_read_section(structure) -> str | None:
-    """The top-level section covering the most body order, ties broken by document order."""
-    if not isinstance(structure, dict):
-        return None
-    sections = structure.get("sections")
-    if not isinstance(sections, list) or not sections:
-        return None
-    stream = structure.get("stream")
-    total_nodes = stream.get("total_nodes") if isinstance(stream, dict) else None
-    best = None
-    for index, node in enumerate(sections):
-        if not isinstance(node, dict):
-            continue
-        start = node.get("body_order")
-        end = total_nodes
-        if index + 1 < len(sections) and isinstance(sections[index + 1], dict):
-            end = sections[index + 1].get("body_order")
-        if not isinstance(start, int) or not isinstance(end, int):
-            continue
-        if best is None or end - start > best[0]:
-            best = (end - start, start, node.get("section_id"))
-    if best is None:
-        first = sections[0]
-        return first.get("section_id") if isinstance(first, dict) else None
-    return best[2]
-
-
-def text_unit_cursor(
-    opened: dict,
-    structure: dict,
-    section_id: str,
-    kind: str,
-    direction: str,
-    policy: str,
-    next_index: int,
-    total_items: int,
-) -> str:
-    """Rebuilds a resume cursor at `next_index` with the encoding `text_unit_cursor.rs` uses.
-
-    The claims are serialized in declaration order and checksummed, so the server accepts this
-    exactly like a cursor it issued itself; that is what makes a middle-of-stream read one call.
-    """
-    claims = {
-        "schema_version": "text-unit-cursor/v1",
-        "document_id": opened["document_id"],
-        "content_hash": opened["content_hash"],
-        "normalized_document_hash": opened["normalized_document_hash"],
-        "section_id": section_id,
-        "segmentation_version": structure["segmentation_version"],
-        "requested_kind": kind,
-        "direction": direction,
-        "coverage_policy": policy,
-        "next_index": next_index,
-        "total_items": total_items,
-    }
-    claims_bytes = json.dumps(claims, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    checksum = "sha256:" + hashlib.sha256(
-        CURSOR_CHECKSUM_DOMAIN + claims_bytes
-    ).hexdigest()
-    envelope = json.dumps(
-        {"claims": claims, "checksum": checksum},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return "tuc1." + envelope.hex()
-
-
-def run_v1_reads(call, source: str, records: list[dict]) -> None:
-    """Records the design note's §4 read sequence: text units, context, reads, search.
-
-    Runs on the same server as the v2 sequence, after `open_document`, on the largest top-level
-    section so the page boundaries are non-trivial.
-    """
-    opened = call("open_document", {"source": os.path.abspath(source)})
-    records.append({"step": "v1 open_document", "payload": opened})
-    document_id = opened.get("document_id") if isinstance(opened, dict) else None
-    if not isinstance(document_id, str):
-        return
-
-    structure = call("get_document_structure", {"document_id": document_id, "max_depth": 1})
-    records.append({"step": "v1 get_document_structure", "payload": structure})
-    section = pick_read_section(structure)
-    if not isinstance(section, str):
-        return
-
-    # A one-node first page forces a structure cursor; its continuation must resume identically.
-    first_page = call(
-        "get_document_structure",
-        {"document_id": document_id, "max_depth": 1, "max_nodes": 1},
-    )
-    records.append({"step": "v1 get_document_structure first page", "payload": first_page})
-    structure_cursor = first_page.get("next_cursor") if isinstance(first_page, dict) else None
-    if isinstance(structure_cursor, str):
-        records.append(
-            {
-                "step": "v1 get_document_structure continue",
-                "payload": call(
-                    "get_document_structure",
-                    {"document_id": document_id, "cursor": structure_cursor, "max_nodes": 1},
-                ),
-            }
-        )
-
-    # A named-section request, when the input has a titled section. A page-only PDF answers
-    # `Unavailable`; that is a result too, and both binaries must agree on it.
-    named_title = None
-    structure_sections = structure.get("sections") if isinstance(structure, dict) else None
-    if isinstance(structure_sections, list):
-        for node in structure_sections:
-            if (
-                isinstance(node, dict)
-                and isinstance(node.get("title"), str)
-                and node["title"].strip()
-            ):
-                named_title = node["title"].strip()
-                break
-    if named_title is not None:
-        records.append(
-            {
-                "step": "v1 get_document_structure named section",
-                "payload": call(
-                    "get_document_structure",
-                    {
-                        "document_id": document_id,
-                        "named_section_query": named_title,
-                        "expected_content_hash": opened.get("content_hash"),
-                        "expected_normalized_document_hash": opened.get(
-                            "normalized_document_hash"
-                        ),
-                        "max_depth": 1,
-                    },
-                ),
-            }
-        )
-
-    first_locators: dict[str, dict] = {}
-    first_texts: dict[str, str] = {}
-    section_locator: dict | None = None
-    for kind in ("paragraph", "sentence"):
-        for policy in ("preserve_source", "eligible_only"):
-            label = f"{kind}/{policy}"
-            base = {
-                "document_id": document_id,
-                "section_id": section,
-                "requested_kind": kind,
-                "coverage_policy": policy,
-            }
-
-            def text_units(**extra):
-                return call("get_text_units", {**base, **extra})
-
-            start = text_units(direction="forward", max_items=1)
-            records.append({"step": f"v1 {label} forward start", "payload": start})
-            if isinstance(start, dict) and isinstance(
-                start.get("target_section_locator"), dict
-            ):
-                section_locator = start["target_section_locator"]
-            items = start.get("items") if isinstance(start, dict) else None
-            if isinstance(items, list) and items and isinstance(items[0], dict):
-                locator = items[0].get("locator")
-                text = items[0].get("text")
-                if isinstance(locator, dict):
-                    first_locators.setdefault(kind, locator)
-                if isinstance(text, str):
-                    first_texts.setdefault(kind, text)
-            stream = start.get("stream") if isinstance(start, dict) else None
-            total = stream.get("total_items") if isinstance(stream, dict) else None
-            if not isinstance(total, int) or total <= 0:
-                continue
-
-            batch = text_units(direction="forward", max_items=256)
-            records.append({"step": f"v1 {label} forward 256", "payload": batch})
-            follow = batch.get("next_cursor") if isinstance(batch, dict) else None
-            if isinstance(follow, str):
-                records.append(
-                    {
-                        "step": f"v1 {label} forward continue",
-                        "payload": text_units(
-                            direction="forward", max_items=256, cursor=follow
-                        ),
-                    }
-                )
-
-            anchor = None
-            middle = total // 2
-            if 0 < middle < total:
-                middle_page = text_units(
-                    direction="forward",
-                    max_items=256,
-                    cursor=text_unit_cursor(
-                        opened, structure, section, kind, "forward", policy, middle, total
-                    ),
-                )
-                records.append({"step": f"v1 {label} forward middle", "payload": middle_page})
-                middle_items = middle_page.get("items")
-                if (
-                    isinstance(middle_items, list)
-                    and middle_items
-                    and isinstance(middle_items[0], dict)
-                ):
-                    anchor = middle_items[0].get("locator")
-            end_page = text_units(
-                direction="forward",
-                max_items=1,
-                cursor=text_unit_cursor(
-                    opened, structure, section, kind, "forward", policy, total - 1, total
-                ),
-            )
-            records.append({"step": f"v1 {label} forward end", "payload": end_page})
-            records.append(
-                {
-                    "step": f"v1 {label} backward end 1",
-                    "payload": text_units(direction="backward", max_items=1),
-                }
-            )
-            records.append(
-                {
-                    "step": f"v1 {label} backward end 256",
-                    "payload": text_units(direction="backward", max_items=256),
-                }
-            )
-
-            if not isinstance(anchor, dict):
-                anchor = first_locators.get(kind)
-            if isinstance(anchor, dict):
-                anchored = text_units(
-                    direction="forward", max_items=1, anchor_locator=anchor
-                )
-                records.append({"step": f"v1 {label} anchored", "payload": anchored})
-                follow = anchored.get("next_cursor") if isinstance(anchored, dict) else None
-                if isinstance(follow, str):
-                    records.append(
-                        {
-                            "step": f"v1 {label} anchored continue",
-                            "payload": text_units(
-                                direction="forward", max_items=256, cursor=follow
-                            ),
-                        }
-                    )
-
-    paragraph_locator = first_locators.get("paragraph")
-    sentence_locator = first_locators.get("sentence")
-    if isinstance(paragraph_locator, dict):
-        records.append(
-            {
-                "step": "v1 get_context paragraph",
-                "payload": call(
-                    "get_context",
-                    {
-                        "document_id": document_id,
-                        "target_locator": paragraph_locator,
-                        "relation": {
-                            "type": "neighbor",
-                            "unit": "paragraph",
-                            "before": 1,
-                            "after": 1,
-                        },
-                    },
-                ),
-            }
-        )
-    if isinstance(sentence_locator, dict):
-        records.append(
-            {
-                "step": "v1 get_context sentence",
-                "payload": call(
-                    "get_context",
-                    {
-                        "document_id": document_id,
-                        "target_locator": sentence_locator,
-                        "relation": {
-                            "type": "neighbor",
-                            "unit": "sentence",
-                            "before": 2,
-                            "after": 2,
-                        },
-                    },
-                ),
-            }
-        )
-        records.append(
-            {
-                "step": "v1 get_context container",
-                "payload": call(
-                    "get_context",
-                    {
-                        "document_id": document_id,
-                        "target_locator": sentence_locator,
-                        "relation": {"type": "container", "kind": "paragraph"},
-                    },
-                ),
-            }
-        )
-    records.append(
-        {
-            "step": "v1 get_context section container",
-            "payload": call(
-                "get_context",
-                {
-                    "document_id": document_id,
-                    "section_id": section,
-                    "relation": {"type": "container", "kind": "section"},
-                },
-            ),
-        }
-    )
-
-    records.append(
-        {
-            "step": "v1 read_document section",
-            "payload": call(
-                "read_document",
-                {"document_id": document_id, "section_id": section, "max_chars": 512},
-            ),
-        }
-    )
-    if isinstance(paragraph_locator, dict):
-        records.append(
-            {
-                "step": "v1 read_document locator",
-                "payload": call(
-                    "read_document",
-                    {
-                        "document_id": document_id,
-                        "target_locator": paragraph_locator,
-                        "max_chars": 512,
-                    },
-                ),
-            }
-        )
-
-    query = first_texts.get("sentence", "").strip()[:24] or "reading"
-    records.append(
-        {
-            "step": "v1 search_document",
-            "payload": call(
-                "search_document",
-                {"document_id": document_id, "query": query, "limit": 5},
-            ),
-        }
-    )
-
-    # `source_view` only renders a PDF. A precise Paragraph locator maps to a page; a Section
-    # locator is the fallback when the input has no paragraph units. A refusal is also a result:
-    # both binaries must refuse identically.
-    media_type = opened.get("media_type") if isinstance(opened, dict) else None
-    if (
-        isinstance(media_type, str)
-        and media_type.lower() == "application/pdf"
-        and isinstance(paragraph_locator or section_locator, dict)
-    ):
-        records.append(
-            {
-                "step": "v1 get_source_view",
-                "payload": call(
-                    "get_source_view",
-                    {
-                        "document_id": document_id,
-                        "target_locator": paragraph_locator or section_locator,
-                    },
-                ),
-            }
-        )
-
-    run_light_reader_shapes(
-        call,
-        document_id,
-        structure,
-        section,
-        section_locator,
-        paragraph_locator,
-        records,
-    )
-
-
-def run_light_reader_shapes(
-    call,
-    document_id: str,
-    structure: dict,
-    section: str,
-    section_locator: dict | None,
-    paragraph_locator: dict | None,
-    records: list[dict],
-) -> None:
-    """The shapes R1c-3c adds risk for: every text use the light readers serve per section.
-
-    A section neighbour renders `before + after + 1` sections, a section container one section, and
-    a structural relation none; a root section's tree read renders its whole subtree; a section-kind
-    anchor asks for that section's length and then refuses the anchor. Every payload is kept so two
-    binaries are compared byte for byte on all of them.
-    """
-    records.append(
-        {
-            "step": "v1 get_context section neighbour 2/2",
-            "payload": call(
-                "get_context",
-                {
-                    "document_id": document_id,
-                    "section_id": section,
-                    "relation": {
-                        "type": "neighbor",
-                        "unit": "section",
-                        "before": 2,
-                        "after": 2,
-                    },
-                },
-            ),
-        }
-    )
-    records.append(
-        {
-            "step": "v1 get_context structured section container",
-            "payload": call(
-                "get_context",
-                {
-                    "document_id": document_id,
-                    "section_id": section,
-                    "relation": {"type": "container", "kind": "section"},
-                },
-            ),
-        }
-    )
-    for kind in ("children", "ancestors"):
-        records.append(
-            {
-                "step": f"v1 get_context structural {kind}",
-                "payload": call(
-                    "get_context",
-                    {
-                        "document_id": document_id,
-                        "section_id": section,
-                        "relation": {"type": "structural", "kind": kind},
-                    },
-                ),
-            }
-        )
-
-    if isinstance(section_locator, dict):
-        # A section-kind anchor is not part of any text-unit stream; the answer is an error, and it
-        # must be the same error on both binaries.
-        records.append(
-            {
-                "step": "v1 get_text_units section anchor",
-                "payload": call(
-                    "get_text_units",
-                    {
-                        "document_id": document_id,
-                        "section_id": section,
-                        "requested_kind": "sentence",
-                        "anchor_locator": section_locator,
-                        "max_items": 1,
-                    },
-                ),
-            }
-        )
-
-    # The whole subtree of a top-level section, with a budget small enough to need a cursor.
-    sections = structure.get("sections") if isinstance(structure, dict) else None
-    root = None
-    if isinstance(sections, list):
-        for node in sections:
-            if (
-                isinstance(node, dict)
-                and node.get("parent_id") is None
-                and isinstance(node.get("section_id"), str)
-            ):
-                root = node["section_id"]
-                break
-    if isinstance(root, str):
-        tree = call(
-            "read_document",
-            {"document_id": document_id, "section_id": root, "max_chars": 200},
-        )
-        records.append({"step": "v1 read_document root 200", "payload": tree})
-        cursor = tree.get("next_cursor") if isinstance(tree, dict) else None
-        if isinstance(cursor, str):
-            records.append(
-                {
-                    "step": "v1 read_document root continue",
-                    "payload": call(
-                        "read_document",
-                        {
-                            "document_id": document_id,
-                            "section_id": root,
-                            "cursor": cursor,
-                            "max_chars": 200,
-                        },
-                    ),
-                }
-            )
-
-    if isinstance(paragraph_locator, dict):
-        exact = call(
-            "read_document",
-            {
-                "document_id": document_id,
-                "target_locator": paragraph_locator,
-                "max_chars": 120,
-            },
-        )
-        records.append({"step": "v1 read_document exact 120", "payload": exact})
-        cursor = exact.get("next_cursor") if isinstance(exact, dict) else None
-        if isinstance(cursor, str):
-            records.append(
-                {
-                    "step": "v1 read_document exact continue",
-                    "payload": call(
-                        "read_document",
-                        {
-                            "document_id": document_id,
-                            "target_locator": paragraph_locator,
-                            "cursor": cursor,
-                            "max_chars": 120,
-                        },
-                    ),
-                }
-            )
-
-    # A query built from the section title, so the scan can produce a section-kind hit. If the
-    # input's titles do not allow one, the payload says so and both binaries must say it alike.
-    title = None
-    if isinstance(sections, list):
-        for node in sections:
-            if isinstance(node, dict) and node.get("section_id") == section:
-                title = node.get("title")
-                break
-    query = title.strip()[:24] if isinstance(title, str) and title.strip() else None
-    if query is not None:
-        records.append(
-            {
-                "step": "v1 search_document section title",
-                "payload": call(
-                    "search_document",
-                    {"document_id": document_id, "query": query, "limit": 5},
-                ),
-            }
-        )
-
-
 def run_read_probe(
     binary: str,
     source: str,
     state_dir: str,
     timeout: float,
     log_path: str,
-    tools: str = "v2",
 ) -> list[dict]:
-    """Reopens the stored state and records the v1 and v2 read sequences, both tools registered.
+    """Reopens the stored state and records the v2 read sequence.
 
-    The v1 sequence (`run_v1_reads`) covers text units, context, reads and search; then `open`
-    returns the short document handle, five `read` calls follow `next`, the next call uses `back=2`
-    and the last one asks for a 2000-char batch from the section start. In v2 mode the v2 sequence
-    also covers what the v1 legs covered: the first `outline` page and its continuation, `search`
-    with the same body term and section title `run_v1_reads` uses, and `cite` of the first read
-    item, one `next` item and the first search hit. Every response is kept so two binaries can be
-    compared call by call.
+    `open` returns the short document handle, five `read` calls follow `next`, the next call
+    uses `back=2` and the last one asks for a 2000-char batch from the section start. The v2
+    sequence also covers what the v1 legs covered before they were deleted: the first `outline`
+    page and its continuation, `search` with the same body term and section title the v1 leg
+    used, and `cite` of the first read item, one `next` item and the first search hit. Every
+    response is kept so two binaries can be compared call by call.
     """
     env = server_environment(state_dir, os.path.dirname(os.path.abspath(source)))
-    env["READING_MCP_TOOLS"] = "both" if tools == "v1" else "v2"
     records: list[dict] = []
     with open(log_path, "wb") as log_handle:
         process = subprocess.Popen(
@@ -1707,9 +1161,6 @@ def run_read_probe(
             if failure is not None:
                 return [{"step": "initialize", "payload": {"error": failure}}]
             send(process, INITIALIZED_NOTIFICATION)
-
-            if tools == "v1":
-                run_v1_reads(call, source, records)
 
             opened = call("open", {"source": os.path.abspath(source)})
             records.append({"step": "v2 open", "payload": opened})
@@ -1806,33 +1257,28 @@ def run_read_probe(
                     }
                 )
 
-            # In v1 mode `run_v1_reads` already covers the structure pages, the searches and
-            # the locator reads; in v2 mode this sequence is the whole `reads` column, so it
-            # must cover the same stored state. The added steps stay out of v1 mode so its
-            # records stay byte-identical to the pre-V2-4b gate.
-            if tools == "v2":
-                # The v1 leg records the structure's first page and its continuation; `outline`
-                # answers the same preorder, so one node plus one `next` page keeps that coverage.
-                outline_first = call("outline", {"at": document, "depth": 2, "limit": 1})
-                records.append({"step": "outline first page", "payload": outline_first})
-                outline_next = (
-                    outline_first.get("next") if isinstance(outline_first, dict) else None
+            # The v1 leg records the structure's first page and its continuation; `outline`
+            # answers the same preorder, so one node plus one `next` page keeps that coverage.
+            outline_first = call("outline", {"at": document, "depth": 2, "limit": 1})
+            records.append({"step": "outline first page", "payload": outline_first})
+            outline_next = (
+                outline_first.get("next") if isinstance(outline_first, dict) else None
+            )
+            if isinstance(outline_next, str):
+                records.append(
+                    {
+                        "step": "outline next page",
+                        "payload": call(
+                            "outline",
+                            {
+                                "at": document,
+                                "depth": 2,
+                                "limit": 1,
+                                "cursor": outline_next,
+                            },
+                        ),
+                    }
                 )
-                if isinstance(outline_next, str):
-                    records.append(
-                        {
-                            "step": "outline next page",
-                            "payload": call(
-                                "outline",
-                                {
-                                    "at": document,
-                                    "depth": 2,
-                                    "limit": 1,
-                                    "cursor": outline_next,
-                                },
-                            ),
-                        }
-                    )
 
             # `search` resolves its document handle from the header; the query is the section
             # title, which the scan answers with a section-kind hit on inputs that have one.
@@ -1848,39 +1294,38 @@ def run_read_probe(
                 )
                 records.append({"step": "search title", "payload": title_search})
 
-            if tools == "v2":
-                # The v1 leg also searches a term from the picked section's first sentence.
-                # `read` above returned that sentence, so the same query goes to `search` here.
-                body_query = (
-                    first_text.strip()[:24] if isinstance(first_text, str) else ""
-                ) or "reading"
-                body_search = call(
-                    "search", {"doc": document, "query": body_query, "limit": 5}
-                )
-                records.append({"step": "search body term", "payload": body_search})
+            # The v1 leg also searches a term from the picked section's first sentence.
+            # `read` above returned that sentence, so the same query goes to `search` here.
+            body_query = (
+                first_text.strip()[:24] if isinstance(first_text, str) else ""
+            ) or "reading"
+            body_search = call(
+                "search", {"doc": document, "query": body_query, "limit": 5}
+            )
+            records.append({"step": "search body term", "payload": body_search})
 
-                # `cite` returns the canonical locators of the handles it is given. The three
-                # handles are the v1 leg's locator-based reads and its search hit.
-                hit = None
-                for result in (body_search, title_search):
-                    hits = result.get("hits") if isinstance(result, dict) else None
-                    if (
-                        isinstance(hits, list)
-                        and hits
-                        and isinstance(hits[0], (list, tuple))
-                        and hits[0]
-                    ):
-                        hit = hits[0][0]
-                        break
-                for step, handle in (
-                    ("cite first read item", first_item),
-                    ("cite next item", next_item),
-                    ("cite first search hit", hit),
+            # `cite` returns the canonical locators of the handles it is given. The three
+            # handles are the v1 leg's locator-based reads and its search hit.
+            hit = None
+            for result in (body_search, title_search):
+                hits = result.get("hits") if isinstance(result, dict) else None
+                if (
+                    isinstance(hits, list)
+                    and hits
+                    and isinstance(hits[0], (list, tuple))
+                    and hits[0]
                 ):
-                    if isinstance(handle, str):
-                        records.append(
-                            {"step": step, "payload": call("cite", {"at": [handle]})}
-                        )
+                    hit = hits[0][0]
+                    break
+            for step, handle in (
+                ("cite first read item", first_item),
+                ("cite next item", next_item),
+                ("cite first search hit", hit),
+            ):
+                if isinstance(handle, str):
+                    records.append(
+                        {"step": step, "payload": call("cite", {"at": [handle]})}
+                    )
 
             records.append(
                 {"step": "cite section", "payload": call("cite", {"at": [section]})}
@@ -1918,7 +1363,6 @@ def run_side(
     path: str,
     out_dir: str,
     timeout: float,
-    tools: str = "v2",
 ) -> dict:
     """Opens `path` with `binary` on a fresh state directory and returns its comparable facts."""
     side_dir = os.path.join(out_dir, "runs", safe_label(label), side)
@@ -1930,7 +1374,6 @@ def run_side(
         state_dir,
         timeout,
         os.path.join(side_dir, "server.log"),
-        tools,
     )
     dump = dump_state(os.path.join(state_dir, STATE_DATABASE))
     reads = run_read_probe(
@@ -1939,7 +1382,6 @@ def run_side(
         state_dir,
         timeout,
         os.path.join(side_dir, "read-server.log"),
-        tools,
     )
     return {"payload": payload, "dump": dump, "reads": reads}
 
@@ -2064,12 +1506,6 @@ def main() -> int:
     parser.add_argument("--inputs", required=True, help="label=path pairs, comma separated")
     parser.add_argument("--out", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="tool set the servers expose: v2 (default) or v1",
-    )
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -2088,8 +1524,8 @@ def main() -> int:
             )
             failed = True
             continue
-        left = run_side(args.binary_a, "a", label, path, args.out, args.timeout_seconds, args.tools)
-        right = run_side(args.binary_b, "b", label, path, args.out, args.timeout_seconds, args.tools)
+        left = run_side(args.binary_a, "a", label, path, args.out, args.timeout_seconds)
+        right = run_side(args.binary_b, "b", label, path, args.out, args.timeout_seconds)
         columns = compare(label, left, right, args.out)
         result = "same" if all(value == "same" for value in columns.values()) else "DIFF"
         failed = failed or result == "DIFF"

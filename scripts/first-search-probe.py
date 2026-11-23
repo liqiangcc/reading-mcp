@@ -5,11 +5,11 @@ The probe reuses the MCP stdio transport of `doc-read-probe.py` and answers thre
 per `--shape`, each on fresh servers with fresh state directories:
 
 - `first-search`: open the document, wait `--wait-seconds` (1.5 s by default), then time the first
-  `search_document` (and, when the server exposes the v2 tools, the first v2 `search` after a v2
-  `open`). This is the shape a model produces: the first search comes seconds after `open` returns.
-- `immediate-search`: time the first `search_document` right after `open` returns, with no wait. The
+  `search` after the `open`. This is the shape a model produces: the first search comes seconds
+  after `open` returns.
+- `immediate-search`: time the first `search` right after `open` returns, with no wait. The
   worst case: warming must never make it slower than not warming.
-- `foreground-reads`: time `--calls` `get_text_units` calls right after `open`, while the warm of the
+- `foreground-reads`: time `--calls` `read` calls right after `open`, while the warm of the
   scan text cache runs. The mean must not degrade against the same run with warming off.
 
 Every repetition also times the `open` that produces the result, a second `open` of the same source
@@ -68,7 +68,6 @@ def run_once(probe, args: argparse.Namespace, binary: str, document: str) -> dic
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
-    env["READING_MCP_TOOLS"] = "both" if args.tools == "v1" else "v2"
     env["READING_MCP_TELEMETRY"] = "true"
     for item in args.env:
         key, separator, value = item.partition("=")
@@ -98,91 +97,40 @@ def run_once(probe, args: argparse.Namespace, binary: str, document: str) -> dic
     sampler.__enter__()
     try:
         server.initialize()
-        tool_names = server.tool_names()
 
-        open_tool = "open_document" if args.tools == "v1" else "open"
         started = time.monotonic()
-        payload = probe.tool_payload(server.tool(open_tool, {"source": document}))
+        payload = probe.tool_payload(server.tool("open", {"source": document}))
         record["open_seconds"] = round(time.monotonic() - started, 4)
         record["rss_after_open_kib"] = probe.proc_rss_kib(server.process.pid)
-        id_key = "document_id" if args.tools == "v1" else "doc"
-        if not isinstance(payload, dict) or not isinstance(payload.get(id_key), str):
-            raise probe.ProbeError(f"{open_tool} did not return a document_id")
-        document_id = payload[id_key]
+        if not isinstance(payload, dict) or not isinstance(payload.get("doc"), str):
+            raise probe.ProbeError("open did not return a document_id")
+        document_id = payload["doc"]
 
         if args.shape == "foreground-reads":
-            if args.tools == "v2":
-                sections = probe.outline_sections(server, document_id)
-            else:
-                sections = probe.read_structure(server, document_id)
+            sections = probe.outline_sections(server, document_id)
             if not sections:
                 raise probe.ProbeError("document has no sections")
             section_id = sections[min(len(sections) - 1, len(sections) // 2)]["section_id"]
-            if args.tools == "v2":
-                arguments = {"from": section_id}
-                read_tool = "read"
-            else:
-                arguments = {
-                    "document_id": document_id,
-                    "section_id": section_id,
-                    "requested_kind": "sentence",
-                    "direction": "forward",
-                    "coverage_policy": "preserve_source",
-                    "max_items": 1,
-                }
-                read_tool = "get_text_units"
             for _ in range(args.calls):
-                elapsed, _, _ = probe.timed_tool(server, read_tool, arguments, False)
+                elapsed, _, _ = probe.timed_tool(server, "read", {"from": section_id}, False)
                 record["read_ms"].append(round(1000.0 * elapsed, 3))
         else:
             if args.shape == "first-search":
                 time.sleep(args.wait_seconds)
-            if args.tools == "v2":
-                search_tool = "search"
-                search_arguments = {"doc": document_id, "query": args.query, "limit": 10}
-            else:
-                search_tool = "search_document"
-                search_arguments = {
-                    "document_id": document_id, "query": args.query, "limit": 10
-                }
             elapsed, _, result = probe.timed_tool(
-                server, search_tool, search_arguments, False
+                server, "search", {"doc": document_id, "query": args.query, "limit": 10}, False
             )
             record["search_ms"] = round(1000.0 * elapsed, 3)
             hits = probe.tool_payload(result)
             record["hits"] = len(hits.get("hits", [])) if isinstance(hits, dict) else None
             record["rss_after_search_kib"] = probe.proc_rss_kib(server.process.pid)
 
-            # The v2 search is timed only in the waited shape: opening the v2 handle first costs a
-            # call, which would give the warm time in the immediate shape.
-            if (
-                args.tools == "v1"
-                and args.shape == "first-search"
-                and "open" in tool_names
-                and "search" in tool_names
-            ):
-                opened_v2 = probe.tool_payload(server.tool("open", {"source": document}))
-                handle = opened_v2.get("doc") if isinstance(opened_v2, dict) else None
-                if isinstance(handle, str):
-                    elapsed, _, result = probe.timed_tool(
-                        server,
-                        "search",
-                        {"doc": handle, "query": args.query, "limit": 10},
-                        False,
-                    )
-                    record["v2_search_ms"] = round(1000.0 * elapsed, 3)
-                    hits = probe.tool_payload(result)
-                    record["v2_hits"] = (
-                        len(hits.get("hits", [])) if isinstance(hits, dict) else None
-                    )
-                else:
-                    record["skipped"].append("v2 search: v2 open returned no handle")
-            elif args.shape == "immediate-search":
+            if args.shape == "immediate-search":
                 record["skipped"].append("v2 search: not timed right after open by design")
 
         # The second open of the same source takes the open-result path.
         started = time.monotonic()
-        server.tool(open_tool, {"source": document})
+        server.tool("open", {"source": document})
         record["reopen_seconds"] = round(time.monotonic() - started, 4)
 
         record["warm"] = [
@@ -333,12 +281,6 @@ def main() -> int:
     )
     parser.add_argument(
         "--calls", type=int, default=200, help="read calls (foreground-reads shape)"
-    )
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="tool set the server exposes: v2 (default) or v1",
     )
     parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", required=True, help="JSON result path")

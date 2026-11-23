@@ -831,9 +831,8 @@ def _read_v2(probe, server, document_handle: str, sections: list[dict], record: 
 
 
 def read_backend(probe, binary: str, pdf_path: str, backend: str, layout_python: str,
-                 state_root: str, label: str, deadline: float,
-                 tools: str = "v2") -> tuple[dict, str]:
-    """Open and read the whole document through `get_text_units`, batching 256 items per call.
+                 state_root: str, label: str, deadline: float) -> tuple[dict, str]:
+    """Open and read the whole document through `read` batches.
 
     The PDF section model can return the same text from two different sections (a heading
     section that covers its siblings' range), which would inflate the recovered count. Such a
@@ -856,68 +855,24 @@ def read_backend(probe, binary: str, pdf_path: str, backend: str, layout_python:
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
     env = probe.server_env(state_dir, os.path.dirname(os.path.abspath(pdf_path)), backend,
-                           layout_python, tools)
+                           layout_python)
     server = probe.Server([binary], env, os.path.join(state_dir, "server.log"),
                           probe.TOOL_TIMEOUT_S)
     document_id = None
     try:
         server.initialize()
-        data, open_s, error = probe.open_document(server, pdf_path, tools)
+        data, open_s, error = probe.open_document(server, pdf_path)
         record["open_s"] = round(open_s, 3)
         if error is not None:
             record["error"] = str(error)[:500]
             record["error_code"] = error.code
         else:
             record["outcome"] = "ok"
-            document_id = probe.document_handle(data, tools)
+            document_id = probe.document_handle(data)
         if document_id:
-            sections = probe.read_sections(server, document_id, tools)
+            sections = probe.read_sections(server, document_id)
             record["sections"] = len(sections)
-            if tools == "v2":
-                texts = _read_v2(probe, server, document_id, sections, record, deadline)
-            else:
-                totals = 0
-                for section in sections:
-                    if record["units_read"] >= SENTENCE_CAP:
-                        record["capped"] = True
-                        break
-                    if time.monotonic() > deadline:
-                        record["partial"] = True
-                        break
-                    cursor = None
-                    section_texts: list[str] = []
-                    while True:
-                        if record["units_read"] >= SENTENCE_CAP:
-                            record["capped"] = True
-                            break
-                        if time.monotonic() > deadline:
-                            record["partial"] = True
-                            break
-                        arguments = probe.text_units(document_id, section["section_id"],
-                                                    READ_BATCH, cursor)
-                        try:
-                            data = probe.payload(server.tool("get_text_units", arguments)) or {}
-                        except probe.ProbeError as exc:
-                            record["read_error"] = str(exc)[:200]
-                            break
-                        stream = data.get("stream") or {}
-                        totals += int(stream.get("total_items") or 0)
-                        for item in data.get("items") or []:
-                            record["units_read"] += 1
-                            section_texts.append(item.get("text") or "")
-                        cursor = data.get("next_cursor")
-                        if not cursor:
-                            break
-                    section_text = "\n".join(section_texts)
-                    fingerprint = squash(section_text)
-                    if fingerprint and fingerprint in seen_sections:
-                        record["duplicate_sections"] += 1
-                        continue
-                    if fingerprint:
-                        seen_sections.add(fingerprint)
-                    record["units_kept"] += len(section_texts)
-                    texts.extend(section_texts)
-                record["sentences"] = totals or None
+            texts = _read_v2(probe, server, document_id, sections, record, deadline)
     except probe.ProbeError as exc:
         if record["open_s"] is None:
             record["error"] = str(exc)[:500]
@@ -1016,8 +971,7 @@ def process_paper(probe, entry: dict, args, deadline: float, inventory_dir: str)
         document.close()
 
     default_record, default_text = read_backend(
-        probe, args.binary, pdf_path, "default", "", args.state_root, entry["id"], deadline,
-        args.tools)
+        probe, args.binary, pdf_path, "default", "", args.state_root, entry["id"], deadline)
     record["default"] = default_record
 
     document = pymupdf.open(pdf_path)
@@ -1059,7 +1013,7 @@ def process_paper(probe, entry: dict, args, deadline: float, inventory_dir: str)
 
     layout_record, _layout_text = read_backend(
         probe, args.binary, pdf_path, "layout", args.layout_python, args.state_root,
-        entry["id"], deadline, args.tools)
+        entry["id"], deadline)
     record["layout"] = layout_record
     record["seconds"] = round(time.perf_counter() - started, 1)
     return record
@@ -1327,7 +1281,7 @@ def repro_mode(args) -> int:
             reference += sum(1 for char in page.get_text() if is_cjk(char))
     result, text = read_backend(probe, args.binary, repro_path, "default", "",
                                 args.state_root, f"repro-{record['id']}",
-                                time.monotonic() + 600, args.tools)
+                                time.monotonic() + 600)
     recovered = sum(1 for char in text if is_cjk(char))
     report = {
         "group": key, "paper": record["id"], "page": page_number,
@@ -1365,8 +1319,6 @@ def main() -> int:
     parser.add_argument("--per-shard", type=int, default=5)
     parser.add_argument("--deadline-minutes", type=float, default=70.0)
     parser.add_argument("--paper-deadline-minutes", type=float, default=12.0)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
-                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if args.select:
         if not args.out:

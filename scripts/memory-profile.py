@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the peak RSS of `open_document` in reading-mcp over newline-delimited JSON-RPC.
+"""Measure the peak RSS of `open` in reading-mcp over newline-delimited JSON-RPC.
 
 Standard library only. Builds deterministic ASCII documents of the requested sizes, runs the
 release binary once per (state mode, size) plus a baseline of each mode, and reports each run's
@@ -9,10 +9,10 @@ bytes the peak implies over that mode's baseline.
 Besides the ASCII sizes, additional inputs can be measured: deterministic Chinese prose of a
 given size (`--cjk-sizes-mb`), a synthetic English Markdown file with many sections
 (`--markdown-sections`), and arbitrary existing files (`--documents label=path`). Every row
-carries a `label`, the `sections` count reported by `open_document`, and the first 30 characters
+carries a `label`, the `sections` count reported by `open`, and the first 30 characters
 of its `title`.
 
-Each run is bounded by `--run-timeout-seconds`: if `open_document` does not answer within that
+Each run is bounded by `--run-timeout-seconds`: if `open` does not answer within that
 deadline the server is killed, its rusage is still collected, and the run is recorded as a
 timeout. Rows are printed and the `--out` file is rewritten after every run so partial results
 survive a job timeout. Once a size times out or fails, the larger sizes for that state are
@@ -27,24 +27,20 @@ With `--rss-phases` (which implies `--telemetry`), a second per-input table is p
 flag the output is byte-identical to before.
 
 With `--retained-rss`, every run samples the server's own `VmRSS`/`VmHWM` right after
-`open_document` returns and again after a settle, which is the memory the open leaves resident;
+`open` returns and again after a settle, which is the memory the open leaves resident;
 the row gains `RSS after open KiB` and `RSS settled KiB` columns. The sample is taken before
 stdin is closed, so the server is still alive. Without the flag the table is byte-identical to
 before.
 
 With `--probe-query label=query` (repeatable), an input whose label has a query runs
-`search_document` on its opened `document_id` and then `get_context` around the first hit, in the
-same server process, and the row gains `Search s`, `Hits` and `Context s` columns. The probe runs
-before stdin is closed, so that row's peak RSS includes the probe work. Probe tool errors are
-recorded in `probe_error` and never change the open row's `ok`. With no `--probe-query` the table
-is byte-identical to before.
+`search` on its opened doc handle and then `read {"from": <first hit handle>, "back": 2}` around
+the first hit, in the same server process, and the row gains `Search s`, `Hits` and `Context s`
+columns. The probe runs before stdin is closed, so that row's peak RSS includes the probe work.
+Probe tool errors are recorded in `probe_error` and never change the open row's `ok`. With no
+`--probe-query` the table is byte-identical to before.
 
-In v2 mode (the default) the servers start with `READING_MCP_TOOLS=v2` and every call uses the v2 tool
-set: `open` instead of `open_document` (its `sections`/`title` stand in for `section_count`/
-`title`), and the probe runs `search` and then `read {"from": <first hit handle>, "back": 2}`
-instead of `search_document` and `get_context`. Everything else — the inputs, the rows, the peak
-RSS, the telemetry phases and the disk measurement — is unchanged. `v2` is the default; `--tools
-v1` is today's behaviour, byte for byte.
+Every call uses the v2 tool set: `open` (its `sections`/`title` stand in for the old
+`section_count`/`title`), `search` and `read`.
 """
 
 from __future__ import annotations
@@ -177,12 +173,10 @@ def server_environment(
     state_dir: str,
     parse_timeout: float | None,
     telemetry: bool = False,
-    tools: str = "v2",
 ) -> dict:
     env = dict(os.environ)
     env["READING_MCP_LOCAL_ROOTS"] = os.pathsep.join(roots)
     env["READING_MCP_TELEMETRY"] = "1" if telemetry else "false"
-    env["READING_MCP_TOOLS"] = tools
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = (
@@ -272,17 +266,6 @@ def extract_error(response: dict, tool: str = "open_document") -> str | None:
     return None
 
 
-def extract_structured(response: dict) -> dict | None:
-    """Return the tool result's structured content object, if it has one."""
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return None
-    structured = result.get("structuredContent")
-    if not isinstance(structured, dict):
-        structured = result.get("structured_content")
-    return structured if isinstance(structured, dict) else None
-
-
 def extract_text_payload(response: dict) -> dict | None:
     """Return the JSON object a v2 tool answer carries in its first text block."""
     result = response.get("result")
@@ -301,22 +284,17 @@ def extract_text_payload(response: dict) -> dict | None:
     return None
 
 
-def extract_payload(response: dict, tools: str = "v2") -> dict | None:
-    """The tool result's JSON object: v1 `structuredContent`, v2 `content[0].text`."""
-    return extract_structured(response) if tools == "v1" else extract_text_payload(response)
-
-
 def extract_metadata(
-    response: dict, tools: str = "v2"
+    response: dict
 ) -> tuple[object | None, str | None]:
     """Return `(section_count, title_truncated)` from an open result.
 
-    v1 names the section count `section_count`; v2's `open` names it `sections`.
+    v2's `open` names the section count `sections`.
     """
-    structured = extract_payload(response, tools)
+    structured = extract_text_payload(response)
     if structured is None:
         return None, None
-    sections = structured.get("section_count" if tools == "v1" else "sections")
+    sections = structured.get("sections")
     title = structured.get("title")
     if isinstance(title, str):
         title = title[:30]
@@ -339,48 +317,29 @@ def probe(
     response: dict,
     query: str,
     run_timeout: float,
-    tools: str = "v2",
 ) -> tuple[float | None, int | None, float | None, str | None]:
     """Time the search and the context read for one successful open, in the same process.
 
-    v1 runs `search_document` and `get_context` (neighbour 2/2 of the first hit's locator); v2
-    runs `search` and `read {"from": <first hit handle>, "back": 2}`.
+    Runs `search` and `read {"from": <first hit handle>, "back": 2}`.
 
     Returns (search_seconds, hit_count, context_seconds, probe_error). A probe timeout or tool
     error is reported in `probe_error`; it never changes the open result.
     """
-    structured = extract_payload(response, tools)
-    document_id = (
-        structured.get("document_id" if tools == "v1" else "doc")
-        if structured is not None
-        else None
-    )
+    structured = extract_text_payload(response)
+    document_id = structured.get("doc") if structured is not None else None
     if not isinstance(document_id, str):
-        open_tool = "open_document" if tools == "v1" else "open"
-        id_field = "document_id" if tools == "v1" else "doc"
-        return None, None, None, f"{open_tool} result did not include a {id_field}"
+        return None, None, None, "open result did not include a doc"
 
-    if tools == "v1":
-        search_message = {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": "search_document",
-                "arguments": {"document_id": document_id, "query": query},
-            },
-        }
-    else:
-        search_message = {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": "search",
-                "arguments": {"doc": document_id, "query": query, "limit": 10},
-            },
-        }
-    search_tool = "search_document" if tools == "v1" else "search"
+    search_message = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "search",
+            "arguments": {"doc": document_id, "query": query, "limit": 10},
+        },
+    }
+    search_tool = "search"
     start = time.monotonic()
     try:
         send(process, search_message)
@@ -393,7 +352,7 @@ def probe(
     if probe_error is not None:
         return search_seconds, None, None, probe_error
 
-    hits = extract_payload(search_response, tools)
+    hits = extract_text_payload(search_response)
     hits = hits.get("hits") if hits is not None else None
     if not isinstance(hits, list):
         return search_seconds, None, None, f"{search_tool} result did not include hits"
@@ -401,39 +360,18 @@ def probe(
     if not hits:
         return search_seconds, hit_count, None, None
 
-    if tools == "v1":
-        first = hits[0] if isinstance(hits[0], dict) else {}
-        locator = first.get("text_locator")
-        if not isinstance(locator, dict):
-            return search_seconds, hit_count, None, "search hit did not include a text_locator"
-        unit = "sentence" if locator.get("sentence_index") is not None else "paragraph"
-        context_message = {
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/call",
-            "params": {
-                "name": "get_context",
-                "arguments": {
-                    "document_id": document_id,
-                    "target_locator": locator,
-                    "relation": {"type": "neighbor", "unit": unit, "before": 2, "after": 2},
-                },
-            },
-        }
-        context_tool = "get_context"
-    else:
-        # v2 search hits are `[handle, text]` pairs; the anchor is the first handle.
-        first = hits[0]
-        handle = first[0] if isinstance(first, (list, tuple)) and first else None
-        if not isinstance(handle, str):
-            return search_seconds, hit_count, None, "search hit did not include a handle"
-        context_message = {
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/call",
-            "params": {"name": "read", "arguments": {"from": handle, "back": 2}},
-        }
-        context_tool = "read"
+    # v2 search hits are `[handle, text]` pairs; the anchor is the first handle.
+    first = hits[0]
+    handle = first[0] if isinstance(first, (list, tuple)) and first else None
+    if not isinstance(handle, str):
+        return search_seconds, hit_count, None, "search hit did not include a handle"
+    context_message = {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {"name": "read", "arguments": {"from": handle, "back": 2}},
+    }
+    context_tool = "read"
     start = time.monotonic()
     try:
         send(process, context_message)
@@ -460,7 +398,6 @@ def run_one(
     stderr_path: str | None = None,
     samples: dict | None = None,
     settle_seconds: float = 3.0,
-    tools: str = "v2",
 ) -> tuple[
     int,
     float | None,
@@ -474,8 +411,6 @@ def run_one(
     str | None,
 ]:
     """Run one open call, then optionally its read probe.
-
-    `tools` selects the tool set: v1 `open_document` or v2 `open`.
 
     Returns (peak_rss_kib, open_seconds, error, timed_out, section_count, title,
     search_seconds, hit_count, context_seconds, probe_error). The probe runs before stdin is
@@ -513,12 +448,11 @@ def run_one(
         error = extract_error(initialized)
         send(process, INITIALIZED_NOTIFICATION)
         if source is not None and error is None:
-            open_tool = "open_document" if tools == "v1" else "open"
             message = {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": open_tool, "arguments": {"source": source}},
+                "params": {"name": "open", "arguments": {"source": source}},
             }
             start = time.monotonic()
             send(process, message)
@@ -531,8 +465,8 @@ def run_one(
                 process.kill()
             else:
                 open_seconds = time.monotonic() - start
-                error = extract_error(response, open_tool)
-                section_count, title = extract_metadata(response, tools)
+                error = extract_error(response, "open")
+                section_count, title = extract_metadata(response)
                 if samples is not None:
                     sample = process_memory_kib(process.pid)
                     if sample is not None:
@@ -548,7 +482,7 @@ def run_one(
                         context_seconds,
                         probe_error,
                     ) = probe(
-                        process, responses, response, probe_query, run_timeout, tools
+                        process, responses, response, probe_query, run_timeout
                     )
     except TimeoutError:
         timed_out = True
@@ -1053,7 +987,6 @@ def run_input_group(
     roots: list[str] | None = None,
     parse_timeout: float | None = None,
     retained: bool = False,
-    tools: str = "v2",
 ) -> None:
     skip = False
     for entry in inputs:
@@ -1084,7 +1017,7 @@ def run_input_group(
                 prefix=f"state-{entry['label'].replace(os.sep, '_')}-", dir=temp_root
             )
             entry_env = server_environment(
-                roots or [], entry_state_dir, parse_timeout, telemetry=telemetry, tools=tools
+                roots or [], entry_state_dir, parse_timeout, telemetry=telemetry
             )
         open_stderr = (
             telemetry_path(telemetry_dir, entry["label"], "open")
@@ -1116,7 +1049,6 @@ def run_input_group(
             probe_query,
             stderr_path=open_stderr,
             samples=samples,
-            tools=tools,
         )
         row = make_row(
             state,
@@ -1160,7 +1092,6 @@ def run_input_group(
                 entry["source"],
                 run_timeout,
                 stderr_path=reopen_stderr,
-                tools=tools,
             )
             row["reopen_seconds"] = reopen_seconds if reopen_error is None else None
             row["reopen_extra_kib"] = (
@@ -1182,7 +1113,7 @@ def run_input_group(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Profile open_document peak memory.")
+    parser = argparse.ArgumentParser(description="Profile open peak memory.")
     parser.add_argument("--binary", required=True)
     parser.add_argument("--sizes-mb", default="")
     parser.add_argument("--out", required=True)
@@ -1203,7 +1134,7 @@ def main() -> int:
         action="append",
         default=[],
         metavar="LABEL=QUERY",
-        help="after opening this label, time search_document and get_context (repeatable)",
+        help="after opening this label, time search and a back-2 read (repeatable)",
     )
     parser.add_argument(
         "--telemetry",
@@ -1224,12 +1155,6 @@ def main() -> int:
         "--disk",
         action="store_true",
         help="give each input a fresh state dir and print its disk footprint",
-    )
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="tool set the servers expose and the script calls (default v2; v1 is the old behaviour)",
     )
     args = parser.parse_args()
 
@@ -1286,14 +1211,13 @@ def main() -> int:
             else:
                 state_dir = os.path.abspath(tempfile.mkdtemp(prefix="state-dir-", dir=root))
             env = server_environment(
-                roots, state_dir, args.parse_timeout_seconds, tools=args.tools
+                roots, state_dir, args.parse_timeout_seconds
             )
             input_env = server_environment(
                 roots,
                 state_dir,
                 args.parse_timeout_seconds,
                 telemetry=args.telemetry,
-                tools=args.tools,
             )
 
             baseline_label = f"{state}-baseline"
@@ -1309,7 +1233,7 @@ def main() -> int:
                 _,
                 _,
                 _,
-            ) = run_one(baseline_command, env, None, run_timeout, tools=args.tools)
+            ) = run_one(baseline_command, env, None, run_timeout)
             baseline_row = make_row(
                 state,
                 baseline_label,
@@ -1338,7 +1262,6 @@ def main() -> int:
                 roots=roots,
                 parse_timeout=args.parse_timeout_seconds,
                 retained=args.retained_rss,
-                tools=args.tools,
             )
             run_input_group(
                 state, input_env, binary, args.wrapper, run_timeout, size_inputs,

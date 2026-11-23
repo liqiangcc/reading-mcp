@@ -6,7 +6,7 @@ Speaks newline-delimited JSON-RPC MCP over stdio to an existing release binary, 
 
 - `--mode run --input label=path --backend default|layout`: for one input and one backend, open
   the document (wall time, peak RSS, state-dir bytes, error code, killed), read its structure,
-  reopen it in the same state dir, read it sentence by sentence with `get_text_units` (the whole
+  reopen it in the same state dir, read it sentence by sentence with `read` (the whole
   document for generated inputs, the first 200 sentences for real papers), score the text against
   the generator's ground truth, and optionally repeat the open under systemd memory caps. Writes
   one JSONL file and prints a markdown table.
@@ -40,11 +40,6 @@ INITIALIZE_PARAMS = {
     "protocolVersion": "2025-06-18",
     "capabilities": {},
     "clientInfo": {"name": "pdf-probe", "version": "0"},
-}
-TEXT_UNIT_BASE = {
-    "requested_kind": "sentence",
-    "direction": "forward",
-    "coverage_policy": "preserve_source",
 }
 CAPS = ["1024M", "768M", "512M"]
 KILLED_CODES = (-9, 137)
@@ -238,8 +233,7 @@ class Server:
         return int(self.usage.ru_maxrss) if self.usage is not None else 0
 
 
-def server_env(state_dir: str, roots: str, backend: str, layout_python: str,
-               tools: str = "v2") -> dict:
+def server_env(state_dir: str, roots: str, backend: str, layout_python: str) -> dict:
     env = dict(os.environ)
     env.pop("READING_MCP_PDF_LAYOUT_PYTHON", None)
     env["READING_MCP_STATE_DIR"] = state_dir
@@ -248,8 +242,6 @@ def server_env(state_dir: str, roots: str, backend: str, layout_python: str,
     env["READING_MCP_MAX_DOCUMENT_BYTES"] = "134217728"
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     env["READING_MCP_PARSE_TIMEOUT_SECS"] = "900"
-    # v2 (the default) exposes only the seven v2 tools; v1 calls v1 tools only.
-    env["READING_MCP_TOOLS"] = tools
     # OCR is opt-in and stays off: an image-only PDF must report ocr_required.
     env["READING_MCP_OCR_ENABLED"] = "false"
     if backend == "layout":
@@ -302,33 +294,8 @@ def disk_usage(state_dir: str) -> dict:
     return {"total_bytes": total, "sqlite_bytes": sqlite}
 
 
-def flatten_structure(nodes, out: dict) -> None:
-    if not isinstance(nodes, list):
-        return
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        section_id = node.get("section_id")
-        if isinstance(section_id, str):
-            out.setdefault(section_id, node)
-        flatten_structure(node.get("children"), out)
-
-
-def read_sections(server: Server, document_id: str, tools: str = "v2") -> list[dict]:
-    if tools == "v2":
-        return read_sections_v2(server, document_id)
-    found: dict[str, dict] = {}
-    cursor = None
-    for _ in range(10000):
-        arguments: dict = {"document_id": document_id, "max_nodes": 500}
-        if cursor is not None:
-            arguments["cursor"] = cursor
-        data = payload(server.tool("get_document_structure", arguments)) or {}
-        flatten_structure(data.get("sections"), found)
-        cursor = data.get("next_cursor")
-        if not cursor or data.get("complete") is True:
-            break
-    return sorted(found.values(), key=lambda node: node.get("body_order", 0))
+def read_sections(server: Server, document_id: str) -> list[dict]:
+    return read_sections_v2(server, document_id)
 
 
 def read_sections_v2(server: Server, document_handle: str) -> list[dict]:
@@ -356,14 +323,11 @@ def read_sections_v2(server: Server, document_handle: str) -> list[dict]:
     return sections
 
 
-def is_page_fallback(sections: list[dict], tools: str = "v2") -> bool:
+def is_page_fallback(sections: list[dict]) -> bool:
     """Whether the structure is one section per PDF page (the parser's page fallback)."""
     if not sections:
         return False
-    if tools == "v2":
-        return all(re.fullmatch(r"Page \d+", str(section.get("title") or ""))
-                   for section in sections)
-    return all(re.fullmatch(r"section://page-\d+", str(section.get("section_id", "")))
+    return all(re.fullmatch(r"Page \d+", str(section.get("title") or ""))
                for section in sections)
 
 
@@ -403,31 +367,20 @@ def read_batch(server: Server, from_handle: str, max_chars: int | None = V2_READ
     return payload(server.tool("read", arguments)) or {}
 
 
-def document_handle(data: dict, tools: str = "v2") -> str | None:
-    """The document identifier a v1 or v2 open answer carries."""
-    key = "document_id" if tools == "v1" else "doc"
-    value = data.get(key) if isinstance(data, dict) else None
+def document_handle(data: dict) -> str | None:
+    """The document identifier a v2 open answer carries."""
+    value = data.get("doc") if isinstance(data, dict) else None
     return value if isinstance(value, str) else None
 
 
-def opened_section_count(data: dict, tools: str = "v2"):
-    """The section count an open answer carries (`section_count` v1, `sections` v2)."""
-    key = "section_count" if tools == "v1" else "sections"
-    return data.get(key) if isinstance(data, dict) else None
+def opened_section_count(data: dict):
+    """The section count an open answer carries (`sections` for v2)."""
+    return data.get("sections") if isinstance(data, dict) else None
 
 
-def opened_media_type(data: dict, tools: str = "v2"):
-    """The format an open answer carries (`media_type` v1, `format` v2)."""
-    key = "media_type" if tools == "v1" else "format"
-    return data.get(key) if isinstance(data, dict) else None
-
-
-def text_units(document_id: str, section_id: str, max_items: int, cursor=None) -> dict:
-    arguments = {"document_id": document_id, "section_id": section_id, **TEXT_UNIT_BASE}
-    arguments["max_items"] = max_items
-    if cursor is not None:
-        arguments["cursor"] = cursor
-    return arguments
+def opened_media_type(data: dict):
+    """The format an open answer carries (`format` for v2)."""
+    return data.get("format") if isinstance(data, dict) else None
 
 
 def percentile(values: list[float], fraction: float) -> float | None:
@@ -458,31 +411,18 @@ def page_count(path: str) -> int | None:
         return None
 
 
-def open_document(server: Server, source: str, tools: str = "v2") -> tuple[dict, float, ProbeError | None]:
+def open_document(server: Server, source: str) -> tuple[dict, float, ProbeError | None]:
     start = time.perf_counter()
     try:
-        result = server.tool("open_document" if tools == "v1" else "open", {"source": source})
+        result = server.tool("open", {"source": source})
     except ProbeError as exc:
         return {}, time.perf_counter() - start, exc
     return payload(result) or {}, time.perf_counter() - start, None
 
 
 def sentence_totals(server: Server, document_id: str, sections: list[dict],
-                    deadline: float, tools: str = "v2") -> tuple[list[int], str | None]:
-    if tools == "v2":
-        return sentence_totals_v2(server, document_id, sections, deadline)
-    totals: list[int] = []
-    for section in sections:
-        if time.monotonic() > deadline:
-            return totals, "job deadline during the per-section sentence count"
-        try:
-            data = payload(
-                server.tool("get_text_units", text_units(document_id, section["section_id"], 1))
-            ) or {}
-        except ProbeError as exc:
-            return totals, str(exc)
-        totals.append(int((data.get("stream") or {}).get("total_items", 0)))
-    return totals, None
+                    deadline: float) -> tuple[list[int], str | None]:
+    return sentence_totals_v2(server, document_id, sections, deadline)
 
 
 def sentence_totals_v2(server: Server, document_handle: str, sections: list[dict],
@@ -519,64 +459,9 @@ def sentence_totals_v2(server: Server, document_handle: str, sections: list[dict
 
 
 def read_sentences(server: Server, document_id: str, sections: list[dict], limit: int,
-                   deadline: float, tools: str = "v2") -> dict:
+                   deadline: float) -> dict:
     """Read sentence by sentence (one item per call) and time every call."""
-    if tools == "v2":
-        return read_sentences_v2(server, document_id, limit, deadline)
-    texts: list[str] = []
-    latencies: list[float] = []
-    rss_samples: list[tuple[int, int]] = []
-    errors: list[str] = []
-    calls = 0
-    capped = False
-    partial = False
-    started = time.monotonic()
-    for section in sections:
-        if len(texts) >= limit:
-            capped = True
-            break
-        if time.monotonic() > deadline:
-            partial = True
-            break
-        cursor = None
-        while True:
-            if len(texts) >= limit:
-                capped = True
-                break
-            if time.monotonic() > deadline:
-                partial = True
-                break
-            began = time.perf_counter()
-            try:
-                result = server.tool(
-                    "get_text_units", text_units(document_id, section["section_id"], 1, cursor)
-                )
-            except ProbeError as exc:
-                errors.append(str(exc))
-                break
-            latencies.append((time.perf_counter() - began) * 1000.0)
-            data = payload(result) or {}
-            items = data.get("items") or []
-            calls += 1
-            for item in items:
-                texts.append(item.get("text") or "")
-            if calls % 500 == 0:
-                rss = peak_rss_kib(server.pid)
-                if rss is not None:
-                    rss_samples.append((calls, rss))
-            cursor = data.get("next_cursor")
-            if not cursor:
-                break
-    return {
-        "texts": texts,
-        "calls": calls,
-        "latencies_ms": latencies,
-        "rss_samples": rss_samples,
-        "errors": errors,
-        "capped": capped,
-        "partial": partial,
-        "read_s": time.monotonic() - started,
-    }
+    return read_sentences_v2(server, document_id, limit, deadline)
 
 
 def read_sentences_v2(server: Server, document_handle: str, limit: int, deadline: float) -> dict:
@@ -787,7 +672,7 @@ def real_paper_metrics(texts: list[str], errors: list[str]) -> dict:
 
 
 def run_caps(binary: str, label: str, source: str, state_root: str, backend: str,
-             layout_python: str, deadline: float, tools: str = "v2") -> list[dict]:
+             layout_python: str, deadline: float) -> list[dict]:
     records = []
     if not cap_available():
         return [{"kind_record": "caps", "input": label, "backend": backend, "cap": cap,
@@ -801,8 +686,7 @@ def run_caps(binary: str, label: str, source: str, state_root: str, backend: str
         state_dir = os.path.join(state_root, tag)
         shutil.rmtree(state_dir, ignore_errors=True)
         os.makedirs(state_dir)
-        env = server_env(state_dir, os.path.dirname(os.path.abspath(source)), backend, layout_python,
-                         tools)
+        env = server_env(state_dir, os.path.dirname(os.path.abspath(source)), backend, layout_python)
         server = Server(cap_command(binary, cap, env), env, os.path.join(state_dir, "server.log"),
                         TOOL_TIMEOUT_S)
         record: dict = {"kind_record": "caps", "input": label, "backend": backend, "cap": cap,
@@ -811,7 +695,7 @@ def run_caps(binary: str, label: str, source: str, state_root: str, backend: str
         try:
             server.initialize()
             after_open = None
-            _, open_s, error = open_document(server, source, tools)
+            _, open_s, error = open_document(server, source)
             record["open_s"] = open_s
             after_open = peak_rss_kib(server.pid)
             record["peak_rss_after_open_kib"] = after_open
@@ -863,7 +747,7 @@ def run_one(args) -> int:
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir)
     env = server_env(state_dir, os.path.dirname(os.path.abspath(source)), backend,
-                     args.layout_python, args.tools)
+                     args.layout_python)
     server = Server([args.binary], env, os.path.join(state_dir, "server.log"), TOOL_TIMEOUT_S)
     open_record = dict(base, kind_record="open", open_s=None, error_code=None, error=None,
                        killed=False, rc=None, peak_rss_after_open_kib=None,
@@ -880,7 +764,7 @@ def run_one(args) -> int:
     document_id = None
     try:
         server.initialize()
-        data, open_s, error = open_document(server, source, args.tools)
+        data, open_s, error = open_document(server, source)
         open_record["open_s"] = round(open_s, 3)
         open_record["peak_rss_after_open_kib"] = peak_rss_kib(server.pid)
         if error is not None:
@@ -888,15 +772,14 @@ def run_one(args) -> int:
             open_record["error_code"] = error.code
         else:
             open_record["outcome"] = "ok"
-            document_id = document_handle(data, args.tools)
-            open_record["sections_open"] = opened_section_count(data, args.tools)
+            document_id = document_handle(data)
+            open_record["sections_open"] = opened_section_count(data)
             open_record["title"] = (data.get("title") or "")[:80]
-            open_record["media_type"] = opened_media_type(data, args.tools)
+            open_record["media_type"] = opened_media_type(data)
 
         if document_id:
-            sections = read_sections(server, document_id, args.tools)
-            totals, totals_error = sentence_totals(server, document_id, sections, deadline,
-                                                   args.tools)
+            sections = read_sections(server, document_id)
+            totals, totals_error = sentence_totals(server, document_id, sections, deadline)
             sentences = sum(totals) if totals and not totals_error else None
             structure_record.update({
                 "sections": len(sections), "sentences": sentences,
@@ -912,11 +795,11 @@ def run_one(args) -> int:
             # Memory caps first: a slow read must not eat the job deadline before they run.
             if args.caps:
                 records += run_caps(args.binary, label, source, args.state_root, backend,
-                                    args.layout_python, deadline, args.tools)
+                                    args.layout_python, deadline)
 
             limit = REAL_PAPER_SENTENCES if meta.get("kind", "real") == "real" else READ_CAP_SENTENCES
             if time.monotonic() < deadline:
-                read = read_sentences(server, document_id, sections, limit, deadline, args.tools)
+                read = read_sentences(server, document_id, sections, limit, deadline)
                 latencies = read["latencies_ms"]
                 read_record.update({
                     "sentences_read": len(read["texts"]), "calls": read["calls"],
@@ -1003,7 +886,7 @@ def run_one(args) -> int:
                      TOOL_TIMEOUT_S)
     try:
         server2.initialize()
-        _, reopen_s, error = open_document(server2, source, args.tools)
+        _, reopen_s, error = open_document(server2, source)
         reopen_record["reopen_s"] = round(reopen_s, 3)
         reopen_record["peak_rss_kib"] = peak_rss_kib(server2.pid)
         if error is not None:
@@ -1251,8 +1134,6 @@ def main() -> int:
     parser.add_argument("--jsonl-dir", default="")
     parser.add_argument("--caps", action="store_true")
     parser.add_argument("--deadline-minutes", type=float, default=150.0)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
-                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if args.mode == "run":
         if not args.binary or not args.input:

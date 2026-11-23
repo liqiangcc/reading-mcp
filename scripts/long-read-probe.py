@@ -2,8 +2,8 @@
 """Measure RSS growth while reading one document sentence by sentence.
 
 The probe speaks newline-delimited JSON-RPC MCP over stdio.  It opens one server process on a
-fresh state directory, walks the document's sections in body order with `get_text_units`
-(`max_items: 1`), and repeats the book from the beginning when it reaches the end, so `--calls`
+fresh state directory, walks the document's sections in body order with `read`
+(following `next`), and repeats the book from the beginning when it reaches the end, so `--calls`
 may exceed the sentence count.  Every 1,000 calls it samples the server's `VmRSS` and `VmHWM`
 from `/proc/<pid>/status`.  With `--wrapper`, the real server is the child of the wrapper.
 
@@ -38,12 +38,6 @@ INITIALIZE_MESSAGE = {
 INITIALIZED_NOTIFICATION = {
     "jsonrpc": "2.0",
     "method": "notifications/initialized",
-}
-
-TEXT_UNIT_BASE = {
-    "requested_kind": "sentence",
-    "direction": "forward",
-    "coverage_policy": "preserve_source",
 }
 
 SAMPLE_EVERY = 1_000
@@ -240,56 +234,17 @@ class Server:
 
 
 def server_environment(
-    state_dir: str, roots: str, overrides: list[str], tools: str = "v2"
+    state_dir: str, roots: str, overrides: list[str]
 ) -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
-    env["READING_MCP_TOOLS"] = tools
     for item in overrides:
         key, separator, value = item.partition("=")
         if not separator or not key:
             raise ProbeError(f"--env expects KEY=VALUE, got {item!r}")
         env[key] = value
     return env
-
-
-def flatten_structure(structure_result: dict) -> list[dict]:
-    flattened: dict[str, dict] = {}
-
-    def walk(nodes) -> None:
-        if not isinstance(nodes, list):
-            return
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            section_id = node.get("section_id")
-            if isinstance(section_id, str) and section_id not in flattened:
-                flattened[section_id] = node
-            walk(node.get("children"))
-
-    walk(structure_result.get("sections"))
-    return sorted(flattened.values(), key=lambda node: node.get("body_order", 0))
-
-
-def read_structure(server: Server, document_id: str) -> list[dict]:
-    sections: dict[str, dict] = {}
-    cursor = None
-    for _ in range(10_000):
-        arguments = {"document_id": document_id, "max_nodes": 500}
-        if cursor is not None:
-            arguments["cursor"] = cursor
-        payload = tool_payload(server.tool("get_document_structure", arguments))
-        if not isinstance(payload, dict):
-            raise ProbeError("get_document_structure returned no JSON object")
-        for node in flatten_structure(payload):
-            sections.setdefault(node["section_id"], node)
-        cursor = payload.get("next_cursor")
-        if not cursor or payload.get("complete") is True:
-            break
-    else:
-        raise ProbeError("structure pagination did not terminate")
-    return sorted(sections.values(), key=lambda node: node.get("body_order", 0))
 
 
 def child_pids(pid: int) -> list[int]:
@@ -402,7 +357,7 @@ def probe(args: argparse.Namespace) -> int:
         raise ProbeError(f"binary not found: {binary}")
     command = wrapper_parts + [binary] if wrapper_parts else [binary]
     env = server_environment(
-        state_dir, os.path.dirname(document), args.env, args.tools
+        state_dir, os.path.dirname(document), args.env
     )
 
     server = Server(command, env, log_path, REQUEST_TIMEOUT)
@@ -410,22 +365,15 @@ def probe(args: argparse.Namespace) -> int:
     calls = 0
     try:
         server.initialize()
-        open_tool = "open_document" if args.tools == "v1" else "open"
-        opened = tool_payload(server.tool(open_tool, {"source": document}))
+        opened = tool_payload(server.tool("open", {"source": document}))
         if not isinstance(opened, dict):
-            raise ProbeError(f"{open_tool} did not return an object")
-        if args.tools == "v2":
-            document_id = opened.get("doc")
-            sections = [{"section_id": document_id}] if isinstance(
-                document_id, str
-            ) else []
-        else:
-            document_id = opened.get("document_id")
-            sections = None
+            raise ProbeError("open did not return an object")
+        document_id = opened.get("doc")
+        sections = [{"section_id": document_id}] if isinstance(
+            document_id, str
+        ) else []
         if not isinstance(document_id, str):
-            raise ProbeError(f"{open_tool} did not return a document_id")
-        if sections is None:
-            sections = read_structure(server, document_id)
+            raise ProbeError("open did not return a document_id")
         if not sections:
             raise ProbeError("document has no sections")
 
@@ -436,33 +384,16 @@ def probe(args: argparse.Namespace) -> int:
         )
 
         section_index = 0
-        cursor = None
         next_handle = None
         while calls < args.calls:
             section_id = sections[section_index]["section_id"]
-            if args.tools == "v2":
-                arguments = {"from": next_handle or section_id}
-                read_tool = "read"
-            else:
-                arguments = {
-                    "document_id": document_id,
-                    "section_id": section_id,
-                    **TEXT_UNIT_BASE,
-                    "max_items": 1,
-                }
-                if cursor is not None:
-                    arguments["cursor"] = cursor
-                read_tool = "get_text_units"
-            payload = tool_payload(server.tool(read_tool, arguments))
+            arguments = {"from": next_handle or section_id}
+            payload = tool_payload(server.tool("read", arguments))
             if not isinstance(payload, dict):
-                raise ProbeError(f"{read_tool} returned no JSON object")
+                raise ProbeError("read returned no JSON object")
             calls += 1
-            if args.tools == "v2":
-                next_handle = payload.get("next")
-                advanced = not isinstance(next_handle, str)
-            else:
-                cursor = payload.get("next_cursor")
-                advanced = not cursor
+            next_handle = payload.get("next")
+            advanced = not isinstance(next_handle, str)
             if calls % SAMPLE_EVERY == 0:
                 rss, hwm = read_rss_mib(pid)
                 samples.append(
@@ -476,7 +407,6 @@ def probe(args: argparse.Namespace) -> int:
                 section_index += 1
                 if section_index >= len(sections):
                     section_index = 0
-                cursor = None
                 next_handle = None
 
         end_rss, end_hwm = read_rss_mib(pid)
@@ -524,12 +454,6 @@ def main() -> int:
     parser.add_argument("--binary", required=True, help="reading-mcp binary to run")
     parser.add_argument("--document", required=True, help="document to read")
     parser.add_argument("--calls", type=int, required=True, help="reading calls to make")
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="tool set the server exposes: v2 (default) or v1",
-    )
     parser.add_argument(
         "--wrapper",
         default=None,

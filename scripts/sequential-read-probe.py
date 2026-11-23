@@ -53,12 +53,6 @@ SEARCH_QUERIES = {
     "zh-large": "皇帝",
 }
 
-TEXT_UNIT_BASE = {
-    "requested_kind": "sentence",
-    "direction": "forward",
-    "coverage_policy": "preserve_source",
-}
-
 
 class ProbeError(RuntimeError):
     """A transport, protocol, tool or deadline failure."""
@@ -356,12 +350,11 @@ class Server:
             pass
 
 
-def server_environment(roots: str, state_dir: str, tools: str = "v2") -> dict:
+def server_environment(roots: str, state_dir: str) -> dict:
     env = dict(os.environ)
     env["READING_MCP_STATE_DIR"] = state_dir
     env["READING_MCP_LOCAL_ROOTS"] = roots
     env["READING_MCP_TELEMETRY"] = "false"
-    env["READING_MCP_TOOLS"] = tools
     return env
 
 
@@ -504,193 +497,11 @@ def pass_summary(
     }
 
 
-def text_unit_arguments(
-    document_id: str, section_id: str, max_items: int, cursor: str | None = None
-) -> dict:
-    arguments = {
-        "document_id": document_id,
-        "section_id": section_id,
-        **TEXT_UNIT_BASE,
-        "max_items": max_items,
-    }
-    if cursor is not None:
-        arguments["cursor"] = cursor
-    return arguments
-
-
-def flatten_structure(structure_result: dict) -> list[dict]:
-    flattened: dict[str, dict] = {}
-
-    def walk(nodes) -> None:
-        if not isinstance(nodes, list):
-            return
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            section_id = node.get("section_id")
-            if isinstance(section_id, str) and section_id not in flattened:
-                flattened[section_id] = node
-            walk(node.get("children"))
-
-    walk(structure_result.get("sections"))
-    return sorted(flattened.values(), key=lambda node: node.get("body_order", 0))
-
-
-def read_structure(server: Server, document_id: str, deadline: float) -> tuple[list[dict], int]:
-    sections: dict[str, dict] = {}
-    calls = 0
-    cursor = None
-    while True:
-        arguments = {"document_id": document_id, "max_nodes": 500}
-        if cursor is not None:
-            arguments["cursor"] = cursor
-        result = server.tool(
-            "get_document_structure", arguments, deadline_timeout(deadline)
-        )
-        calls += 1
-        payload = tool_payload(result)
-        if not isinstance(payload, dict):
-            raise ProbeError("get_document_structure returned no JSON object")
-        for node in flatten_structure(payload):
-            sections.setdefault(node["section_id"], node)
-        cursor = payload.get("next_cursor")
-        if not cursor or payload.get("complete") is True:
-            break
-        if calls > 10000:
-            raise ProbeError("structure pagination did not terminate")
-    ordered = sorted(sections.values(), key=lambda node: node.get("body_order", 0))
-    return ordered, calls
-
-
-def run_page_pass(
-    server: Server,
-    document_id: str,
-    sections: list[dict],
-    deadline: float,
-) -> tuple[list[dict], float, bool, str | None, int]:
-    records: list[dict] = []
-    start = time.monotonic()
-    partial = False
-    error = None
-    transitions = 0
-    try:
-        for section in sections:
-            if time.monotonic() >= deadline:
-                partial = True
-                break
-            section_id = section["section_id"]
-            section_items = 0
-            cursor = None
-            seen_cursors: set[str] = set()
-            for _ in range(100000):
-                if time.monotonic() >= deadline:
-                    partial = True
-                    break
-                arguments = text_unit_arguments(document_id, section_id, 256, cursor)
-                result, wall_ms = timed_tool(
-                    server, "get_text_units", arguments, deadline_timeout(deadline)
-                )
-                record = make_call_record(
-                    "page",
-                    section_id,
-                    wall_ms,
-                    result,
-                    capture_sample=not records,
-                )
-                records.append(record)
-                section_items += record["items"]
-                cursor = (tool_payload(result) or {}).get("next_cursor")
-                if not cursor:
-                    break
-                if cursor in seen_cursors:
-                    raise ProbeError("get_text_units cursor repeated within a section")
-                seen_cursors.add(cursor)
-            else:
-                raise ProbeError("get_text_units pagination did not terminate")
-            if section_items > 0:
-                transitions += 1
-            if partial:
-                break
-    except DeadlineExceeded:
-        partial = True
-    except ProbeError as exc:
-        error = str(exc)
-    return records, time.monotonic() - start, partial, error, transitions
-
-
 def start_section_index(sections: list[dict], page_section_items: dict[str, int]) -> int:
     for index, section in enumerate(sections):
         if page_section_items.get(section["section_id"], 0) > 0:
             return index
     return 0
-
-
-def run_item_pass(
-    server: Server,
-    document_id: str,
-    sections: list[dict],
-    start_index: int,
-    max_items: int,
-    item_cap: int,
-    deadline: float,
-    pass_name: str,
-) -> tuple[list[dict], float, bool, str | None, int]:
-    records: list[dict] = []
-    start = time.monotonic()
-    partial = False
-    error = None
-    switches = 0
-    total_items = 0
-    cap_reached = False
-    try:
-        for index in range(start_index, len(sections)):
-            if cap_reached:
-                break
-            if time.monotonic() >= deadline:
-                partial = True
-                break
-            section_id = sections[index]["section_id"]
-            cursor = None
-            seen_cursors: set[str] = set()
-            for _ in range(100000):
-                if time.monotonic() >= deadline:
-                    partial = True
-                    break
-                if total_items >= item_cap:
-                    cap_reached = True
-                    break
-                arguments = text_unit_arguments(
-                    document_id, section_id, max_items, cursor
-                )
-                result, wall_ms = timed_tool(
-                    server, "get_text_units", arguments, deadline_timeout(deadline)
-                )
-                record = make_call_record(
-                    pass_name,
-                    section_id,
-                    wall_ms,
-                    result,
-                    capture_sample=pass_name == "one" and not records,
-                )
-                records.append(record)
-                total_items += record["items"]
-                cursor = (tool_payload(result) or {}).get("next_cursor")
-                if not cursor:
-                    if total_items < item_cap and index + 1 < len(sections):
-                        switches += 1
-                    break
-                if cursor in seen_cursors:
-                    raise ProbeError("get_text_units cursor repeated within a section")
-                seen_cursors.add(cursor)
-            else:
-                raise ProbeError("get_text_units pagination did not terminate")
-            if total_items >= item_cap:
-                cap_reached = True
-    except DeadlineExceeded:
-        partial = True
-    except ProbeError as exc:
-        error = str(exc)
-    return records, time.monotonic() - start, partial, error, switches
 
 
 V2_PAGE_CHARS = 16000
@@ -930,121 +741,6 @@ def tools_list_footprint(result: dict) -> tuple[dict, list[dict]]:
 
 def full_text_query(label: str) -> str:
     return SEARCH_QUERIES.get(label, "Pierre")
-
-
-def representative_calls(
-    server: Server,
-    book_label: str,
-    document_id: str,
-    content_hash: str,
-    normalized_hash: str,
-    sections: list[dict],
-    start_index: int,
-    open_result: dict,
-    open_wall_ms: float,
-    deadline: float,
-) -> list[dict]:
-    records = [
-        representative_record(
-            book_label,
-            "open_document",
-            open_result,
-            open_wall_ms,
-            document_id,
-            content_hash,
-            normalized_hash,
-        )
-    ]
-
-    def add(tool_name: str, result: dict, wall_ms: float) -> None:
-        records.append(
-            representative_record(
-                book_label,
-                tool_name,
-                result,
-                wall_ms,
-                document_id,
-                content_hash,
-                normalized_hash,
-            )
-        )
-
-    section_id = sections[start_index]["section_id"] if sections else None
-
-    try:
-        result, wall_ms = timed_tool(
-            server,
-            "get_document_structure",
-            {"document_id": document_id, "max_nodes": 50},
-            deadline_timeout(deadline),
-        )
-        add("get_document_structure", result, wall_ms)
-    except ProbeError:
-        pass
-
-    search_result = None
-    try:
-        search_result, wall_ms = timed_tool(
-            server,
-            "search_document",
-            {"document_id": document_id, "query": full_text_query(book_label)},
-            deadline_timeout(deadline),
-        )
-        add("search_document", search_result, wall_ms)
-    except ProbeError:
-        search_result = None
-
-    if search_result is not None:
-        hits = (tool_payload(search_result) or {}).get("hits")
-        if isinstance(hits, list) and hits:
-            first = hits[0] if isinstance(hits[0], dict) else {}
-            locator = first.get("text_locator")
-            if isinstance(locator, dict):
-                unit = "sentence" if locator.get("sentence_index") is not None else "paragraph"
-                try:
-                    context_result, wall_ms = timed_tool(
-                        server,
-                        "get_context",
-                        {
-                            "document_id": document_id,
-                            "target_locator": locator,
-                            "relation": {
-                                "type": "neighbor",
-                                "unit": unit,
-                                "before": 2,
-                                "after": 2,
-                            },
-                        },
-                        deadline_timeout(deadline),
-                    )
-                    add("get_context", context_result, wall_ms)
-                except ProbeError:
-                    pass
-
-    if section_id is not None:
-        try:
-            read_result, wall_ms = timed_tool(
-                server,
-                "read_document",
-                {"document_id": document_id, "section_id": section_id},
-                deadline_timeout(deadline),
-            )
-            add("read_document", read_result, wall_ms)
-        except ProbeError:
-            pass
-
-        try:
-            units_result, wall_ms = timed_tool(
-                server,
-                "get_text_units",
-                text_unit_arguments(document_id, section_id, 20),
-                deadline_timeout(deadline),
-            )
-            add("get_text_units", units_result, wall_ms)
-        except ProbeError:
-            pass
-
-    return records
 
 
 def representative_calls_v2(
@@ -1308,7 +1004,6 @@ def probe_book(
     path: str,
     state_root: str,
     max_seconds: float,
-    tools: str = "v2",
 ) -> dict:
     book: dict = {
         "label": label,
@@ -1336,86 +1031,57 @@ def probe_book(
     try:
         server = Server(
             binary,
-            server_environment(parent, state_dir, tools),
+            server_environment(parent, state_dir),
             os.path.join(state_dir, "server.log"),
             request_timeout=max(30.0, max_seconds),
             cwd=parent,
         )
         server.initialize(timeout=max(30.0, max_seconds))
-        open_tool = "open_document" if tools == "v1" else "open"
         open_result, open_wall_ms = timed_tool(
             server,
-            open_tool,
+            "open",
             {"source": os.path.abspath(path)},
             max(30.0, max_seconds),
         )
         opened = tool_payload(open_result)
         if not isinstance(opened, dict):
-            raise ProbeError(f"{open_tool} did not return an object")
-        if tools == "v2":
-            document_id = opened.get("doc")
-            book["section_count"] = opened.get("sections") or 0
-        else:
-            document_id = opened.get("document_id")
-            book["section_count"] = opened.get("section_count") or 0
+            raise ProbeError("open did not return an object")
+        document_id = opened.get("doc")
+        book["section_count"] = opened.get("sections") or 0
         if not isinstance(document_id, str):
-            raise ProbeError(f"{open_tool} did not return a document_id")
+            raise ProbeError("open did not return a document_id")
         book["document_id"] = document_id
         book["content_hash"] = opened.get("content_hash")
         book["normalized_document_hash"] = opened.get("normalized_document_hash")
         book["title"] = opened.get("title")
 
         structure_deadline = time.monotonic() + max_seconds
-        if tools == "v2":
-            sections, structure_calls = outline_sections_v2(
-                server, document_id, structure_deadline
-            )
-        else:
-            sections, structure_calls = read_structure(
-                server, document_id, structure_deadline
-            )
+        sections, structure_calls = outline_sections_v2(
+            server, document_id, structure_deadline
+        )
         book["structure_calls"] = structure_calls
         book["sections"] = sections
         book["section_count"] = len(sections) or book["section_count"]
 
         representative_deadline = time.monotonic() + max_seconds
-        if tools == "v2":
-            book["representative_calls"] = representative_calls_v2(
-                server,
-                label,
-                document_id,
-                book["content_hash"] or "",
-                book["normalized_document_hash"] or "",
-                sections,
-                0,
-                open_result,
-                open_wall_ms,
-                representative_deadline,
-            )
-        else:
-            book["representative_calls"] = representative_calls(
-                server,
-                label,
-                document_id,
-                book["content_hash"] or "",
-                book["normalized_document_hash"] or "",
-                sections,
-                0,
-                open_result,
-                open_wall_ms,
-                representative_deadline,
-            )
+        book["representative_calls"] = representative_calls_v2(
+            server,
+            label,
+            document_id,
+            book["content_hash"] or "",
+            book["normalized_document_hash"] or "",
+            sections,
+            0,
+            open_result,
+            open_wall_ms,
+            representative_deadline,
+        )
 
         page_deadline = time.monotonic() + max_seconds
-        if tools == "v2":
-            first_section = sections[0]["section_id"] if sections else None
-            page_records, page_elapsed, page_partial, page_error, transitions = (
-                run_page_pass_v2(server, document_id, first_section, page_deadline)
-            )
-        else:
-            page_records, page_elapsed, page_partial, page_error, transitions = (
-                run_page_pass(server, document_id, sections, page_deadline)
-            )
+        first_section = sections[0]["section_id"] if sections else None
+        page_records, page_elapsed, page_partial, page_error, transitions = (
+            run_page_pass_v2(server, document_id, first_section, page_deadline)
+        )
         book["page_section_transitions"] = transitions
         book["calls"].extend(page_records)
         book["passes"].append(
@@ -1432,34 +1098,20 @@ def probe_book(
         start_index = start_section_index(sections, page_section_items)
 
         v2_start_handle = (
-            sections[start_index]["section_id"] if tools == "v2" and sections else None
+            sections[start_index]["section_id"] if sections else None
         )
         one_deadline = time.monotonic() + max_seconds
-        if tools == "v2":
-            one_records, one_elapsed, one_partial, one_error, one_switches = (
-                run_item_pass_v2(
-                    server,
-                    v2_start_handle or document_id,
-                    v2_start_handle,
-                    None,
-                    500,
-                    one_deadline,
-                    "one",
-                )
+        one_records, one_elapsed, one_partial, one_error, one_switches = (
+            run_item_pass_v2(
+                server,
+                v2_start_handle or document_id,
+                v2_start_handle,
+                None,
+                500,
+                one_deadline,
+                "one",
             )
-        else:
-            one_records, one_elapsed, one_partial, one_error, one_switches = (
-                run_item_pass(
-                    server,
-                    document_id,
-                    sections,
-                    start_index,
-                    1,
-                    500,
-                    one_deadline,
-                    "one",
-                )
-            )
+        )
         book["calls"].extend(one_records)
         book["passes"].append(
             pass_summary(
@@ -1473,34 +1125,20 @@ def probe_book(
         )
 
         twenty_deadline = time.monotonic() + max_seconds
-        if tools == "v2":
-            one_chars = sum(record["item_text_chars"] for record in one_records)
-            one_items = sum(record["items"] for record in one_records)
-            mean_chars = (one_chars / one_items) if one_items else 100.0
-            twenty_records, twenty_elapsed, twenty_partial, twenty_error, twenty_switches = (
-                run_item_pass_v2(
-                    server,
-                    v2_start_handle or document_id,
-                    v2_start_handle,
-                    min(V2_PAGE_CHARS, max(1, int(mean_chars * 20))),
-                    300,
-                    twenty_deadline,
-                    "twenty",
-                )
+        one_chars = sum(record["item_text_chars"] for record in one_records)
+        one_items = sum(record["items"] for record in one_records)
+        mean_chars = (one_chars / one_items) if one_items else 100.0
+        twenty_records, twenty_elapsed, twenty_partial, twenty_error, twenty_switches = (
+            run_item_pass_v2(
+                server,
+                v2_start_handle or document_id,
+                v2_start_handle,
+                min(V2_PAGE_CHARS, max(1, int(mean_chars * 20))),
+                300,
+                twenty_deadline,
+                "twenty",
             )
-        else:
-            twenty_records, twenty_elapsed, twenty_partial, twenty_error, twenty_switches = (
-                run_item_pass(
-                    server,
-                    document_id,
-                    sections,
-                    start_index,
-                    20,
-                    300,
-                    twenty_deadline,
-                    "twenty",
-                )
-            )
+        )
         book["calls"].extend(twenty_records)
         book["passes"].append(
             pass_summary(
@@ -1554,12 +1192,6 @@ def main() -> int:
         default=None,
         help="base state directory; a fresh run subdirectory is created inside it",
     )
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="tool set the server exposes: v2 (default) or v1",
-    )
     args = parser.parse_args()
 
     try:
@@ -1596,7 +1228,7 @@ def main() -> int:
     try:
         tools_server = Server(
             binary,
-            server_environment(state_root, tools_state, args.tools),
+            server_environment(state_root, tools_state),
             os.path.join(tools_state, "server.log"),
             request_timeout=max(30.0, args.max_seconds_per_book),
             cwd=state_root,
@@ -1622,7 +1254,7 @@ def main() -> int:
     for label, path in documents:
         print(f"probing {label}: {path}", file=sys.stderr)
         book = probe_book(
-            binary, label, path, state_root, args.max_seconds_per_book, args.tools
+            binary, label, path, state_root, args.max_seconds_per_book
         )
         data["books"].append(book)
         book["passes"] = [

@@ -11,21 +11,17 @@ The tasks are the ones a reader actually runs:
 
 T1/T2 are replayed without a model against the same binary:
 
-  v1  server ``READING_MCP_TOOLS=v1``: ``open_document``, ``get_text_units`` with
-      ``next_cursor``, and a ``get_document_structure`` call to find the next section
-      whenever a section ends, as a v1 client needs.
-  v2  server ``READING_MCP_TOOLS=v2``: ``open`` and ``read``, following ``next``.
+  v2  server (the only tool set left): ``open`` and ``read``, following ``next``.
 
-T3-T5 use the matching v1 tools (``search_document``, ``get_document_structure``,
-``get_text_units``) and the v2 tools (``search``, ``outline``, ``read``, ``cite``).
+T3-T5 use the v2 tools (``search``, ``outline``, ``read``, ``cite``).
 
 Per task and tool set it records calls, request and response tokens, the body share of the
 response, ``tools/list`` tokens times calls, and server milliseconds.  Tokens are the same
 rough heuristic the sequential probe uses: ``ascii_chars / 4 + other_chars / 1.5``.
 
-The per-sentence overhead counts the reading calls only (``read`` for v2, ``get_text_units``
-for v1): request tokens plus response tokens minus body tokens, divided by the sentences those
-calls returned.  The ``open`` step has its own column.
+The per-sentence overhead counts the reading calls only (``read``): request tokens plus
+response tokens minus body tokens, divided by the sentences those calls returned.  The
+``open`` step has its own column.
 
 The v2 task 2 starting point is addressed directly by its documented section handle
 ``d<key>~<chk>.s<section_key>``: ``open`` reports the section count, so the middle section is
@@ -77,8 +73,8 @@ T3_TERMS = {"zh-classic": "寶玉", "en-novel": "Pierre"}
 T4_BOOKS = frozenset({"zh-large"})
 T5_BOOKS = frozenset({"zh-classic"})
 EXTENDED_TASKS = ("T3", "T4", "T5")
-# The tools that return reading items: v1 pages them with `get_text_units`, v2 with `read`.
-READ_TOOLS = frozenset({"read", "get_text_units"})
+# The tools that return reading items: v2 pages them with `read`.
+READ_TOOLS = frozenset({"read"})
 
 
 class TaskResult:
@@ -198,129 +194,8 @@ def call(server, name: str, arguments: dict, deadline: float, record: TaskResult
     return payload
 
 
-def open_v1(server, path: str, deadline: float, record: TaskResult) -> str:
-    payload = call(server, "open_document", {"source": path}, deadline, record)
-    document_id = payload.get("document_id")
-    if not isinstance(document_id, str):
-        raise probe.ProbeError("open_document returned no document_id")
-    return document_id
-
-
 def open_v2(server, path: str, deadline: float, record: TaskResult) -> dict:
     return call(server, "open", {"source": path}, deadline, record)
-
-
-def v1_sections(server, document_id: str, deadline: float, record: TaskResult) -> list[dict]:
-    """The whole section order, in v1 body order, one structure enumeration."""
-    sections: dict[str, dict] = {}
-    cursor = None
-    while True:
-        arguments = {"document_id": document_id, "max_nodes": 500}
-        if cursor is not None:
-            arguments["cursor"] = cursor
-        payload = call(server, "get_document_structure", arguments, deadline, record)
-        for node in flatten(payload.get("sections")):
-            sections.setdefault(node["section_id"], node)
-        cursor = payload.get("next_cursor")
-        if not cursor or payload.get("complete") is True:
-            break
-    return sorted(sections.values(), key=lambda node: node.get("body_order", 0))
-
-
-def flatten(nodes) -> list[dict]:
-    found: list[dict] = []
-    if not isinstance(nodes, list):
-        return found
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        found.append(node)
-        found.extend(flatten(node.get("children")))
-    return found
-
-
-def v1_read_units(
-    server,
-    document_id: str,
-    section_id: str,
-    deadline: float,
-    record: TaskResult,
-    budget: dict,
-    counter: dict,
-) -> bool:
-    """Read one section one item per call. Returns True when the section was non-empty."""
-    cursor = None
-    empty = True
-    while True:
-        arguments = tool_arguments(
-            document_id=document_id,
-            section_id=section_id,
-            requested_kind="sentence",
-            direction="forward",
-            coverage_policy="preserve_source",
-            max_items=1,
-            cursor=cursor,
-        )
-        payload = call(server, "get_text_units", arguments, deadline, record)
-        items = payload.get("items") or []
-        if items:
-            empty = False
-            counter["items"] += len(items)
-        if payload.get("complete"):
-            return not empty
-        cursor = payload.get("next_cursor")
-        if not cursor:
-            return not empty
-        if budget["limit"] is not None and counter["items"] >= budget["limit"]:
-            return not empty
-
-
-def v1_task1(server, document_id: str, sections: list[dict], deadline: float) -> TaskResult:
-    record = TaskResult("T1", V1)
-    counter = {"items": 0}
-    for section in sections:
-        before = counter["items"]
-        v1_read_units(
-            server,
-            document_id,
-            section["section_id"],
-            deadline,
-            record,
-            {"limit": None},
-            counter,
-        )
-        if counter["items"] > before:
-            # The first section with body text was read to its end.
-            return record
-    return record
-
-
-def v1_task2(
-    server, document_id: str, sections: list[dict], deadline: float
-) -> TaskResult:
-    record = TaskResult("T2", V1)
-    counter = {"items": 0}
-    if not sections:
-        return record
-    index = len(sections) // 2
-    while index < len(sections) and counter["items"] < SENTENCES_T2:
-        v1_read_units(
-            server,
-            document_id,
-            sections[index]["section_id"],
-            deadline,
-            record,
-            {"limit": SENTENCES_T2},
-            counter,
-        )
-        if counter["items"] >= SENTENCES_T2:
-            break
-        # A section ended: v1 has to ask for the structure again to find the next one.
-        sections = v1_sections(server, document_id, deadline, record)
-        if index >= len(sections):
-            break
-        index += 1
-    return record
 
 
 def v2_task1(server, doc_handle: str, deadline: float) -> TaskResult:
@@ -359,23 +234,6 @@ def v2_task2(server, opened: dict, deadline: float) -> TaskResult:
     return record
 
 
-def v1_first_section(
-    server, document_id: str, deadline: float, record: TaskResult
-) -> str | None:
-    """The first root section of a document, from one bounded structure call."""
-    payload = call(
-        server,
-        "get_document_structure",
-        {"document_id": document_id, "max_nodes": 1},
-        deadline,
-        record,
-    )
-    nodes = flatten(payload.get("sections"))
-    if not nodes:
-        return None
-    return nodes[0].get("section_id")
-
-
 def v2_task3(server, doc_handle: str, term: str, deadline: float) -> TaskResult:
     """Search a term, then read two sentences before and after each of the first hits."""
     record = TaskResult("T3", V2)
@@ -395,44 +253,6 @@ def v2_task3(server, doc_handle: str, term: str, deadline: float) -> TaskResult:
             deadline,
             record,
         )
-    return record
-
-
-def v1_task3(server, document_id: str, term: str, deadline: float) -> TaskResult:
-    """The v1 equivalent: search, then two anchored sentence pages per hit."""
-    record = TaskResult("T3", V1)
-    found = call(
-        server,
-        "search_document",
-        {"document_id": document_id, "query": term, "limit": 10},
-        deadline,
-        record,
-    )
-    hits = [
-        hit
-        for hit in (found.get("hits") or [])
-        if hit.get("candidate_kind") == "sentence"
-    ]
-    if not hits:
-        record.error = f"v1 search returned no sentence hits for {term!r}"
-        return record
-    for hit in hits[:T3_HITS]:
-        for direction in ("backward", "forward"):
-            call(
-                server,
-                "get_text_units",
-                tool_arguments(
-                    document_id=document_id,
-                    section_id=hit["section_id"],
-                    anchor_locator=hit["text_locator"],
-                    requested_kind="sentence",
-                    direction=direction,
-                    coverage_policy="preserve_source",
-                    max_items=T3_BACK,
-                ),
-                deadline,
-                record,
-            )
     return record
 
 
@@ -461,24 +281,6 @@ def v2_task4(server, doc_handle: str, deadline: float) -> TaskResult:
     return record
 
 
-def v1_task4(server, document_id: str, deadline: float) -> TaskResult:
-    """The v1 equivalent: enumerate the structure, then read that section's first page."""
-    record = TaskResult("T4", V1)
-    sections = v1_sections(server, document_id, deadline, record)
-    if not sections:
-        record.error = "structure returned no sections"
-        return record
-    section_id = sections[min(T4_INDEX, len(sections) - 1)]["section_id"]
-    call(
-        server,
-        "read_document",
-        {"document_id": document_id, "section_id": section_id, "max_chars": T4_MAX_CHARS},
-        deadline,
-        record,
-    )
-    return record
-
-
 def v2_task5(server, doc_handle: str, deadline: float) -> TaskResult:
     """Read a few sentences, then cite all of them in one call."""
     record = TaskResult("T5", V2)
@@ -491,51 +293,6 @@ def v2_task5(server, doc_handle: str, deadline: float) -> TaskResult:
         record.error = "read returned no sentences to cite"
         return record
     call(server, "cite", {"at": handles}, deadline, record)
-    return record
-
-
-def v1_task5(server, document_id: str, deadline: float) -> TaskResult:
-    """The v1 equivalent: find a section, then page three sentences with their locators."""
-    record = TaskResult("T5", V1)
-    section_id = v1_first_section(server, document_id, deadline, record)
-    if section_id is None:
-        record.error = "structure returned no sections"
-        return record
-    payload = call(
-        server,
-        "get_text_units",
-        tool_arguments(
-            document_id=document_id,
-            section_id=section_id,
-            requested_kind="sentence",
-            direction="forward",
-            coverage_policy="preserve_source",
-            max_items=T5_SENTENCES,
-        ),
-        deadline,
-        record,
-    )
-    if payload.get("items"):
-        return record
-    # The first section was empty: a v1 client falls back to the full structure.
-    for section in v1_sections(server, document_id, deadline, record)[:3]:
-        payload = call(
-            server,
-            "get_text_units",
-            tool_arguments(
-                document_id=document_id,
-                section_id=section["section_id"],
-                requested_kind="sentence",
-                direction="forward",
-                coverage_policy="preserve_source",
-                max_items=T5_SENTENCES,
-            ),
-            deadline,
-            record,
-        )
-        if payload.get("items"):
-            return record
-    record.error = "v1 found no sentences to cite"
     return record
 
 
@@ -567,7 +324,6 @@ def run_task_book(
     try:
         books = os.path.dirname(os.path.abspath(path))
         environment = probe.server_environment(books, state)
-        environment["READING_MCP_TOOLS"] = toolset
         server = probe.Server(
             binary,
             environment,
@@ -578,29 +334,16 @@ def run_task_book(
         server.initialize(timeout=max(30.0, seconds))
         deadline = time.monotonic() + seconds
         record = TaskResult("open", toolset)
-        if toolset == V1:
-            document_id = open_v1(server, os.path.abspath(path), deadline, record)
-        else:
-            opened = open_v2(server, os.path.abspath(path), deadline, record)
-            document_id = opened.get("doc")
+        opened = open_v2(server, os.path.abspath(path), deadline, record)
+        document_id = opened.get("doc")
         completed = []
         for task in tasks:
-            if toolset == V1:
-                if task == "T3":
-                    completed.append(
-                        v1_task3(server, document_id, T3_TERMS[book], deadline)
-                    )
-                elif task == "T4":
-                    completed.append(v1_task4(server, document_id, deadline))
-                elif task == "T5":
-                    completed.append(v1_task5(server, document_id, deadline))
-            else:
-                if task == "T3":
-                    completed.append(v2_task3(server, document_id, T3_TERMS[book], deadline))
-                elif task == "T4":
-                    completed.append(v2_task4(server, document_id, deadline))
-                elif task == "T5":
-                    completed.append(v2_task5(server, document_id, deadline))
+            if task == "T3":
+                completed.append(v2_task3(server, document_id, T3_TERMS[book], deadline))
+            elif task == "T4":
+                completed.append(v2_task4(server, document_id, deadline))
+            elif task == "T5":
+                completed.append(v2_task5(server, document_id, deadline))
         for task in completed:
             task.calls += record.calls
             task.request_tokens += record.request_tokens
@@ -624,7 +367,6 @@ def measure_tools_list(binary: str, state_root: str, toolset: str, seconds: floa
     server = None
     try:
         environment = probe.server_environment(state_root, state)
-        environment["READING_MCP_TOOLS"] = toolset
         server = probe.Server(
             binary,
             environment,
@@ -659,7 +401,6 @@ def run_toolset(
     try:
         books = os.path.dirname(os.path.abspath(path))
         environment = probe.server_environment(books, state)
-        environment["READING_MCP_TOOLS"] = toolset
         server = probe.Server(
             binary,
             environment,
@@ -669,28 +410,15 @@ def run_toolset(
         )
         server.initialize(timeout=max(30.0, seconds))
         deadline = time.monotonic() + seconds
-        if toolset == V1:
-            record = TaskResult("open", V1)
-            document_id = open_v1(server, os.path.abspath(path), deadline, record)
-            sections = v1_sections(server, document_id, deadline, record)
-            t1 = v1_task1(server, document_id, sections, deadline)
-            t2 = v1_task2(server, document_id, sections, deadline)
-            # Charge the open cost to both tasks: every run has to open the book once.
-            for task in (t1, t2):
-                task.calls += record.calls
-                task.request_tokens += record.request_tokens
-                task.response_tokens += record.response_tokens
-                task.server_ms += record.server_ms
-        else:
-            record = TaskResult("open", V2)
-            opened = open_v2(server, os.path.abspath(path), deadline, record)
-            t1 = v2_task1(server, opened["doc"], deadline)
-            t2 = v2_task2(server, opened, deadline)
-            for task in (t1, t2):
-                task.calls += record.calls
-                task.request_tokens += record.request_tokens
-                task.response_tokens += record.response_tokens
-                task.server_ms += record.server_ms
+        record = TaskResult("open", V2)
+        opened = open_v2(server, os.path.abspath(path), deadline, record)
+        t1 = v2_task1(server, opened["doc"], deadline)
+        t2 = v2_task2(server, opened, deadline)
+        for task in (t1, t2):
+            task.calls += record.calls
+            task.request_tokens += record.request_tokens
+            task.response_tokens += record.response_tokens
+            task.server_ms += record.server_ms
         result["open"] = record
         result["tasks"] = [t1, t2]
     except probe.ProbeError as exc:
@@ -854,7 +582,7 @@ def pass_lines(rows: list[dict], tools_tokens: dict[str, float]) -> tuple[list[s
     }
     combined_pct = ratio(combined["v2_tokens"], combined["v1_tokens"])
     if not extended and combined["v1_calls"] == 0:
-        # Only the v2 legs ran (--tools v2): there is no v1 baseline to gate against.
+        # Only the v2 legs ran: there is no v1 baseline to gate against.
         lines.append("INFO T3-T5 skipped: no v1 leg was run")
         summary["t3_t5"] = {
             "v1_tokens": combined["v1_tokens"],
@@ -925,12 +653,6 @@ def main() -> int:
         default=None,
         help="base state directory; a fresh run subdirectory is created inside it",
     )
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="which legs run: v2 (default) only the v2 legs; v1 replays both tool sets",
-    )
     args = parser.parse_args()
 
     try:
@@ -950,7 +672,7 @@ def main() -> int:
     state_root = os.path.join(base, f"run-{os.getpid()}-{stamp}")
     os.makedirs(state_root, exist_ok=True)
 
-    toolsets = (V1, V2) if args.tools == V1 else (V2,)
+    toolsets = (V2,)
     tools_footprint = {
         toolset: measure_tools_list(
             binary, state_root, toolset, args.max_seconds_per_task

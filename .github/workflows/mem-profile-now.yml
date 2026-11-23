@@ -7,10 +7,6 @@ on:
         type: string
         default: ''
         description: Extra arena run for the heap job; empty uses the fixed default + arena2 pair
-      tools:
-        description: 'Tool set the probe servers expose'
-        required: false
-        default: 'v2'
   push:
     branches: ['bench/mem2a-**']
 jobs:
@@ -105,7 +101,7 @@ jobs:
             [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
           done
           mkdir -p rss
-          python3 scripts/mem-profile-now.py profile --tools "${{ inputs.tools || 'v2' }}" \
+          python3 scripts/mem-profile-now.py profile \
             --binary "$RUNNER_TEMP/bin/reading-mcp" --out rss --mode rss \
             --inputs "$docs" --settle-seconds 3 --sample-interval 0.02 \
             --timeout-seconds 900
@@ -144,7 +140,7 @@ jobs:
             [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
           done
           mkdir -p heap
-          python3 scripts/mem-profile-now.py profile --tools "${{ inputs.tools || 'v2' }}" \
+          python3 scripts/mem-profile-now.py profile \
             --binary "$RUNNER_TEMP/bin/reading-mcp" --out heap --mode heap \
             --variant default --inputs "$docs" --timeout-seconds 900
       - name: Upload the heap runs
@@ -182,7 +178,7 @@ jobs:
             [ -f "${pair#*=}" ] && docs="${docs:+$docs,}$pair"
           done
           mkdir -p heap
-          python3 scripts/mem-profile-now.py profile --tools "${{ inputs.tools || 'v2' }}" \
+          python3 scripts/mem-profile-now.py profile \
             --binary "$RUNNER_TEMP/bin/reading-mcp" --out heap --mode heap \
             --variant arena2 --malloc-arena-max 2 --inputs "$docs" --timeout-seconds 900
       - name: Upload the heap runs

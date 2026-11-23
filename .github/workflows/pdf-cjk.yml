@@ -7,10 +7,6 @@ on:
         description: 'Rebuild scripts/pdf-cjk-ids.txt (downloads candidates to check licence, pages, CJK chars)'
         type: boolean
         default: false
-      tools:
-        description: 'Tool set the probe servers expose'
-        required: false
-        default: 'v2'
   push:
     branches: ['bench/pdf1b-**']
 
@@ -147,8 +143,7 @@ jobs:
             --inventory-dir "$RUNNER_TEMP/inventory" \
             --out "$RUNNER_TEMP/results/cjk-${{ matrix.shard }}.jsonl" \
             --deadline-minutes 65 \
-            --paper-deadline-minutes 12 \
-            --tools "${{ inputs.tools || 'v2' }}" | tail -40
+            --paper-deadline-minutes 12 \ | tail -40
       - name: Upload shard results
         if: always() && steps.corpus.outputs.present == 'yes'
         uses: actions/upload-artifact@v4

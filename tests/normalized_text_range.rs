@@ -7,7 +7,7 @@ use reading_mcp::domain::{
     NormalizedTextRangeError, Section, SectionId,
 };
 use reading_mcp::infrastructure::SqliteDocumentRepository;
-use reading_mcp::mcp::contracts::OpenDocumentResponse;
+use reading_mcp::mcp::contracts::TextLocatorDto;
 use tempfile::tempdir;
 
 #[test]
@@ -172,7 +172,7 @@ async fn normalized_hash_rebuilds_from_persisted_canonical_document() {
 }
 
 #[test]
-fn open_contract_advertises_normalized_identity_and_coordinate_versions() {
+fn the_cite_locator_advertises_normalized_identity_and_coordinate_versions() {
     assert_eq!(NORMALIZATION_VERSION, "reading-mcp-normalization/v11");
     assert_eq!(
         NORMALIZED_DOCUMENT_HASH_VERSION,
@@ -183,18 +183,19 @@ fn open_contract_advertises_normalized_identity_and_coordinate_versions() {
         "section-content-unicode-scalar/v1"
     );
 
-    let schema = schemars::schema_for!(OpenDocumentResponse);
+    let schema = schemars::schema_for!(TextLocatorDto);
     let schema = serde_json::to_value(schema).expect("schema should serialize");
     let properties = schema
         .get("properties")
         .and_then(|value| value.as_object())
-        .expect("open response schema should expose properties");
+        .expect("locator schema should expose properties");
 
+    assert!(properties.contains_key("document_id"));
     assert!(properties.contains_key("content_hash"));
     assert!(properties.contains_key("normalized_document_hash"));
-    assert!(properties.contains_key("normalized_document_hash_version"));
-    assert!(properties.contains_key("normalization_version"));
-    assert!(properties.contains_key("normalized_text_coordinate_space"));
+    assert!(properties.contains_key("owner_section_id"));
+    assert!(properties.contains_key("normalized_range"));
+    assert!(properties.contains_key("segmentation_version"));
 }
 
 fn canonical_document() -> Document {

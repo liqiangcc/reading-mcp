@@ -33,6 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // A session builds the server lazily, so validate the environment eagerly: an unsupported
+    // `READING_MCP_TOOLS` refuses to start instead of failing the first session.
+    reading_mcp::runtime::RuntimeConfig::from_env().map_err(std::io::Error::other)?;
+
     let token = env::var("READING_MCP_HTTP_TOKEN")
         .map_err(|_| "READING_MCP_HTTP_TOKEN must be set for the HTTP server")?;
     if token.len() < 32 {

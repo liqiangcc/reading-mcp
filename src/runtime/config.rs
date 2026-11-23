@@ -6,30 +6,6 @@ use crate::domain::OcrConfig;
 use crate::infrastructure::ResourceBudget;
 use crate::retrieval::HttpRetrieverConfig;
 
-/// Which tool set `READING_MCP_TOOLS` selects.
-///
-/// `v2` (the default) is the seven short-handle tools; `v1` is the nine stable tools; `both`
-/// serves them together. A tool that is not registered is absent from `tools/list` and rejected
-/// when called.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ToolSet {
-    V1,
-    #[default]
-    V2,
-    Both,
-}
-
-impl ToolSet {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "v1" => Some(Self::V1),
-            "v2" => Some(Self::V2),
-            "both" => Some(Self::Both),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub pdf_layout_python: Option<PathBuf>,
@@ -47,7 +23,6 @@ pub struct RuntimeConfig {
     /// `READING_MCP_RESOLVE_LANDING_PAGES`: resolve a paper landing page to its PDF (PDF-3).
     pub resolve_landing_pages: bool,
     pub telemetry: bool,
-    pub tools: ToolSet,
     pub resource_budget: ResourceBudget,
     pub source_view: SourceViewLimits,
     pub http: HttpRetrieverConfig,
@@ -74,7 +49,6 @@ impl Default for RuntimeConfig {
             allow_http: false,
             resolve_landing_pages: true,
             telemetry: true,
-            tools: ToolSet::default(),
             resource_budget,
             source_view: SourceViewLimits::default(),
             http,
@@ -167,12 +141,12 @@ impl RuntimeConfig {
                     .to_string()
             })?;
         }
+        // The tool set is v2 only: a deployment pinned to v1 refuses to start rather than
+        // silently serving a different tool list.
         if let Ok(value) = std::env::var("READING_MCP_TOOLS")
             && !value.trim().is_empty()
         {
-            config.tools = ToolSet::parse(&value).ok_or_else(|| {
-                format!("READING_MCP_TOOLS must be one of v1, v2 or both, got {value:?}")
-            })?;
+            check_tools_env(&value)?;
         }
 
         config.resource_budget.max_document_bytes = env_usize(
@@ -260,6 +234,16 @@ impl RuntimeConfig {
 
         validate(&config)?;
         Ok(config)
+    }
+}
+
+fn check_tools_env(value: &str) -> Result<(), String> {
+    if value.trim().eq_ignore_ascii_case("v2") {
+        Ok(())
+    } else {
+        Err(format!(
+            "READING_MCP_TOOLS must be one of v2, got {value:?}"
+        ))
     }
 }
 
@@ -378,16 +362,19 @@ fn env_u64(name: &str, default: u64) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolSet, parse_scan_prewarm};
+    use super::{check_tools_env, parse_scan_prewarm};
 
     #[test]
-    fn tool_set_parsing_accepts_only_the_documented_values() {
-        assert_eq!(ToolSet::parse("v1"), Some(ToolSet::V1));
-        assert_eq!(ToolSet::parse(" V2 "), Some(ToolSet::V2));
-        assert_eq!(ToolSet::parse("both"), Some(ToolSet::Both));
-        assert_eq!(ToolSet::parse("v3"), None);
-        assert_eq!(ToolSet::parse(""), None);
-        assert_eq!(ToolSet::default(), ToolSet::V2);
+    fn the_tools_env_accepts_only_v2() {
+        assert!(check_tools_env("v2").is_ok());
+        assert!(check_tools_env(" V2 ").is_ok());
+        assert_eq!(
+            check_tools_env("v1").unwrap_err(),
+            r#"READING_MCP_TOOLS must be one of v2, got "v1""#
+        );
+        assert!(check_tools_env("both").is_err());
+        assert!(check_tools_env("v3").is_err());
+        assert!(check_tools_env("").is_err());
     }
 
     #[test]

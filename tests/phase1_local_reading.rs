@@ -1,9 +1,19 @@
 use std::sync::Arc;
 
-use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use reading_mcp::application::ports::{ApplicationError, RetrievalOptions, SourcePolicy};
-use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
+use reading_mcp::application::outline_reading::{OutlineReadingCommand, OutlineReadingUseCase};
+use reading_mcp::application::ports::{
+    ApplicationError, DocumentRepository, RetrievalOptions, SourcePolicy, TextUnitIndex,
+};
+use reading_mcp::application::read_reading::{
+    ReadReadingCommand, ReadReadingResult, ReadReadingUseCase,
+};
+use reading_mcp::application::short_handle::{DocumentHandle, SectionHandle, handle_checksum};
 use reading_mcp::domain::{DocumentSource, SectionId};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, NoopSearchIndex};
 use reading_mcp::parsing::ParserRouter;
@@ -42,48 +52,67 @@ async fn markdown_open_structure_and_read_form_a_complete_loop() {
     assert_eq!(opened.media_type.0, "text/markdown");
     assert_eq!(opened.section_count, 4);
 
-    let structure = GetDocumentStructureUseCase::new(repository.clone())
-        .execute(opened.document_id.clone(), None)
+    let keyed = Arc::new(KeyedTextUnitIndex::default());
+    let document = repository
+        .get(&opened.document_id)
         .await
-        .expect("structure should be available");
+        .expect("stored document")
+        .expect("the opened document is stored");
+    keyed.store(&document).await;
+    let units: Arc<dyn TextUnitIndex> = keyed;
 
-    assert_eq!(structure.sections.len(), 1);
-    let root = &structure.sections[0];
-    assert_eq!(root.section_id.0, "section://operating-systems");
-    assert_eq!(root.children.len(), 2);
-    assert_eq!(
-        root.children[0].section_id.0,
-        "section://operating-systems/virtual-memory"
-    );
-    assert_eq!(
-        root.children[0].children[0].section_id.0,
-        "section://operating-systems/virtual-memory/page-tables"
-    );
-
-    let read = ReadDocumentUseCase::new(repository)
-        .execute(ReadSectionCommand {
-            document_id: opened.document_id,
-            section_id: SectionId("section://operating-systems/virtual-memory".into()),
-            max_chars: None,
+    let handle = document_handle(&units, &document).await;
+    let outline = OutlineReadingUseCase::new(repository.clone(), units.clone())
+        .execute(OutlineReadingCommand {
+            at: handle.to_string(),
+            depth: 4,
+            limit: 100,
+            cursor: None,
         })
         .await
-        .expect("section should be readable");
-
-    assert!(read.content.contains("Virtual memory intro."));
-    assert!(read.content.contains("### Page Tables"));
-    assert!(read.content.contains("Page table details."));
+        .expect("structure should be available");
+    let shape: Vec<(&str, u8)> = outline
+        .items
+        .iter()
+        .map(|item| (item.title.as_str(), item.level))
+        .collect();
     assert_eq!(
-        read.location.section_path,
-        vec!["Operating Systems", "Virtual Memory"]
+        shape,
+        vec![
+            ("Operating Systems", 1),
+            ("Virtual Memory", 2),
+            ("Page Tables", 3),
+            ("Processes", 2),
+        ]
     );
-    assert!(!read.truncated);
+
+    let section = section_handle(
+        &units,
+        &document,
+        "section://operating-systems/virtual-memory",
+    )
+    .await;
+    // A v2 `read` streams forward from the anchor to the end of the document, so the batch
+    // below covers the `Virtual Memory` subtree and the sibling `Processes` section too.
+    let result = read_items(repository, units, &section.to_string(), Some(1_000)).await;
+    let text = items_text(&result);
+    assert!(text.contains("Virtual memory intro."));
+    assert!(text.contains("Page table details."));
+    assert_eq!(result.sections[0].title, "Virtual Memory");
+    assert!(
+        result
+            .sections
+            .iter()
+            .any(|section| section.title == "Page Tables")
+    );
+    assert!(result.next.is_none());
 }
 
 #[tokio::test]
 async fn plain_text_is_exposed_as_one_logical_section() {
     let directory = tempdir().expect("temp directory should be created");
     let path = directory.path().join("notes.txt");
-    tokio::fs::write(&path, "line one\nline two\n")
+    tokio::fs::write(&path, "line one.\nline two.\n")
         .await
         .expect("fixture should be written");
 
@@ -108,17 +137,18 @@ async fn plain_text_is_exposed_as_one_logical_section() {
     assert_eq!(opened.media_type.0, "text/plain");
     assert_eq!(opened.section_count, 1);
 
-    let read = ReadDocumentUseCase::new(repository)
-        .execute(ReadSectionCommand {
-            document_id: opened.document_id,
-            section_id: SectionId("section://document".into()),
-            max_chars: Some(12),
-        })
+    let keyed = Arc::new(KeyedTextUnitIndex::default());
+    let document = repository
+        .get(&opened.document_id)
         .await
-        .expect("text section should be readable");
-
-    assert!(read.truncated);
-    assert_eq!(read.content.chars().count(), 12);
+        .expect("stored document")
+        .expect("the opened document is stored");
+    keyed.store(&document).await;
+    let units: Arc<dyn TextUnitIndex> = keyed;
+    let handle = document_handle(&units, &document).await;
+    let result = read_items(repository, units, &handle.to_string(), Some(12)).await;
+    assert!(result.next.is_some(), "a 12-char budget must leave a next");
+    assert_eq!(result.items[0].text, "line one.");
 }
 
 #[tokio::test]
@@ -152,4 +182,65 @@ async fn local_file_policy_is_disabled_by_default_and_blocks_outside_roots() {
         .await
         .expect_err("paths outside configured roots must be blocked");
     assert!(matches!(outside_error, ApplicationError::BlockedSource(_)));
+}
+
+// The v2 reading helpers: every reader below runs through the public v2 use cases.
+async fn document_handle(
+    units: &Arc<dyn TextUnitIndex>,
+    document: &reading_mcp::domain::Document,
+) -> DocumentHandle {
+    DocumentHandle {
+        doc_key: units
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
+    }
+}
+
+async fn section_handle(
+    units: &Arc<dyn TextUnitIndex>,
+    document: &reading_mcp::domain::Document,
+    section_id: &str,
+) -> SectionHandle {
+    SectionHandle {
+        document: document_handle(units, document).await,
+        section_key: units
+            .section_key(&document.id, &SectionId(section_id.into()))
+            .await
+            .expect("section key")
+            .expect("stored section"),
+    }
+}
+
+async fn read_items(
+    repository: Arc<dyn DocumentRepository>,
+    units: Arc<dyn TextUnitIndex>,
+    from: &str,
+    max_chars: Option<usize>,
+) -> ReadReadingResult {
+    ReadReadingUseCase::new(repository, units)
+        .execute(ReadReadingCommand {
+            from: from.to_string(),
+            unit: RequestedTextUnitKind::Sentence,
+            max_chars,
+            direction: None,
+            back: 0,
+        })
+        .await
+        .expect("read")
+}
+
+fn items_text(result: &ReadReadingResult) -> String {
+    result
+        .items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

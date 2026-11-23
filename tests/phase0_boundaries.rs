@@ -10,7 +10,7 @@ use reading_mcp::application::ports::{
 use reading_mcp::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
-use reading_mcp::mcp::contracts::OpenDocumentRequest;
+use reading_mcp::mcp::v2_contracts::OpenRequest;
 use schemars::schema_for;
 
 struct AllowAllPolicy;
@@ -159,7 +159,7 @@ async fn open_document_runs_only_against_abstract_ports() {
 
 #[test]
 fn mcp_contract_schema_is_sdk_independent() {
-    let schema = schema_for!(OpenDocumentRequest);
+    let schema = schema_for!(OpenRequest);
     let json = serde_json::to_value(schema).expect("schema should serialize");
 
     assert_eq!(

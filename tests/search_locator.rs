@@ -1,10 +1,18 @@
 use std::sync::Arc;
 
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
-use reading_mcp::application::ports::RetrievalOptions;
-use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};
+use reading_mcp::application::ports::{DocumentRepository, RetrievalOptions, TextUnitIndex};
+use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
 use reading_mcp::application::search_document::{
     SearchCandidateKind, SearchDocumentCommand, SearchDocumentUseCase,
+};
+use reading_mcp::application::short_handle::{
+    DocumentHandle, SectionHandle, handle_checksum, sentence_handle,
 };
 use reading_mcp::domain::DocumentSource;
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
@@ -69,15 +77,52 @@ async fn canonical_sentence_search_hands_off_exact_text_locator() {
         Some("text-segmentation/v3")
     );
 
-    let read = ReadDocumentUseCase::new(repository)
-        .read_exact(ReadExactTargetCommand {
-            document_id: opened.document_id,
-            target_locator: hit.text_locator.clone(),
+    // The locator hands off to a v2 read handle: the same unit, through `read`.
+    let document = repository
+        .get(&opened.document_id)
+        .await
+        .expect("stored document")
+        .expect("the opened document is stored");
+    let units_index = Arc::new(KeyedTextUnitIndex::default());
+    units_index.store(&document).await;
+    let section = SectionHandle {
+        document: DocumentHandle {
+            doc_key: units_index
+                .document_key(&document.id)
+                .await
+                .expect("document key")
+                .expect("stored document"),
+            checksum: handle_checksum(
+                &document.id,
+                &document.normalized_document_hash(),
+                &document.media_type,
+            ),
+        },
+        section_key: units_index
+            .section_key(&document.id, &hit.text_locator.owner_section_id)
+            .await
+            .expect("section key")
+            .expect("stored section"),
+    };
+    let from = sentence_handle(
+        &section,
+        hit.text_locator.paragraph_index.expect("paragraph index"),
+        hit.text_locator.sentence_index.expect("sentence index"),
+    );
+    let result = ReadReadingUseCase::new(repository, units_index)
+        .execute(ReadReadingCommand {
+            from,
+            unit: RequestedTextUnitKind::Sentence,
             max_chars: None,
+            direction: None,
+            back: 0,
         })
         .await
-        .expect("search locator should hand off to exact read");
-    assert_eq!(read.content, "Needle phrase lives in a canonical sentence.");
+        .expect("search locator should hand off to read");
+    assert_eq!(
+        result.items[0].text,
+        "Needle phrase lives in a canonical sentence."
+    );
 }
 
 #[tokio::test]

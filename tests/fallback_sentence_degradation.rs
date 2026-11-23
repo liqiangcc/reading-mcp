@@ -2,14 +2,17 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use reading_mcp::application::get_text_units::{
-    GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
+    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitContentClass, TextUnitCoveragePolicy,
     TextUnitDirection,
 };
-use reading_mcp::application::ports::{DocumentReliabilityInspector, DocumentRepository};
+use reading_mcp::application::ports::{
+    DocumentReliabilityInspector, DocumentRepository, OwnedStreamUnit, StoredStreamItem,
+    TextUnitIndex, TextUnitStreamKey,
+};
 use reading_mcp::application::text_unit_store::store_text_units;
 use reading_mcp::domain::{
-    ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, ParagraphContentClass,
-    Section, SectionId, SentenceEligibility,
+    ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, NormalizedTextRange,
+    ParagraphContentClass, Section, SectionId, SentenceEligibility,
 };
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use reading_mcp::parsing::PersistedDocumentReliabilityInspector;
@@ -140,37 +143,44 @@ async fn degraded_blob_enumerates_as_paragraph_and_still_reads_exactly() {
         .expect("document should save");
     let index = Arc::new(InMemoryTextUnitIndex::default());
     store_text_units(&*index, &document).await.unwrap();
-    let use_case = GetTextUnitsUseCase::new(repository, index);
-
-    let result = use_case
-        .execute(command(&document, RequestedTextUnitKind::Sentence, 10))
+    let key = TextUnitStreamKey {
+        document_id: &document.id,
+        section_id: &SectionId("section://root".into()),
+        kind: RequestedTextUnitKind::Sentence,
+        policy: TextUnitCoveragePolicy::PreserveSource,
+    };
+    let result = index
+        .section_stream_items(key, TextUnitDirection::Forward, 0, 10)
         .await
         .expect("sentence enumeration should succeed");
+    let coverage = index
+        .section_stream_summary(key)
+        .await
+        .expect("summary")
+        .expect("stored units")
+        .coverage;
 
-    assert_eq!(result.items.len(), 3);
-    let degraded = &result.items[0];
-    assert_eq!(degraded.effective_kind.as_str(), "paragraph");
-    assert_eq!(degraded.content_class.as_str(), "unknown");
-    assert_eq!(degraded.content_class_detail, "prose_or_unknown");
+    assert_eq!(result.len(), 3);
+    let degraded = &result[0];
+    assert_eq!(effective_kind(degraded).as_str(), "paragraph");
+    assert_eq!(content_class(degraded).as_str(), "unknown");
+    assert_eq!(degraded.content_class.as_str(), "prose_or_unknown");
     assert_eq!(
         degraded.degradation.as_deref(),
         Some("requested_sentence_but_paragraph_is_coarse_only")
     );
-    assert_eq!(result.coverage.coarse_non_prose_items, 1);
-    assert_eq!(result.items[1].text, "Body prose sentence one.");
-    assert_eq!(result.items[2].effective_kind.as_str(), "sentence");
+    assert_eq!(coverage.coarse_non_prose_items, 1);
+    assert_eq!(unit_text(&result[1]), "Body prose sentence one.");
+    assert_eq!(effective_kind(&result[2]).as_str(), "sentence");
 
-    // A degraded unit must still be exactly readable by its locator.
+    // A degraded unit must still be exactly readable by its normalized range.
     let section = &document.root_sections[0];
-    let range = degraded
-        .locator
-        .normalized_range
-        .expect("degraded paragraph item must carry an exact normalized range");
+    let range = normalized_range(degraded);
     assert_eq!(
         section
             .normalized_text_slice(range)
-            .expect("degraded locator must resolve to the exact owner slice"),
-        degraded.text
+            .expect("degraded range must resolve to the exact owner slice"),
+        unit_text(degraded)
     );
 }
 
@@ -405,20 +415,36 @@ fn clean_fallback_pdf_keeps_not_applicable_reliability() {
     );
 }
 
-fn command(
-    document: &Document,
-    requested_kind: RequestedTextUnitKind,
-    max_items: usize,
-) -> GetTextUnitsCommand {
-    GetTextUnitsCommand {
-        document_id: document.id.clone(),
-        section_id: SectionId("section://root".into()),
-        requested_kind,
-        direction: TextUnitDirection::Forward,
-        coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-        max_items,
-        max_chars: None,
-        cursor: None,
+fn effective_kind(item: &StoredStreamItem) -> EffectiveTextUnitKind {
+    match &item.unit {
+        OwnedStreamUnit::Paragraph(_) => EffectiveTextUnitKind::Paragraph,
+        OwnedStreamUnit::Sentence(_) => EffectiveTextUnitKind::Sentence,
+    }
+}
+
+fn content_class(item: &StoredStreamItem) -> TextUnitContentClass {
+    match item.content_class {
+        ParagraphContentClass::ProseOrUnknown
+        | ParagraphContentClass::NativeParagraph
+        | ParagraphContentClass::BlockQuote
+        | ParagraphContentClass::ListItem => TextUnitContentClass::Unknown,
+        ParagraphContentClass::CodeBlock
+        | ParagraphContentClass::Preformatted
+        | ParagraphContentClass::Table => TextUnitContentClass::NonProse,
+    }
+}
+
+fn unit_text(item: &StoredStreamItem) -> &str {
+    match &item.unit {
+        OwnedStreamUnit::Paragraph(unit) => unit.text.as_str(),
+        OwnedStreamUnit::Sentence(unit) => unit.text.as_str(),
+    }
+}
+
+fn normalized_range(item: &StoredStreamItem) -> NormalizedTextRange {
+    match &item.unit {
+        OwnedStreamUnit::Paragraph(unit) => unit.normalized_range,
+        OwnedStreamUnit::Sentence(unit) => unit.normalized_range,
     }
 }
 

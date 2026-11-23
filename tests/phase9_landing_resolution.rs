@@ -10,13 +10,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary, text_string};
-use reading_mcp::application::get_document_structure::GetDocumentStructureUseCase;
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use reading_mcp::application::ports::{
-    ApplicationError, Parser, RetrievalOptions, Retriever, SourcePolicy,
+    ApplicationError, DocumentRepository, Parser, RetrievalOptions, Retriever, SourcePolicy,
+    TextUnitIndex,
 };
-use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
-use reading_mcp::domain::{DocumentId, DocumentSource, SectionId};
+use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
+use reading_mcp::application::short_handle::{DocumentHandle, handle_checksum};
+use reading_mcp::domain::{DocumentId, DocumentSource};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
 use reading_mcp::parsing::ParserRouter;
 use reading_mcp::retrieval::{
@@ -126,23 +132,46 @@ async fn body_text(
     repository: &Arc<InMemoryDocumentRepository>,
     document_id: &DocumentId,
 ) -> String {
-    let structure = GetDocumentStructureUseCase::new(repository.clone())
-        .execute(document_id.clone(), None)
+    let keyed = Arc::new(KeyedTextUnitIndex::default());
+    let document = repository
+        .get(document_id)
         .await
-        .expect("the opened document should have a structure");
-    let root = structure
-        .sections
-        .first()
-        .expect("the document should have a section");
-    ReadDocumentUseCase::new(repository.clone())
-        .execute(ReadSectionCommand {
-            document_id: document_id.clone(),
-            section_id: SectionId(root.section_id.0.clone()),
-            max_chars: None,
-        })
-        .await
-        .expect("the root section should read")
-        .content
+        .expect("stored document")
+        .expect("the opened document is stored");
+    keyed.store(&document).await;
+    let units: Arc<dyn TextUnitIndex> = keyed;
+    let handle = DocumentHandle {
+        doc_key: units
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
+    };
+    let mut from = handle.to_string();
+    let mut parts = Vec::new();
+    loop {
+        let result = ReadReadingUseCase::new(repository.clone(), units.clone())
+            .execute(ReadReadingCommand {
+                from,
+                unit: RequestedTextUnitKind::Sentence,
+                max_chars: Some(16_000),
+                direction: None,
+                back: 0,
+            })
+            .await
+            .expect("the document should read");
+        parts.extend(result.items.iter().map(|item| item.text.clone()));
+        match result.next {
+            Some(next) => from = next,
+            None => break,
+        }
+    }
+    parts.join("\n")
 }
 
 #[tokio::test]

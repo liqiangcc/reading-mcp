@@ -9,10 +9,19 @@
 //!
 //! Hosted-only: requires the pinned layout Python (READING_MCP_PDF_LAYOUT_PYTHON).
 
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
+use reading_mcp::application::cite_reading::CiteReadingUseCase;
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::ports::{
     DocumentReliabilityInspector, DocumentRepository, Parser, RetrievedResource,
 };
-use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadExactTargetCommand};
+use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
+use reading_mcp::application::short_handle::{
+    DocumentHandle, SectionHandle, handle_checksum, paragraph_handle, sentence_handle,
+};
 use reading_mcp::domain::{
     Document, DocumentSource, MediaType, NormalizedTextRange, ParagraphTextUnitSet,
     SentenceEligibility, SentenceTextUnitSet, TextLocator, TextUnitId,
@@ -100,7 +109,9 @@ async fn units_report(
     }
     let repository = Arc::new(SqliteDocumentRepository::open(&database).unwrap());
     let restored = repository.get(&document.id).await.unwrap().unwrap();
-    let reader = ReadDocumentUseCase::new(repository);
+    let units_index = Arc::new(KeyedTextUnitIndex::default());
+    units_index.store(&restored).await;
+    let units: Arc<dyn reading_mcp::application::ports::TextUnitIndex> = units_index;
     let mut exact_reads = 0usize;
     let mut equal_reads = 0usize;
     let units: Vec<_> = paragraphs
@@ -150,16 +161,18 @@ async fn units_report(
                 let mut total = 0usize;
                 let mut equal = 0usize;
                 for (locator, text) in targets {
-                    let result = reader
-                        .read_exact(ReadExactTargetCommand {
-                            document_id: document.id.clone(),
-                            target_locator: locator.clone(),
-                            max_chars: Some(8192),
-                        })
+                    let from = handle_for_locator(&units, &restored, &locator).await;
+                    let unit = match locator.sentence_index {
+                        Some(_) => RequestedTextUnitKind::Sentence,
+                        None => RequestedTextUnitKind::Paragraph,
+                    };
+                    let result = read_handle(repository.clone(), units.clone(), &from, unit).await;
+                    let cite = CiteReadingUseCase::new(repository.clone(), units.clone())
+                        .execute(&[result.items[0].handle.clone()])
                         .await
-                        .unwrap();
+                        .expect("cite");
                     total += 1;
-                    if result.complete && result.content == text {
+                    if result.items[0].text == text && cite.items[0].locator == Some(locator) {
                         equal += 1;
                     }
                 }
@@ -318,4 +331,55 @@ async fn export_projection_quality_canonical_report() {
     .unwrap();
     std::fs::write(&output, &encoded).unwrap();
     println!("{encoded}");
+}
+
+// A `TextLocator` resolves to its v2 read handle; reading from the handle returns the unit's text
+// and `cite` on the returned item resolves the same locator back.
+async fn handle_for_locator(
+    units: &Arc<dyn reading_mcp::application::ports::TextUnitIndex>,
+    document: &Document,
+    locator: &TextLocator,
+) -> String {
+    let section = SectionHandle {
+        document: DocumentHandle {
+            doc_key: units
+                .document_key(&document.id)
+                .await
+                .expect("document key")
+                .expect("stored document"),
+            checksum: handle_checksum(
+                &document.id,
+                &document.normalized_document_hash(),
+                &document.media_type,
+            ),
+        },
+        section_key: units
+            .section_key(&document.id, &locator.owner_section_id)
+            .await
+            .expect("section key")
+            .expect("stored section"),
+    };
+    match (locator.paragraph_index, locator.sentence_index) {
+        (Some(paragraph), Some(sentence)) => sentence_handle(&section, paragraph, sentence),
+        (Some(paragraph), None) => paragraph_handle(&section, paragraph),
+        _ => section.to_string(),
+    }
+}
+
+async fn read_handle(
+    repository: Arc<dyn reading_mcp::application::ports::DocumentRepository>,
+    units: Arc<dyn reading_mcp::application::ports::TextUnitIndex>,
+    from: &str,
+    unit: RequestedTextUnitKind,
+) -> reading_mcp::application::read_reading::ReadReadingResult {
+    ReadReadingUseCase::new(repository, units)
+        .execute(ReadReadingCommand {
+            from: from.to_string(),
+            unit,
+            max_chars: Some(8192),
+            direction: None,
+            back: 0,
+        })
+        .await
+        .expect("read")
 }

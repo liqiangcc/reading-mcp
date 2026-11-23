@@ -6,9 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::application::get_text_units::{
-    RequestedTextUnitKind, TextUnitContentClass, TextUnitEnumerationCoverage,
-};
+use crate::application::get_text_units::{RequestedTextUnitKind, TextUnitEnumerationCoverage};
 use crate::application::ports::ApplicationError;
 use crate::domain::{
     ParagraphContentClass, ParagraphSectionCoverage, SectionId, SentenceEligibility,
@@ -451,18 +449,6 @@ pub(crate) fn coarse_degradation(class: ParagraphContentClass) -> &'static str {
         ParagraphContentClass::ProseOrUnknown | ParagraphContentClass::NativeParagraph => {
             "requested_sentence_but_paragraph_is_coarse_only"
         }
-    }
-}
-
-pub(crate) fn content_class(class: ParagraphContentClass) -> (TextUnitContentClass, &'static str) {
-    match class {
-        ParagraphContentClass::ProseOrUnknown
-        | ParagraphContentClass::NativeParagraph
-        | ParagraphContentClass::BlockQuote
-        | ParagraphContentClass::ListItem => (TextUnitContentClass::Unknown, class.as_str()),
-        ParagraphContentClass::CodeBlock
-        | ParagraphContentClass::Preformatted
-        | ParagraphContentClass::Table => (TextUnitContentClass::NonProse, class.as_str()),
     }
 }
 

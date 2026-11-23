@@ -1,11 +1,17 @@
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use std::sync::Arc;
 
-use reading_mcp::application::get_context::{GetContextCommand, GetContextUseCase};
+use reading_mcp::application::get_text_units::RequestedTextUnitKind;
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use reading_mcp::application::ports::{ApplicationError, RetrievalOptions, SearchIndex};
-use reading_mcp::application::read_document::{ReadDocumentUseCase, ReadSectionCommand};
+use reading_mcp::application::ports::{DocumentRepository, TextUnitIndex};
+use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
-use reading_mcp::domain::{DocumentSource, SectionId};
+use reading_mcp::application::short_handle::{DocumentHandle, handle_checksum};
+use reading_mcp::domain::DocumentSource;
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemorySearchIndex};
 use reading_mcp::parsing::ParserRouter;
 use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
@@ -64,22 +70,16 @@ async fn search_units_are_smaller_than_logical_read_sections() {
             .is_some_and(|location| location.contains("search-unit"))
     );
 
-    let read = ReadDocumentUseCase::new(repository)
-        .execute(ReadSectionCommand {
-            document_id: opened.document_id,
-            section_id: hit.section_id.clone(),
-            max_chars: None,
-        })
+    let document = repository
+        .get(&opened.document_id)
         .await
-        .expect("owning section should be readable");
+        .expect("stored document")
+        .expect("the opened document is stored");
+    let text = read_document_text(&repository, &document).await;
 
-    assert!(read.content.contains("Address spaces give each process"));
-    assert!(read.content.contains("Page replacement algorithms"));
-    assert!(read.content.contains("### Page Tables"));
-    assert!(
-        read.content
-            .contains("Page table entries map virtual pages")
-    );
+    assert!(text.contains("Address spaces give each process"));
+    assert!(text.contains("Page replacement algorithms"));
+    assert!(text.contains("Page table entries map virtual pages"));
 }
 
 #[tokio::test]
@@ -109,29 +109,71 @@ async fn context_expansion_reads_canonical_document_not_search_snippets() {
     .await
     .expect("markdown should open");
 
-    let context = GetContextUseCase::new(repository)
-        .execute(GetContextCommand {
-            document_id: opened.document_id,
-            section_id: SectionId("section://operating-systems/virtual-memory/page-tables".into()),
-            before: 1,
-            after: 1,
-            max_chars: None,
-        })
-        .await
-        .expect("context should expand around owner section");
+    let text = read_document_text(&repository, &{
+        repository
+            .get(&opened.document_id)
+            .await
+            .expect("stored document")
+            .expect("the opened document is stored")
+    })
+    .await;
 
-    assert_eq!(
-        context.owner_section_id.0,
-        "section://operating-systems/virtual-memory/page-tables"
-    );
-    assert!(context.content.contains("## Virtual Memory"));
-    assert!(context.content.contains("Virtual memory intro."));
-    assert!(context.content.contains("### Page Tables"));
-    assert!(context.content.contains("Page table details."));
-    assert!(context.content.contains("## Processes"));
-    assert!(context.content.contains("Process details."));
-    assert_eq!(context.content.matches("Page table details.").count(), 1);
-    assert!(!context.truncated);
+    assert!(text.contains("Virtual memory intro."));
+    assert!(text.contains("Page table details."));
+    assert!(text.contains("Process details."));
+    assert_eq!(text.matches("Page table details.").count(), 1);
+}
+
+// The whole book as one text, through the v2 `read` use case: the section items in body order.
+async fn read_document_text(
+    repository: &Arc<InMemoryDocumentRepository>,
+    document: &std::sync::Arc<reading_mcp::domain::Document>,
+) -> String {
+    let keyed = Arc::new(KeyedTextUnitIndex::default());
+    keyed.store(document.as_ref()).await;
+    let units: Arc<dyn TextUnitIndex> = keyed;
+    let handle = DocumentHandle {
+        doc_key: units
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
+    };
+    let mut text = String::new();
+    let mut titles = Vec::new();
+    let mut from = handle.to_string();
+    loop {
+        let result = ReadReadingUseCase::new(repository.clone(), units.clone())
+            .execute(ReadReadingCommand {
+                from,
+                unit: RequestedTextUnitKind::Sentence,
+                max_chars: Some(16_000),
+                direction: None,
+                back: 0,
+            })
+            .await
+            .expect("read");
+        for item in &result.items {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&item.text);
+        }
+        titles.extend(result.sections.iter().map(|section| section.title.clone()));
+        match result.next {
+            Some(next) => from = next,
+            None => break,
+        }
+    }
+    for title in ["Virtual Memory", "Page Tables", "Processes"] {
+        assert!(titles.contains(&title.to_string()), "titles: {titles:?}");
+    }
+    text
 }
 
 #[tokio::test]

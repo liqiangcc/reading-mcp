@@ -192,10 +192,13 @@ Two options for what removing the switch does to such a config:
   silently serves v2, and the client's first `open_document` call fails with
   tool-not-found. Cleanest code; the failure surfaces at call time, not boot.
 
-**Recommendation: refuse to start.** An operator who pinned `v1` deserves a loud boot
-error (`READING_MCP_TOOLS must be one of v2, got "v1"` — reuse the existing message shape),
-and the check is 15 lines; silent fallback turns a config mistake into a confusing client
-error. The user decides; either way the parse lives or dies in the final PR.
+**Decision (implemented in PR-6): refuse to start.** `READING_MCP_TOOLS` still parses,
+accepts only unset/empty/`v2`, and fails before serving on `v1`, `both`, or anything else,
+with the existing message shape `READING_MCP_TOOLS must be one of v2, got "v1"`. The check
+runs in `RuntimeConfig::from_env` — eagerly for both `reading-mcp` and `reading-mcp-http`
+(the HTTP binary validates the environment before its lazy session servers would build one)
+— and is pinned by `tests/tools_switch.rs`. An operator who pinned `v1` gets a loud boot
+error instead of a silent tool-not-found later.
 
 ## 5. The PR split
 
@@ -208,6 +211,6 @@ Ordered so every PR is reviewable and the tree is green at each step.
 | **3. Port the deferred scripts** — merged, #260 (PDF batch) and #261 (memory batch) | `pdf-probe.py` (+`pdf-corpus.py` helpers), `pdf-quality.py`, `pdf-sweep.py`, `pdf-cjk.py`, `pdf-layout/smoke.py`, `memory-profile.py` grow the V2-4a `--tools` mode | `CI`; each workflow's dispatch runs once with `--tools v2` before merge | medium — measurement drift; must land **after** PDF-6/LAYOUT-1 PRs (#247, #248) merge |
 | **4. Flip every default to v2** — this PR, #265 | `--tools` default `v1`→`v2` in all 17 scripts that have the flag; the `tools` default and `\|\|` fallback in all 18 workflows; the new `outline`/`search`/`cite` coverage in `ingest-parity.py`'s v2 sequence. The v1 legs of `ingest-parity.py` and `v2-eval.py` stay until PR-6. | `CI` + one default-mode dispatch each | low — v1 still exists for rollback |
 | **5. Delete the v1 tests** | delete tests 1–21 legs that are now duplicated, plus `v2_book_equivalence`/`v2_open_read`/`v2_tools` v1 legs | `CI` | low — coverage already re-built in PRs 1–2 |
-| **6. Delete the v1 server code and the switch** | `tool_router_v1` block, `contracts.rs`, the v1-only use cases/cursors, `ToolSet`/`READING_MCP_TOOLS` (keep the refuse-to-start check per §4), `ocr_error_tests.rs` v1 remnants; workflow `tools` inputs removed | `CI` | the point of no return; also the biggest line-count win (~4.5k lines) |
+| **6. Delete the v1 server code and the switch** — this PR | `tool_router_v1` block, `contracts.rs`, the v1-only use cases/cursors, `ToolSet::V1`/`Both`, the refuse-to-start check per §4, `ocr_error_tests.rs` v1 remnants; `pdf-open-profile.py` ported to v2 `open`; workflow `tools` inputs stay for PR-7 | `CI` | the point of no return; also the biggest line-count win |
 
 Nothing may merge to `main` by this plan; each PR waits for its own checks.

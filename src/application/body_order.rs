@@ -5,7 +5,6 @@ use serde::Deserialize;
 use crate::application::ports::ApplicationError;
 use crate::domain::{Document, MediaType, Section, SectionId};
 
-pub(crate) const BODY_ORDER_VERSION: &str = "body-order/v1";
 const EPUB_STRUCTURE_MAP_VERSION: &str = "epub-structure-reconciliation/v1";
 const EPUB_STRUCTURE_MAP_METADATA_KEY: &str = "epub_structure_map";
 

@@ -47,23 +47,19 @@ fn flatten_section(section: &Section, parent_key: Option<i64>, rows: &mut Vec<Se
 
 /// The section ids of `document` in depth-first document order: `ids[section_key]` is the id
 /// [`flatten_document`] gives that key.
-///
-/// A caller that only needs the key-to-id mapping takes this instead of the rows: the rows carry a
-/// copy of every title and location, which a mapping does not read. `get_document_structure` maps
-/// the stored body order through it on every call, so the copies would be per-call work.
-pub(crate) fn section_ids_in_key_order(document: &Document) -> Vec<SectionId> {
+#[cfg(test)]
+fn section_ids_in_key_order(document: &Document) -> Vec<SectionId> {
     let mut ids = Vec::with_capacity(document.section_count());
+    fn push(section: &Section, ids: &mut Vec<SectionId>) {
+        ids.push(section.id.clone());
+        for child in &section.children {
+            push(child, ids);
+        }
+    }
     for section in &document.root_sections {
-        push_section_ids(section, &mut ids);
+        push(section, &mut ids);
     }
     ids
-}
-
-fn push_section_ids(section: &Section, ids: &mut Vec<SectionId>) {
-    ids.push(section.id.clone());
-    for child in &section.children {
-        push_section_ids(child, ids);
-    }
 }
 
 /// The header of `document`, as the store writes it.

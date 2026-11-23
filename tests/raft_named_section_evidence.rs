@@ -1,18 +1,22 @@
+#[path = "support/keyed_index.rs"]
+mod keyed_index;
+use keyed_index::KeyedTextUnitIndex;
+
 use std::sync::Arc;
 
-use reading_mcp::application::get_document_structure::{
-    GetDocumentStructureUseCase, NAMED_SECTION_RESOLUTION_VERSION, NamedSectionResolutionStatus,
-    ResolveNamedSectionCommand,
-};
 use reading_mcp::application::get_text_units::{
-    GetTextUnitsCommand, GetTextUnitsUseCase, RequestedTextUnitKind, TextUnitCoveragePolicy,
-    TextUnitDirection,
+    RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
+};
+use reading_mcp::application::outline_reading::{
+    MAX_OUTLINE_DEPTH, OutlineReadingCommand, OutlineReadingUseCase,
 };
 use reading_mcp::application::ports::{
-    ApplicationError, DocumentRepository, Parser, RetrievedResource,
+    DocumentRepository, OwnedStreamUnit, Parser, RetrievedResource, TextUnitIndex,
+    TextUnitStreamKey,
 };
+use reading_mcp::application::short_handle::{DocumentHandle, handle_checksum};
 use reading_mcp::application::text_unit_store::store_text_units;
-use reading_mcp::domain::{DocumentSource, MediaType, NORMALIZATION_VERSION};
+use reading_mcp::domain::{Document, DocumentSource, MediaType, NORMALIZATION_VERSION, Section};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
 use reading_mcp::parsing::PdfParser;
 
@@ -91,178 +95,45 @@ async fn real_raft_named_section_scope_gate_is_structure_only_and_fail_closed() 
         document.id.0, document.content_hash.0, normalized_hash.0, NORMALIZATION_VERSION
     );
 
-    let repository = Arc::new(InMemoryDocumentRepository::default());
-    repository
-        .save(document.clone())
-        .await
-        .expect("Raft canonical document should save");
+    // The numbered sections are consecutive in body order: the section after `1 Introduction`
+    // (outside its subtree) starts with `2 `. The v1 boundary resolver is gone; the parsed tree
+    // itself carries this evidence.
+    let flat = preorder(&document.root_sections);
+    let (position, (introduction, introduction_level)) = flat
+        .iter()
+        .enumerate()
+        .find(|(_, (section, _))| section.title == "1 Introduction")
+        .expect("real Raft must parse a `1 Introduction` section");
+    let (next_section, _) = flat
+        .iter()
+        .skip(position + 1)
+        .find(|(_, level)| level <= introduction_level)
+        .expect("`1 Introduction` must have a next section after its subtree");
+    assert!(
+        next_section.title.starts_with("2 "),
+        "the section after `1 Introduction` must be `2 ...`, got {:?}",
+        next_section.title
+    );
+    println!(
+        "EVIDENCE_BC introduction_section_id={} next_title={}",
+        introduction.id.0, next_section.title
+    );
+
+    // Body reads: each section's stored sentence stream yields a non-empty sentence owned by
+    // that section. This is the shared text-unit stream that v2 `read` serves.
     let index = Arc::new(InMemoryTextUnitIndex::default());
     store_text_units(&*index, &document).await.unwrap();
-    let structure = GetDocumentStructureUseCase::new(repository.clone());
 
-    let abstract_resolution = structure
-        .resolve_named_section(ResolveNamedSectionCommand {
-            document_id: document.id.clone(),
-            query: "Abstract".into(),
-            expected_content_hash: document.content_hash.0.clone(),
-            expected_normalized_document_hash: normalized_hash.0.clone(),
-            expected_structure_resolution_version: Some(NAMED_SECTION_RESOLUTION_VERSION.into()),
-        })
-        .await
-        .expect("Raft Abstract should resolve structurally");
-    assert_eq!(
-        abstract_resolution.resolution.status,
-        NamedSectionResolutionStatus::Resolved
-    );
-    let abstract_match = abstract_resolution
-        .resolution
-        .matched
-        .expect("resolved Abstract metadata should be present");
-    assert_eq!(abstract_match.section_id.0, "section://abstract");
-    assert_eq!(abstract_match.title, "Abstract");
-    assert!(abstract_match.start_locator.normalized_range.is_none());
-    let abstract_boundary = abstract_resolution
-        .resolution
-        .boundary
-        .expect("Abstract should have an executable boundary");
-    let introduction_owner = abstract_boundary
-        .end_exclusive
-        .as_ref()
-        .expect("Abstract should stop before Introduction");
-    assert_eq!(introduction_owner.title, "1 Introduction");
-    assert!(
-        abstract_boundary.intervals.iter().all(|interval| {
-            introduction_owner.body_order < interval.start
-                || introduction_owner.body_order >= interval.end
-        }),
-        "Introduction owner must be outside the Abstract-only allowed intervals"
-    );
-    println!(
-        "EVIDENCE_ABSTRACT section_id={} intervals={:?} next_owner={} next_body_order={}",
-        abstract_match.section_id.0,
-        abstract_boundary
-            .intervals
-            .iter()
-            .map(|interval| (interval.start, interval.end))
-            .collect::<Vec<_>>(),
-        introduction_owner.title,
-        introduction_owner.body_order
-    );
-
-    let mut resolved_section_id = None;
-    let mut resolved_boundary = None;
-    for query in ["1 Introduction", "Section 1 Introduction", "Introduction"] {
-        let result = structure
-            .resolve_named_section(ResolveNamedSectionCommand {
-                document_id: document.id.clone(),
-                query: query.into(),
-                expected_content_hash: document.content_hash.0.clone(),
-                expected_normalized_document_hash: normalized_hash.0.clone(),
-                expected_structure_resolution_version: Some(
-                    NAMED_SECTION_RESOLUTION_VERSION.into(),
-                ),
-            })
-            .await
-            .expect("Raft Section 1 should resolve structurally");
-        assert_eq!(
-            result.resolution.status,
-            NamedSectionResolutionStatus::Resolved
-        );
-        let matched = result
-            .resolution
-            .matched
-            .expect("resolved Raft structural metadata should be present");
-        assert_eq!(matched.title, "1 Introduction");
-        assert!(matched.start_locator.normalized_range.is_none());
-        if let Some(expected) = &resolved_section_id {
-            assert_eq!(&matched.section_id, expected);
-        } else {
-            resolved_section_id = Some(matched.section_id.clone());
-        }
-        let boundary = result
-            .resolution
-            .boundary
-            .expect("Raft Section 1 should have an executable boundary");
-        let next = boundary
-            .end_exclusive
-            .as_ref()
-            .expect("Raft Section 1 should have a next body owner");
-        assert!(next.title.starts_with("2 "));
-        assert!(
-            boundary
-                .intervals
-                .iter()
-                .all(|interval| next.body_order < interval.start || next.body_order >= interval.end)
-        );
-        resolved_boundary = Some(boundary);
-    }
-    let section_id = resolved_section_id.expect("all queries should resolve the same Section 1");
-    let boundary = resolved_boundary.expect("Raft scope boundary should be captured");
-    println!(
-        "EVIDENCE_BC section_id={} intervals={:?} end_exclusive_body_order={}",
-        section_id.0,
-        boundary
-            .intervals
-            .iter()
-            .map(|interval| (interval.start, interval.end))
-            .collect::<Vec<_>>(),
-        boundary
-            .end_exclusive
-            .as_ref()
-            .map(|next| next.body_order)
-            .expect("next owner should exist")
-    );
-
-    let stale = structure
-        .resolve_named_section(ResolveNamedSectionCommand {
-            document_id: document.id.clone(),
-            query: "Introduction".into(),
-            expected_content_hash: document.content_hash.0.clone(),
-            expected_normalized_document_hash: V6_NORMALIZED_HASH.into(),
-            expected_structure_resolution_version: Some(NAMED_SECTION_RESOLUTION_VERSION.into()),
-        })
-        .await
-        .expect_err("v6 normalized identity must fail closed after normalization v8");
-    assert!(matches!(stale, ApplicationError::StaleStructure(_)));
-    println!("EVIDENCE_E stale_v6_identity=PASS");
-
-    let abstract_reveal = GetTextUnitsUseCase::new(repository.clone(), index.clone())
-        .execute(GetTextUnitsCommand {
-            document_id: document.id.clone(),
-            section_id: abstract_match.section_id.clone(),
-            requested_kind: RequestedTextUnitKind::Sentence,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 1,
-            max_chars: None,
-            cursor: None,
-        })
-        .await
-        .expect("explicit Abstract-only body reveal should remain available");
-    assert_eq!(abstract_reveal.items.len(), 1);
-    assert_eq!(
-        abstract_reveal.items[0].locator.owner_section_id,
-        abstract_match.section_id
-    );
-    assert!(!abstract_reveal.items[0].text.is_empty());
+    let abstract_items = first_sentences(index.as_ref(), &document, abstract_section).await;
+    assert_eq!(abstract_items.len(), 1);
+    assert_eq!(abstract_items[0].0, abstract_section.id);
+    assert!(!abstract_items[0].1.is_empty());
     println!("EVIDENCE_ABSTRACT_BODY explicit_abstract_body_reveal=PASS");
 
-    let revealed = GetTextUnitsUseCase::new(repository, index)
-        .execute(GetTextUnitsCommand {
-            document_id: document.id,
-            section_id: section_id.clone(),
-            requested_kind: RequestedTextUnitKind::Sentence,
-            direction: TextUnitDirection::Forward,
-            coverage_policy: TextUnitCoveragePolicy::PreserveSource,
-            max_items: 1,
-            max_chars: None,
-            cursor: None,
-        })
-        .await
-        .expect("explicit allowed-scope body reveal should remain available");
-    assert_eq!(revealed.items.len(), 1);
-    assert_eq!(revealed.items[0].locator.owner_section_id, section_id);
-    assert!(!revealed.items[0].text.is_empty());
+    let revealed = first_sentences(index.as_ref(), &document, introduction).await;
+    assert_eq!(revealed.len(), 1);
+    assert_eq!(revealed[0].0, introduction.id);
+    assert!(!revealed[0].1.is_empty());
     println!("EVIDENCE_D explicit_allowed_body_reveal=PASS");
 }
 
@@ -306,22 +177,100 @@ async fn real_kafka_pdf_regression_preserves_raw_identity_and_structure_navigati
         .save(document.clone())
         .await
         .expect("Kafka canonical document should save");
-    let result = GetDocumentStructureUseCase::new(repository)
-        .execute(document.id.clone(), None)
-        .await
-        .expect("Kafka canonical structure should remain enumerable");
-    assert!(result.complete);
-    assert!(!result.truncated);
-    assert_eq!(result.stream.total_nodes, document.section_count());
-    assert!(!result.sections.is_empty());
+    let index = Arc::new(KeyedTextUnitIndex::default());
+    index.store(&document).await;
+    let index: Arc<dyn TextUnitIndex> = index;
+
+    // The v2 `outline` tool enumerates the whole tree: paging with a small limit must still
+    // cover every section node, with the cursor ending cleanly (no truncation).
+    let handle = DocumentHandle {
+        doc_key: index
+            .document_key(&document.id)
+            .await
+            .expect("document key")
+            .expect("stored document"),
+        checksum: handle_checksum(
+            &document.id,
+            &document.normalized_document_hash(),
+            &document.media_type,
+        ),
+    };
+    let outline = OutlineReadingUseCase::new(repository, index);
+    let mut cursor = None;
+    let mut listed = 0usize;
+    loop {
+        let page = outline
+            .execute(OutlineReadingCommand {
+                at: handle.to_string(),
+                depth: MAX_OUTLINE_DEPTH,
+                limit: 3,
+                cursor: cursor.clone(),
+            })
+            .await
+            .expect("Kafka canonical structure should remain enumerable through v2 outline");
+        listed += page.items.len();
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        listed,
+        document.section_count(),
+        "v2 outline paging must cover every section without truncation"
+    );
 
     println!(
         "EVIDENCE_F_KAFKA content_hash={} page_count=7 structure_nodes={} provenance={}",
         document.content_hash.0,
-        result.stream.total_nodes,
+        listed,
         document
             .metadata
             .get("pdf_structure_provenance")
             .expect("PDF structure provenance should be recorded")
     );
+}
+
+/// The sections in document body order, tagged with their depth (roots are level 0).
+fn preorder(sections: &[Section]) -> Vec<(&Section, usize)> {
+    fn collect<'a>(sections: &'a [Section], level: usize, out: &mut Vec<(&'a Section, usize)>) {
+        for section in sections {
+            out.push((section, level));
+            collect(&section.children, level + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    collect(sections, 0, &mut out);
+    out
+}
+
+/// The first stored item(s) of one section's `PreserveSource` sentence stream, as
+/// `(owner_section_id, text)`. A sentence stream can yield a whole paragraph when the paragraph
+/// is one coarse unit; ownership and text carry the evidence either way.
+async fn first_sentences(
+    index: &dyn TextUnitIndex,
+    document: &Document,
+    section: &Section,
+) -> Vec<(reading_mcp::domain::SectionId, String)> {
+    let items = index
+        .section_stream_items(
+            TextUnitStreamKey {
+                document_id: &document.id,
+                section_id: &section.id,
+                kind: RequestedTextUnitKind::Sentence,
+                policy: TextUnitCoveragePolicy::PreserveSource,
+            },
+            TextUnitDirection::Forward,
+            0,
+            1,
+        )
+        .await
+        .expect("stored section units should stream");
+    items
+        .into_iter()
+        .map(|item| match item.unit {
+            OwnedStreamUnit::Sentence(sentence) => (sentence.owner_section_id, sentence.text),
+            OwnedStreamUnit::Paragraph(paragraph) => (paragraph.owner_section_id, paragraph.text),
+        })
+        .collect()
 }

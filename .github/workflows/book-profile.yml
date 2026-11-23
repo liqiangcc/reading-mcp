@@ -121,9 +121,6 @@ jobs:
             --rss-phases \
             ${{ (inputs.tools || 'v2') == 'v1' && '--env READING_MCP_TOOLS=both' || '' }} \
             --out book/deep-next-cjk-64mib.json
-      - name: V2 sequence equivalence (real books)
-        if: always()
-        run: READING_MCP_BOOK_DIR="$RUNNER_TEMP/books" cargo test --release --locked --test v2_book_equivalence -- --ignored --nocapture
       - name: V2 evaluation T1-T5
         if: always()
         run: |

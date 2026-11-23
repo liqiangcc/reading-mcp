@@ -6,6 +6,7 @@
 //! same failures as `fetch_failed` (timeout, busy) and `too_large` (the output
 //! cap), keeps the retry hint, and never publishes or leaks the private path.
 use super::*;
+use crate::application::open_document::OpenDocumentUseCase;
 use crate::application::ports::{
     DocumentRepository, Parser, RetrievalOptions, RetrievedResource, Retriever, SourcePolicy,
 };
@@ -100,7 +101,6 @@ async fn ocr_deadline_cap_and_busy_have_actionable_private_mcp_errors_without_pu
         );
         let mut server = crate::runtime::build_server(RuntimeConfig {
             state_dir: None,
-            tools: crate::runtime::ToolSet::V2,
             ..RuntimeConfig::default()
         })
         .unwrap();

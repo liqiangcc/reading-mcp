@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - "src/parsing/pdf.rs"
-      - "src/application/get_document_structure.rs"
+      - "src/application/outline_reading.rs"
+      - "src/application/short_handle.rs"
+      - "src/application/text_unit_stream.rs"
       - "src/domain/normalized_text.rs"
       - "src/mcp/contracts.rs"
       - "src/mcp/server.rs"
@@ -15,7 +17,9 @@ on:
       - main
     paths:
       - "src/parsing/pdf.rs"
-      - "src/application/get_document_structure.rs"
+      - "src/application/outline_reading.rs"
+      - "src/application/short_handle.rs"
+      - "src/application/text_unit_stream.rs"
       - "src/domain/normalized_text.rs"
       - "src/mcp/contracts.rs"
       - "src/mcp/server.rs"

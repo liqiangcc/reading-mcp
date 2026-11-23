@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure where `open_document`'s peak memory goes, now, itemised (MEM-2a).
+"""Measure where `open`'s peak memory goes, now, itemised (MEM-2a).
 
 This script is measurement only: it drives the release server over newline-delimited JSON-RPC and
 reads the kernel's own counters, the server's telemetry events and heaptrack's heap profile. It
@@ -16,9 +16,9 @@ text PDFs, `text-long-en-300.pdf` and `text-long-cjk-300.pdf`. PDF generation ne
 fresh server process on a fresh state directory:
 
 - `rss` samples `/proc/<pid>/status` (`VmRSS`, `VmHWM`) every `--sample-interval` seconds from
-  process start through the first `open_document` return, then through a `--settle-seconds` wait
-  (the prewarm and other background work), then one `get_document_structure`, one
-  `get_text_units` and one `search_document`, then a second `open_document` of the same source in
+  process start through the first `open` return, then through a `--settle-seconds` wait
+  (the prewarm and other background work), then one `outline`, one
+  `read` and one `search`, then a second `open` of the same source in
   the same process. The server's telemetry lines (`READING_MCP_TELEMETRY=1`) are timestamped as
   they arrive, so each event's `duration_ms` gives the phase's `[end-duration, end]` interval and
   the RSS samples align with it. Writes `<label>.timeline.json` and `<label>.sqlite.json`.
@@ -309,16 +309,6 @@ def global_peak_phase(samples: list[list[float]], phases: list[dict]) -> tuple[i
 # --------------------------------------------------------------------------------------------------
 
 
-def extract_document_id(response: dict) -> str | None:
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return None
-    structured = result.get("structuredContent") or result.get("structured_content")
-    if isinstance(structured, dict) and isinstance(structured.get("document_id"), str):
-        return structured["document_id"]
-    return None
-
-
 def call(process, responses: queue.Queue, request_id: int, name: str, arguments: dict,
          timeout: float) -> tuple[dict | None, str | None]:
     """Send one tools/call and wait for its response; return `(response, error)`."""
@@ -348,7 +338,6 @@ def run_timeline(
     sample_interval: float,
     timeout: float,
     env_extra: dict | None,
-    tools: str = "v2",
 ) -> dict:
     """Run one open, its settle wait, three tool calls and a second open, sampling RSS throughout."""
     memory_profile = load_module("memory_profile", "memory-profile.py")
@@ -357,7 +346,6 @@ def run_timeline(
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     if env_extra:
         env.update(env_extra)
-    env["READING_MCP_TOOLS"] = tools
     started = time.monotonic()
     process = subprocess.Popen(
         [binary],
@@ -399,22 +387,17 @@ def run_timeline(
             errors.append(f"initialize: {init_error}")
         memory_profile.send(process, memory_profile.INITIALIZED_NOTIFICATION)
 
-        open_tool = "open_document" if tools == "v1" else "open"
         if not init_error:
             mark("open_sent")
-            response, error = call(process, responses, 2, open_tool, {"source": source},
+            response, error = call(process, responses, 2, "open", {"source": source},
                                    timeout)
             mark("open_done")
             if error:
-                errors.append(f"{open_tool}: {error}")
+                errors.append(f"open: {error}")
             else:
                 structured = (response or {}).get("result", {}).get("structuredContent") or {}
-                if tools == "v2":
-                    document_id = structured.get("doc")
-                    section_count = structured.get("sections")
-                else:
-                    document_id = extract_document_id(response or {})
-                    section_count = structured.get("section_count")
+                document_id = structured.get("doc")
+                section_count = structured.get("sections")
 
         time.sleep(settle)
         mark("settle1_done")
@@ -422,39 +405,23 @@ def run_timeline(
         if document_id:
             mark("structure_sent")
             start = time.monotonic()
-            if tools == "v2":
-                response, error = call(process, responses, 3, "outline",
-                                       {"at": document_id, "depth": 3, "limit": 200},
-                                       timeout)
-            else:
-                response, error = call(process, responses, 3, "get_document_structure",
-                                       {"document_id": document_id, "max_depth": 3, "max_nodes": 200},
-                                       timeout)
+            response, error = call(process, responses, 3, "outline",
+                                   {"at": document_id, "depth": 3, "limit": 200},
+                                   timeout)
             call_timings["get_document_structure"] = time.monotonic() - start
             mark("structure_done")
             if error:
                 errors.append(f"get_document_structure: {error}")
             structured = (response or {}).get("result", {}).get("structuredContent") or {}
-            if tools == "v2":
-                items = structured.get("items") or []
-                if items and isinstance(items[0], (list, tuple)) and items[0]:
-                    section_id = items[0][0]
-            else:
-                sections = structured.get("sections") or []
-                if sections and isinstance(sections[0], dict):
-                    section_id = sections[0].get("section_id")
+            items = structured.get("items") or []
+            if items and isinstance(items[0], (list, tuple)) and items[0]:
+                section_id = items[0][0]
 
             mark("text_units_sent")
             start = time.monotonic()
-            if tools == "v2":
-                response, error = call(process, responses, 4, "read",
-                                       {"from": section_id or document_id, "max_chars": 4000},
-                                       timeout)
-            else:
-                response, error = call(process, responses, 4, "get_text_units",
-                                       {"document_id": document_id, "section_id": section_id,
-                                        "requested_kind": "sentence", "max_items": 32},
-                                       timeout)
+            response, error = call(process, responses, 4, "read",
+                                   {"from": section_id or document_id, "max_chars": 4000},
+                                   timeout)
             call_timings["get_text_units"] = time.monotonic() - start
             mark("text_units_done")
             if error:
@@ -462,14 +429,9 @@ def run_timeline(
 
             mark("search_sent")
             start = time.monotonic()
-            if tools == "v2":
-                response, error = call(process, responses, 5, "search",
-                                       {"doc": document_id, "query": search_query(label),
-                                        "limit": 10}, timeout)
-            else:
-                response, error = call(process, responses, 5, "search_document",
-                                       {"document_id": document_id, "query": search_query(label),
-                                        "limit": 10}, timeout)
+            response, error = call(process, responses, 5, "search",
+                                   {"doc": document_id, "query": search_query(label),
+                                    "limit": 10}, timeout)
             call_timings["search_document"] = time.monotonic() - start
             mark("search_done")
             if error:
@@ -479,10 +441,10 @@ def run_timeline(
         mark("settle2_done")
 
         mark("open2_sent")
-        response, error = call(process, responses, 6, open_tool, {"source": source}, timeout)
+        response, error = call(process, responses, 6, "open", {"source": source}, timeout)
         mark("open2_done")
         if error:
-            errors.append(f"second {open_tool}: {error}")
+            errors.append(f"second open: {error}")
         time.sleep(settle)
         mark("settle3_done")
     finally:
@@ -1044,7 +1006,6 @@ def run_open_under_heaptrack(
     timeout: float,
     env_extra: dict | None,
     variant: str = "default",
-    tools: str = "v2",
 ) -> dict:
     """Open the document once under heaptrack, then summarize the global heap peak."""
     memory_profile = load_module("memory_profile", "memory-profile.py")
@@ -1058,7 +1019,6 @@ def run_open_under_heaptrack(
     env["READING_MCP_MAX_NORMALIZED_CHARS"] = "200000000"
     if env_extra:
         env.update(env_extra)
-    env["READING_MCP_TOOLS"] = tools
     command = ["heaptrack", "-o", prefix, binary]
     process = subprocess.Popen(
         command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -1076,8 +1036,7 @@ def run_open_under_heaptrack(
         error = memory_profile.extract_error(initialized)
         memory_profile.send(process, memory_profile.INITIALIZED_NOTIFICATION)
         if error is None:
-            open_tool = "open_document" if tools == "v1" else "open"
-            _, error = call(process, responses, 2, open_tool, {"source": source}, timeout)
+            _, error = call(process, responses, 2, "open", {"source": source}, timeout)
     except (TimeoutError, RuntimeError) as exc:
         error = str(exc)
     finally:
@@ -1462,8 +1421,6 @@ def main() -> int:
     prof.add_argument("--timeout-seconds", type=float, default=900.0)
     prof.add_argument("--variant", default="default")
     prof.add_argument("--malloc-arena-max", default=None)
-    prof.add_argument("--tools", choices=("v1", "v2"), default="v2",
-                      help="tool set the server exposes: v2 (default) or v1")
 
     rep = sub.add_parser("report", help="aggregate the profile JSON into markdown")
     rep.add_argument("--dir", required=True)
@@ -1502,7 +1459,7 @@ def main() -> int:
                 run = run_timeline(
                     binary, label, path, state_dir, roots, args.out,
                     args.settle_seconds, args.sample_interval, args.timeout_seconds,
-                    env_extra, args.tools,
+                    env_extra,
                 )
                 facts = sqlite_facts(state_dir)
                 facts["label"] = label
@@ -1522,7 +1479,7 @@ def main() -> int:
             else:
                 heap = run_open_under_heaptrack(
                     binary, label, path, state_dir, roots, args.out,
-                    args.timeout_seconds, env_extra, args.variant, args.tools,
+                    args.timeout_seconds, env_extra, args.variant,
                 )
                 heap["variant"] = args.variant
                 heap["malloc_arena_max"] = args.malloc_arena_max

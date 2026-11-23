@@ -2,11 +2,6 @@ name: URL resolve probe
 run-name: URL resolve probe (PDF-3)
 on:
   workflow_dispatch:
-    inputs:
-      tools:
-        description: 'Tool set the probe servers expose'
-        required: false
-        default: 'v2'
   push:
     branches: ['feat/pdf3-**']
 
@@ -55,10 +50,8 @@ jobs:
           BIN="$RUNNER_TEMP/bin/reading-mcp"
           chmod +x "$BIN"
           mkdir -p "$RUNNER_TEMP/probe"
-          # v2 by default: the probe calls open and read; --tools v1 uses open_document /
-          # get_document_structure / read_document. It also measures the tools/list footprint
-          # of both tool sets.
-          python3 scripts/url-resolve-probe.py --tools "${{ inputs.tools || 'v2' }}" \
+          # The probe calls open and read, and measures the tools/list footprint.
+          python3 scripts/url-resolve-probe.py \
             --binary "$BIN" \
             --state-dir "$RUNNER_TEMP/probe/state" \
             --timeout 600 \

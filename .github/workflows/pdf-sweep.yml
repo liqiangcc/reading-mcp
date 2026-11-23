@@ -7,10 +7,6 @@ on:
         description: 'Rebuild scripts/pdf-sweep-ids.txt (downloads candidates to check licence, pages and group metrics)'
         type: boolean
         default: false
-      tools:
-        description: 'Tool set the probe servers expose'
-        required: false
-        default: 'v2'
   push:
     branches: ['bench/pdf5a-**']
 
@@ -142,8 +138,7 @@ jobs:
             --state-root "$RUNNER_TEMP/state" \
             --out "$RUNNER_TEMP/results/sweep-${{ matrix.shard }}.jsonl" \
             --deadline-minutes 40 \
-            --per-document-minutes 4.5 \
-            --tools "${{ inputs.tools || 'v2' }}" | tail -150
+            --per-document-minutes 4.5 | tail -150
       - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v4

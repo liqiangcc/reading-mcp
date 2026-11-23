@@ -2,10 +2,9 @@
 """Live check that a paper's landing-page link reads the paper (PDF-3).
 
 The probe speaks newline-delimited JSON-RPC MCP over stdio against a release binary built from
-this branch, with ``READING_MCP_TOOLS=v2`` by default.  For every pinned link it calls ``open`` and
-then reads the first 200 sentences with ``read`` batches from the document handle.  ``--tools v1``
-uses the v1 calls instead (``open_document``, ``get_document_structure`` for the root section, then
-``read_document`` on it).  Every non-control link is compared with the same paper opened through
+this branch.  For every pinned link it calls ``open`` and
+then reads the first 200 sentences with ``read`` batches from the document handle.
+Every non-control link is compared with the same paper opened through
 its direct ``.pdf`` link:
 
 * ``document_id`` — the id derives from the final source plus the content hash, so a resolved
@@ -20,7 +19,7 @@ generic rule), and whether the id equals the control's (which only happens when 
 
 Sites that are unreachable from the runner (or that answer with a bot challenge) are recorded as
 ``skipped`` with the reason and never fail the job; only a missing binary or a broken protocol
-does.  The script also measures the ``tools/list`` footprint of both tool sets, because PDF-3 must
+does.  The script also measures the ``tools/list`` footprint of the v2 tool set, because PDF-3 must
 not grow it.
 
 Standard library only.  This script never builds anything: pass an existing release binary.
@@ -265,66 +264,35 @@ def first_sentences(text: str, limit: int = SENTENCE_LIMIT) -> tuple[int, str]:
 
 
 def open_and_sample(
-    server: Server, url: str, timeout: float, tools: str = "v2"
+    server: Server, url: str, timeout: float
 ) -> dict:
     """Open one URL, then read the first sentences of its root section."""
     started = time.monotonic()
-    if tools == "v2":
-        opened = tool_json(server.tool("open", {"source": url}, timeout))
-    else:
-        opened = tool_json(
-            server.tool("open_document", {"source": url, "force_refresh": False}, timeout)
-        )
+    opened = tool_json(server.tool("open", {"source": url}, timeout))
     seconds = time.monotonic() - started
-    id_key = "doc" if tools == "v2" else "document_id"
-    document_id = opened.get(id_key)
+    document_id = opened.get("doc")
     if not document_id:
-        raise ProbeError(f"open returned no {id_key}")
+        raise ProbeError("open returned no doc")
 
-    if tools == "v2":
-        text = ""
-        from_handle = document_id
-        for _ in range(200):
-            read = tool_json(
-                server.tool(
-                    "read", {"from": from_handle, "max_chars": 16000}, timeout
-                )
-            )
-            for item in read.get("items") or []:
-                if isinstance(item, (list, tuple)) and len(item) > 1:
-                    text += str(item[1]) + " "
-            body = read.get("text")
-            if isinstance(body, str):
-                text += body + " "
-            from_handle = read.get("next")
-            if not from_handle:
-                break
-        section_count = opened.get("sections")
-        media_type = opened.get("format")
-    else:
-        structure = tool_json(
-            server.tool(
-                "get_document_structure",
-                {"document_id": document_id, "max_depth": 1, "max_nodes": 1},
-                timeout,
-            )
-        )
-        sections = structure.get("sections") or []
-        section_id = sections[0]["section_id"] if sections else None
+    text = ""
+    from_handle = document_id
+    for _ in range(200):
         read = tool_json(
             server.tool(
-                "read_document",
-                {
-                    "document_id": document_id,
-                    "section_id": section_id,
-                    "max_chars": 40000,
-                },
-                timeout,
+                "read", {"from": from_handle, "max_chars": 16000}, timeout
             )
         )
-        text = read.get("content") or ""
-        section_count = opened.get("section_count")
-        media_type = opened.get("media_type")
+        for item in read.get("items") or []:
+            if isinstance(item, (list, tuple)) and len(item) > 1:
+                text += str(item[1]) + " "
+        body = read.get("text")
+        if isinstance(body, str):
+            text += body + " "
+        from_handle = read.get("next")
+        if not from_handle:
+            break
+    section_count = opened.get("sections")
+    media_type = opened.get("format")
     sentences, sample = first_sentences(text)
     return {
         "document_id": document_id,
@@ -365,7 +333,7 @@ def preflight(entry: dict) -> str | None:
 
 def measure_tools_list(binary: str, state_dir: str, toolset: str, timeout: float) -> dict:
     environment = server_environment(
-        state_dir, os.path.join(state_dir, f"tools-{toolset}"), toolset
+        state_dir, os.path.join(state_dir, f"tools-{toolset}")
     )
     server = None
     try:
@@ -386,7 +354,7 @@ def measure_tools_list(binary: str, state_dir: str, toolset: str, timeout: float
             server.close()
 
 
-def server_environment(state_dir: str, state: str, tools: str = "v2") -> dict:
+def server_environment(state_dir: str, state: str) -> dict:
     environment = dict(os.environ)
     environment.update(
         {
@@ -394,18 +362,17 @@ def server_environment(state_dir: str, state: str, tools: str = "v2") -> dict:
             "READING_MCP_TELEMETRY": "false",
             "READING_MCP_ALLOW_HTTP": "false",
             "READING_MCP_LOCAL_ROOTS": state_dir,
-            "READING_MCP_TOOLS": tools,
         }
     )
     return environment
 
 
-def run_probe(binary: str, state_dir: str, timeout: float, tools: str = "v2") -> dict:
+def run_probe(binary: str, state_dir: str, timeout: float) -> dict:
     state = os.path.join(state_dir, "links")
     os.makedirs(state, exist_ok=True)
     server = Server(
         binary,
-        server_environment(state_dir, state, tools),
+        server_environment(state_dir, state),
         os.path.join(state_dir, "links.log"),
         timeout,
     )
@@ -438,7 +405,7 @@ def run_probe(binary: str, state_dir: str, timeout: float, tools: str = "v2") ->
                 continue
             record["meta_present"] = bool(entry.get("meta_present"))
             try:
-                sample = open_and_sample(server, entry["url"], timeout, tools)
+                sample = open_and_sample(server, entry["url"], timeout)
             except ProbeError as error:
                 record["outcome"] = "failed"
                 record["reason"] = str(error)
@@ -460,7 +427,7 @@ def run_probe(binary: str, state_dir: str, timeout: float, tools: str = "v2") ->
             if not control_url or control_url in samples:
                 continue
             try:
-                samples[control_url] = open_and_sample(server, control_url, timeout, tools)
+                samples[control_url] = open_and_sample(server, control_url, timeout)
             except ProbeError as error:
                 samples[control_url] = {"error": str(error)}
     finally:
@@ -508,7 +475,7 @@ def render_markdown(report: dict) -> str:
             f"| {id_equal} | {text_equal} | {sentences} |"
         )
     tools = report.get("tools_list", {})
-    for toolset in ("v1", "v2"):
+    for toolset in ("v2",):
         entry = tools.get(toolset) or {}
         lines.append(
             f"\n`tools/list` {toolset}: {entry.get('tools', 0)} tools, "
@@ -523,12 +490,6 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--timeout", type=float, default=REQUEST_TIMEOUT)
     parser.add_argument("--out", help="write the JSON report here")
-    parser.add_argument(
-        "--tools",
-        choices=("v1", "v2"),
-        default="v2",
-        help="tool set the probe's servers expose: v2 (default) or v1",
-    )
     parser.add_argument("--md", help="write the Markdown table here")
     args = parser.parse_args(argv)
 
@@ -540,10 +501,9 @@ def main(argv: list[str]) -> int:
     state_dir = os.path.abspath(args.state_dir)
     os.makedirs(state_dir, exist_ok=True)
 
-    report = run_probe(binary, state_dir, args.timeout, args.tools)
+    report = run_probe(binary, state_dir, args.timeout)
     report["tools_list"] = {
-        toolset: measure_tools_list(binary, state_dir, toolset, args.timeout)
-        for toolset in ("v1", "v2")
+        "v2": measure_tools_list(binary, state_dir, "v2", args.timeout),
     }
     markdown = render_markdown(report)
 

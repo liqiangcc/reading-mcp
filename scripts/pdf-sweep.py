@@ -796,46 +796,8 @@ def classify(record: dict, timed_out: bool, message: str) -> str:
 
 
 def collect_text(server, document_id: str, sections: list[dict], budget: int,
-                 deadline: float, tools: str = "v2") -> dict:
-    """Read the whole document text in 256-item batches, bounded by a character budget."""
-    if tools == "v2":
-        return collect_text_v2(server, document_id, budget, deadline)
-    units: list[str] = []
-    chars = 0
-    calls = 0
-    truncated = False
-    error = None
-    started = time.monotonic()
-    for section in sections:
-        if chars >= budget or time.monotonic() > deadline:
-            # Either the budget or the job deadline cut the text: both make the character
-            # counts a lower bound, so the ratio must not be reported as a whole-document one.
-            truncated = True
-            break
-        cursor = None
-        while True:
-            if chars >= budget or time.monotonic() > deadline:
-                truncated = True
-                break
-            arguments = PROBE.text_units(document_id, section["section_id"], BATCH_ITEMS, cursor)
-            try:
-                data = PROBE.payload(server.tool("get_text_units", arguments)) or {}
-            except PROBE.ProbeError as exc:
-                error = str(exc)[:200]
-                break
-            calls += 1
-            for item in data.get("items") or []:
-                text = item.get("text") or ""
-                units.append(text)
-                chars += len(text)
-            cursor = data.get("next_cursor")
-            if not cursor:
-                break
-        if error:
-            break
-    return {"text": "\n".join(units), "units": units, "chars": chars, "calls": calls,
-            "truncated": truncated, "error": error,
-            "seconds": round(time.monotonic() - started, 2)}
+                 deadline: float) -> dict:
+    return collect_text_v2(server, document_id, budget, deadline)
 
 
 def collect_text_v2(server, document_handle: str, budget: int, deadline: float) -> dict:
@@ -954,8 +916,7 @@ def process_document(entry: dict, args, deadline: float) -> dict:
     state_dir = os.path.join(args.state_root, f"open-{entry['id'].replace('/', '_')}")
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
-    env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), "default", "",
-                           args.tools)
+    env = PROBE.server_env(state_dir, os.path.dirname(os.path.abspath(path)), "default", "")
     cap = CAP if args.cap_available else None
     command = PROBE.cap_command(args.binary, cap, env)
     server = PROBE.Server(command, env, os.path.join(state_dir, "server.log"),
@@ -971,7 +932,7 @@ def process_document(entry: dict, args, deadline: float) -> dict:
         record["phase"] = "open"
         began = time.perf_counter()
         try:
-            result = server.tool("open_document" if args.tools == "v1" else "open",
+            result = server.tool("open",
                                  {"source": path}, timeout=OPEN_TIMEOUT_S)
         except PROBE.ProbeError as exc:
             result = None
@@ -989,18 +950,17 @@ def process_document(entry: dict, args, deadline: float) -> dict:
             record["died"] = died
         else:
             data = PROBE.payload(result) or {}
-            document_id = PROBE.document_handle(data, args.tools)
-            record["server_sections"] = PROBE.opened_section_count(data, args.tools)
+            document_id = PROBE.document_handle(data)
+            record["server_sections"] = PROBE.opened_section_count(data)
             record["server_title"] = (data.get("title") or "")[:120]
 
         if document_id:
             record["phase"] = "structure"
-            sections = PROBE.read_sections(server, document_id, args.tools)
+            sections = PROBE.read_sections(server, document_id)
             record["sections"] = len(sections)
             record["structure_mode"] = (
-                "page_fallback" if PROBE.is_page_fallback(sections, args.tools) else "headings")
-            totals, totals_error = PROBE.sentence_totals(server, document_id, sections, deadline,
-                                                         args.tools)
+                "page_fallback" if PROBE.is_page_fallback(sections) else "headings")
+            totals, totals_error = PROBE.sentence_totals(server, document_id, sections, deadline)
             sentences = sum(totals) if totals and not totals_error else None
             record["sentences"] = sentences
             record["sentences_error"] = totals_error
@@ -1010,8 +970,7 @@ def process_document(entry: dict, args, deadline: float) -> dict:
 
             record["phase"] = "read"
             if time.monotonic() < deadline:
-                read = PROBE.read_sentences(server, document_id, sections, READ_CALLS, deadline,
-                                            args.tools)
+                read = PROBE.read_sentences(server, document_id, sections, READ_CALLS, deadline)
                 latencies = read["latencies_ms"]
                 record["read"] = {
                     "calls": read["calls"], "sentences": len(read["texts"]),
@@ -1028,8 +987,7 @@ def process_document(entry: dict, args, deadline: float) -> dict:
 
             record["phase"] = "full_text"
             if time.monotonic() < deadline:
-                full = collect_text(server, document_id, sections, TEXT_BUDGET_CHARS, deadline,
-                                    args.tools)
+                full = collect_text(server, document_id, sections, TEXT_BUDGET_CHARS, deadline)
                 record["text"] = {"chars": full["chars"], "units": len(full["units"]),
                                   "calls": full["calls"], "truncated": full["truncated"],
                                   "seconds": full["seconds"], "error": full["error"]}
@@ -1040,8 +998,8 @@ def process_document(entry: dict, args, deadline: float) -> dict:
                 began = time.perf_counter()
                 try:
                     hits = PROBE.payload(server.tool(
-                        "search_document" if args.tools == "v1" else "search",
-                        {"document_id" if args.tools == "v1" else "doc": document_id,
+                        "search",
+                        {"doc": document_id,
                          "query": token, "limit": SEARCH_LIMIT})) or {}
                     found = hits.get("hits") or []
                     record["search"] = {
@@ -1098,8 +1056,7 @@ def process_document(entry: dict, args, deadline: float) -> dict:
             record["outcome"] = "ok"
         elif document_id is None and open_error is None:
             record["outcome"] = "parse_failed"
-            record["error"] = ("open_document returned no document_id"
-                               if args.tools == "v1" else "open returned no document handle")
+            record["error"] = "open returned no document handle"
         elif died:
             record["outcome"] = "parse_failed"
             record["error"] = f"server exited (rc={server.rc}) before answering"
@@ -1500,8 +1457,6 @@ def main() -> int:
     parser.add_argument("--shards", type=int, default=8)
     parser.add_argument("--deadline-minutes", type=float, default=42.0)
     parser.add_argument("--per-document-minutes", type=float, default=4.5)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
-                        help="tool set the server exposes: v2 (default) or v1")
     args = parser.parse_args()
     if args.select:
         if not args.out:

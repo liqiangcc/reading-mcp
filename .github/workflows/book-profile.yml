@@ -1,11 +1,6 @@
 name: Book profile
 on:
   workflow_dispatch:
-    inputs:
-      tools:
-        description: 'Tool set the probe servers expose'
-        required: false
-        default: 'v2'
   push:
     branches: ['bench/book-profile-**']
 jobs:
@@ -74,7 +69,7 @@ jobs:
               docs="${docs:+$docs,}$label=$file"
             fi
           done
-          args=(--tools "${{ inputs.tools || 'v2' }}" \
+          args=( \
             --binary target/release/reading-mcp --states dir --sizes-mb 4
             --cjk-sizes-mb 1,4 --markdown-sections 2000 --reopen --telemetry --rss-phases --disk
             --parse-timeout-seconds 900 --run-timeout-seconds 900 --out book/runs.json
@@ -99,7 +94,7 @@ jobs:
           done
           args=(--binary target/release/reading-mcp --documents "$docs"
             --out book/sequential.json)
-          python3 scripts/sequential-read-probe.py --tools "${{ inputs.tools || 'v2' }}" "${args[@]}"
+          python3 scripts/sequential-read-probe.py "${args[@]}"
       - name: Chunked layout deep-next profile (cjk-64mib)
         if: always()
         run: |
@@ -112,14 +107,13 @@ jobs:
           spec.loader.exec_module(module)
           module.write_cjk_document(os.path.join("book", "cjk-64mib.txt"), 64 * 1024 * 1024)
           PY
-          python3 scripts/deep-next-probe.py --tools "${{ inputs.tools || 'v2' }}" \
+          python3 scripts/deep-next-probe.py \
             --binary target/release/reading-mcp \
             --document book/cjk-64mib.txt \
             --calls 200 \
             --start-fraction 0.5 \
             --io-bytes \
             --rss-phases \
-            ${{ (inputs.tools || 'v2') == 'v1' && '--env READING_MCP_TOOLS=both' || '' }} \
             --out book/deep-next-cjk-64mib.json
       - name: V2 evaluation T1-T5
         if: always()
@@ -140,13 +134,13 @@ jobs:
           done
           args=(--binary target/release/reading-mcp --documents "$docs"
             --task-books "$task_books" --out book/v2-eval.json)
-          python3 scripts/v2-eval.py --tools "${{ inputs.tools || 'v2' }}" "${args[@]}"
+          python3 scripts/v2-eval.py "${args[@]}"
       - name: Profile the largest inputs with heaptrack
         if: always()
         run: |
           BOOKS="$RUNNER_TEMP/books"
           mkdir -p book
-          args=(--tools "${{ inputs.tools || 'v2' }}" \
+          args=( \
             --binary target/release/reading-mcp --states dir --markdown-sections 2000
             --cjk-sizes-mb 4,16
             --parse-timeout-seconds 900 --run-timeout-seconds 900
@@ -255,7 +249,6 @@ jobs:
             done
             mkdir -p "disk-$side"
             python3 scripts/memory-profile.py \
-              --tools "${{ inputs.tools || 'v2' }}" \
               --binary "$bin" --states dir --disk --cjk-sizes-mb 64 \
               --documents "$docs" \
               --parse-timeout-seconds 900 --run-timeout-seconds 900 \
@@ -270,10 +263,9 @@ jobs:
           run() { # label bin doc [probe flags...]
             local label="$1" bin="$2" doc="$3"
             shift 3
-            python3 scripts/deep-next-probe.py --tools "${{ inputs.tools || 'v2' }}" \
+            python3 scripts/deep-next-probe.py \
               --binary "$bin" --document "$doc" \
               --largest-section --io-bytes --rss-phases \
-              ${{ (inputs.tools || 'v2') == 'v1' && '--env READING_MCP_TOOLS=both' || '' }} \
               --out "$out/$label.json" "$@" \
               || echo "::warning::probe failed: $label"
           }

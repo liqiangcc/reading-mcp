@@ -423,8 +423,7 @@ def reference_prefix(page_texts: list[str], target_chars: int) -> tuple[str, int
 # --------------------------------------------------------------------------------------------
 
 def backend_run(probe, binary: str, pdf_path: str, backend: str, layout_python: str,
-                state_root: str, label: str, deadline: float,
-                tools: str = "v2") -> tuple[dict, list[str]]:
+                state_root: str, label: str, deadline: float) -> tuple[dict, list[str]]:
     import shutil
 
     record: dict = {
@@ -437,24 +436,23 @@ def backend_run(probe, binary: str, pdf_path: str, backend: str, layout_python: 
     shutil.rmtree(state_dir, ignore_errors=True)
     os.makedirs(state_dir, exist_ok=True)
     env = probe.server_env(state_dir, os.path.dirname(os.path.abspath(pdf_path)), backend,
-                           layout_python, tools)
+                           layout_python)
     server = probe.Server([binary], env, os.path.join(state_dir, "server.log"),
                           probe.TOOL_TIMEOUT_S)
     document_id = None
     try:
         server.initialize()
-        data, open_s, error = probe.open_document(server, pdf_path, tools)
+        data, open_s, error = probe.open_document(server, pdf_path)
         record["open_s"] = round(open_s, 3)
         if error is not None:
             record["error"] = str(error)[:500]
             record["error_code"] = error.code
         else:
             record["outcome"] = "ok"
-            document_id = probe.document_handle(data, tools)
+            document_id = probe.document_handle(data)
         if document_id:
-            sections = probe.read_sections(server, document_id, tools)
-            totals, totals_error = probe.sentence_totals(server, document_id, sections, deadline,
-                                                         tools)
+            sections = probe.read_sections(server, document_id)
+            totals, totals_error = probe.sentence_totals(server, document_id, sections, deadline)
             sentences = sum(totals) if totals and not totals_error else None
             record["sections"] = len(sections)
             record["sentences"] = sentences
@@ -464,7 +462,7 @@ def backend_run(probe, binary: str, pdf_path: str, backend: str, layout_python: 
                 record["sentences_per_page"] = round(sentences / pages, 2)
             if time.monotonic() < deadline:
                 read = probe.read_sentences(server, document_id, sections, READ_SENTENCES,
-                                            deadline, tools)
+                                            deadline)
                 texts = read["texts"]
                 record["read_sentences"] = len(texts)
                 record["read_partial"] = bool(read["partial"])
@@ -827,11 +825,10 @@ def process_paper(probe, entry: dict, args, deadline: float) -> dict:
     record["pages"] = reference["pages"]
     record["reference"] = reference
     default_record, default_texts = backend_run(
-        probe, args.binary, pdf_path, "default", "", args.state_root, label, deadline,
-        args.tools)
+        probe, args.binary, pdf_path, "default", "", args.state_root, label, deadline)
     layout_record, layout_texts = backend_run(
         probe, args.binary, pdf_path, "layout", args.layout_python, args.state_root, label,
-        deadline, args.tools)
+        deadline)
     record["default"] = decorate(default_record, default_texts, reference, first_page_texts)
     record["layout"] = decorate(layout_record, layout_texts, reference, first_page_texts)
     record["seconds"] = round(time.perf_counter() - started, 1)
@@ -1227,8 +1224,6 @@ def main() -> int:
     parser.add_argument("--deadline-minutes", type=float, default=75.0)
     parser.add_argument("--paper-deadline-minutes", type=float, default=6.0)
     parser.add_argument("--worker-timeout", type=float, default=900.0)
-    parser.add_argument("--tools", choices=("v1", "v2"), default="v2",
-                        help="tool set the server exposes: v2 (default) or v1")
     parser.add_argument("--pdf", default="")
     parser.add_argument("--worker", default="")
     args = parser.parse_args()

@@ -2,11 +2,6 @@ name: CPU profile
 run-name: CPU profile of the first open and of deep Next reads
 on:
   workflow_dispatch:
-    inputs:
-      tools:
-        description: 'Tool set the probe servers expose'
-        required: false
-        default: 'v2'
   push:
     branches: ['bench/r5a-*']
 jobs:
@@ -80,7 +75,6 @@ jobs:
             label="$1"
             source="$2"
             python3 scripts/memory-profile.py \
-              --tools "${{ inputs.tools || 'v2' }}" \
               --binary "$BIN" \
               --states dir \
               --documents "$label=$source" \
@@ -100,7 +94,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p perf
-          python3 scripts/deep-next-probe.py --tools "${{ inputs.tools || 'v2' }}" \
+          python3 scripts/deep-next-probe.py \
             --binary "$CARGO_TARGET_DIR/release/reading-mcp" \
             --document "$RUNNER_TEMP/inputs/cjk-64mib.txt" \
             --calls 2000 \

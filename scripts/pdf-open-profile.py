@@ -3,7 +3,7 @@
 
 Three modes, all standard library except `facts` (PyMuPDF):
 
-- `run`: open each input once through the real server (`READING_MCP_TOOLS=v2`, OCR off, default
+- `run`: open each input once through the real server (the v2 tool set, OCR off, default
   PDF backend) with `READING_MCP_TELEMETRY=1`, optionally under a `perf record` wrapper, and
   record wall time, the telemetry phase durations, the per-phase RSS/VmHWM the server reports,
   the peak RSS from `wait4` and the server's own section count.
@@ -255,7 +255,7 @@ def run_mode(args: argparse.Namespace) -> int:
         os.makedirs(state_dir, exist_ok=True)
         telemetry = os.path.join(args.out_dir, f"{label}.telemetry.jsonl")
         env = MEMORY.server_environment([os.path.dirname(entry["path"])], state_dir, None,
-                                       telemetry=True, tools="v2")
+                                       telemetry=True)
         wrapper = None
         if args.perf and label in args.perf_label:
             data = os.path.join(args.out_dir, f"{label}.perf.data")
@@ -263,8 +263,7 @@ def run_mode(args: argparse.Namespace) -> int:
         command = MEMORY.server_command(args.binary, wrapper, label)
         samples: dict = {}
         peak, seconds, error, timed_out, sections, title, *_ = MEMORY.run_one(
-            command, env, entry["path"], args.timeout, stderr_path=telemetry, samples=samples,
-            tools="v2")
+            command, env, entry["path"], args.timeout, stderr_path=telemetry, samples=samples)
         events = MEMORY.read_telemetry_events(telemetry)
         sums = MEMORY.telemetry_sums(events, success_only=True)
         phases = {event: sums.get(event, (0, 0.0))[1] / 1000.0 for event, _ in PHASES}
@@ -616,7 +615,7 @@ def report_mode(args: argparse.Namespace) -> int:
     out.append("## 1. Wall time by phase")
     out.append("")
     out.append("Telemetry events (`READING_MCP_TELEMETRY=1`) of one v2 `open` per input, "
-               "`READING_MCP_TOOLS=v2`, OCR off, default PDF backend.")
+               "OCR off, default PDF backend.")
     out.append("")
     out.append(phase_table(rows))
     out.append("")

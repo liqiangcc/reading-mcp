@@ -2,11 +2,6 @@ name: PDF profile
 run-name: PDF profile (BENCH-D2)
 on:
   workflow_dispatch:
-    inputs:
-      tools:
-        description: 'Tool set the probe servers expose'
-        required: false
-        default: 'v2'
   push:
     branches: ['bench/d2-**']
 jobs:
@@ -140,8 +135,7 @@ jobs:
                 --state-root "$RUNNER_TEMP/state"
                 --artifact-dir "$RUNNER_TEMP/artifacts"
                 --out "$RUNNER_TEMP/results/${{ matrix.input }}-${{ matrix.backend }}.jsonl"
-                --deadline-minutes 320
-                --tools "${{ inputs.tools || 'v2' }}")
+                --deadline-minutes 320)
           if [ -f "$IN/${{ matrix.input }}.meta.json" ]; then
             args+=(--meta "$IN/${{ matrix.input }}.meta.json")
           fi

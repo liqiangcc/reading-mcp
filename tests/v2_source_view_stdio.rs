@@ -109,6 +109,77 @@ async fn v2_stdio_source_view_returns_page_metadata_and_png_image_block() {
         .expect("MCP process should close cleanly");
 }
 
+/// #272: a local PDF whose bytes are rewritten under the same path after `open`
+/// answers `stale_handle` — the worker hashes the file itself and the parent
+/// fails closed, the same as the buffered path did.
+#[tokio::test]
+async fn v2_stdio_source_view_on_rewritten_local_pdf_answers_stale_handle() {
+    let root = tempfile::tempdir().expect("source root should be created");
+    let path = root.path().join("fidelity.pdf");
+    let original = build_pdf();
+    tokio::fs::write(&path, &original)
+        .await
+        .expect("PDF fixture should be written");
+
+    let client = start_client(root.path(), std::path::Path::new("memory")).await;
+    let opened = v2_open(&client, &path).await;
+    let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+    let first = payload(&v2_read(&client, &doc, json!({})).await);
+    let sentence = first["at"].as_str().expect("sentence handle").to_owned();
+
+    let mut changed = original;
+    changed.extend_from_slice(b"changed source bytes");
+    tokio::fs::write(&path, changed)
+        .await
+        .expect("changed source should be written");
+
+    let result = call(&client, "source_view", json!({ "at": sentence })).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "stale_handle", "{error}");
+
+    client
+        .cancel()
+        .await
+        .expect("MCP process should close cleanly");
+}
+
+/// #272: a local path replaced by a symlink that resolves outside the allowed
+/// roots is refused the way the retrieval policy refuses it — `blocked_source`.
+#[cfg(unix)]
+#[tokio::test]
+async fn v2_stdio_source_view_on_root_escaping_symlink_answers_blocked_source() {
+    let root = tempfile::tempdir().expect("source root should be created");
+    let outside = tempfile::tempdir().expect("outside directory should be created");
+    let path = root.path().join("fidelity.pdf");
+    let outside_pdf = outside.path().join("outside.pdf");
+    tokio::fs::write(&path, build_pdf())
+        .await
+        .expect("PDF fixture should be written");
+    tokio::fs::write(&outside_pdf, build_pdf())
+        .await
+        .expect("outside fixture should be written");
+
+    let client = start_client(root.path(), std::path::Path::new("memory")).await;
+    let opened = v2_open(&client, &path).await;
+    let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+    let first = payload(&v2_read(&client, &doc, json!({})).await);
+    let sentence = first["at"].as_str().expect("sentence handle").to_owned();
+
+    tokio::fs::remove_file(&path)
+        .await
+        .expect("original file should be removed");
+    std::os::unix::fs::symlink(&outside_pdf, &path).expect("symlink should be created");
+
+    let result = call(&client, "source_view", json!({ "at": sentence })).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "blocked_source", "{error}");
+
+    client
+        .cancel()
+        .await
+        .expect("MCP process should close cleanly");
+}
+
 /// #264: a page whose decoded image stream is above the configured source-view
 /// limit answers `too_large` with a hint naming the page and both numbers, and
 /// the same handle renders when the limit is raised. The fixture's 9-megapixel

@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::application::ports::{
     ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
@@ -56,36 +57,23 @@ impl FileProcessIsolatedPdfSourceViewRenderer {
     }
 }
 
-impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
-    fn render(
+impl FileProcessIsolatedPdfSourceViewRenderer {
+    /// Spawns the file worker on `input_path` — the staged copy of the buffered
+    /// path or the local source's own file — and collects its PNG. The worker
+    /// records the sha256 of the bytes it renders as `source_sha256` in its
+    /// metadata; anything other than `expected_source_sha256` (the document's
+    /// `content_hash`) is a stale source and the PNG is discarded.
+    fn run_worker(
         &self,
-        bytes: Vec<u8>,
-        media_type: MediaType,
+        input_path: &Path,
+        expected_source_sha256: &str,
+        temp: &WorkerTempDir,
         page: u32,
-        options: SourceViewRenderOptions,
+        options: &SourceViewRenderOptions,
     ) -> Result<RenderedSourceView, ApplicationError> {
-        if !media_type.is_pdf() {
-            return Err(ApplicationError::SourceViewFailed(format!(
-                "unsupported source-view media type {}",
-                media_type.0
-            )));
-        }
-        if self.timeout.is_zero() {
-            return Err(ApplicationError::SourceViewFailed(
-                "source-view worker timeout must be greater than zero".into(),
-            ));
-        }
-
-        let temp = WorkerTempDir::create()?;
-        let input_path = temp.path.join("source.pdf");
         let output_path = temp.path.join("page.png");
         let metadata_path = temp.path.join("metadata.json");
         let stderr_path = temp.path.join("stderr.log");
-        fs::write(&input_path, &bytes).map_err(|error| {
-            ApplicationError::SourceViewFailed(format!(
-                "failed to stage source-view PDF bytes: {error}"
-            ))
-        })?;
         let stderr = fs::File::create(&stderr_path).map_err(|error| {
             ApplicationError::SourceViewFailed(format!(
                 "failed to create source-view worker stderr file: {error}"
@@ -102,7 +90,7 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
         };
         let mut child = command
             .arg(FILE_SOURCE_VIEW_WORKER_FLAG)
-            .arg(&input_path)
+            .arg(input_path)
             .arg(&output_path)
             .arg(&metadata_path)
             .arg(page.to_string())
@@ -113,6 +101,7 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
             .arg(options.max_pixels.to_string())
             .arg(options.max_image_bytes.to_string())
             .arg(options.max_decoded_stream_bytes.to_string())
+            .arg(expected_source_sha256)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
@@ -147,6 +136,15 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
         };
 
         if !status.success() {
+            // A worker that stopped early on a hash mismatch still records what
+            // it saw: the parent — not the exit status — decides stale vs. failed.
+            if let Some(actual) = reported_source_sha256(&metadata_path)
+                && actual != expected_source_sha256
+            {
+                return Err(ApplicationError::StaleLocator(format!(
+                    "raw content hash changed from {expected_source_sha256} to {actual}"
+                )));
+            }
             let diagnostic = fs::read(&stderr_path).unwrap_or_default();
             if let Some(detail) = worker_limit_detail(&diagnostic, page) {
                 return Err(ApplicationError::SourceViewLimitExceeded(detail));
@@ -168,7 +166,19 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
                     "invalid source-view worker metadata: {error}"
                 ))
             })?;
-        validate_metadata(&metadata, &options, page)?;
+        // A render the worker never hashed proves nothing about identity — a
+        // missing `source_sha256` is a worker failure, never a pass.
+        let Some(actual_sha256) = &metadata.source_sha256 else {
+            return Err(ApplicationError::SourceViewFailed(
+                "isolated source-view metadata omits source_sha256".into(),
+            ));
+        };
+        if actual_sha256 != expected_source_sha256 {
+            return Err(ApplicationError::StaleLocator(format!(
+                "raw content hash changed from {expected_source_sha256} to {actual_sha256}"
+            )));
+        }
+        validate_metadata(&metadata, options, page)?;
 
         let encoded = fs::read(&output_path).map_err(|error| {
             ApplicationError::SourceViewFailed(format!(
@@ -203,12 +213,90 @@ impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
     }
 }
 
+impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
+    fn render(
+        &self,
+        bytes: Vec<u8>,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError> {
+        if !media_type.is_pdf() {
+            return Err(ApplicationError::SourceViewFailed(format!(
+                "unsupported source-view media type {}",
+                media_type.0
+            )));
+        }
+        if self.timeout.is_zero() {
+            return Err(ApplicationError::SourceViewFailed(
+                "source-view worker timeout must be greater than zero".into(),
+            ));
+        }
+
+        let temp = WorkerTempDir::create()?;
+        let input_path = temp.path.join("source.pdf");
+        fs::write(&input_path, &bytes).map_err(|error| {
+            ApplicationError::SourceViewFailed(format!(
+                "failed to stage source-view PDF bytes: {error}"
+            ))
+        })?;
+        // The staged file is the worker's copy: verify it end-to-end and release
+        // the heap buffer before the worker runs instead of holding two copies.
+        let expected_source_sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
+        drop(bytes);
+        self.run_worker(&input_path, &expected_source_sha256, &temp, page, &options)
+    }
+
+    fn render_local_file(
+        &self,
+        path: &Path,
+        expected_source_sha256: &str,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError> {
+        if !media_type.is_pdf() {
+            return Err(ApplicationError::SourceViewFailed(format!(
+                "unsupported source-view media type {}",
+                media_type.0
+            )));
+        }
+        if self.timeout.is_zero() {
+            return Err(ApplicationError::SourceViewFailed(
+                "source-view worker timeout must be greater than zero".into(),
+            ));
+        }
+
+        // No staging at all: the worker maps `path` itself — the only file copy
+        // it ever touches — so a large local PDF costs no heap buffer and no
+        // tmpfs copy in the parent.
+        let temp = WorkerTempDir::create()?;
+        self.run_worker(path, expected_source_sha256, &temp, page, &options)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct WorkerMetadata {
     width: u32,
     height: u32,
     page_count: usize,
     image_bytes: usize,
+    #[serde(default)]
+    source_sha256: Option<String>,
+}
+
+/// The `source_sha256` a worker recorded in its metadata file, when it wrote
+/// one — the hash-mismatch evidence of a worker that stopped before parsing,
+/// or the identity proof of one that rendered.
+fn reported_source_sha256(metadata_path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct SourceSha256Probe {
+        source_sha256: Option<String>,
+    }
+    let bytes = fs::read(metadata_path).ok()?;
+    serde_json::from_slice::<SourceSha256Probe>(&bytes)
+        .ok()?
+        .source_sha256
 }
 
 pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error::Error>> {
@@ -232,15 +320,41 @@ pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::e
     let max_pixels = parse_worker_arg::<u64>(&mut args, "max pixels")?;
     let max_image_bytes = parse_worker_arg::<usize>(&mut args, "max image bytes")?;
     let max_decoded_stream_bytes = parse_worker_arg::<u64>(&mut args, "max decoded stream bytes")?;
+    // The expected hash is optional in the protocol: the parent always passes
+    // it, but an older caller without it still gets the hash recorded — the
+    // parent's own compare is the authoritative check either way.
+    let expected_source_sha256 = args.next().and_then(|value| value.into_string().ok());
     if args.next().is_some() {
         return Err("source-view worker received unexpected trailing arguments".into());
     }
 
-    let bytes = fs::read(&input_path)?;
+    // The input is mapped read-only, never read into a heap buffer: its pages
+    // stay clean and file-backed, so memory pressure drops them instead of
+    // swapping them. A concurrent truncation of the file would fault the map —
+    // a loud failure, not a wrong render.
+    let file = fs::File::open(&input_path)?;
+    let map = unsafe { memmap2::Mmap::map(&file) }?;
+    let source_sha256 = format!("sha256:{:x}", Sha256::digest(&map[..]));
+    // Residual window: a file modified in place between this hash and the
+    // parser's lazy reads can produce one render of mixed bytes — the map holds
+    // no snapshot. The next call hashes the file again and fails closed.
+    if let Some(expected) = &expected_source_sha256
+        && source_sha256 != *expected
+    {
+        // Stop before parsing and leave the observed hash for the parent, which
+        // turns it into the fail-closed stale-source answer.
+        fs::write(
+            &metadata_path,
+            serde_json::to_vec(&serde_json::json!({ "source_sha256": source_sha256 }))?,
+        )?;
+        return Err(format!(
+            "source-view input sha256 {source_sha256} does not match expected {expected:?}"
+        )
+        .into());
+    }
     let rendered = PdfSourceViewRenderer
-        .render(
-            bytes,
-            MediaType("application/pdf".into()),
+        .render_data(
+            std::sync::Arc::new(map),
             page,
             SourceViewRenderOptions {
                 dpi,
@@ -259,6 +373,7 @@ pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::e
         height: rendered.height,
         page_count: rendered.page_count,
         image_bytes: rendered.bytes.len(),
+        source_sha256: Some(source_sha256),
     };
     fs::write(&metadata_path, serde_json::to_vec(&metadata)?)?;
     Ok(true)

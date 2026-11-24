@@ -29,9 +29,15 @@ impl LocalFileSourcePolicy {
     }
 }
 
-#[async_trait]
-impl SourcePolicy for LocalFileSourcePolicy {
-    async fn validate(&self, source: &DocumentSource) -> Result<(), ApplicationError> {
+impl LocalFileSourcePolicy {
+    /// The canonical path of `source` under this policy — the scheme, roots and
+    /// symlink canonicalization `validate` enforces — or the same error
+    /// `validate` reports. Shared by callers that need the path itself, like
+    /// the source-view local-file resolver.
+    pub async fn resolve_canonical(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<PathBuf, ApplicationError> {
         let value = source.0.trim();
         if value.is_empty() {
             return Err(ApplicationError::InvalidRequest(
@@ -61,7 +67,7 @@ impl SourcePolicy for LocalFileSourcePolicy {
                 continue;
             };
             if canonical == canonical_root || canonical.strip_prefix(&canonical_root).is_ok() {
-                return Ok(());
+                return Ok(canonical);
             }
         }
 
@@ -69,6 +75,13 @@ impl SourcePolicy for LocalFileSourcePolicy {
             "local file is outside configured roots: {}",
             canonical.display()
         )))
+    }
+}
+
+#[async_trait]
+impl SourcePolicy for LocalFileSourcePolicy {
+    async fn validate(&self, source: &DocumentSource) -> Result<(), ApplicationError> {
+        self.resolve_canonical(source).await.map(|_| ())
     }
 }
 
@@ -117,7 +130,7 @@ impl Retriever for FileRetriever {
     }
 }
 
-fn source_to_path(source: &DocumentSource) -> Result<PathBuf, ApplicationError> {
+pub(crate) fn source_to_path(source: &DocumentSource) -> Result<PathBuf, ApplicationError> {
     let value = source.0.trim();
     let path = value.strip_prefix("file://").unwrap_or(value);
     if path.is_empty() {
@@ -128,7 +141,7 @@ fn source_to_path(source: &DocumentSource) -> Result<PathBuf, ApplicationError> 
     Ok(PathBuf::from(path))
 }
 
-fn media_type_for_path(path: &std::path::Path) -> MediaType {
+pub(crate) fn media_type_for_path(path: &std::path::Path) -> MediaType {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())

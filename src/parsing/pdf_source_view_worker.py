@@ -1,7 +1,13 @@
 """Render original PDF bytes with the optional pinned PyMuPDF engine.
 
-The parent stages private files and enforces wall time. No canonical text or OCR
+The parent stages private files and enforces wall time — except for a local
+source, whose original path the worker opens itself. No canonical text or OCR
 is used to construct the image. Hard process limits bound malformed PDF decoding.
+
+The worker hashes the input file in bounded chunks before parsing and records
+it as `source_sha256` in the metadata. On a mismatch with the expected hash the
+parent passed, it writes just that hash to the metadata file and exits early —
+the parent turns it into the fail-closed stale-source answer.
 
 A rejection over a configured limit is reported as data, not message text: the
 worker prints `READING-MCP-SOURCE-VIEW-LIMIT {"kind": ..., "measured": ...,
@@ -9,6 +15,7 @@ worker prints `READING-MCP-SOURCE-VIEW-LIMIT {"kind": ..., "measured": ...,
 `--reading-mcp-source-view-*-worker` modes emit. Any other failure keeps the
 plain diagnostic and means a crash or an invalid PDF.
 """
+import hashlib
 import importlib.metadata
 import json
 import math
@@ -31,13 +38,30 @@ class LimitRejected(Exception):
         self.limit = limit
 
 
+def source_sha256(source):
+    """sha256 of the file in bounded chunks — never the whole file in one buffer."""
+    digest = hashlib.sha256()
+    with open(source, "rb") as handle:
+        for chunk in iter(lambda: handle.read(8 << 20), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
 def main():
-    if len(sys.argv) != 13:
+    if len(sys.argv) not in (13, 14):
         raise ValueError("invalid source-view worker arguments")
     _, source, output, metadata = sys.argv[1:5]
-    page_no, dpi, max_pages, max_width, max_height, max_pixels, max_image, max_stream = map(int, sys.argv[5:])
+    page_no, dpi, max_pages, max_width, max_height, max_pixels, max_image, max_stream = map(int, sys.argv[5:13])
+    expected_sha256 = sys.argv[13] if len(sys.argv) == 14 else None
     if min(page_no, dpi, max_pages, max_width, max_height, max_pixels, max_image, max_stream) <= 0:
         raise ValueError("source-view limits must be positive")
+    actual_sha256 = source_sha256(source)
+    # Residual window: a file modified in place between this hash and MuPDF's
+    # own reads can produce one render of mixed bytes; the next call hashes the
+    # file again and fails closed.
+    if expected_sha256 is not None and actual_sha256 != expected_sha256:
+        Path(metadata).write_text(json.dumps({"source_sha256": actual_sha256}))
+        raise ValueError(f"source-view input {actual_sha256} does not match expected {expected_sha256}")
     if importlib.metadata.version("pymupdf") != "1.28.2":
         raise ValueError("PyMuPDF 1.28.2 is required")
     # These limits protect the host before MuPDF allocates decoded streams/images.
@@ -88,7 +112,7 @@ def main():
         if len(encoded) > max_image:
             raise LimitRejected("image_bytes", "source-view image exceeds byte limit", len(encoded), max_image)
         Path(output).write_bytes(encoded)
-        Path(metadata).write_text(json.dumps({"width": pixmap.width, "height": pixmap.height, "page_count": len(doc), "image_bytes": len(encoded)}))
+        Path(metadata).write_text(json.dumps({"width": pixmap.width, "height": pixmap.height, "page_count": len(doc), "image_bytes": len(encoded), "source_sha256": actual_sha256}))
 
 
 if __name__ == "__main__":

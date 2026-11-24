@@ -82,6 +82,15 @@ pub struct SectionId(pub String);
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct DocumentSource(pub String);
 
+impl DocumentSource {
+    /// Whether the source is an HTTP(S) URL — the routing predicate the
+    /// retriever router and the source-view use case share.
+    pub fn is_http(&self) -> bool {
+        let value = self.0.trim().to_ascii_lowercase();
+        value.starts_with("https://") || value.starts_with("http://")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct MediaType(pub String);
 

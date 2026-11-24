@@ -9,8 +9,9 @@ use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::light_sections::SectionTexts;
 use crate::application::locator_resolution::resolve_text_locator;
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, RenderedSourceView, RetrievalOptions, Retriever,
-    SourceViewRenderOptions, SourceViewRenderer, TextUnitIndex,
+    ApplicationError, DocumentRepository, LocalSourceAccess, RenderedSourceView,
+    ResolvedLocalSource, RetrievalOptions, Retriever, SourceViewRenderOptions, SourceViewRenderer,
+    TextUnitIndex,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSource, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
@@ -98,6 +99,7 @@ pub struct SourceViewUseCase {
     renderer: Arc<dyn SourceViewRenderer>,
     limits: SourceViewLimits,
     text_unit_index: Option<Arc<dyn TextUnitIndex>>,
+    local_sources: Option<Arc<dyn LocalSourceAccess>>,
 }
 
 impl SourceViewUseCase {
@@ -113,11 +115,21 @@ impl SourceViewUseCase {
             renderer,
             limits,
             text_unit_index: None,
+            local_sources: None,
         }
     }
 
     pub fn with_text_unit_index(mut self, index: Arc<dyn TextUnitIndex>) -> Self {
         self.text_unit_index = Some(index);
+        self
+    }
+
+    /// The local-file resolution path: with `resolver` set, a document whose
+    /// source is a local file is rendered from the file itself — the worker
+    /// maps it and checks its sha256 — instead of the parent retrieving and
+    /// staging a copy. Without it every source keeps the buffered path.
+    pub fn with_local_source_access(mut self, resolver: Arc<dyn LocalSourceAccess>) -> Self {
+        self.local_sources = Some(resolver);
         self
     }
 
@@ -184,27 +196,18 @@ impl SourceViewUseCase {
             )));
         }
 
-        let resource = self
-            .retriever
-            .retrieve(&document.source, &RetrievalOptions::default())
-            .await?;
-        if resource.final_source != document.source {
-            return Err(ApplicationError::StaleLocator(format!(
-                "source changed from {} to {}",
-                document.source.0, resource.final_source.0
-            )));
-        }
-
-        let actual_hash = format!("sha256:{:x}", Sha256::digest(&resource.bytes));
-        if actual_hash != document.content_hash.0 {
-            return Err(ApplicationError::StaleLocator(format!(
-                "raw content hash changed from {} to {}",
-                document.content_hash.0, actual_hash
-            )));
-        }
+        // A local source resolves to the file itself under the same policy the
+        // retrieval chain enforces, so the worker maps it instead of the parent
+        // holding buffered and staged copies. Anything else keeps the buffered
+        // retrieval path; `None` resolver means the buffered path for all.
+        let local_file: Option<ResolvedLocalSource> = match &self.local_sources {
+            Some(resolver) if !document.source.is_http() => {
+                Some(resolver.resolve(&document.source).await?)
+            }
+            _ => None,
+        };
 
         let renderer = Arc::clone(&self.renderer);
-        let media_type = resource.media_type.clone();
         let options = SourceViewRenderOptions {
             dpi,
             max_pages: self.limits.max_pages,
@@ -214,13 +217,63 @@ impl SourceViewUseCase {
             max_image_bytes: self.limits.max_image_bytes,
             max_decoded_stream_bytes: self.limits.max_decoded_stream_bytes,
         };
-        let render = spawn_blocking(move || {
-            renderer.render(resource.bytes, media_type, page_number, options)
-        })
-        .await
-        .map_err(|error| {
-            ApplicationError::SourceViewFailed(format!("source view worker failed: {error}"))
-        })??;
+        let render = match local_file {
+            Some(resolved) => {
+                if resolved.final_source != document.source {
+                    return Err(ApplicationError::StaleLocator(format!(
+                        "source changed from {} to {}",
+                        document.source.0, resolved.final_source.0
+                    )));
+                }
+                let expected = document.content_hash.0.clone();
+                spawn_blocking(move || {
+                    renderer.render_local_file(
+                        &resolved.path,
+                        &expected,
+                        resolved.media_type,
+                        page_number,
+                        options,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    ApplicationError::SourceViewFailed(format!(
+                        "source view worker failed: {error}"
+                    ))
+                })??
+            }
+            None => {
+                let resource = self
+                    .retriever
+                    .retrieve(&document.source, &RetrievalOptions::default())
+                    .await?;
+                if resource.final_source != document.source {
+                    return Err(ApplicationError::StaleLocator(format!(
+                        "source changed from {} to {}",
+                        document.source.0, resource.final_source.0
+                    )));
+                }
+
+                let actual_hash = format!("sha256:{:x}", Sha256::digest(&resource.bytes));
+                if actual_hash != document.content_hash.0 {
+                    return Err(ApplicationError::StaleLocator(format!(
+                        "raw content hash changed from {} to {}",
+                        document.content_hash.0, actual_hash
+                    )));
+                }
+
+                let media_type = resource.media_type.clone();
+                spawn_blocking(move || {
+                    renderer.render(resource.bytes, media_type, page_number, options)
+                })
+                .await
+                .map_err(|error| {
+                    ApplicationError::SourceViewFailed(format!(
+                        "source view worker failed: {error}"
+                    ))
+                })??
+            }
+        };
 
         Ok(SourceViewResult {
             document_id: document.id.clone(),

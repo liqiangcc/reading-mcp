@@ -1157,7 +1157,9 @@ async fn source_view_url_source_with_body_over_the_document_limit_is_refused() {
 
 /// #274: a URL the HTTP policy refuses at the URL level — `http://` with
 /// `allow_http` off — fails with the same error the retrieval path gives, with
-/// no request and no DNS.
+/// no request and no DNS. `max_document_bytes` sits below the cached body
+/// length on purpose: the policy check runs before the cache is touched, so a
+/// refused URL answers `BlockedSource`, never the size limit.
 #[tokio::test]
 async fn source_view_url_source_refused_by_the_url_policy() {
     let fixture = spawn_counting_pdf_fixture().await;
@@ -1167,7 +1169,7 @@ async fn source_view_url_source_refused_by_the_url_policy() {
 
     let before = fixture.requests.load(Ordering::Relaxed);
     let https_only: Arc<dyn HttpUrlPolicy> = Arc::new(PublicHttpAccessPolicy::https_only());
-    let error = url_source_view(&opened, raw_cache, https_only, usize::MAX)
+    let error = url_source_view(&opened, raw_cache, https_only, 16)
         .execute(url_source_view_command(&opened))
         .await
         .expect_err("a URL the policy refuses fails before rendering");

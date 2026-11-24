@@ -333,11 +333,12 @@ impl SourceViewUseCase {
     /// the body and without any network I/O — the same key the retrieval chain
     /// stores under, no auth profile — kept only while it may stand in for the
     /// origin: clean metadata, `final_source` equal to the document's source,
-    /// a PDF media type, a body within `max_document_bytes`, and a source the
-    /// HTTP policy's URL-level check accepts. A body over the limit or a
-    /// refused URL fails the way the retrieval path fails; everything else
-    /// short of usable answers `None` and the caller falls back to today's
-    /// buffered retrieval unchanged.
+    /// a PDF media type, and a body within `max_document_bytes`. The HTTP
+    /// policy's URL-level check runs first, before the cache is touched, so a
+    /// URL it refuses answers the policy's error whatever the cache holds. A
+    /// body over the limit fails the way the retrieval path fails; everything
+    /// else short of usable answers `None` and the caller falls back to
+    /// today's buffered retrieval unchanged.
     async fn cached_url_source(
         &self,
         document: &Document,
@@ -345,6 +346,7 @@ impl SourceViewUseCase {
         let Some(cache) = &self.url_cache else {
             return Ok(None);
         };
+        cache.http_policy.check_url(&document.source)?;
         let key = scoped_cache_key(&document.source, None);
         let Some(entry) = cache.raw_cache.locate(&key).await? else {
             return Ok(None);
@@ -353,7 +355,6 @@ impl SourceViewUseCase {
             return Ok(None);
         }
         check_document_size_limit(entry.body_len, cache.max_document_bytes)?;
-        cache.http_policy.check_url(&document.source)?;
         Ok(Some(ResolvedLocalSource {
             path: entry.body_path,
             final_source: entry.final_source,

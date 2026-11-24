@@ -370,15 +370,17 @@ pub trait SourceViewRenderer: Send + Sync {
     }
 }
 
-/// A local-file document source resolved under the local-file policy to the
-/// canonical path a source-view worker reads itself.
+/// A document source resolved to a file a source-view worker reads itself:
+/// the canonical path a local file resolves to under the local-file policy,
+/// or the body file of a URL source's raw-cache entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedLocalSource {
-    /// The canonical file path handed to the worker.
+    /// The file path handed to the worker.
     pub path: std::path::PathBuf,
-    /// `file://{path}`, exactly what `FileRetriever` reports as `final_source`.
+    /// The `final_source` the resolution reports — `file://{path}` for a local
+    /// file, the stored `final_source` of a raw-cache entry.
     pub final_source: DocumentSource,
-    /// The media type the file retriever reports for the same path.
+    /// The media type the same resolution reports.
     pub media_type: MediaType,
 }
 
@@ -408,6 +410,34 @@ pub trait DocumentReliabilityInspector: Send + Sync {
     }
 }
 
+/// The key the retrieval chain scopes a document source to before it reads or
+/// writes a raw-cache entry: the source itself for an unauthenticated request,
+/// or the source namespaced by its auth profile so profiles never share
+/// entries. The cache hashes this key into its file names; share the function,
+/// never re-derive the key.
+pub fn scoped_cache_key(source: &DocumentSource, auth_profile: Option<&str>) -> DocumentSource {
+    match auth_profile {
+        Some(profile) => DocumentSource(format!("auth-profile:{profile}\0{}", source.0)),
+        None => source.clone(),
+    }
+}
+
+/// A raw-cache entry located without reading its body: the body file a caller
+/// may open or map itself, plus the stored metadata fields that decide whether
+/// the entry may stand in for a fresh retrieval — its `final_source`, its
+/// media type, and the body's length.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedRawResource {
+    /// The cache's own body file.
+    pub body_path: std::path::PathBuf,
+    /// The `final_source` stored in the entry's metadata.
+    pub final_source: DocumentSource,
+    /// The media type stored in the entry's metadata.
+    pub media_type: MediaType,
+    /// The body file's length in bytes.
+    pub body_len: u64,
+}
+
 #[async_trait]
 pub trait RawResourceCache: Send + Sync {
     async fn get(
@@ -420,6 +450,45 @@ pub trait RawResourceCache: Send + Sync {
         source: &DocumentSource,
         resource: RetrievedResource,
     ) -> Result<(), ApplicationError>;
+
+    /// The entry stored under `source` — an already scoped cache key —
+    /// located by reading only its metadata and statting its body, never the
+    /// body bytes. `Ok(None)` covers everything short of a clean locate: no
+    /// entry, unreadable or corrupt metadata, a missing body — the caller's
+    /// fallback then reads through `get`, which reports the same state the
+    /// retrieval path reports today. The default answers `None`: a cache
+    /// without a body file, an in-memory cache, locates nothing.
+    async fn locate(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<Option<LocatedRawResource>, ApplicationError> {
+        let _ = source;
+        Ok(None)
+    }
+}
+
+/// The `max_document_bytes` refusal `BudgetedRetriever` applies to a retrieved
+/// body and the source-view raw-cache path applies to a stat'ed one: the same
+/// check and the same message, so a body over the limit fails identically
+/// whether it was downloaded or only located.
+pub fn check_document_size_limit(
+    body_len: u64,
+    max_document_bytes: usize,
+) -> Result<(), ApplicationError> {
+    if body_len > max_document_bytes as u64 {
+        return Err(ApplicationError::ResourceLimitExceeded(format!(
+            "document is {body_len} bytes; limit is {max_document_bytes} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// The URL-level HTTP access check — `HttpAccessPolicy::parse_and_validate`'s
+/// scheme, credential and host rules — without DNS or any network I/O. The
+/// source-view raw-cache path applies it before a stored body may stand in for
+/// the origin; every `HttpAccessPolicy` implements it (see `security::http`).
+pub trait HttpUrlPolicy: Send + Sync {
+    fn check_url(&self, source: &DocumentSource) -> Result<(), ApplicationError>;
 }
 
 #[async_trait]

@@ -7,9 +7,10 @@ use serde_json::json;
 use crate::application::get_text_units::{EffectiveTextUnitKind, TextUnitDirection};
 use crate::application::ports::{
     ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, LexicalSearchHit,
-    OwnedStreamUnit, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
-    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex, SectionRow,
-    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
+    LocatedRawResource, OwnedStreamUnit, ParsedCacheKey, ParsedDocumentCache, Parser,
+    RawResourceCache, RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex,
+    SectionRow, SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey,
+    TextUnitStreamSummary,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSegmentation, DocumentSource, NormalizedDocumentHash,
@@ -97,6 +98,13 @@ impl RawResourceCache for ObservedRawResourceCache {
             "success": result.is_ok()
         }));
         result
+    }
+
+    async fn locate(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<Option<LocatedRawResource>, ApplicationError> {
+        self.inner.locate(source).await
     }
 }
 

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::application::ports::{
     ApplicationError, RawResourceCache, RetrievalOptions, RetrievedResource, Retriever,
+    scoped_cache_key,
 };
 use crate::domain::DocumentSource;
 
@@ -61,12 +62,5 @@ impl Retriever for RevalidatingHttpRetriever {
                 Ok(resource)
             }
         }
-    }
-}
-
-fn scoped_cache_key(source: &DocumentSource, auth_profile: Option<&str>) -> DocumentSource {
-    match auth_profile {
-        Some(profile) => DocumentSource(format!("auth-profile:{profile}\0{}", source.0)),
-        None => source.clone(),
     }
 }

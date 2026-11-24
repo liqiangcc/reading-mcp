@@ -6,6 +6,7 @@ use tokio::time::timeout;
 
 use crate::application::ports::{
     ApplicationError, Parser, RetrievalOptions, RetrievedResource, Retriever,
+    check_document_size_limit,
 };
 use crate::domain::{Document, DocumentSegmentation, DocumentSource, Section};
 
@@ -66,13 +67,7 @@ impl Retriever for BudgetedRetriever {
         options: &RetrievalOptions,
     ) -> Result<RetrievedResource, ApplicationError> {
         let resource = self.inner.retrieve(source, options).await?;
-        if resource.bytes.len() > self.max_document_bytes {
-            return Err(ApplicationError::ResourceLimitExceeded(format!(
-                "document is {} bytes; limit is {} bytes",
-                resource.bytes.len(),
-                self.max_document_bytes
-            )));
-        }
+        check_document_size_limit(resource.bytes.len() as u64, self.max_document_bytes)?;
         Ok(resource)
     }
 }

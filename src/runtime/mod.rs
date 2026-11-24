@@ -12,8 +12,8 @@ use crate::application::open_document::OpenDocumentUseCase;
 use crate::application::open_reading::OpenReadingUseCase;
 use crate::application::outline_reading::OutlineReadingUseCase;
 use crate::application::ports::{
-    DocumentRepository, OpenResultStore, ParsedDocumentCache, Parser, RawResourceCache, Retriever,
-    SearchIndex, SourcePolicy, TextUnitIndex,
+    DocumentRepository, HttpUrlPolicy, OpenResultStore, ParsedDocumentCache, Parser,
+    RawResourceCache, Retriever, SearchIndex, SourcePolicy, TextUnitIndex,
 };
 use crate::application::read_reading::ReadReadingUseCase;
 use crate::application::search_document::SearchDocumentUseCase;
@@ -40,6 +40,10 @@ pub use config::RuntimeConfig;
 
 struct RuntimeComponents {
     raw_cache: Arc<dyn RawResourceCache>,
+    /// The concrete cache `raw_cache` delegates to: `source_view`'s cached URL
+    /// path locates entries on the same instance the retriever stores through,
+    /// whether or not telemetry wraps the trait object.
+    file_raw_cache: Arc<FileRawResourceCache>,
     parsed_cache: Arc<dyn ParsedDocumentCache>,
     repository: Arc<dyn DocumentRepository>,
     text_unit_index: Arc<dyn TextUnitIndex>,
@@ -51,6 +55,7 @@ impl RuntimeComponents {
     fn observed(self) -> Self {
         Self {
             raw_cache: Arc::new(ObservedRawResourceCache::new(self.raw_cache)),
+            file_raw_cache: self.file_raw_cache,
             parsed_cache: Arc::new(ObservedParsedDocumentCache::new(self.parsed_cache)),
             repository: Arc::new(ObservedDocumentRepository::new(self.repository)),
             text_unit_index: Arc::new(ObservedTextUnitIndex::new(self.text_unit_index)),
@@ -71,6 +76,7 @@ pub fn build_server(
         PublicHttpAccessPolicy::https_only()
     });
     let source_http_policy: Arc<dyn SourcePolicy> = http_policy.clone();
+    let source_view_http_policy: Arc<dyn HttpUrlPolicy> = http_policy.clone();
     let retriever_http_policy: Arc<dyn HttpAccessPolicy> = http_policy;
 
     let file_source_policy =
@@ -227,7 +233,15 @@ pub fn build_server(
         .with_local_source_access(Arc::new(crate::retrieval::LocalFileSourceAccess::new(
             file_source_policy,
             config.resource_budget.max_document_bytes,
-        ))),
+        )))
+        // The same `FileRawResourceCache` instance the revalidating retriever
+        // stores through, the same HTTP policy (URL-level only), and the
+        // document size limit the budget enforces.
+        .with_url_source_cache(
+            components.file_raw_cache,
+            source_view_http_policy,
+            config.resource_budget.max_document_bytes,
+        ),
     );
     let open_document = Arc::new(
         OpenDocumentUseCase::with_text_unit_index(
@@ -353,9 +367,11 @@ fn build_state_components(
     if let Err(error) = open_results.prune_at_startup() {
         eprintln!("warning: failed to prune stale reading state: {error}");
     }
+    let file_raw_cache = Arc::new(FileRawResourceCache::new(&cache_root));
     Ok((
         RuntimeComponents {
-            raw_cache: Arc::new(FileRawResourceCache::new(&cache_root)),
+            raw_cache: file_raw_cache.clone(),
+            file_raw_cache,
             parsed_cache: Arc::new(FileParsedDocumentCache::new(&cache_root)),
             search_index: Arc::new(SqliteSearchIndex::new(
                 repository.clone(),

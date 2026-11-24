@@ -9,9 +9,9 @@ use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::light_sections::SectionTexts;
 use crate::application::locator_resolution::resolve_text_locator;
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, LocalSourceAccess, RenderedSourceView,
-    ResolvedLocalSource, RetrievalOptions, Retriever, SourceViewRenderOptions, SourceViewRenderer,
-    TextUnitIndex,
+    ApplicationError, DocumentRepository, HttpUrlPolicy, LocalSourceAccess, RawResourceCache,
+    RenderedSourceView, ResolvedLocalSource, RetrievalOptions, Retriever, SourceViewRenderOptions,
+    SourceViewRenderer, TextUnitIndex, check_document_size_limit, scoped_cache_key,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSource, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
@@ -93,6 +93,15 @@ pub struct SourceViewResult {
     pub view: RenderedSourceView,
 }
 
+/// The collaborators of the cached URL path: the raw cache the retriever
+/// stores through, the URL-level HTTP policy check, and the document size
+/// limit `READING_MCP_MAX_DOCUMENT_BYTES` configures.
+struct UrlSourceCache {
+    raw_cache: Arc<dyn RawResourceCache>,
+    http_policy: Arc<dyn HttpUrlPolicy>,
+    max_document_bytes: usize,
+}
+
 pub struct SourceViewUseCase {
     repository: Arc<dyn DocumentRepository>,
     retriever: Arc<dyn Retriever>,
@@ -100,6 +109,7 @@ pub struct SourceViewUseCase {
     limits: SourceViewLimits,
     text_unit_index: Option<Arc<dyn TextUnitIndex>>,
     local_sources: Option<Arc<dyn LocalSourceAccess>>,
+    url_cache: Option<UrlSourceCache>,
 }
 
 impl SourceViewUseCase {
@@ -116,6 +126,7 @@ impl SourceViewUseCase {
             limits,
             text_unit_index: None,
             local_sources: None,
+            url_cache: None,
         }
     }
 
@@ -130,6 +141,28 @@ impl SourceViewUseCase {
     /// staging a copy. Without it every source keeps the buffered path.
     pub fn with_local_source_access(mut self, resolver: Arc<dyn LocalSourceAccess>) -> Self {
         self.local_sources = Some(resolver);
+        self
+    }
+
+    /// The URL-source cache path: a document whose source is HTTP(S) is
+    /// rendered from its raw-cache body — the worker maps it and checks its
+    /// sha256 exactly as for a local file — without contacting the origin,
+    /// whenever a usable entry exists. `raw_cache` is the same cache the
+    /// retriever stores through, `http_policy` supplies only the URL-level
+    /// check (never DNS), and `max_document_bytes` is
+    /// `READING_MCP_MAX_DOCUMENT_BYTES`. Without it every URL source keeps the
+    /// buffered path.
+    pub fn with_url_source_cache(
+        mut self,
+        raw_cache: Arc<dyn RawResourceCache>,
+        http_policy: Arc<dyn HttpUrlPolicy>,
+        max_document_bytes: usize,
+    ) -> Self {
+        self.url_cache = Some(UrlSourceCache {
+            raw_cache,
+            http_policy,
+            max_document_bytes,
+        });
         self
     }
 
@@ -198,13 +231,18 @@ impl SourceViewUseCase {
 
         // A local source resolves to the file itself under the same policy the
         // retrieval chain enforces, so the worker maps it instead of the parent
-        // holding buffered and staged copies. Anything else keeps the buffered
-        // retrieval path; `None` resolver means the buffered path for all.
-        let local_file: Option<ResolvedLocalSource> = match &self.local_sources {
-            Some(resolver) if !document.source.is_http() => {
-                Some(resolver.resolve(&document.source).await?)
+        // holding buffered and staged copies. A URL source resolves to its
+        // raw-cache body when the stored entry is usable — the same mapped
+        // worker path without a network round trip. Anything else keeps the
+        // buffered retrieval path; `None` resolver means the buffered path for
+        // all.
+        let mapped_source: Option<ResolvedLocalSource> = if document.source.is_http() {
+            self.cached_url_source(&document).await?
+        } else {
+            match &self.local_sources {
+                Some(resolver) => Some(resolver.resolve(&document.source).await?),
+                None => None,
             }
-            _ => None,
         };
 
         let renderer = Arc::clone(&self.renderer);
@@ -217,7 +255,7 @@ impl SourceViewUseCase {
             max_image_bytes: self.limits.max_image_bytes,
             max_decoded_stream_bytes: self.limits.max_decoded_stream_bytes,
         };
-        let render = match local_file {
+        let render = match mapped_source {
             Some(resolved) => {
                 if resolved.final_source != document.source {
                     return Err(ApplicationError::StaleLocator(format!(
@@ -289,6 +327,38 @@ impl SourceViewUseCase {
             dpi,
             view: render,
         })
+    }
+
+    /// The raw-cache body of a URL document source, located without reading
+    /// the body and without any network I/O — the same key the retrieval chain
+    /// stores under, no auth profile — kept only while it may stand in for the
+    /// origin: clean metadata, `final_source` equal to the document's source,
+    /// a PDF media type, a body within `max_document_bytes`, and a source the
+    /// HTTP policy's URL-level check accepts. A body over the limit or a
+    /// refused URL fails the way the retrieval path fails; everything else
+    /// short of usable answers `None` and the caller falls back to today's
+    /// buffered retrieval unchanged.
+    async fn cached_url_source(
+        &self,
+        document: &Document,
+    ) -> Result<Option<ResolvedLocalSource>, ApplicationError> {
+        let Some(cache) = &self.url_cache else {
+            return Ok(None);
+        };
+        let key = scoped_cache_key(&document.source, None);
+        let Some(entry) = cache.raw_cache.locate(&key).await? else {
+            return Ok(None);
+        };
+        if entry.final_source != document.source || !entry.media_type.is_pdf() {
+            return Ok(None);
+        }
+        check_document_size_limit(entry.body_len, cache.max_document_bytes)?;
+        cache.http_policy.check_url(&document.source)?;
+        Ok(Some(ResolvedLocalSource {
+            path: entry.body_path,
+            final_source: entry.final_source,
+            media_type: entry.media_type,
+        }))
     }
 }
 

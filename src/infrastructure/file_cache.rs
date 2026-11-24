@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -8,7 +10,8 @@ use sha2::{Digest, Sha256};
 use tokio::fs;
 
 use crate::application::ports::{
-    ApplicationError, ParsedCacheKey, ParsedDocumentCache, RawResourceCache, RetrievedResource,
+    ApplicationError, LocatedRawResource, ParsedCacheKey, ParsedDocumentCache, RawResourceCache,
+    RetrievedResource,
 };
 use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
@@ -79,15 +82,43 @@ impl RawResourceCache for FileRawResourceCache {
             ApplicationError::CacheFailed(format!("failed to encode raw cache metadata: {error}"))
         })?;
 
-        // Write the body first and metadata last. A missing metadata file therefore
-        // means an interrupted entry is treated as a cache miss, not as valid data.
-        fs::write(&body_path, &resource.bytes)
-            .await
-            .map_err(|error| cache_io_error(&body_path, error))?;
-        fs::write(&metadata_path, metadata_bytes)
-            .await
-            .map_err(|error| cache_io_error(&metadata_path, error))?;
+        // Write each file to a unique temp name in the same directory, then
+        // rename it into place — body first, metadata last as today. A worker
+        // that mapped the old body keeps its inode and bytes, and a missing
+        // metadata file still means an interrupted entry is treated as a
+        // cache miss, not as valid data.
+        write_replacing(&body_path, &resource.bytes).await?;
+        write_replacing(&metadata_path, &metadata_bytes).await?;
         Ok(())
+    }
+
+    async fn locate(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<Option<LocatedRawResource>, ApplicationError> {
+        let key = digest_key(source.0.as_bytes());
+        let directory = self.directory();
+        let metadata_path = directory.join(format!("{key}.json"));
+        let body_path = directory.join(format!("{key}.bin"));
+
+        // Anything short of a clean locate is "no usable entry": the caller's
+        // fallback reads the entry through `get`, which reports a corrupt or
+        // unreadable file exactly as the retrieval path does.
+        let Ok(metadata_bytes) = fs::read(&metadata_path).await else {
+            return Ok(None);
+        };
+        let Ok(metadata) = serde_json::from_slice::<RawResourceMetadata>(&metadata_bytes) else {
+            return Ok(None);
+        };
+        let Ok(body) = fs::metadata(&body_path).await else {
+            return Ok(None);
+        };
+        Ok(Some(LocatedRawResource {
+            body_path,
+            final_source: DocumentSource(metadata.final_source),
+            media_type: MediaType(metadata.media_type),
+            body_len: body.len(),
+        }))
     }
 }
 
@@ -305,6 +336,35 @@ impl CachedLocation {
             native_location: self.native_location,
         }
     }
+}
+
+/// Writes `bytes` to a unique temporary file next to `target`, then renames it
+/// into place: a reader that still holds `target`'s old file keeps its inode
+/// and bytes. The temporary file is removed when either step fails.
+async fn write_replacing(target: &Path, bytes: &[u8]) -> Result<(), ApplicationError> {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("entry");
+    let temp = target.with_file_name(format!(
+        ".{name}.tmp-{}-{nanos:x}-{sequence}",
+        std::process::id()
+    ));
+    if let Err(error) = fs::write(&temp, bytes).await {
+        let _ = fs::remove_file(&temp).await;
+        return Err(cache_io_error(&temp, error));
+    }
+    if let Err(error) = fs::rename(&temp, target).await {
+        let _ = fs::remove_file(&temp).await;
+        return Err(cache_io_error(target, error));
+    }
+    Ok(())
 }
 
 fn parsed_key(key: &ParsedCacheKey) -> String {

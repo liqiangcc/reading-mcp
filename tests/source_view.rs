@@ -5,16 +5,21 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
 use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use reading_mcp::application::ports::{
-    DocumentRepository, RetrievalOptions, RetrievedResource, SourceViewRenderOptions,
-    SourceViewRenderer,
+    ApplicationError, DocumentRepository, LocalSourceAccess, ResolvedLocalSource, RetrievalOptions,
+    RetrievedResource, Retriever, SourcePolicy, SourceViewRenderOptions, SourceViewRenderer,
 };
 use reading_mcp::application::source_view::{
     GetSourceViewCommand, SourceViewLimits, SourceViewRepresentation, SourceViewUseCase,
 };
 use reading_mcp::domain::{DocumentSource, MediaType, SectionId, TextLocator};
 use reading_mcp::infrastructure::{InMemoryDocumentRepository, InMemoryTextUnitIndex};
-use reading_mcp::parsing::{ParserRouter, PdfSourceViewRenderer};
-use reading_mcp::retrieval::{FileRetriever, LocalFileSourcePolicy};
+use reading_mcp::parsing::{
+    FileProcessIsolatedPdfSourceViewRenderer, ParserRouter, PdfSourceViewRenderer,
+};
+use reading_mcp::retrieval::{
+    FileRetriever, HttpRetriever, HttpRetrieverConfig, LimitedFileRetriever, LocalFileSourceAccess,
+    LocalFileSourcePolicy,
+};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -189,6 +194,391 @@ async fn source_view_enforces_render_dimensions_before_allocating_image() {
             )
         )
     );
+}
+
+/// #272: the source-view local-file resolver refuses exactly what the retrieval
+/// chain refuses — the same error value, from the same shared checks.
+#[tokio::test]
+async fn local_source_access_refuses_what_the_retriever_refuses() {
+    let root = tempdir().expect("root directory should be created");
+    let outside = tempdir().expect("outside directory should be created");
+
+    let inside = root.path().join("inside.pdf");
+    tokio::fs::write(&inside, build_fidelity_pdf())
+        .await
+        .expect("inside fixture should be written");
+    let outside_pdf = outside.path().join("outside.pdf");
+    tokio::fs::write(&outside_pdf, build_fidelity_pdf())
+        .await
+        .expect("outside fixture should be written");
+
+    // Outside the roots: the policy answer today is the BlockedSource the open
+    // path reports; the resolver must give the identical error.
+    let access = LocalFileSourceAccess::new(
+        LocalFileSourcePolicy::allow_roots([root.path()]),
+        usize::MAX,
+    );
+    let outside_source = DocumentSource(outside_pdf.to_string_lossy().into_owned());
+    let policy_error = LocalFileSourcePolicy::allow_roots([root.path()])
+        .validate(&outside_source)
+        .await
+        .expect_err("a file outside the roots is refused");
+    let resolve_error = access
+        .resolve(&outside_source)
+        .await
+        .expect_err("the resolver refuses the same file");
+    assert_eq!(resolve_error, policy_error);
+
+    // A symlink inside the roots that resolves outside them: same refusal.
+    let link = root.path().join("link.pdf");
+    std::os::unix::fs::symlink(&outside_pdf, &link).expect("symlink should be created");
+    let link_source = DocumentSource(link.to_string_lossy().into_owned());
+    let policy_error = LocalFileSourcePolicy::allow_roots([root.path()])
+        .validate(&link_source)
+        .await
+        .expect_err("a symlink escaping the roots is refused");
+    let resolve_error = access
+        .resolve(&link_source)
+        .await
+        .expect_err("the resolver refuses the same symlink");
+    assert_eq!(resolve_error, policy_error);
+
+    // Over the size limit: the retriever's own error, verbatim.
+    let small_limit =
+        LocalFileSourceAccess::new(LocalFileSourcePolicy::allow_roots([root.path()]), 16);
+    let inside_source = DocumentSource(inside.to_string_lossy().into_owned());
+    let retriever_error = LimitedFileRetriever::new(16)
+        .retrieve(&inside_source, &RetrievalOptions::default())
+        .await
+        .expect_err("the retriever refuses an oversized file");
+    let resolve_error = small_limit
+        .resolve(&inside_source)
+        .await
+        .expect_err("the resolver refuses the same oversized file");
+    assert_eq!(resolve_error, retriever_error);
+
+    // And an allowed file resolves to its canonical path and `file://` source.
+    let access = LocalFileSourceAccess::new(
+        LocalFileSourcePolicy::allow_roots([root.path()]),
+        usize::MAX,
+    );
+    let resolved = access
+        .resolve(&inside_source)
+        .await
+        .expect("an allowed file resolves");
+    assert_eq!(
+        resolved.final_source,
+        DocumentSource(format!(
+            "file://{}",
+            inside.canonicalize().unwrap().to_string_lossy()
+        ))
+    );
+    let resolved = resolved.path;
+    assert_eq!(
+        resolved,
+        inside.canonicalize().expect("canonical inside path")
+    );
+}
+
+/// #272: `source_view` on a local PDF goes through the file worker against the
+/// file itself; rewriting the bytes under the same path stays fail-closed.
+#[tokio::test]
+async fn source_view_local_file_fails_closed_when_source_bytes_change() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let path = directory.path().join("fidelity.pdf");
+    let original = build_fidelity_pdf();
+    tokio::fs::write(&path, &original)
+        .await
+        .expect("PDF fixture should be written");
+
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    let opened = OpenDocumentUseCase::with_text_unit_index(
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
+        Arc::new(FileRetriever),
+        Arc::new(ParserRouter::phase4()),
+        repository.clone(),
+        index,
+        Arc::new(reading_mcp::infrastructure::InMemorySearchIndex::default()),
+    )
+    .execute(OpenDocumentCommand {
+        source: DocumentSource(path.to_string_lossy().into_owned()),
+        options: RetrievalOptions::default(),
+    })
+    .await
+    .expect("PDF should open");
+    let document = repository
+        .get(&opened.document_id)
+        .await
+        .expect("repository read")
+        .expect("document should be persisted");
+    let locator =
+        reading_mcp::domain::TextLocator::for_section(&document, &document.root_sections[1]);
+
+    let mut changed = original;
+    changed.extend_from_slice(b"changed source bytes");
+    tokio::fs::write(&path, changed)
+        .await
+        .expect("changed source should be written");
+
+    let renderer = FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_reading-mcp")),
+        std::time::Duration::from_secs(30),
+    );
+    let error = SourceViewUseCase::new(
+        repository,
+        Arc::new(FileRetriever),
+        Arc::new(renderer),
+        SourceViewLimits::default(),
+    )
+    .with_local_source_access(Arc::new(LocalFileSourceAccess::new(
+        LocalFileSourcePolicy::allow_roots([directory.path()]),
+        usize::MAX,
+    )))
+    .execute(GetSourceViewCommand {
+        document_id: opened.document_id,
+        target_locator: locator,
+        representation: SourceViewRepresentation::Original,
+        dpi: None,
+    })
+    .await
+    .expect_err("changed source must not render through an old locator");
+    assert!(matches!(error, ApplicationError::StaleLocator(_)));
+}
+
+/// #272: a worker that saw different bytes than the expected `content_hash`
+/// reports `source_sha256` and stops; the parent answers `StaleLocator` and
+/// returns no PNG.
+#[test]
+fn isolated_worker_hash_mismatch_answers_stale_locator() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let path = directory.path().join("fidelity.pdf");
+    std::fs::write(&path, build_fidelity_pdf()).expect("PDF fixture should be written");
+
+    let renderer = FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_reading-mcp")),
+        std::time::Duration::from_secs(30),
+    );
+    let error = renderer
+        .render_local_file(
+            &path,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            MediaType("application/pdf".into()),
+            1,
+            SourceViewRenderOptions {
+                dpi: 72,
+                max_pages: 2_000,
+                max_width: 2_400,
+                max_height: 3_200,
+                max_pixels: 4_000_000,
+                max_image_bytes: 8 * 1024 * 1024,
+                max_decoded_stream_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .expect_err("a hash-mismatched file must not render");
+    assert!(
+        matches!(error, ApplicationError::StaleLocator(_)),
+        "hash mismatch stays stale: {error:?}"
+    );
+}
+
+/// #272: a worker that reports no `source_sha256` proves nothing about identity;
+/// the missing field is a worker failure, never a pass.
+#[cfg(unix)]
+#[test]
+fn isolated_renderer_fails_a_worker_that_omits_source_sha256() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("worker directory should be created");
+    let worker = directory.path().join("no-hash-worker.sh");
+    // Worker argv: flag input output metadata … — write metadata without the hash.
+    std::fs::write(
+        &worker,
+        "#!/bin/sh\nprintf '{\"width\":1,\"height\":1,\"page_count\":1,\"image_bytes\":1}' > \"$4\"\nprintf x > \"$3\"\n",
+    )
+    .expect("worker script should be written");
+    let mut permissions = std::fs::metadata(&worker)
+        .expect("worker metadata should be available")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&worker, permissions).expect("worker should be executable");
+
+    let renderer = FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+        worker,
+        std::time::Duration::from_secs(5),
+    );
+    let error = renderer
+        .render(
+            build_fidelity_pdf(),
+            MediaType("application/pdf".into()),
+            1,
+            SourceViewRenderOptions {
+                dpi: 72,
+                max_pages: 10,
+                max_width: 1_000,
+                max_height: 1_000,
+                max_pixels: 1_000_000,
+                max_image_bytes: 1024 * 1024,
+                max_decoded_stream_bytes: 1024 * 1024,
+            },
+        )
+        .expect_err("metadata without source_sha256 must not pass");
+    assert!(
+        matches!(error, ApplicationError::SourceViewFailed(_)),
+        "missing source_sha256 is a worker failure: {error:?}"
+    );
+}
+
+/// #272: a URL source keeps the buffered path — the retriever's bytes staged —
+/// and renders exactly as before, even with the local-file resolver configured.
+#[tokio::test]
+async fn source_view_url_source_still_renders_through_the_staged_path() {
+    let (endpoint, server) = spawn_pdf_http_fixture().await;
+    let source = DocumentSource(format!("http://example.test:{}/doc.pdf", endpoint.port()));
+
+    let retriever: Arc<dyn Retriever> = Arc::new(HttpRetriever::new(
+        Arc::new(TestHttpPolicy { endpoint }),
+        HttpRetrieverConfig::default(),
+    ));
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    let opened = OpenDocumentUseCase::with_text_unit_index(
+        Arc::new(AllowAllSourcePolicy),
+        retriever.clone(),
+        Arc::new(ParserRouter::phase4()),
+        repository.clone(),
+        index,
+        Arc::new(reading_mcp::infrastructure::InMemorySearchIndex::default()),
+    )
+    .execute(OpenDocumentCommand {
+        source: source.clone(),
+        options: RetrievalOptions::default(),
+    })
+    .await
+    .expect("PDF should open over the fixture endpoint");
+    let document = repository
+        .get(&opened.document_id)
+        .await
+        .expect("repository read")
+        .expect("document should be persisted");
+    let locator =
+        reading_mcp::domain::TextLocator::for_section(&document, &document.root_sections[0]);
+
+    // The resolver fails loudly if a URL source ever reaches it.
+    let renderer = FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_reading-mcp")),
+        std::time::Duration::from_secs(30),
+    );
+    let result = SourceViewUseCase::new(
+        repository,
+        retriever,
+        Arc::new(renderer),
+        SourceViewLimits::default(),
+    )
+    .with_local_source_access(Arc::new(RefusingLocalSourceAccess))
+    .execute(GetSourceViewCommand {
+        document_id: opened.document_id,
+        target_locator: locator,
+        representation: SourceViewRepresentation::Original,
+        dpi: Some(72),
+    })
+    .await
+    .expect("a URL source renders through the buffered path");
+
+    assert_eq!(result.view.media_type.0, "image/png");
+    assert_eq!(&result.view.bytes[..8], b"\x89PNG\r\n\x1a\n");
+    server.abort();
+}
+
+struct AllowAllSourcePolicy;
+
+#[async_trait::async_trait]
+impl SourcePolicy for AllowAllSourcePolicy {
+    async fn validate(&self, _source: &DocumentSource) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+}
+
+struct RefusingLocalSourceAccess;
+
+#[async_trait::async_trait]
+impl LocalSourceAccess for RefusingLocalSourceAccess {
+    async fn resolve(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<ResolvedLocalSource, ApplicationError> {
+        Err(ApplicationError::SourceViewFailed(format!(
+            "the local-file resolver must never see {source:?}"
+        )))
+    }
+}
+
+struct TestHttpPolicy {
+    endpoint: std::net::SocketAddr,
+}
+
+#[async_trait::async_trait]
+impl reading_mcp::security::HttpAccessPolicy for TestHttpPolicy {
+    fn parse_and_validate(&self, source: &DocumentSource) -> Result<url::Url, ApplicationError> {
+        let url = url::Url::parse(&source.0)
+            .map_err(|error| ApplicationError::InvalidRequest(error.to_string()))?;
+        self.validate_url(&url)?;
+        Ok(url)
+    }
+
+    fn validate_url(&self, url: &url::Url) -> Result<(), ApplicationError> {
+        if url.scheme() != "http" {
+            return Err(ApplicationError::BlockedSource(
+                "test policy only allows HTTP".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn resolve_public_endpoint(
+        &self,
+        url: &url::Url,
+    ) -> Result<std::net::SocketAddr, ApplicationError> {
+        self.validate_url(url)?;
+        Ok(std::net::SocketAddr::new(
+            self.endpoint.ip(),
+            url.port().unwrap_or(self.endpoint.port()),
+        ))
+    }
+}
+
+/// The `spawn_http_fixture` pattern of the HTTP retrieval tests, serving the
+/// PDF fixture bytes so the URL-source path is exercised end to end.
+async fn spawn_pdf_http_fixture() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fixture listener should bind");
+    let address = listener.local_addr().expect("fixture address should exist");
+    let body = build_fidelity_pdf();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 4096];
+                let Ok(_read) = socket.read(&mut buffer).await else {
+                    return;
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let mut response = response.into_bytes();
+                response.extend_from_slice(&body);
+                let _ = socket.write_all(&response).await;
+            });
+        }
+    });
+    (address, handle)
 }
 
 fn build_fidelity_pdf() -> Vec<u8> {

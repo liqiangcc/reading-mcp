@@ -15,6 +15,6 @@ pub use landing::{
     RULE_CITATION_PDF_URL, RULE_OPENREVIEW_FORUM, ResolutionFailure, ResolvedTarget,
     extract_citation_pdf_url, known_landing_target,
 };
-pub use limited_file::LimitedFileRetriever;
+pub use limited_file::{LimitedFileRetriever, LocalFileSourceAccess};
 pub use revalidating_http::RevalidatingHttpRetriever;
 pub use router::{RetrieverRouter, SourcePolicyRouter};

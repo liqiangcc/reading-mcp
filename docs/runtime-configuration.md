@@ -228,6 +228,9 @@ READING_MCP_RESOLVE_LANDING_PAGES=off   关闭；行为与未引入解析时逐�
 | `READING_MCP_SEARCH_THREADS` | `min(available_parallelism, 4)` | 单个文档搜索扫描的线程数，1 表示串行 |
 | `READING_MCP_SCAN_PREWARM` | `1` | 打开文档后在后台预热上述 section 文本缓存；`0`/`off` 关闭 |
 
+source-view worker 对本地文件源直接只读映射（memory-map）原始 PDF，并自行校验其 sha256；
+其余来源仍按今天的方式把字节暂存到私有临时目录。
+
 `READING_MCP_SEARCH_CACHE_MIB` 只限制 lexical 搜索扫描的文本缓存：缓存只保留最近一次搜索的那个文档，
 按 stored document 的 `doc_key` 与 normalized hash 校验，重新 ingest、替换 segmentation 或删除文档都会失效。
 超过上限的文档不缓存，按每次读取一个 section 的方式扫描，结果不变。

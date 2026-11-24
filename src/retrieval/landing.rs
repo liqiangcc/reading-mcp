@@ -565,8 +565,7 @@ impl Retriever for LandingPageRetriever {
 }
 
 fn is_http_source(source: &DocumentSource) -> bool {
-    let value = source.0.trim().to_ascii_lowercase();
-    value.starts_with("https://") || value.starts_with("http://")
+    source.is_http()
 }
 
 #[cfg(test)]

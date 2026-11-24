@@ -41,11 +41,13 @@ tools.
 The tool renders one locator-bound page per request. The runtime bounds PDF
 object depth, decoded stream bytes, decoded image pixels, page count, DPI,
 output dimensions, output pixels, encoded image bytes, and render-process
-wall-clock time. Production rendering runs in a separate worker process. Input
-PDF bytes are staged in a private temporary directory instead of being streamed
-through a potentially back-pressured child stdin pipe; worker input, image,
-metadata, and diagnostics are file-backed, and an over-deadline worker is
-terminated with `kill + wait`.
+wall-clock time. Production rendering runs in a separate worker process. For a
+document whose source is a local file, the worker maps the original PDF
+read-only and verifies its sha256 itself; other sources' PDF bytes are staged
+in a private temporary directory instead of being streamed through a
+potentially back-pressured child stdin pipe; worker input, image, metadata, and
+diagnostics are file-backed, and an over-deadline worker is terminated with
+`kill + wait`.
 
 Defaults are deliberately suitable for review images rather than bulk PDF export
 and can be configured with the `READING_MCP_SOURCE_VIEW_*` variables documented

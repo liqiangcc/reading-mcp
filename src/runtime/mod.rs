@@ -73,10 +73,10 @@ pub fn build_server(
     let source_http_policy: Arc<dyn SourcePolicy> = http_policy.clone();
     let retriever_http_policy: Arc<dyn HttpAccessPolicy> = http_policy;
 
+    let file_source_policy =
+        crate::retrieval::LocalFileSourcePolicy::allow_roots(config.local_roots.clone());
     let source_policy: Arc<dyn SourcePolicy> = Arc::new(SourcePolicyRouter::new(
-        Arc::new(crate::retrieval::LocalFileSourcePolicy::allow_roots(
-            config.local_roots.clone(),
-        )),
+        Arc::new(file_source_policy.clone()),
         source_http_policy,
     ));
 
@@ -223,7 +223,11 @@ pub fn build_server(
             source_view_renderer,
             config.source_view,
         )
-        .with_text_unit_index(text_unit_index.clone()),
+        .with_text_unit_index(text_unit_index.clone())
+        .with_local_source_access(Arc::new(crate::retrieval::LocalFileSourceAccess::new(
+            file_source_policy,
+            config.resource_budget.max_document_bytes,
+        ))),
     );
     let open_document = Arc::new(
         OpenDocumentUseCase::with_text_unit_index(

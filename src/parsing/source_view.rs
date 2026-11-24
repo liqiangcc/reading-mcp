@@ -17,8 +17,9 @@ use pdf_render::pdf_syntax::object::dict::keys::{
 };
 use pdf_render::pdf_syntax::object::{Dict, Name, ObjectIdentifier, Stream};
 use pdf_render::pdf_syntax::page::{Page, Resources};
-use pdf_render::pdf_syntax::{self, LoadPdfError, Pdf, PdfLoadLimits};
+use pdf_render::pdf_syntax::{self, LoadPdfError, Pdf, PdfData, PdfLoadLimits};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::application::ports::{
     ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
@@ -136,26 +137,21 @@ pub(crate) fn report_worker_limit(error: ApplicationError) -> Box<dyn std::error
 #[derive(Default)]
 pub struct PdfSourceViewRenderer;
 
-impl SourceViewRenderer for PdfSourceViewRenderer {
-    fn render(
+impl PdfSourceViewRenderer {
+    /// Renders page `page` of `data` — anything `PdfData` accepts: the staged
+    /// `Vec<u8>` of the buffered path or the read-only `memmap2` map of a local
+    /// file. The render path itself is identical either way.
+    pub(crate) fn render_data(
         &self,
-        bytes: Vec<u8>,
-        media_type: MediaType,
+        data: impl Into<PdfData>,
         page: u32,
         options: SourceViewRenderOptions,
     ) -> Result<RenderedSourceView, ApplicationError> {
-        if !media_type.is_pdf() {
-            return Err(ApplicationError::SourceViewFailed(format!(
-                "unsupported source-view media type {}",
-                media_type.0
-            )));
-        }
-
         let load_limits = PdfLoadLimits::new()
             .max_object_depth(64)
             .max_image_pixels(options.max_pixels)
             .max_stream_bytes(options.max_decoded_stream_bytes);
-        let pdf = Pdf::new_with_limits(bytes, load_limits).map_err(|error| match error {
+        let pdf = Pdf::new_with_limits(data, load_limits).map_err(|error| match error {
             // `TooLarge` is the only `LoadPdfError` that is a limit rejection
             // (the parser's object/page caps); `Invalid` and `Decryption` mean
             // a corrupt or encrypted PDF and stay `internal`.
@@ -332,6 +328,69 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
             height: u32::from(pixmap.height()),
             page_count,
         })
+    }
+}
+
+impl SourceViewRenderer for PdfSourceViewRenderer {
+    fn render(
+        &self,
+        bytes: Vec<u8>,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError> {
+        if !media_type.is_pdf() {
+            return Err(ApplicationError::SourceViewFailed(format!(
+                "unsupported source-view media type {}",
+                media_type.0
+            )));
+        }
+
+        self.render_data(bytes, page, options)
+    }
+
+    fn render_local_file(
+        &self,
+        path: &Path,
+        expected_source_sha256: &str,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError> {
+        if !media_type.is_pdf() {
+            return Err(ApplicationError::SourceViewFailed(format!(
+                "unsupported source-view media type {}",
+                media_type.0
+            )));
+        }
+
+        let file = fs::File::open(path).map_err(|error| {
+            ApplicationError::SourceViewFailed(format!(
+                "failed to open local source-view file {}: {error}",
+                path.display()
+            ))
+        })?;
+        // Read-only mapping: the kernel can drop these clean file-backed pages
+        // under memory pressure instead of swapping a heap copy. Safe because
+        // the map is read-only; a writer truncating the file underneath us
+        // would fault the worker rather than serve wrong bytes.
+        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|error| {
+            ApplicationError::SourceViewFailed(format!(
+                "failed to map local source-view file {}: {error}",
+                path.display()
+            ))
+        })?;
+        // Residual window: a file modified in place between this hash and the
+        // parser's lazy reads below can produce one render of mixed bytes — the
+        // map holds no snapshot. The next call hashes the file again and fails
+        // closed.
+        let actual = format!("sha256:{:x}", Sha256::digest(&map[..]));
+        if actual != expected_source_sha256 {
+            return Err(ApplicationError::StaleLocator(format!(
+                "raw content hash changed from {expected_source_sha256} to {actual}"
+            )));
+        }
+        self.render_data(std::sync::Arc::new(map), page, options)
     }
 }
 

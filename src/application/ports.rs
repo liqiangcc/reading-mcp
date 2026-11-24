@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sha2::Digest;
 use thiserror::Error;
 
 use crate::domain::{
@@ -338,6 +339,59 @@ pub trait SourceViewRenderer: Send + Sync {
         page: u32,
         options: SourceViewRenderOptions,
     ) -> Result<RenderedSourceView, ApplicationError>;
+
+    /// Renders `path`, a local file the renderer reads itself instead of being
+    /// handed staged bytes. `expected_source_sha256` is the document's stored
+    /// `content_hash`: the renderer must verify the bytes it renders against it
+    /// and answer `StaleLocator` on a mismatch — never a render of other bytes.
+    /// The default reads the file and delegates to [`Self::render`]; renderers
+    /// with an out-of-process worker hand the path to the worker instead.
+    fn render_local_file(
+        &self,
+        path: &std::path::Path,
+        expected_source_sha256: &str,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError> {
+        let bytes = std::fs::read(path).map_err(|error| {
+            ApplicationError::SourceViewFailed(format!(
+                "failed to read local source-view file {}: {error}",
+                path.display()
+            ))
+        })?;
+        let actual = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+        if actual != expected_source_sha256 {
+            return Err(ApplicationError::StaleLocator(format!(
+                "raw content hash changed from {expected_source_sha256} to {actual}"
+            )));
+        }
+        self.render(bytes, media_type, page, options)
+    }
+}
+
+/// A local-file document source resolved under the local-file policy to the
+/// canonical path a source-view worker reads itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedLocalSource {
+    /// The canonical file path handed to the worker.
+    pub path: std::path::PathBuf,
+    /// `file://{path}`, exactly what `FileRetriever` reports as `final_source`.
+    pub final_source: DocumentSource,
+    /// The media type the file retriever reports for the same path.
+    pub media_type: MediaType,
+}
+
+/// Resolves a local-file `DocumentSource` to the canonical on-disk path a
+/// source-view worker reads, under the same policy the retrieval chain
+/// enforces — allowed roots, symlink canonicalization, and the document size
+/// limit — without reading the file.
+#[async_trait]
+pub trait LocalSourceAccess: Send + Sync {
+    async fn resolve(
+        &self,
+        source: &DocumentSource,
+    ) -> Result<ResolvedLocalSource, ApplicationError>;
 }
 
 pub trait DocumentReliabilityInspector: Send + Sync {

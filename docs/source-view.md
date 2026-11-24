@@ -43,11 +43,14 @@ object depth, decoded stream bytes, decoded image pixels, page count, DPI,
 output dimensions, output pixels, encoded image bytes, and render-process
 wall-clock time. Production rendering runs in a separate worker process. For a
 document whose source is a local file, the worker maps the original PDF
-read-only and verifies its sha256 itself; other sources' PDF bytes are staged
-in a private temporary directory instead of being streamed through a
-potentially back-pressured child stdin pipe; worker input, image, metadata, and
-diagnostics are file-backed, and an over-deadline worker is terminated with
-`kill + wait`.
+read-only and verifies its sha256 itself; a URL source whose raw-cache entry
+still holds its bytes renders the same way — the worker maps the stored body
+and checks its sha256, without contacting the origin — while a URL source
+without a usable cache entry keeps the revalidating retrieval path; other
+sources' PDF bytes are staged in a private temporary directory instead of
+being streamed through a potentially back-pressured child stdin pipe; worker
+input, image, metadata, and diagnostics are file-backed, and an over-deadline
+worker is terminated with `kill + wait`.
 
 Defaults are deliberately suitable for review images rather than bulk PDF export
 and can be configured with the `READING_MCP_SOURCE_VIEW_*` variables documented

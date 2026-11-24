@@ -11,16 +11,25 @@
 #[path = "support/v2_mcp.rs"]
 mod v2_mcp;
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
+use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
 use reading_mcp::application::ports::{
-    ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
-    SourceViewRenderOptions, SourceViewRenderer,
+    ApplicationError, RawResourceCache, RenderedSourceView, RetrievalOptions, RetrievedResource,
+    Retriever, SourcePolicy, SourceViewLimitDetail, SourceViewLimitKind, SourceViewRenderOptions,
+    SourceViewRenderer, TextUnitIndex,
 };
-use reading_mcp::domain::{MediaType, NORMALIZED_DOCUMENT_HASH_VERSION};
-use reading_mcp::parsing::FileProcessIsolatedPdfSourceViewRenderer;
+use reading_mcp::application::short_handle::handle_checksum;
+use reading_mcp::domain::{DocumentSource, MediaType, NORMALIZED_DOCUMENT_HASH_VERSION};
+use reading_mcp::infrastructure::{
+    FileRawResourceCache, SqliteDocumentRepository, SqliteOpenResultStore, SqliteSearchIndex,
+    SqliteTextUnitIndex,
+};
+use reading_mcp::parsing::{FileProcessIsolatedPdfSourceViewRenderer, ParserRouter};
 use serde_json::json;
 
 use v2_mcp::{
@@ -141,6 +150,120 @@ async fn v2_stdio_source_view_on_rewritten_local_pdf_answers_stale_handle() {
         .cancel()
         .await
         .expect("MCP process should close cleanly");
+}
+
+/// #274: a URL source whose raw-cache body was rewritten under the same key
+/// answers `stale_handle` through the real server — the worker maps the cache
+/// file, hashes it, and the parent fails closed instead of falling back to the
+/// network. The stdio binary refuses loopback endpoints, so the state dir is
+/// seeded in-process: the document through `OpenDocumentUseCase` on the real
+/// sqlite stores, its raw-cache entry through `FileRawResourceCache::put`,
+/// then the body file rewritten. The document handle is `d<doc_key>~<checksum>`
+/// — `doc_key` from the seeded index, the checksum through `handle_checksum`.
+#[tokio::test]
+async fn v2_stdio_source_view_on_rewritten_url_cache_body_answers_stale_handle() {
+    let root = tempfile::tempdir().expect("source root should be created");
+    let state = tempfile::tempdir().expect("state directory should be created");
+    let database = state.path().join("reading-mcp.sqlite");
+
+    let source = DocumentSource("https://example.test/doc.pdf".into());
+    let mut bytes = build_pdf();
+    let resource = RetrievedResource {
+        source: source.clone(),
+        final_source: source.clone(),
+        media_type: MediaType("application/pdf".into()),
+        bytes: bytes.clone(),
+        etag: Some("\"pdf-v1\"".into()),
+        last_modified: None,
+        metadata: BTreeMap::new(),
+    };
+    let repository =
+        Arc::new(SqliteDocumentRepository::open(&database).expect("repository should open"));
+    let index = Arc::new(SqliteTextUnitIndex::open(&database).expect("index should open"));
+    let open_results =
+        Arc::new(SqliteOpenResultStore::open(&database).expect("open result store should open"));
+    let search = Arc::new(SqliteSearchIndex::new(repository.clone(), index.clone()));
+    // The store's startup prune deletes every document no open result names, so the seed must
+    // leave the `open_results_v1` row a real open leaves.
+    let opened = OpenDocumentUseCase::with_text_unit_index(
+        Arc::new(SeededSourcePolicy),
+        Arc::new(SeededRetriever(resource.clone())),
+        Arc::new(ParserRouter::phase4()),
+        repository.clone(),
+        index.clone(),
+        search,
+    )
+    .with_open_result_store(open_results, "seeded|pdf-layout=off|pdf-text=test".into())
+    .execute(OpenDocumentCommand {
+        source: source.clone(),
+        options: RetrievalOptions::default(),
+    })
+    .await
+    .expect("the seed document should open");
+
+    let cache = FileRawResourceCache::new(state.path().join("cache"));
+    cache
+        .put(&source, resource)
+        .await
+        .expect("seed cache entry should be written");
+    let body = std::fs::read_dir(state.path().join("cache").join("raw"))
+        .expect("raw cache directory should exist")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "bin"))
+        .expect("the seeded body file");
+    bytes.extend_from_slice(b"rewritten cache body");
+    std::fs::write(&body, &bytes).expect("cache body should be rewritten");
+
+    let doc_key = index
+        .document_key(&opened.document_id)
+        .await
+        .expect("document key should read")
+        .expect("the seeded document has a key");
+    let handle = format!(
+        "d{doc_key}~{}",
+        handle_checksum(
+            &opened.document_id,
+            &opened.normalized_document_hash,
+            &MediaType("application/pdf".into()),
+        )
+    );
+
+    let client = start_client(root.path(), state.path()).await;
+    let result = call(&client, "source_view", json!({ "at": handle })).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "stale_handle", "{error}");
+
+    client
+        .cancel()
+        .await
+        .expect("MCP process should close cleanly");
+}
+
+/// A source policy that accepts the seeded URL — the stdio binary's own policy
+/// is what `source_view` consults, not the seeding path's.
+struct SeededSourcePolicy;
+
+#[async_trait::async_trait]
+impl SourcePolicy for SeededSourcePolicy {
+    async fn validate(&self, _source: &DocumentSource) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+}
+
+/// A retriever that serves the seeded URL resource — the same role the
+/// counting fixture plays in the in-process tests.
+struct SeededRetriever(RetrievedResource);
+
+#[async_trait::async_trait]
+impl Retriever for SeededRetriever {
+    async fn retrieve(
+        &self,
+        _source: &DocumentSource,
+        _options: &RetrievalOptions,
+    ) -> Result<RetrievedResource, ApplicationError> {
+        Ok(self.0.clone())
+    }
 }
 
 /// #272: a local path replaced by a symlink that resolves outside the allowed

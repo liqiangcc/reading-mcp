@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::net::lookup_host;
 use url::Url;
 
-use crate::application::ports::{ApplicationError, SourcePolicy};
+use crate::application::ports::{ApplicationError, HttpUrlPolicy, SourcePolicy};
 use crate::domain::DocumentSource;
 
 #[async_trait]
@@ -117,6 +117,14 @@ impl HttpAccessPolicy for PublicHttpAccessPolicy {
         selected.ok_or_else(|| {
             ApplicationError::RetrievalFailed(format!("DNS lookup returned no address for {host}"))
         })
+    }
+}
+
+/// Every HTTP access policy is also the URL-level policy the source-view
+/// raw-cache path consults: `parse_and_validate` decides without DNS.
+impl<T: HttpAccessPolicy> HttpUrlPolicy for T {
+    fn check_url(&self, source: &DocumentSource) -> Result<(), ApplicationError> {
+        self.parse_and_validate(source).map(|_| ())
     }
 }
 

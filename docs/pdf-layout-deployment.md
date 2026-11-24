@@ -21,6 +21,8 @@ setup/smoke 脚本和本文，不把 Python 环境伪装成 server 二进制的�
 原页 renderer 使用原始 PDF；不从 canonical text 或 OCR 内容重建页面。
 现有线上 `READING_MCP_SOURCE_VIEW_MAX_PIXELS=16000000` 是已发现的环境配置，
 不是所有主机的新默认值。保留 source-view 各项限制和显式超预算失败。
+两个原页 renderer 现在都会拒绝绘制超像素上限嵌入图像的页面（应答
+`too_large`），不再渲染出缺图的页面。
 
 ## 身份、范围与回滚
 

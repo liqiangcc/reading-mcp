@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -9,6 +10,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use image::{ImageFormat, RgbaImage};
 use pdf_render::pdf_interpret::{InterpreterSettings, InterpreterWarning};
+use pdf_render::pdf_syntax::content::TypedIter;
+use pdf_render::pdf_syntax::content::ops::TypedInstruction;
+use pdf_render::pdf_syntax::object::dict::keys::{
+    FORM, H, HEIGHT, IMAGE, MASK, RESOURCES, SMASK, SMASK_IN_DATA, SUBTYPE, W, WIDTH,
+};
+use pdf_render::pdf_syntax::object::{Dict, Name, ObjectIdentifier, Stream};
+use pdf_render::pdf_syntax::page::{Page, Resources};
 use pdf_render::pdf_syntax::{self, LoadPdfError, Pdf, PdfLoadLimits};
 use serde::{Deserialize, Serialize};
 
@@ -226,6 +234,24 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
             ));
         }
 
+        // A drawn embedded image over `max_pixels` reaches the interpreter as
+        // the generic `ImageDecodeFailure` warning — indistinguishable from a
+        // corrupt image — so the render pass alone cannot tell "over the limit"
+        // from "broken". Check every drawn image's `Width × Height` against the
+        // same bound `pdf-syntax` applies in `decoded_image` before rendering:
+        // the first oversized one rejects the page instead of silently missing
+        // from the PNG (for a scanned page, the image *is* the page).
+        if let Some(measured) = first_oversized_drawn_image(source_page, options.max_pixels) {
+            return Err(ApplicationError::SourceViewLimitExceeded(
+                SourceViewLimitDetail::new(
+                    page,
+                    SourceViewLimitKind::EmbeddedImagePixels,
+                    Some(measured),
+                    Some(options.max_pixels),
+                ),
+            ));
+        }
+
         // A stream over `max_decoded_stream_bytes` reaches the interpreter as
         // the typed `StreamTooLarge` warning, never as a render error, so the
         // sink is the only place the rejection is observable — capture the
@@ -307,6 +333,176 @@ impl SourceViewRenderer for PdfSourceViewRenderer {
             page_count,
         })
     }
+}
+
+/// Form-XObject descent bound for the drawn-image walk. `pdf-interpret` 0.5.8
+/// has no dedicated form-nesting cap: `interpret` recurses through
+/// `draw_form_xobject` for every `Do` until the operator stream ends, so the
+/// walk borrows the object-depth bound this renderer already configures on
+/// `PdfLoadLimits` (`.max_object_depth(64)` above). A form nested deeper is
+/// left for the interpreter, whose decode path keeps today's behaviour.
+const DRAWN_IMAGE_MAX_FORM_DEPTH: u32 = 64;
+
+/// Walks the content a page will draw — the page's own operators and, through
+/// each `Do`, the form XObjects the interpreter descends into — and returns the
+/// `Width × Height` of the first drawn image stream over `max_pixels`, the same
+/// bound `pdf-syntax` enforces in `Stream::decoded_image` when the interpreter
+/// later decodes it. `None` means every drawn image fits (or the page has no
+/// decodable content stream, in which case rendering behaves as it does today).
+///
+/// The walk follows `Do` operators, never the resource dictionary, so an image
+/// a shared `/Resources` names but the page never draws cannot reject the page.
+/// It reads only dictionaries and content streams — image data is never
+/// decoded — and skips any content branch it cannot decode or parse.
+///
+/// What the walk does not see; an oversized image reached only through these
+/// paths still drops silently the way it does today:
+/// - tiling patterns;
+/// - Type3 glyph procedures;
+/// - soft-mask groups in an ExtGState;
+/// - annotation appearance streams — `pdf-render` does draw them
+///   (`interpret_page` resolves `/AP /N` forms when `render_annotations` is on,
+///   which `InterpreterSettings::default()` enables), but they sit outside the
+///   page's content walk;
+/// - a form drawn a second time under different ancestor resources:
+///   `walked_forms` dedupes by object reference, and a form without its own
+///   `/Resources` resolves names through the chain in effect at the `Do` that
+///   first reached it, so an image reachable only under a later chain is
+///   never measured.
+///
+/// Inline images (`BI … ID … EI`) are skipped for a different reason:
+/// pdf-syntax 0.5.6 builds an inline image's `Stream` on
+/// `ReaderContext::dummy_in_content_stream`, whose `PdfLoadLimits::default()`
+/// carries no caps, so `decoded_image` never applies `max_image_pixels` to it.
+/// Checking an inline image here would reject a page the interpreter draws in
+/// full.
+fn first_oversized_drawn_image(page: &Page<'_>, max_pixels: u64) -> Option<u64> {
+    let mut walk = DrawnImageWalk::default();
+    walk.content(page.page_stream()?, page.resources(), max_pixels, 0)
+}
+
+#[derive(Default)]
+struct DrawnImageWalk {
+    /// Each form's content is walked once, keyed by object reference; the set
+    /// also breaks form cycles (`/Fm0 Do` inside `/Fm0`'s own stream).
+    walked_forms: HashSet<ObjectIdentifier>,
+    /// Each image is measured once, keyed by object reference — a page can
+    /// draw thousands of images.
+    checked_images: HashSet<ObjectIdentifier>,
+}
+
+impl DrawnImageWalk {
+    fn content(
+        &mut self,
+        content: &[u8],
+        resources: &Resources<'_>,
+        max_pixels: u64,
+        depth: u32,
+    ) -> Option<u64> {
+        for instruction in TypedIter::new(content) {
+            let TypedInstruction::XObject(x_object) = instruction else {
+                continue;
+            };
+            // `get_x_object` resolves the name exactly the way the interpreter
+            // does: the level's own `/XObject` dict, then the parent chain.
+            let Some(stream) = resources.get_x_object(x_object.0) else {
+                continue;
+            };
+            let dict = stream.dict();
+            match dict.get::<Name>(SUBTYPE).as_deref() {
+                Some(IMAGE) => {
+                    if let Some(obj_id) = stream.obj_id()
+                        && !self.checked_images.insert(obj_id)
+                    {
+                        continue;
+                    }
+                    if let Some(pixels) = self.oversized_image(dict, max_pixels) {
+                        return Some(pixels);
+                    }
+                }
+                Some(FORM) => {
+                    if depth >= DRAWN_IMAGE_MAX_FORM_DEPTH {
+                        continue;
+                    }
+                    if let Some(obj_id) = stream.obj_id()
+                        && !self.walked_forms.insert(obj_id)
+                    {
+                        continue;
+                    }
+                    // The same decode `FormXObject::new` performs through
+                    // `decode_or_warn`: a form stream that cannot be decoded
+                    // (including one over `max_decoded_stream_bytes`) is
+                    // skipped here; the `StreamTooLarge` warning sink still
+                    // reports that path during the render pass itself.
+                    let Ok(decoded) = stream.decoded() else {
+                        continue;
+                    };
+                    // `Resources::from_parent` mirrors `draw_form_xobject`: the
+                    // form's own `/Resources` over the chain in effect at the
+                    // `Do` that reached it.
+                    let form_resources = Resources::from_parent(
+                        dict.get::<Dict<'_>>(RESOURCES).unwrap_or_default(),
+                        resources.clone(),
+                    );
+                    if let Some(pixels) =
+                        self.content(&decoded, &form_resources, max_pixels, depth + 1)
+                    {
+                        return Some(pixels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The pixel count of the first oversized raster among a drawn image's own
+    /// data and the mask stream `pdf-interpret` decodes through the same
+    /// pixel-limited `decoded_image` path (`x_object.rs`). The chain mirrors
+    /// the interpreter exactly: `/SMaskInData 1` serves alpha from the image's
+    /// own decoded data and no mask stream is read; an `/SMask` stream is
+    /// decoded next through `ImageXObject::new` with no `/Subtype` check; a
+    /// `/Mask` stream is reached only when there is no `/SMask` stream; and a
+    /// `/Mask` array is a colour key, not a stream.
+    fn oversized_image(&mut self, dict: &Dict<'_>, max_pixels: u64) -> Option<u64> {
+        if let Some(pixels) = image_pixels(dict)
+            && pixels > max_pixels
+        {
+            return Some(pixels);
+        }
+        if dict.get::<u8>(SMASK_IN_DATA) == Some(1) {
+            return None;
+        }
+        let mask = dict
+            .get::<Stream<'_>>(SMASK)
+            .or_else(|| dict.get::<Stream<'_>>(MASK))?;
+        let mask_dict = mask.dict();
+        if let Some(obj_id) = mask.obj_id()
+            && !self.checked_images.insert(obj_id)
+        {
+            return None;
+        }
+        if let Some(pixels) = image_pixels(mask_dict)
+            && pixels > max_pixels
+        {
+            return Some(pixels);
+        }
+        None
+    }
+}
+
+/// `Width × Height` of an image dict the way `ImageXObject::new` reads them —
+/// `/W` then `/Width`, `/H` then `/Height`, both `u32` — with the saturating
+/// multiplication `decoded_image` uses. `None` covers the cases that path
+/// skips too: a missing, non-integer or zero dimension (a zero-size image is
+/// never drawn, so it is never decoded either).
+fn image_pixels(dict: &Dict<'_>) -> Option<u64> {
+    let width = dict.get::<u32>(W).or_else(|| dict.get::<u32>(WIDTH))?;
+    let height = dict.get::<u32>(H).or_else(|| dict.get::<u32>(HEIGHT))?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(u64::from(width).saturating_mul(u64::from(height)))
 }
 
 #[derive(Clone, Debug)]

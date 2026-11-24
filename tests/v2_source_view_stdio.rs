@@ -16,7 +16,8 @@ use std::time::Duration;
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
 use reading_mcp::application::ports::{
-    ApplicationError, SourceViewLimitKind, SourceViewRenderOptions, SourceViewRenderer,
+    ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
+    SourceViewRenderOptions, SourceViewRenderer,
 };
 use reading_mcp::domain::{MediaType, NORMALIZED_DOCUMENT_HASH_VERSION};
 use reading_mcp::parsing::FileProcessIsolatedPdfSourceViewRenderer;
@@ -177,6 +178,78 @@ async fn v2_stdio_source_view_reports_decoded_stream_limit_and_renders_above_it(
     }
 }
 
+/// #268: a drawn embedded image whose `Width × Height` exceeds `max_pixels`
+/// answers `too_large` instead of rendering without the image: the hint names
+/// the page, the measured count and the configured limit, and the same handle
+/// renders as a PNG block once the limit covers the image.
+#[tokio::test]
+async fn v2_stdio_source_view_reports_embedded_image_pixel_limit_and_renders_above_it() {
+    let root = tempfile::tempdir().expect("source root should be created");
+    let path = root.path().join("big_pixels.pdf");
+    tokio::fs::write(
+        &path,
+        std::fs::read("tests/fixtures/source_view/big_pixels.pdf").unwrap(),
+    )
+    .await
+    .expect("fixture should be copied");
+
+    // The default pixel limit (4,000,000) rejects the drawn 5,000,000-pixel
+    // image; no env override is set for this leg.
+    let client = start_client(root.path(), &root.path().join("state-default")).await;
+    let opened = v2_open(&client, &path).await;
+    let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+    let first = payload(&v2_read(&client, &doc, json!({})).await);
+    let sentence = first["at"].as_str().expect("sentence handle").to_owned();
+    let result = call(&client, "source_view", json!({ "at": sentence })).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "too_large", "{error}");
+    let hint = error["hint"].as_str().expect("a too_large hint");
+    assert!(hint.contains("第 1 页"), "{hint}");
+    assert!(hint.contains("5,000,000"), "{hint}");
+    assert!(hint.contains("4,000,000"), "{hint}");
+    assert!(hint.contains("read"), "{hint}");
+    assert!(
+        error.get("retry").is_none(),
+        "a too_large answer is not retryable: {error}"
+    );
+    client
+        .cancel()
+        .await
+        .expect("MCP process should close cleanly");
+
+    // The deployment profile's 16M-pixel budget covers the image, so the page
+    // renders as a PNG image block on page 1.
+    let client = start_client_with_env(
+        root.path(),
+        &root.path().join("state-16mp"),
+        &[("READING_MCP_SOURCE_VIEW_MAX_PIXELS", "16000000")],
+    )
+    .await;
+    let opened = v2_open(&client, &path).await;
+    let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+    let first = payload(&v2_read(&client, &doc, json!({})).await);
+    let sentence = first["at"].as_str().expect("sentence handle").to_owned();
+    let result = call(&client, "source_view", json!({ "at": sentence })).await;
+    assert!(
+        result.is_error != Some(true),
+        "the same page renders above the image's pixel count: {result:?}"
+    );
+    let wire = serde_json::to_value(&result).expect("tool result should serialize");
+    assert!(
+        wire["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["type"] == "image" && block["mimeType"] == "image/png"),
+        "the page renders as a PNG image block: {wire}"
+    );
+    assert_eq!(payload(&result)["page"], 1);
+    client
+        .cancel()
+        .await
+        .expect("MCP process should close cleanly");
+}
+
 /// The PyMuPDF worker reports the same rejection through the same error record;
 /// gated on the layout-python environment like the OCR tests, since CI's normal
 /// job has no PyMuPDF.
@@ -304,6 +377,235 @@ fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
     assert_eq!(detail.page, 1);
     assert_eq!(detail.kind, SourceViewLimitKind::Timeout);
     assert_eq!(detail.limit, Some(25));
+}
+
+// #268: renderer-level coverage of the drawn-image pixel check, through the
+// production file-worker path so the assertion exercises the same code the
+// parent process drives. Default options except `max_pixels`.
+
+fn source_view_options(max_pixels: u64) -> SourceViewRenderOptions {
+    SourceViewRenderOptions {
+        dpi: 144,
+        max_pages: 2_000,
+        max_width: 2_400,
+        max_height: 3_200,
+        max_pixels,
+        max_image_bytes: 8 * 1024 * 1024,
+        max_decoded_stream_bytes: 16 * 1024 * 1024,
+    }
+}
+
+fn render_source_view(
+    bytes: Vec<u8>,
+    max_pixels: u64,
+) -> Result<RenderedSourceView, ApplicationError> {
+    FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_reading-mcp")),
+        Duration::from_secs(30),
+    )
+    .render(
+        bytes,
+        MediaType("application/pdf".into()),
+        1,
+        source_view_options(max_pixels),
+    )
+}
+
+fn render_source_view_fixture(
+    fixture: &str,
+    max_pixels: u64,
+) -> Result<RenderedSourceView, ApplicationError> {
+    render_source_view(
+        std::fs::read(format!("tests/fixtures/source_view/{fixture}.pdf")).unwrap(),
+        max_pixels,
+    )
+}
+
+fn embedded_image_limit(error: &ApplicationError) -> SourceViewLimitDetail {
+    let ApplicationError::SourceViewLimitExceeded(detail) = error else {
+        panic!("expected a source-view limit rejection: {error:?}");
+    };
+    *detail
+}
+
+/// A drawn DeviceGray 2,500×2,000 image is over the default limit; the first
+/// oversized measurement and the limit are reported.
+#[test]
+fn source_view_rejects_a_drawn_image_over_the_pixel_limit() {
+    let error = render_source_view_fixture("big_pixels", 4_000_000)
+        .expect_err("a drawn 5,000,000-pixel image must reject");
+    assert_eq!(
+        embedded_image_limit(&error),
+        SourceViewLimitDetail::new(
+            1,
+            SourceViewLimitKind::EmbeddedImagePixels,
+            Some(5_000_000),
+            Some(4_000_000),
+        )
+    );
+}
+
+/// The comparison is strictly `>`, matching `pdf-syntax`: one pixel under the
+/// drawn count still rejects, while the limit itself renders.
+#[test]
+fn source_view_rejects_one_pixel_below_the_image() {
+    let error = render_source_view_fixture("big_pixels", 4_999_999)
+        .expect_err("5,000,000 pixels is over a 4,999,999 limit");
+    assert_eq!(
+        embedded_image_limit(&error).kind,
+        SourceViewLimitKind::EmbeddedImagePixels
+    );
+}
+
+/// At exactly `max_pixels` the page renders and the image is visibly drawn:
+/// the fixture's rectangle is gray level 40, so most of its pixels are dark —
+/// before this fix that area was blank.
+#[test]
+fn source_view_renders_an_image_at_exactly_the_pixel_limit() {
+    let rendered = render_source_view_fixture("big_pixels", 5_000_000)
+        .expect("5,000,000 pixels equals the limit and renders");
+    let decoded = image::load_from_memory(&rendered.bytes)
+        .expect("result should be a PNG")
+        .to_rgba8();
+    // The 2500×2000 image is letterboxed into its (72, 360)-(300, 588) pt
+    // rectangle: the drawn area keeps the 1.25 aspect, so it covers
+    // (72, 382.8)-(300, 565.2) pt of the 595×842 pt page — inset a pixel to
+    // keep anti-aliased edges out of the count.
+    let x0 = (72.0 / 595.0 * rendered.width as f32) as u32 + 2;
+    let x1 = (300.0 / 595.0 * rendered.width as f32) as u32 - 2;
+    let y0 = (382.8 / 842.0 * rendered.height as f32) as u32 + 2;
+    let y1 = (565.2 / 842.0 * rendered.height as f32) as u32 - 2;
+    let mut dark = 0_u64;
+    let mut total = 0_u64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let pixel = decoded.get_pixel(x, y).0;
+            total += 1;
+            if pixel[..3].iter().all(|channel| *channel < 80) {
+                dark += 1;
+            }
+        }
+    }
+    assert!(
+        dark * 10 > total * 9,
+        "the drawn image's rectangle should be mostly dark, {dark}/{total}"
+    );
+}
+
+/// The same image drawn only inside a nested form XObject is found by the
+/// `Do` walk and rejects with the same numbers.
+#[test]
+fn source_view_rejects_an_image_drawn_inside_a_form_xobject() {
+    let error = render_source_view_fixture("big_pixels_form", 4_000_000)
+        .expect_err("a drawn 5,000,000-pixel image in a form must reject");
+    assert_eq!(
+        embedded_image_limit(&error),
+        SourceViewLimitDetail::new(
+            1,
+            SourceViewLimitKind::EmbeddedImagePixels,
+            Some(5_000_000),
+            Some(4_000_000),
+        )
+    );
+}
+
+/// An image the page's resources name but its content never draws must not
+/// reject: the walk follows `Do` operators, not the resource dictionary.
+#[test]
+fn source_view_renders_a_page_that_lists_but_never_draws_the_image() {
+    render_source_view_fixture("big_pixels_unused", 4_000_000)
+        .expect("an undrawn image stays invisible, as before");
+}
+
+/// `/SMask` image data decodes through the same pixel-limited path, so an
+/// oversized soft mask rejects the page that draws the masked image.
+#[test]
+fn source_view_rejects_an_oversized_smask_image() {
+    let error = render_source_view_fixture("big_smask", 4_000_000)
+        .expect_err("a drawn image whose /SMask is 5,000,000 pixels must reject");
+    assert_eq!(
+        embedded_image_limit(&error),
+        SourceViewLimitDetail::new(
+            1,
+            SourceViewLimitKind::EmbeddedImagePixels,
+            Some(5_000_000),
+            Some(4_000_000),
+        )
+    );
+}
+
+/// A corrupt image is not a limit rejection: the stream is invalid for its
+/// filter, so the renderer keeps today's behaviour and renders without it.
+#[test]
+fn source_view_renders_a_corrupt_image_the_same_as_before() {
+    render_source_view_fixture("corrupt_image", 4_000_000)
+        .expect("a corrupt image drops silently, as on main");
+}
+
+/// A form XObject that names itself in its own resources and draws itself
+/// terminates the `Do` walk (the visited set breaks the cycle). The page then
+/// fails inside the interpreter the same way it does on `main` — the worker
+/// reports no limit record, so the parent sees a plain worker failure.
+#[test]
+fn source_view_form_cycle_terminates_the_walk() {
+    let error = render_source_view(build_form_cycle_pdf(), 4_000_000)
+        .expect_err("the self-drawing form fails during rendering, as on main");
+    assert!(
+        matches!(error, ApplicationError::SourceViewFailed(_)),
+        "a cyclic form is a worker failure, not a limit rejection: {error:?}"
+    );
+}
+
+/// One page whose only content draws `/Fm0`, a form XObject that lists itself
+/// in its own `/Resources` and draws itself.
+fn build_form_cycle_pdf() -> Vec<u8> {
+    let mut document = PdfDocument::with_version("1.5");
+    let pages_id = document.new_object_id();
+    let form_id = document.new_object_id();
+    let resources_id = document.add_object(dictionary! {
+        "XObject" => dictionary! { "Fm0" => form_id },
+    });
+    document.objects.insert(
+        form_id,
+        Object::Stream(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+                "Resources" => dictionary! {
+                    "XObject" => dictionary! { "Fm0" => form_id },
+                },
+            },
+            b"/Fm0 Do\n".to_vec(),
+        )),
+    );
+    let content_id = document.add_object(Stream::new(dictionary! {}, b"/Fm0 Do\n".to_vec()));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+
+    let mut bytes = Vec::new();
+    document
+        .save_to(&mut bytes)
+        .expect("fixture PDF should serialize");
+    bytes
 }
 
 fn build_pdf() -> Vec<u8> {

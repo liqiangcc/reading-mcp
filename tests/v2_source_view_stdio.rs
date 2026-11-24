@@ -534,6 +534,73 @@ fn source_view_rejects_an_oversized_smask_image() {
     );
 }
 
+/// `pdf-interpret` decodes an `/SMask` stream through `ImageXObject::new`
+/// without checking its `/Subtype`, so an oversized soft mask rejects even
+/// when it carries none.
+#[test]
+fn source_view_rejects_an_oversized_smask_without_a_subtype() {
+    let error = render_source_view(
+        build_masked_image_pdf(
+            Some((
+                dictionary! {
+                    "W" => 2500,
+                    "H" => 2000,
+                    "ColorSpace" => "DeviceGray",
+                    "BitsPerComponent" => 8,
+                },
+                vec![0u8; 100],
+            )),
+            None,
+        ),
+        4_000_000,
+    )
+    .expect_err("a 5,000,000-pixel /SMask with no /Subtype must reject");
+    assert_eq!(
+        embedded_image_limit(&error),
+        SourceViewLimitDetail::new(
+            1,
+            SourceViewLimitKind::EmbeddedImagePixels,
+            Some(5_000_000),
+            Some(4_000_000),
+        )
+    );
+}
+
+/// The interpreter reaches a `/Mask` stream only when there is no `/SMask`
+/// stream, so an oversized `/Mask` shadowed by an in-limit `/SMask` never
+/// rejects — a page cannot fail on a mask the interpreter does not decode.
+#[test]
+fn source_view_ignores_an_oversized_mask_shadowed_by_smask() {
+    render_source_view(
+        build_masked_image_pdf(
+            Some((
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Image",
+                    "W" => 10,
+                    "H" => 10,
+                    "ColorSpace" => "DeviceGray",
+                    "BitsPerComponent" => 8,
+                },
+                vec![0u8; 100],
+            )),
+            Some((
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Image",
+                    "W" => 2500,
+                    "H" => 2000,
+                    "ColorSpace" => "DeviceGray",
+                    "BitsPerComponent" => 8,
+                },
+                vec![0u8; 100],
+            )),
+        ),
+        4_000_000,
+    )
+    .expect("an /SMask stream shadows /Mask, so the page renders");
+}
+
 /// A corrupt image is not a limit rejection: the stream is invalid for its
 /// filter, so the renderer keeps today's behaviour and renders without it.
 #[test]
@@ -580,6 +647,83 @@ fn build_form_cycle_pdf() -> Vec<u8> {
         )),
     );
     let content_id = document.add_object(Stream::new(dictionary! {}, b"/Fm0 Do\n".to_vec()));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+        "Resources" => resources_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+
+    let mut bytes = Vec::new();
+    document
+        .save_to(&mut bytes)
+        .expect("fixture PDF should serialize");
+    bytes
+}
+
+/// One page that draws `/Im0`, a 10×10 DeviceGray image whose dict carries the
+/// given `/SMask` and `/Mask` streams.
+fn build_masked_image_pdf(
+    smask: Option<(lopdf::Dictionary, Vec<u8>)>,
+    mask: Option<(lopdf::Dictionary, Vec<u8>)>,
+) -> Vec<u8> {
+    let mut document = PdfDocument::with_version("1.5");
+    let pages_id = document.new_object_id();
+    let mut image_dict = dictionary! {
+        "Type" => "XObject",
+        "Subtype" => "Image",
+        "W" => 10,
+        "H" => 10,
+        "ColorSpace" => "DeviceGray",
+        "BitsPerComponent" => 8,
+    };
+    for (key, entry) in [("SMask", smask), ("Mask", mask)] {
+        let Some((dict, bytes)) = entry else {
+            continue;
+        };
+        let mask_id = document.add_object(Stream::new(dict, bytes));
+        image_dict.set(key, mask_id);
+    }
+    let image_id = document.add_object(Stream::new(image_dict, vec![0u8; 100]));
+    let resources_id = document.add_object(dictionary! {
+        "XObject" => dictionary! { "Im0" => image_id },
+    });
+    let content = Content {
+        operations: vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    100.into(),
+                    0.into(),
+                    0.into(),
+                    100.into(),
+                    72.into(),
+                    360.into(),
+                ],
+            ),
+            Operation::new("Do", vec!["Im0".into()]),
+            Operation::new("Q", vec![]),
+        ],
+    };
+    let content_id = document.add_object(Stream::new(
+        dictionary! {},
+        content.encode().expect("fixture content should encode"),
+    ));
     let page_id = document.add_object(dictionary! {
         "Type" => "Page",
         "Parent" => pages_id,

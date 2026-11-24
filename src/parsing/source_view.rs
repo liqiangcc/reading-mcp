@@ -13,7 +13,7 @@ use pdf_render::pdf_interpret::{InterpreterSettings, InterpreterWarning};
 use pdf_render::pdf_syntax::content::TypedIter;
 use pdf_render::pdf_syntax::content::ops::TypedInstruction;
 use pdf_render::pdf_syntax::object::dict::keys::{
-    FORM, H, HEIGHT, IMAGE, MASK, RESOURCES, SMASK, SUBTYPE, W, WIDTH,
+    FORM, H, HEIGHT, IMAGE, MASK, RESOURCES, SMASK, SMASK_IN_DATA, SUBTYPE, W, WIDTH,
 };
 use pdf_render::pdf_syntax::object::{Dict, Name, ObjectIdentifier, Stream};
 use pdf_render::pdf_syntax::page::{Page, Resources};
@@ -363,7 +363,12 @@ const DRAWN_IMAGE_MAX_FORM_DEPTH: u32 = 64;
 /// - annotation appearance streams — `pdf-render` does draw them
 ///   (`interpret_page` resolves `/AP /N` forms when `render_annotations` is on,
 ///   which `InterpreterSettings::default()` enables), but they sit outside the
-///   page's content walk.
+///   page's content walk;
+/// - a form drawn a second time under different ancestor resources:
+///   `walked_forms` dedupes by object reference, and a form without its own
+///   `/Resources` resolves names through the chain in effect at the `Do` that
+///   first reached it, so an image reachable only under a later chain is
+///   never measured.
 ///
 /// Inline images (`BI … ID … EI`) are skipped for a different reason:
 /// pdf-syntax 0.5.6 builds an inline image's `Stream` on
@@ -452,33 +457,35 @@ impl DrawnImageWalk {
     }
 
     /// The pixel count of the first oversized raster among a drawn image's own
-    /// data and its `/SMask` and `/Mask` image streams — `pdf-interpret`
-    /// decodes both masks through the same pixel-limited `decoded_image` path
-    /// (`x_object.rs`), so each is measured the same way.
+    /// data and the mask stream `pdf-interpret` decodes through the same
+    /// pixel-limited `decoded_image` path (`x_object.rs`). The chain mirrors
+    /// the interpreter exactly: `/SMaskInData 1` serves alpha from the image's
+    /// own decoded data and no mask stream is read; an `/SMask` stream is
+    /// decoded next through `ImageXObject::new` with no `/Subtype` check; a
+    /// `/Mask` stream is reached only when there is no `/SMask` stream; and a
+    /// `/Mask` array is a colour key, not a stream.
     fn oversized_image(&mut self, dict: &Dict<'_>, max_pixels: u64) -> Option<u64> {
         if let Some(pixels) = image_pixels(dict)
             && pixels > max_pixels
         {
             return Some(pixels);
         }
-        for key in [SMASK, MASK] {
-            let Some(mask) = dict.get::<Stream<'_>>(key) else {
-                continue;
-            };
-            let mask_dict = mask.dict();
-            if mask_dict.get::<Name>(SUBTYPE).as_deref() != Some(IMAGE) {
-                continue;
-            }
-            if let Some(obj_id) = mask.obj_id()
-                && !self.checked_images.insert(obj_id)
-            {
-                continue;
-            }
-            if let Some(pixels) = image_pixels(mask_dict)
-                && pixels > max_pixels
-            {
-                return Some(pixels);
-            }
+        if dict.get::<u8>(SMASK_IN_DATA) == Some(1) {
+            return None;
+        }
+        let mask = dict
+            .get::<Stream<'_>>(SMASK)
+            .or_else(|| dict.get::<Stream<'_>>(MASK))?;
+        let mask_dict = mask.dict();
+        if let Some(obj_id) = mask.obj_id()
+            && !self.checked_images.insert(obj_id)
+        {
+            return None;
+        }
+        if let Some(pixels) = image_pixels(mask_dict)
+            && pixels > max_pixels
+        {
+            return Some(pixels);
         }
         None
     }

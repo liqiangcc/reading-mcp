@@ -488,6 +488,64 @@ async fn source_view_url_source_still_renders_through_the_staged_path() {
     assert_eq!(result.view.media_type.0, "image/png");
     assert_eq!(&result.view.bytes[..8], b"\x89PNG\r\n\x1a\n");
     server.abort();
+
+    // The same bytes as a local file must produce the same PNG through the
+    // mapped path that the URL source produced through the staged path.
+    let directory = tempdir().expect("local root should be created");
+    let path = directory.path().join("fidelity.pdf");
+    tokio::fs::write(&path, build_fidelity_pdf())
+        .await
+        .expect("PDF fixture should be written");
+    let local_repository = Arc::new(InMemoryDocumentRepository::default());
+    let local_opened = OpenDocumentUseCase::with_text_unit_index(
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory.path()])),
+        Arc::new(FileRetriever),
+        Arc::new(ParserRouter::phase4()),
+        local_repository.clone(),
+        Arc::new(InMemoryTextUnitIndex::default()),
+        Arc::new(reading_mcp::infrastructure::InMemorySearchIndex::default()),
+    )
+    .execute(OpenDocumentCommand {
+        source: DocumentSource(path.to_string_lossy().into_owned()),
+        options: RetrievalOptions::default(),
+    })
+    .await
+    .expect("PDF should open as a local file");
+    let local_document = local_repository
+        .get(&local_opened.document_id)
+        .await
+        .expect("repository read")
+        .expect("document should be persisted");
+    let local_locator = reading_mcp::domain::TextLocator::for_section(
+        &local_document,
+        &local_document.root_sections[0],
+    );
+    let local = SourceViewUseCase::new(
+        local_repository,
+        Arc::new(FileRetriever),
+        Arc::new(FileProcessIsolatedPdfSourceViewRenderer::with_executable(
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_reading-mcp")),
+            std::time::Duration::from_secs(30),
+        )),
+        SourceViewLimits::default(),
+    )
+    .with_local_source_access(Arc::new(LocalFileSourceAccess::new(
+        LocalFileSourcePolicy::allow_roots([directory.path()]),
+        usize::MAX,
+    )))
+    .execute(GetSourceViewCommand {
+        document_id: local_opened.document_id,
+        target_locator: local_locator,
+        representation: SourceViewRepresentation::Original,
+        dpi: Some(72),
+    })
+    .await
+    .expect("a local source renders through the mapped path");
+
+    assert_eq!(
+        local.view.bytes, result.view.bytes,
+        "the mapped local path must render the same PNG the staged URL path produced"
+    );
 }
 
 struct AllowAllSourcePolicy;

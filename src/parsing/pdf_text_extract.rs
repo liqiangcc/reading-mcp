@@ -63,6 +63,7 @@ fn extract_text_chunks_from_page(
 
     let mut current_encoding = None;
     let mut current_text = String::new();
+    let mut whitespace_tail = false;
     for operation in &content.operations {
         match operation.operator.as_ref() {
             "Tf" => {
@@ -84,8 +85,12 @@ fn extract_text_chunks_from_page(
             }
             "Tj" | "TJ" => {
                 if let Some(encoding) = current_encoding
-                    && let Err(error) =
-                        collect_text(&mut current_text, encoding, &operation.operands)
+                    && let Err(error) = collect_text(
+                        &mut current_text,
+                        encoding,
+                        &operation.operands,
+                        &mut whitespace_tail,
+                    )
                 {
                     chunks.push(Err(error));
                 }
@@ -94,10 +99,14 @@ fn extract_text_chunks_from_page(
                 if let Some(encoding) = current_encoding {
                     if !current_text.ends_with('\n') {
                         current_text.push('\n');
+                        whitespace_tail = true;
                     }
-                    if let Err(error) =
-                        collect_text(&mut current_text, encoding, &operation.operands)
-                    {
+                    if let Err(error) = collect_text(
+                        &mut current_text,
+                        encoding,
+                        &operation.operands,
+                        &mut whitespace_tail,
+                    ) {
                         chunks.push(Err(error));
                     }
                 }
@@ -106,19 +115,24 @@ fn extract_text_chunks_from_page(
                 if let Some(encoding) = current_encoding {
                     if !current_text.ends_with('\n') {
                         current_text.push('\n');
+                        whitespace_tail = true;
                     }
                     if let Some(string_operand) = operation.operands.get(2)
                         && let Err(error) = collect_text(
                             &mut current_text,
                             encoding,
                             std::slice::from_ref(string_operand),
+                            &mut whitespace_tail,
                         )
                     {
                         chunks.push(Err(error));
                     }
                 }
             }
-            "T*" | "ET" if !current_text.ends_with('\n') => current_text.push('\n'),
+            "T*" | "ET" if !current_text.ends_with('\n') => {
+                current_text.push('\n');
+                whitespace_tail = true;
+            }
             _ => {}
         }
     }
@@ -128,22 +142,76 @@ fn extract_text_chunks_from_page(
     Ok(chunks)
 }
 
-fn collect_text(text: &mut String, encoding: &Encoding, operands: &[Object]) -> Result<()> {
+fn collect_text(
+    text: &mut String,
+    encoding: &Encoding,
+    operands: &[Object],
+    whitespace_tail: &mut bool,
+) -> Result<()> {
     for operand in operands {
         match operand {
-            Object::String(bytes, _) => encoding.write_to_string(bytes, text)?,
+            Object::String(bytes, _) => {
+                encoding.write_to_string(bytes, text)?;
+                refresh_whitespace_tail(text, whitespace_tail);
+            }
             Object::Array(array) => {
-                collect_text(text, encoding, array)?;
+                collect_array_text(text, encoding, array, whitespace_tail)?;
                 text.push(' ');
+                *whitespace_tail = true;
             }
-            Object::Integer(adjustment) if *adjustment < -TJ_WORD_GAP_THRESHOLD as i64 => {
-                text.push(' ')
-            }
-            Object::Real(adjustment) if *adjustment < -TJ_WORD_GAP_THRESHOLD => text.push(' '),
             _ => {}
         }
     }
     Ok(())
+}
+
+fn collect_array_text(
+    text: &mut String,
+    encoding: &Encoding,
+    operands: &[Object],
+    whitespace_tail: &mut bool,
+) -> Result<()> {
+    let mut pending_word_gap = false;
+    for operand in operands {
+        match operand {
+            Object::String(bytes, _) => {
+                let mut decoded = String::new();
+                encoding.write_to_string(bytes, &mut decoded)?;
+                if pending_word_gap && !decoded.is_empty() {
+                    if !*whitespace_tail && !starts_with_whitespace(&decoded) {
+                        text.push(' ');
+                    }
+                    pending_word_gap = false;
+                }
+                text.push_str(&decoded);
+                refresh_whitespace_tail(text, whitespace_tail);
+            }
+            Object::Array(array) => {
+                collect_array_text(text, encoding, array, whitespace_tail)?;
+                text.push(' ');
+                *whitespace_tail = true;
+                pending_word_gap = false;
+            }
+            Object::Integer(adjustment) if *adjustment < -TJ_WORD_GAP_THRESHOLD as i64 => {
+                pending_word_gap = !*whitespace_tail;
+            }
+            Object::Real(adjustment) if *adjustment < -TJ_WORD_GAP_THRESHOLD => {
+                pending_word_gap = !*whitespace_tail;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn refresh_whitespace_tail(text: &str, whitespace_tail: &mut bool) {
+    if let Some(last) = text.chars().last() {
+        *whitespace_tail = last.is_whitespace();
+    }
+}
+
+fn starts_with_whitespace(text: &str) -> bool {
+    text.chars().next().is_some_and(char::is_whitespace)
 }
 
 #[cfg(test)]
@@ -152,10 +220,12 @@ mod tests {
 
     fn winansi_text(operands: Vec<Object>) -> String {
         let mut text = String::new();
+        let mut whitespace_tail = false;
         collect_text(
             &mut text,
             &Encoding::SimpleEncoding(b"WinAnsiEncoding"),
             &operands,
+            &mut whitespace_tail,
         )
         .expect("WinAnsi text decodes");
         text
@@ -163,10 +233,12 @@ mod tests {
 
     fn ucs2_text(operands: Vec<Object>) -> String {
         let mut text = String::new();
+        let mut whitespace_tail = false;
         collect_text(
             &mut text,
             &Encoding::SimpleEncoding(b"UniGB-UCS2-H"),
             &operands,
+            &mut whitespace_tail,
         )
         .expect("UCS-2 text decodes");
         text
@@ -211,6 +283,65 @@ mod tests {
             ])),
             "economic and "
         );
+    }
+
+    #[test]
+    fn a_real_gap_after_a_space_glyph_does_not_add_a_second_space() {
+        assert_eq!(
+            winansi_text(tj(vec![
+                literal_ascii("Log "),
+                Object::Real(-314.006),
+                literal_ascii("processing"),
+            ])),
+            "Log processing "
+        );
+    }
+
+    #[test]
+    fn a_real_gap_before_a_leading_space_glyph_does_not_add_a_second_space() {
+        assert_eq!(
+            winansi_text(tj(vec![
+                literal_ascii("Log"),
+                Object::Real(-314.006),
+                literal_ascii(" processing"),
+            ])),
+            "Log processing "
+        );
+    }
+
+    #[test]
+    fn an_integer_gap_after_a_space_glyph_does_not_add_a_second_space() {
+        assert_eq!(
+            winansi_text(tj(vec![
+                literal_ascii("Log "),
+                Object::Integer(-314),
+                literal_ascii("processing"),
+            ])),
+            "Log processing "
+        );
+    }
+
+    #[test]
+    fn a_gap_after_a_fragment_boundary_sees_the_previous_whitespace_tail() {
+        let encoding = Encoding::SimpleEncoding(b"WinAnsiEncoding");
+        let mut whitespace_tail = false;
+        let mut first = String::new();
+        collect_text(
+            &mut first,
+            &encoding,
+            &[literal_ascii("Log ")],
+            &mut whitespace_tail,
+        )
+        .expect("first fragment decodes");
+        let mut second = String::new();
+        collect_text(
+            &mut second,
+            &encoding,
+            &tj(vec![Object::Real(-314.006), literal_ascii("processing")]),
+            &mut whitespace_tail,
+        )
+        .expect("second fragment decodes");
+        assert_eq!(first + &second, "Log processing ");
     }
 
     #[test]

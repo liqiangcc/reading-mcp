@@ -113,6 +113,17 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v musl-gcc >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          fi
+          musl-gcc --version | head -1
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -125,6 +136,9 @@ jobs:
 
       - name: Package protocol smoke test
         shell: bash
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CXX_x86_64_unknown_linux_musl: musl-gcc
         run: |
           set -euo pipefail
           version=$(python3 - <<'PY'
@@ -143,7 +157,7 @@ jobs:
           RELEASE_TAG="v$version" \
           RELEASE_SHA="$release_sha" \
           VERIFY_RELEASE_TAG=false \
-          TARGET_TRIPLE=x86_64-unknown-linux-gnu \
+          TARGET_TRIPLE=x86_64-unknown-linux-musl \
           PLATFORM=linux-x86_64 \
           OUTPUT_DIR="$RUNNER_TEMP/package-smoke" \
           PACKAGING_COMMIT_SHA="$release_sha" \
@@ -158,3 +172,63 @@ jobs:
             ${{ runner.temp }}/package-smoke/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
+
+  portability:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+          - debian:11
+          - debian:12
+    name: portable smoke ${{ matrix.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download candidate package
+        uses: actions/download-artifact@v4
+        with:
+          name: release-candidate-package
+          path: ${{ runner.temp }}/candidate
+
+      - name: Verify and unpack candidate package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/candidate"
+          sha256sum -c SHA256SUMS
+          mkdir -p extracted
+          tar -xzf ./*.tar.gz -C extracted
+          package_dir=$(find extracted -mindepth 1 -maxdepth 1 -type d -print -quit)
+          test -n "$package_dir"
+          test -x "$package_dir/reading-mcp"
+          echo "PACKAGE_DIR=${{ runner.temp }}/candidate/$package_dir" >> "$GITHUB_ENV"
+          python3 - "$package_dir/release-manifest.json" <<'PY'
+          import json
+          import sys
+          manifest = json.load(open(sys.argv[1], encoding='utf-8'))
+          print('manifest target:', manifest.get('target'))
+          print('manifest libc requirement:', manifest.get('binary_libc_requirement'))
+          if manifest.get('binary_libc_requirement') not in {'static'} and not str(manifest.get('binary_libc_requirement', '')).startswith('GLIBC_'):
+              raise SystemExit('release manifest is missing a valid binary_libc_requirement')
+          PY
+
+      - name: Pull ${{ matrix.image }}
+        run: docker pull ${{ matrix.image }}
+
+      - name: Smoke-test inside ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release-smoke.py \
+            --binary "$PACKAGE_DIR/reading-mcp" \
+            --pdf tests/fixtures/pdf_tex/type1-builtin.pdf \
+            --work-dir "${{ runner.temp }}/portability-smoke" \
+            --image "${{ matrix.image }}"

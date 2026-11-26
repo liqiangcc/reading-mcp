@@ -98,15 +98,16 @@ reading-mcp-release-manifest/v1
   "version": "0.1.0",
   "tag": "v0.1.0",
   "git_sha": "<40-char source sha>",
-  "target": "x86_64-unknown-linux-gnu",
+  "target": "x86_64-unknown-linux-musl",
   "platform": "linux-x86_64",
   "binary_sha256": "<sha256>",
+  "binary_libc_requirement": "static",
   "cargo_lock_sha256": "<sha256>",
   "packaging_commit_sha": "<packaging infrastructure sha>"
 }
 ```
 
-`packaging_commit_sha` 是构建基础设施身份，不参与 Source identity，也不能把新的 main commit 冒充为旧 tag 的源码。
+`binary_libc_requirement` 是 binary 需要的最高 `GLIBC_` 符号版本；完全静态 binary 记录为 `static`。`packaging_commit_sha` 是构建基础设施身份，不参与 Source identity，也不能把新的 main commit 冒充为旧 tag 的源码。
 
 ## 6. Package 生成
 
@@ -117,7 +118,7 @@ REPO_DIR=<clean-checkout-at-tag> \
 RELEASE_VERSION=0.1.0 \
 RELEASE_TAG=v0.1.0 \
 RELEASE_SHA=<frozen-sha> \
-TARGET_TRIPLE=x86_64-unknown-linux-gnu \
+TARGET_TRIPLE=x86_64-unknown-linux-musl \
 PLATFORM=linux-x86_64 \
 OUTPUT_DIR=<dist-dir> \
 PACKAGING_COMMIT_SHA=<packaging-infra-sha> \

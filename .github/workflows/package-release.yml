@@ -4,15 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Immutable release tag, for example v0.1.0
-        required: true
+        description: Immutable release tag, for example v0.1.0; empty validates the dispatched ref
+        required: false
+        default: ''
       expected_sha:
-        description: Exact frozen source commit SHA
-        required: true
+        description: Exact frozen source commit SHA; empty validates the dispatched ref
+        required: false
+        default: ''
       target_triple:
         description: Rust target triple
         required: true
-        default: x86_64-unknown-linux-gnu
+        default: x86_64-unknown-linux-musl
       platform:
         description: Artifact platform label
         required: true
@@ -27,18 +29,52 @@ permissions:
   contents: write
 
 concurrency:
-  group: package-${{ github.repository }}-${{ inputs.tag }}-${{ inputs.platform }}
+  group: package-${{ github.repository }}-${{ inputs.tag || github.ref_name }}-${{ inputs.platform }}
   cancel-in-progress: false
 
 jobs:
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      artifact_name: ${{ steps.mode.outputs.artifact_name }}
     steps:
+      - name: Resolve package mode
+        id: mode
+        shell: bash
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+          EXPECTED_SHA_INPUT: ${{ inputs.expected_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          PLATFORM_INPUT: ${{ inputs.platform }}
+          PUBLISH_ASSETS: ${{ inputs.publish_assets }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAG_INPUT" && -z "$EXPECTED_SHA_INPUT" ]]; then
+            echo "source_ref=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+            echo "expected_sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+            echo "verify_release_tag=false" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=release-candidate-package" >> "$GITHUB_OUTPUT"
+            if [[ "$PUBLISH_ASSETS" == "true" ]]; then
+              echo "publish_assets requires an immutable release tag" >&2
+              exit 1
+            fi
+          elif [[ -n "$TAG_INPUT" && -n "$EXPECTED_SHA_INPUT" ]]; then
+            [[ "$TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+            [[ "$EXPECTED_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]]
+            echo "source_ref=$TAG_INPUT" >> "$GITHUB_OUTPUT"
+            echo "expected_sha=$EXPECTED_SHA_INPUT" >> "$GITHUB_OUTPUT"
+            echo "verify_release_tag=true" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=reading-mcp-$TAG_INPUT-$PLATFORM_INPUT" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag and expected_sha must either both be set or both be empty" >&2
+            exit 1
+          fi
+
       - name: Checkout packaging infrastructure
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
           path: packaging
 
       - name: Record packaging infrastructure identity
@@ -47,10 +83,10 @@ jobs:
           set -euo pipefail
           echo "PACKAGING_COMMIT_SHA=$(git -C packaging rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Checkout immutable release source
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ steps.mode.outputs.source_ref }}
           fetch-depth: 0
           path: source
 
@@ -58,22 +94,26 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_SHA: ${{ steps.mode.outputs.expected_sha }}
           RELEASE_TAG: ${{ inputs.tag }}
+          VERIFY_RELEASE_TAG: ${{ steps.mode.outputs.verify_release_tag }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           actual_sha=$(git -C source rev-parse 'HEAD^{commit}')
-          tag_ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")
-          tag_object=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
-          tag_type=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["type"])')
-          if [[ "$tag_type" == tag ]]; then
-            tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" --jq .object.sha)
-          else
-            tag_sha="$tag_object"
+          tag_sha="$actual_sha"
+          if [[ "$VERIFY_RELEASE_TAG" == "true" ]]; then
+            tag_ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")
+            tag_object=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+            tag_type=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["type"])')
+            if [[ "$tag_type" == tag ]]; then
+              tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" --jq .object.sha)
+            else
+              tag_sha="$tag_object"
+            fi
           fi
           source_status=$(git -C source status --porcelain --untracked-files=all)
-          printf 'source_sha=%s tag_sha=%s status_bytes=%s\n' "$actual_sha" "$tag_sha" "${#source_status}"
+          printf 'source_sha=%s tag_sha=%s status_bytes=%s verify_tag=%s\n' "$actual_sha" "$tag_sha" "${#source_status}" "$VERIFY_RELEASE_TAG"
           [[ "$actual_sha" == "$EXPECTED_SHA" ]]
           [[ "$tag_sha" == "$EXPECTED_SHA" ]]
           [[ -z "$source_status" ]]
@@ -82,6 +122,17 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v musl-gcc >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          fi
+          musl-gcc --version | head -1
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -92,23 +143,40 @@ jobs:
         shell: bash
         env:
           REPO_DIR: ${{ github.workspace }}/source
-          RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_SHA: ${{ inputs.expected_sha }}
+          RELEASE_SHA: ${{ steps.mode.outputs.expected_sha }}
+          VERIFY_RELEASE_TAG: ${{ steps.mode.outputs.verify_release_tag }}
           TARGET_TRIPLE: ${{ inputs.target_triple }}
           PLATFORM: ${{ inputs.platform }}
           OUTPUT_DIR: ${{ github.workspace }}/dist
           PACKAGING_COMMIT_SHA: ${{ env.PACKAGING_COMMIT_SHA }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CXX_x86_64_unknown_linux_musl: musl-gcc
         run: |
           set -euo pipefail
-          version="${RELEASE_TAG#v}"
-          [[ "v$version" == "$RELEASE_TAG" ]]
+          cargo_version=$(python3 - <<'PY'
+          import pathlib
+          import re
+          text = pathlib.Path('source/Cargo.toml').read_text(encoding='utf-8')
+          match = re.search(r'^version\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+          if not match:
+              raise SystemExit('could not read package version')
+          print(match.group(1))
+          PY
+          )
+          version="$cargo_version"
+          export RELEASE_TAG="v$version"
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            version="${{ inputs.tag }}"
+            version="${version#v}"
+            export RELEASE_TAG="${{ inputs.tag }}"
+          fi
           export RELEASE_VERSION="$version"
           bash packaging/scripts/package-release.sh
 
       - name: Upload package as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reading-mcp-${{ inputs.tag }}-${{ inputs.platform }}
+          name: ${{ steps.mode.outputs.artifact_name }}
           path: |
             dist/*.tar.gz
             dist/SHA256SUMS
@@ -134,3 +202,65 @@ jobs:
             fi
           done
           gh release upload "$RELEASE_TAG" "$archive" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+
+  portability:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+          - debian:11
+          - debian:12
+    name: portable smoke ${{ matrix.image }}
+    steps:
+      - name: Checkout packaging infrastructure
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download candidate package
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Verify and unpack candidate package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/candidate"
+          sha256sum -c SHA256SUMS
+          mkdir -p extracted
+          tar -xzf ./*.tar.gz -C extracted
+          package_dir=$(find extracted -mindepth 1 -maxdepth 1 -type d -print -quit)
+          test -n "$package_dir"
+          test -x "$package_dir/reading-mcp"
+          echo "PACKAGE_DIR=${{ runner.temp }}/candidate/$package_dir" >> "$GITHUB_ENV"
+          python3 - "$package_dir/release-manifest.json" <<'PY'
+          import json
+          import sys
+          manifest = json.load(open(sys.argv[1], encoding='utf-8'))
+          print('manifest target:', manifest.get('target'))
+          print('manifest libc requirement:', manifest.get('binary_libc_requirement'))
+          if manifest.get('binary_libc_requirement') != 'static' and not str(manifest.get('binary_libc_requirement', '')).startswith('GLIBC_'):
+              raise SystemExit('release manifest is missing a valid binary_libc_requirement')
+          PY
+
+      - name: Pull ${{ matrix.image }}
+        run: docker pull ${{ matrix.image }}
+
+      - name: Smoke-test inside ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release-smoke.py \
+            --binary "$PACKAGE_DIR/reading-mcp" \
+            --pdf tests/fixtures/pdf_tex/type1-builtin.pdf \
+            --work-dir "${{ runner.temp }}/portability-smoke" \
+            --image "${{ matrix.image }}"

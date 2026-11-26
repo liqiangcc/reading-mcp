@@ -7,6 +7,13 @@ use rmcp::{
 };
 use tokio::io::{Stdin, Stdout};
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(target_env = "musl")]
+const MI_OPTION_PURGE_DELAY: i32 = 15;
+
 /// `tunnel-client` may probe an MCP server with `server/discover` before the
 /// regular MCP `initialize` request. rmcp 3.5.1 answers `server/discover` from
 /// its default `ServerHandler::discover`, which switches the peer to the
@@ -88,8 +95,13 @@ impl Transport<RoleServer> for DiscoveryCompatibleStdio {
     }
 }
 
-#[tokio::main]
+#[cfg_attr(not(target_env = "musl"), tokio::main)]
+#[cfg_attr(target_env = "musl", tokio::main(flavor = "current_thread"))]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_env = "musl")]
+    unsafe {
+        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 10);
+    }
     if reading_mcp::parsing::run_file_source_view_worker_if_requested()? {
         return Ok(());
     }

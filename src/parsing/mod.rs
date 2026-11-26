@@ -18,6 +18,7 @@ mod pdf;
 mod pdf_front_matter;
 mod pdf_layout;
 mod pdf_raster;
+mod pdf_text_extract;
 mod pdf_text_repair;
 mod pdf_type1_builtin;
 mod pdf_type1_glyphs;

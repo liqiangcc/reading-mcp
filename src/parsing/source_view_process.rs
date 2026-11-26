@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::application::ports::{
     ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
-    SourceViewRenderOptions, SourceViewRenderer,
+    SourceViewOutputFormat, SourceViewRenderOptions, SourceViewRenderer,
 };
 use crate::domain::MediaType;
 
@@ -102,6 +102,7 @@ impl FileProcessIsolatedPdfSourceViewRenderer {
             .arg(options.max_image_bytes.to_string())
             .arg(options.max_decoded_stream_bytes.to_string())
             .arg(expected_source_sha256)
+            .arg(options.format.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
@@ -204,7 +205,7 @@ impl FileProcessIsolatedPdfSourceViewRenderer {
         }
 
         Ok(RenderedSourceView {
-            media_type: MediaType("image/png".into()),
+            media_type: MediaType(metadata.media_type.clone()),
             bytes: encoded,
             width: metadata.width,
             height: metadata.height,
@@ -214,6 +215,14 @@ impl FileProcessIsolatedPdfSourceViewRenderer {
 }
 
 impl SourceViewRenderer for FileProcessIsolatedPdfSourceViewRenderer {
+    fn cache_namespace(&self) -> &'static str {
+        if self.pymupdf_python.is_some() {
+            "pymupdf/1.28.2"
+        } else {
+            "pdf-render/1.0.0-beta.18+pdf-syntax/0.5.6+jpeg-encoder/0.7.1"
+        }
+    }
+
     fn render(
         &self,
         bytes: Vec<u8>,
@@ -281,8 +290,14 @@ struct WorkerMetadata {
     height: u32,
     page_count: usize,
     image_bytes: usize,
+    #[serde(default = "default_png_media_type")]
+    media_type: String,
     #[serde(default)]
     source_sha256: Option<String>,
+}
+
+fn default_png_media_type() -> String {
+    "image/png".into()
 }
 
 /// The `source_sha256` a worker recorded in its metadata file, when it wrote
@@ -324,6 +339,15 @@ pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::e
     // it, but an older caller without it still gets the hash recorded — the
     // parent's own compare is the authoritative check either way.
     let expected_source_sha256 = args.next().and_then(|value| value.into_string().ok());
+    let format = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .map(|value| {
+            SourceViewOutputFormat::parse(&value)
+                .ok_or_else(|| format!("invalid source-view output format: {value}"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     if args.next().is_some() {
         return Err("source-view worker received unexpected trailing arguments".into());
     }
@@ -364,6 +388,7 @@ pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::e
                 max_pixels,
                 max_image_bytes,
                 max_decoded_stream_bytes,
+                format,
             },
         )
         .map_err(report_worker_limit)?;
@@ -373,6 +398,7 @@ pub fn run_file_source_view_worker_if_requested() -> Result<bool, Box<dyn std::e
         height: rendered.height,
         page_count: rendered.page_count,
         image_bytes: rendered.bytes.len(),
+        media_type: rendered.media_type.0,
         source_sha256: Some(source_sha256),
     };
     fs::write(&metadata_path, serde_json::to_vec(&metadata)?)?;
@@ -442,6 +468,12 @@ fn validate_metadata(
             metadata.image_bytes as u64,
             options.max_image_bytes as u64,
         ));
+    }
+    if metadata.media_type != "image/png" && metadata.media_type != "image/jpeg" {
+        return Err(ApplicationError::SourceViewFailed(format!(
+            "isolated source-view metadata declares unsupported media type {}",
+            metadata.media_type
+        )));
     }
     Ok(())
 }

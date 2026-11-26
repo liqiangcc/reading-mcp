@@ -7,17 +7,20 @@ use tokio::task::spawn_blocking;
 
 use crate::application::derived_text_units::DerivedTextUnits;
 use crate::application::light_sections::SectionTexts;
-use crate::application::locator_resolution::resolve_text_locator;
+use crate::application::locator_resolution::{resolve_text_locator, resolve_text_locator_at};
 use crate::application::ports::{
-    ApplicationError, DocumentRepository, HttpUrlPolicy, LocalSourceAccess, RawResourceCache,
-    RenderedSourceView, ResolvedLocalSource, RetrievalOptions, Retriever, SourceViewRenderOptions,
+    ApplicationError, DocumentRepository, HttpUrlPolicy, LocalSourceAccess,
+    OriginalSourceRangePage, RawResourceCache, RenderedSourceView, RenderedSourceViewCache,
+    ResolvedLocalSource, RetrievalOptions, Retriever, SOURCE_VIEW_JPEG_QUALITY,
+    SOURCE_VIEW_RASTER_RULE_VERSION, SourceViewOutputFormat, SourceViewRenderOptions,
     SourceViewRenderer, TextUnitIndex, check_document_size_limit, scoped_cache_key,
 };
+use crate::application::section_view::DocumentView;
 use crate::domain::{
-    Document, DocumentId, DocumentSource, NORMALIZED_DOCUMENT_HASH_VERSION, NormalizedDocumentHash,
-    ORIGINAL_SOURCE_BINDING_METADATA_KEY, ORIGINAL_SOURCE_BINDING_MODEL_VERSION,
-    OriginalSourceBindingError, OriginalSourceBindingMap, OriginalSourceTarget, Section,
-    TextLocator,
+    Document, DocumentId, DocumentSource, Location, NORMALIZED_DOCUMENT_HASH_VERSION,
+    NormalizedDocumentHash, ORIGINAL_SOURCE_BINDING_METADATA_KEY,
+    ORIGINAL_SOURCE_BINDING_MODEL_VERSION, OriginalSourceBindingError, OriginalSourceBindingMap,
+    OriginalSourceTarget, SectionId, TextLocator,
 };
 
 pub const DEFAULT_SOURCE_VIEW_DPI: u32 = 144;
@@ -39,6 +42,7 @@ pub struct SourceViewLimits {
     pub max_image_bytes: usize,
     pub max_decoded_stream_bytes: u64,
     pub timeout: Duration,
+    pub format: crate::application::ports::SourceViewOutputFormat,
 }
 
 impl Default for SourceViewLimits {
@@ -52,6 +56,7 @@ impl Default for SourceViewLimits {
             max_image_bytes: DEFAULT_SOURCE_VIEW_MAX_IMAGE_BYTES,
             max_decoded_stream_bytes: DEFAULT_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES,
             timeout: DEFAULT_SOURCE_VIEW_TIMEOUT,
+            format: crate::application::ports::SourceViewOutputFormat::Auto,
         }
     }
 }
@@ -110,6 +115,7 @@ pub struct SourceViewUseCase {
     text_unit_index: Option<Arc<dyn TextUnitIndex>>,
     local_sources: Option<Arc<dyn LocalSourceAccess>>,
     url_cache: Option<UrlSourceCache>,
+    render_cache: Option<Arc<dyn RenderedSourceViewCache>>,
 }
 
 impl SourceViewUseCase {
@@ -127,6 +133,7 @@ impl SourceViewUseCase {
             text_unit_index: None,
             local_sources: None,
             url_cache: None,
+            render_cache: None,
         }
     }
 
@@ -141,6 +148,15 @@ impl SourceViewUseCase {
     /// staging a copy. Without it every source keeps the buffered path.
     pub fn with_local_source_access(mut self, resolver: Arc<dyn LocalSourceAccess>) -> Self {
         self.local_sources = Some(resolver);
+        self
+    }
+
+    /// The rendered-page cache. It is consulted only after locator, policy,
+    /// source and size resolution; a mapped-source hit additionally requires
+    /// the cache's file freshness evidence, and every miss still runs the
+    /// renderer's sha256 identity check before rendering.
+    pub fn with_render_cache(mut self, cache: Arc<dyn RenderedSourceViewCache>) -> Self {
+        self.render_cache = Some(cache);
         self
     }
 
@@ -178,49 +194,74 @@ impl SourceViewUseCase {
             )));
         }
 
-        // The light document when a stored text-unit index serves the units — then every section
-        // length and text is asked of the repository — and the full document when the units come
-        // from `DerivedTextUnits`, which segments the document's own text.
-        let light = self.text_unit_index.is_some();
-        let loaded = match &self.text_unit_index {
-            Some(_) => {
-                self.repository
-                    .get_rebuilt_with_hash(&command.document_id, false)
-                    .await?
+        // With a stored text-unit index, resolve through the same point-query
+        // document view `cite` uses: one header, one owner-section row, one
+        // text-unit row and one source-binding row. A warm rendered-page hit
+        // must not rebuild a whole book (or validate every binding in it)
+        // before reaching the cache. Without a stored index the fallback units
+        // segment the full document, so that path keeps its whole-document load.
+        let (document, normalized_document_hash, resolved) = match &self.text_unit_index {
+            Some(index) => {
+                let (view, normalized_document_hash) = DocumentView::load_with_hash(
+                    Arc::clone(&self.repository),
+                    &command.document_id,
+                )
+                .await?
+                .ok_or(ApplicationError::DocumentNotFound)?;
+                let document = Arc::new(view.document());
+                let mut texts =
+                    SectionTexts::from_repository(&document, Arc::clone(&self.repository));
+                let resolved = resolve_text_locator_at(
+                    &document,
+                    &view,
+                    &command.target_locator,
+                    &normalized_document_hash,
+                    index.as_ref(),
+                    &mut texts,
+                )
+                .await?;
+                (document, normalized_document_hash, resolved)
             }
             None => {
-                self.repository
+                let (document, normalized_document_hash) = self
+                    .repository
                     .get_rebuilt_with_hash(&command.document_id, true)
                     .await?
+                    .ok_or(ApplicationError::DocumentNotFound)?;
+                let units: Arc<dyn TextUnitIndex> =
+                    Arc::new(DerivedTextUnits::new(Arc::clone(&document)));
+                let mut texts = SectionTexts::from_document(&document);
+                let resolved = resolve_text_locator(
+                    &document,
+                    &command.target_locator,
+                    &normalized_document_hash,
+                    units.as_ref(),
+                    &mut texts,
+                )
+                .await?;
+                (document, normalized_document_hash, resolved)
             }
         };
-        let (document, normalized_document_hash) =
-            loaded.ok_or(ApplicationError::DocumentNotFound)?;
-        let units: Arc<dyn TextUnitIndex> = match &self.text_unit_index {
-            Some(index) => Arc::clone(index),
-            None => Arc::new(DerivedTextUnits::new(Arc::clone(&document))),
+        let (page_number, source_binding_version) = if self.text_unit_index.is_some() {
+            resolve_original_page_indexed(
+                self.repository.as_ref(),
+                &document.id,
+                &resolved.locator.owner_section_id,
+                &resolved.section_location,
+                resolved.range,
+            )
+            .await?
+        } else {
+            let mut texts = SectionTexts::from_document(&document);
+            let binding_map =
+                load_binding_map(self.repository.as_ref(), &document, false, &mut texts).await?;
+            resolve_original_page(
+                &resolved.locator.owner_section_id,
+                &resolved.section_location,
+                resolved.range,
+                binding_map.as_ref(),
+            )?
         };
-        let mut texts = match &self.text_unit_index {
-            Some(_) => SectionTexts::from_repository(&document, Arc::clone(&self.repository)),
-            None => SectionTexts::from_document(&document),
-        };
-        let resolved = resolve_text_locator(
-            &document,
-            &command.target_locator,
-            &normalized_document_hash,
-            units.as_ref(),
-            &mut texts,
-        )
-        .await?;
-        let section = document
-            .find_section(&resolved.locator.owner_section_id)
-            .ok_or(ApplicationError::InvalidLocator(
-                "resolved source-view section disappeared".into(),
-            ))?;
-        let binding_map =
-            load_binding_map(self.repository.as_ref(), &document, light, &mut texts).await?;
-        let (page_number, source_binding_version) =
-            resolve_original_page(section, resolved.range, binding_map.as_ref())?;
 
         if !document.media_type.is_pdf() {
             return Err(ApplicationError::InvalidRequest(format!(
@@ -254,7 +295,14 @@ impl SourceViewUseCase {
             max_pixels: self.limits.max_pixels,
             max_image_bytes: self.limits.max_image_bytes,
             max_decoded_stream_bytes: self.limits.max_decoded_stream_bytes,
+            format: self.limits.format,
         };
+        let cache_keys = RenderCacheKeys::new(
+            &document.content_hash.0,
+            page_number,
+            &options,
+            renderer.cache_namespace(),
+        );
         let render = match mapped_source {
             Some(resolved) => {
                 if resolved.final_source != document.source {
@@ -264,14 +312,44 @@ impl SourceViewUseCase {
                     )));
                 }
                 let expected = document.content_hash.0.clone();
+                let cache = self.render_cache.clone();
                 spawn_blocking(move || {
-                    renderer.render_local_file(
+                    let fingerprint = cache
+                        .as_ref()
+                        .and_then(|cache| cache.fingerprint(&resolved.path).ok());
+                    if let (Some(cache), Some(fingerprint)) = (&cache, &fingerprint)
+                        && let Some(hit) = cache.get(cache_keys.probes(), Some(fingerprint))?
+                    {
+                        return Ok(hit);
+                    }
+
+                    let before = fingerprint;
+                    let rendered = renderer.render_local_file(
                         &resolved.path,
                         &expected,
-                        resolved.media_type,
+                        resolved.media_type.clone(),
                         page_number,
                         options,
-                    )
+                    )?;
+                    if let Some(cache) = &cache {
+                        // Use freshness evidence from after the render. If it
+                        // differs from the pre-render evidence the file was
+                        // replaced or touched concurrently, so do not publish
+                        // an entry whose hit-time validation would be wrong.
+                        let after = cache.fingerprint(&resolved.path).ok();
+                        let valid = match (&before, &after) {
+                            (Some(before), Some(after)) if before == after => Some(after.clone()),
+                            _ => None,
+                        };
+                        if let Some(fingerprint) = valid {
+                            cache.put(
+                                cache_keys.for_media_type(&rendered.media_type.0),
+                                &rendered,
+                                Some(fingerprint),
+                            )?;
+                        }
+                    }
+                    Ok(rendered)
                 })
                 .await
                 .map_err(|error| {
@@ -301,8 +379,26 @@ impl SourceViewUseCase {
                 }
 
                 let media_type = resource.media_type.clone();
+                let cache = self.render_cache.clone();
                 spawn_blocking(move || {
-                    renderer.render(resource.bytes, media_type, page_number, options)
+                    // The buffered path retrieved and hashed the exact bytes
+                    // before this lookup, so no file freshness evidence is
+                    // needed: the content hash in the key is the validation.
+                    if let Some(cache) = &cache
+                        && let Some(hit) = cache.get(cache_keys.probes(), None)?
+                    {
+                        return Ok(hit);
+                    }
+                    let rendered =
+                        renderer.render(resource.bytes, media_type, page_number, options)?;
+                    if let Some(cache) = &cache {
+                        cache.put(
+                            cache_keys.for_media_type(&rendered.media_type.0),
+                            &rendered,
+                            None,
+                        )?;
+                    }
+                    Ok(rendered)
                 })
                 .await
                 .map_err(|error| {
@@ -363,6 +459,85 @@ impl SourceViewUseCase {
     }
 }
 
+/// Both cache keys a render can occupy in `auto` mode. Probing the actual
+/// format names keeps the chosen format inside the key without requiring a
+/// pre-render raster detection pass: at most one of the two entries can exist
+/// for one deterministic renderer/rule version.
+struct RenderCacheKeys {
+    png: String,
+    jpeg: String,
+    probes: Vec<String>,
+}
+
+impl RenderCacheKeys {
+    fn new(
+        content_hash: &str,
+        page: u32,
+        options: &SourceViewRenderOptions,
+        renderer_namespace: &str,
+    ) -> Self {
+        let png = rendered_cache_key(content_hash, page, options, renderer_namespace, "png");
+        let jpeg = rendered_cache_key(content_hash, page, options, renderer_namespace, "jpeg");
+        let probes = match options.format {
+            SourceViewOutputFormat::Auto => vec![jpeg.clone(), png.clone()],
+            SourceViewOutputFormat::Png => vec![png.clone()],
+        };
+        Self { png, jpeg, probes }
+    }
+
+    fn probes(&self) -> &[String] {
+        &self.probes
+    }
+
+    fn for_media_type(&self, media_type: &str) -> &str {
+        if media_type == "image/jpeg" {
+            &self.jpeg
+        } else {
+            &self.png
+        }
+    }
+}
+
+/// The cache key is a sha256 over explicit length-neutral components. It covers
+/// the exact document bytes through `content_hash`, the page, every render
+/// input that can change output bytes, the renderer engine/version namespace,
+/// the raster rule and JPEG quality constants, the configured format mode, and
+/// the actual format of the stored entry.
+fn rendered_cache_key(
+    content_hash: &str,
+    page: u32,
+    options: &SourceViewRenderOptions,
+    renderer_namespace: &str,
+    chosen_format: &str,
+) -> String {
+    let mut input = String::new();
+    let mut component = |name: &str, value: &str| {
+        input.push_str(name);
+        input.push('\x1e');
+        input.push_str(value);
+        input.push('\x1f');
+    };
+    component("cache", "rendered-source-view/v1");
+    component("content_hash", content_hash);
+    component("page", &page.to_string());
+    component("dpi", &options.dpi.to_string());
+    component("max_pages", &options.max_pages.to_string());
+    component("max_width", &options.max_width.to_string());
+    component("max_height", &options.max_height.to_string());
+    component("max_pixels", &options.max_pixels.to_string());
+    component("max_image_bytes", &options.max_image_bytes.to_string());
+    component(
+        "max_decoded_stream_bytes",
+        &options.max_decoded_stream_bytes.to_string(),
+    );
+    component("renderer", renderer_namespace);
+    component("raster_rule", SOURCE_VIEW_RASTER_RULE_VERSION);
+    component("jpeg_quality", &SOURCE_VIEW_JPEG_QUALITY.to_string());
+    component("format_mode", options.format.as_str());
+    component("chosen_format", chosen_format);
+    format!("{:x}", Sha256::digest(input.as_bytes()))
+}
+
 /// The persisted original-source binding map, deserialized and validated exactly as the full
 /// document's `original_source_binding_map` does. A light document carries no section text, so the
 /// lengths the range check needs come from the repository, one `section_layout_v2` row per owner.
@@ -401,38 +576,70 @@ async fn load_binding_map(
 }
 
 fn resolve_original_page(
-    section: &Section,
+    section_id: &SectionId,
+    section_location: &Location,
     range: crate::domain::NormalizedTextRange,
     binding_map: Option<&OriginalSourceBindingMap>,
 ) -> Result<(u32, String), ApplicationError> {
-    if let Some(binding_map) = binding_map {
-        return match binding_map
-            .target_for_range(&section.id, range)
-            .map_err(source_binding_error)?
-        {
-            Some(OriginalSourceTarget::Page { page_number }) => {
-                Ok((page_number, ORIGINAL_SOURCE_BINDING_MODEL_VERSION.into()))
+    let lookup = if let Some(binding_map) = binding_map {
+        match binding_map.target_for_range(section_id, range) {
+            Ok(Some(OriginalSourceTarget::Page { page_number })) => {
+                OriginalSourceRangePage::Page(page_number)
             }
-            None => Err(ApplicationError::InvalidLocator(
-                "target locator has no precise original source binding".into(),
-            )),
-        };
-    }
-
-    legacy_single_page_binding(section)
-        .map(|page| (page, "legacy-single-page-section/v1".into()))
-        .ok_or_else(|| {
-            ApplicationError::StaleLocator(
-                "persisted PDF lacks precise page binding evidence for this locator; reopen the document with the current parser"
-                    .into(),
-            )
-        })
+            Ok(None) => OriginalSourceRangePage::NoCoveringBinding,
+            Err(error) => return Err(source_binding_error(error)),
+        }
+    } else {
+        OriginalSourceRangePage::NoBindings
+    };
+    resolve_original_page_lookup(section_location, lookup)
 }
 
-fn legacy_single_page_binding(section: &Section) -> Option<u32> {
-    let page = section.location.page?;
+/// One point-query binding lookup. SQLite answers it from indexed binding
+/// rows; validating every row of a book on every `source_view` call would cost
+/// more than the rendered-page cache hit it protects.
+async fn resolve_original_page_indexed(
+    repository: &dyn DocumentRepository,
+    document_id: &DocumentId,
+    section_id: &SectionId,
+    section_location: &Location,
+    range: crate::domain::NormalizedTextRange,
+) -> Result<(u32, String), ApplicationError> {
+    let lookup = repository
+        .original_source_page_for_range(document_id, section_id, range)
+        .await?;
+    resolve_original_page_lookup(section_location, lookup)
+}
+
+fn resolve_original_page_lookup(
+    section_location: &Location,
+    lookup: OriginalSourceRangePage,
+) -> Result<(u32, String), ApplicationError> {
+    match lookup {
+        OriginalSourceRangePage::Page(page_number) => {
+            Ok((page_number, ORIGINAL_SOURCE_BINDING_MODEL_VERSION.into()))
+        }
+        OriginalSourceRangePage::NoCoveringBinding => Err(ApplicationError::InvalidLocator(
+            "target locator has no precise original source binding".into(),
+        )),
+        OriginalSourceRangePage::Ambiguous => Err(source_binding_error(
+            OriginalSourceBindingError::AmbiguousTarget,
+        )),
+        OriginalSourceRangePage::NoBindings => legacy_single_page_binding(section_location)
+            .map(|page| (page, "legacy-single-page-section/v1".into()))
+            .ok_or_else(|| {
+                ApplicationError::StaleLocator(
+                    "persisted PDF lacks precise page binding evidence for this locator; reopen the document with the current parser"
+                        .into(),
+                )
+            }),
+    }
+}
+
+fn legacy_single_page_binding(location: &Location) -> Option<u32> {
+    let page = location.page?;
     let expected = format!("pdf:page:{page}");
-    (section.location.native_location.as_deref() == Some(expected.as_str())).then_some(page)
+    (location.native_location.as_deref() == Some(expected.as_str())).then_some(page)
 }
 
 fn source_binding_error(error: OriginalSourceBindingError) -> ApplicationError {

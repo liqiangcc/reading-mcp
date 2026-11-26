@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::application::ports::SourceViewOutputFormat;
 use crate::application::source_view::SourceViewLimits;
 use crate::domain::OcrConfig;
 use crate::infrastructure::ResourceBudget;
@@ -25,6 +26,8 @@ pub struct RuntimeConfig {
     pub telemetry: bool,
     pub resource_budget: ResourceBudget,
     pub source_view: SourceViewLimits,
+    /// Rendered source-view page cache cap in MiB; 0 disables the cache.
+    pub source_view_cache_mib: usize,
     pub http: HttpRetrieverConfig,
 }
 
@@ -51,6 +54,7 @@ impl Default for RuntimeConfig {
             telemetry: true,
             resource_budget,
             source_view: SourceViewLimits::default(),
+            source_view_cache_mib: 256,
             http,
         }
     }
@@ -215,6 +219,15 @@ impl RuntimeConfig {
             "READING_MCP_SOURCE_VIEW_TIMEOUT_SECS",
             config.source_view.timeout.as_secs(),
         )?);
+        if let Ok(value) = std::env::var("READING_MCP_SOURCE_VIEW_FORMAT") {
+            config.source_view.format = SourceViewOutputFormat::parse(&value).ok_or_else(|| {
+                format!("READING_MCP_SOURCE_VIEW_FORMAT must be auto or png, got {value:?}")
+            })?;
+        }
+        config.source_view_cache_mib = env_usize(
+            "READING_MCP_SOURCE_VIEW_CACHE_MIB",
+            config.source_view_cache_mib,
+        )?;
 
         config.http.max_redirects =
             env_usize("READING_MCP_HTTP_MAX_REDIRECTS", config.http.max_redirects)?;

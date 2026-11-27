@@ -91,6 +91,16 @@ pub fn build_server(
     ));
 
     let (components, ephemeral_state) = build_state_components(&config)?;
+    // The opt-in usage log writes under the same state directory the stores use; when the state
+    // is ephemeral, so is the log. `None` state means the ephemeral directory `build_state_components`
+    // created, which the server's ephemeral-state guard keeps alive for exactly the server's life.
+    // Spawned here because `config` is partially moved below.
+    let usage_state = usage_state_dir(&config, ephemeral_state.as_deref());
+    let usage_log = crate::mcp::usage_log::build_usage_log(
+        config.usage_log,
+        config.usage_log_days,
+        &usage_state,
+    );
     let components = if config.telemetry {
         components.observed()
     } else {
@@ -324,7 +334,19 @@ pub fn build_server(
         search_reading,
         cite_reading,
         ephemeral_state,
-    ))
+    )
+    .with_usage_log(usage_log))
+}
+
+fn usage_state_dir(
+    config: &RuntimeConfig,
+    ephemeral_state: Option<&EphemeralStateDir>,
+) -> std::path::PathBuf {
+    match (&config.state_dir, ephemeral_state) {
+        (Some(state_dir), _) => state_dir.clone(),
+        (None, Some(ephemeral)) => ephemeral.path().to_path_buf(),
+        (None, None) => std::env::temp_dir(),
+    }
 }
 
 fn build_ocr_identity(

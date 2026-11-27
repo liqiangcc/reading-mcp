@@ -852,8 +852,10 @@ mod locator_differential_tests {
                 "external measurement PDFs should exercise many handles"
             );
         } else {
+            // 42 since sgr1: the spaced decimal in `type1-builtin.pdf` (`0 .` + `5%`)
+            // is one sentence now, so the fixture set yields one handle fewer (was 43).
             assert_eq!(
-                compared, 43,
+                compared, 42,
                 "the committed fixtures plus cross-page case are deterministic"
             );
         }

@@ -4,19 +4,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
-use reading_mcp::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
+use reading_mcp::application::open_document::{
+    OpenDocumentCommand, OpenDocumentResult, OpenDocumentUseCase,
+};
 use reading_mcp::application::ports::{
     ApplicationError, DocumentRepository, HttpUrlPolicy, LocalSourceAccess, RawResourceCache,
-    ResolvedLocalSource, RetrievalOptions, RetrievedResource, Retriever, SourcePolicy,
-    SourceViewRenderOptions, SourceViewRenderer,
+    RenderedSourceView, RenderedSourceViewCache, ResolvedLocalSource, RetrievalOptions,
+    RetrievedResource, Retriever, SourcePolicy, SourceViewOutputFormat, SourceViewRenderOptions,
+    SourceViewRenderer,
 };
 use reading_mcp::application::source_view::{
     GetSourceViewCommand, SourceViewLimits, SourceViewRepresentation, SourceViewUseCase,
 };
 use reading_mcp::domain::{DocumentSource, MediaType, SectionId, TextLocator};
 use reading_mcp::infrastructure::{
-    FileRawResourceCache, InMemoryDocumentRepository, InMemoryRawResourceCache,
-    InMemoryTextUnitIndex,
+    FileRawResourceCache, FileSourceViewCache, InMemoryDocumentRepository,
+    InMemoryRawResourceCache, InMemoryTextUnitIndex,
 };
 use reading_mcp::parsing::{
     FileProcessIsolatedPdfSourceViewRenderer, ParserRouter, PdfSourceViewRenderer,
@@ -187,6 +190,7 @@ async fn source_view_enforces_render_dimensions_before_allocating_image() {
             max_pixels: 10_000,
             max_image_bytes: 8 * 1024 * 1024,
             max_decoded_stream_bytes: 16 * 1024 * 1024,
+            format: reading_mcp::application::ports::SourceViewOutputFormat::Auto,
         },
     )
     .expect_err("oversized source-view dimensions must be rejected");
@@ -380,6 +384,7 @@ fn isolated_worker_hash_mismatch_answers_stale_locator() {
                 max_pixels: 4_000_000,
                 max_image_bytes: 8 * 1024 * 1024,
                 max_decoded_stream_bytes: 16 * 1024 * 1024,
+                format: reading_mcp::application::ports::SourceViewOutputFormat::Auto,
             },
         )
         .expect_err("a hash-mismatched file must not render");
@@ -427,6 +432,7 @@ fn isolated_renderer_fails_a_worker_that_omits_source_sha256() {
                 max_pixels: 1_000_000,
                 max_image_bytes: 1024 * 1024,
                 max_decoded_stream_bytes: 1024 * 1024,
+                format: reading_mcp::application::ports::SourceViewOutputFormat::Auto,
             },
         )
         .expect_err("metadata without source_sha256 must not pass");
@@ -736,6 +742,441 @@ fn build_fidelity_pdf() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Rendered-page cache and output format coverage.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CountingSourceViewRenderer {
+    renders: AtomicUsize,
+    namespace: &'static str,
+}
+
+impl SourceViewRenderer for CountingSourceViewRenderer {
+    fn cache_namespace(&self) -> &'static str {
+        self.namespace
+    }
+
+    fn render(
+        &self,
+        bytes: Vec<u8>,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError> {
+        self.renders.fetch_add(1, Ordering::Relaxed);
+        PdfSourceViewRenderer.render(bytes, media_type, page, options)
+    }
+
+    fn render_local_file(
+        &self,
+        path: &std::path::Path,
+        expected_source_sha256: &str,
+        media_type: MediaType,
+        page: u32,
+        options: SourceViewRenderOptions,
+    ) -> Result<RenderedSourceView, ApplicationError> {
+        self.renders.fetch_add(1, Ordering::Relaxed);
+        PdfSourceViewRenderer.render_local_file(
+            path,
+            expected_source_sha256,
+            media_type,
+            page,
+            options,
+        )
+    }
+}
+
+async fn open_cache_fidelity_pdf(
+    directory: &std::path::Path,
+) -> (
+    Arc<InMemoryDocumentRepository>,
+    OpenDocumentResult,
+    TextLocator,
+    TextLocator,
+) {
+    open_cache_fidelity_pdf_bytes(directory, build_fidelity_pdf()).await
+}
+
+async fn open_cache_fidelity_pdf_bytes(
+    directory: &std::path::Path,
+    bytes: Vec<u8>,
+) -> (
+    Arc<InMemoryDocumentRepository>,
+    OpenDocumentResult,
+    TextLocator,
+    TextLocator,
+) {
+    let path = directory.join("fidelity.pdf");
+    tokio::fs::write(&path, bytes)
+        .await
+        .expect("PDF fixture should be written");
+    let repository = Arc::new(InMemoryDocumentRepository::default());
+    let index = Arc::new(InMemoryTextUnitIndex::default());
+    let opened = OpenDocumentUseCase::with_text_unit_index(
+        Arc::new(LocalFileSourcePolicy::allow_roots([directory])),
+        Arc::new(FileRetriever),
+        Arc::new(ParserRouter::phase4()),
+        repository.clone(),
+        index,
+        Arc::new(reading_mcp::infrastructure::InMemorySearchIndex::default()),
+    )
+    .execute(OpenDocumentCommand {
+        source: DocumentSource(path.to_string_lossy().into_owned()),
+        options: RetrievalOptions::default(),
+    })
+    .await
+    .expect("PDF should open");
+    let document = repository
+        .get(&opened.document_id)
+        .await
+        .expect("repository read")
+        .expect("document should be persisted");
+    let first = TextLocator::for_section(&document, &document.root_sections[0]);
+    let second = TextLocator::for_section(&document, &document.root_sections[1]);
+    (repository, opened, first, second)
+}
+
+fn cache_command(
+    opened: &OpenDocumentResult,
+    locator: TextLocator,
+    dpi: u32,
+) -> GetSourceViewCommand {
+    GetSourceViewCommand {
+        document_id: opened.document_id.clone(),
+        target_locator: locator,
+        representation: SourceViewRepresentation::Original,
+        dpi: Some(dpi),
+    }
+}
+
+#[tokio::test]
+async fn rendered_page_cache_hit_equals_miss_and_key_inputs_miss() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let (repository, opened, first, second) = open_cache_fidelity_pdf(directory.path()).await;
+    let cache = Arc::new(
+        FileSourceViewCache::open(directory.path().join("render-cache"), 4)
+            .expect("render cache should open"),
+    );
+    let renderer = Arc::new(CountingSourceViewRenderer::default());
+    let usecase = || {
+        SourceViewUseCase::new(
+            repository.clone(),
+            Arc::new(FileRetriever),
+            renderer.clone(),
+            SourceViewLimits::default(),
+        )
+        .with_render_cache(cache.clone())
+    };
+
+    let miss = usecase()
+        .execute(cache_command(&opened, first.clone(), 72))
+        .await
+        .expect("cold render");
+    let hit = usecase()
+        .execute(cache_command(&opened, first.clone(), 72))
+        .await
+        .expect("warm render");
+    assert_eq!(miss.view, hit.view, "a hit returns the miss bytes exactly");
+    assert_eq!(
+        renderer.renders.load(Ordering::Relaxed),
+        1,
+        "the hit did not render again"
+    );
+
+    // Page, scale, every render-affecting limit, format mode, document content
+    // hash and renderer namespace are key inputs: each change renders once more
+    // instead of reusing the entry.
+    usecase()
+        .execute(cache_command(&opened, second, 72))
+        .await
+        .expect("another page renders");
+    usecase()
+        .execute(cache_command(&opened, first.clone(), 36))
+        .await
+        .expect("another dpi renders");
+    macro_rules! render_with_limits {
+        ($limits:expr, $message:literal) => {
+            SourceViewUseCase::new(
+                repository.clone(),
+                Arc::new(FileRetriever),
+                renderer.clone(),
+                $limits,
+            )
+            .with_render_cache(cache.clone())
+            .execute(cache_command(&opened, first.clone(), 72))
+            .await
+            .expect($message)
+        };
+    }
+    let defaults = SourceViewLimits::default();
+    render_with_limits!(
+        SourceViewLimits {
+            max_pages: defaults.max_pages + 1,
+            ..defaults.clone()
+        },
+        "another page-count limit renders"
+    );
+    render_with_limits!(
+        SourceViewLimits {
+            max_width: defaults.max_width + 1,
+            ..defaults.clone()
+        },
+        "another width limit renders"
+    );
+    render_with_limits!(
+        SourceViewLimits {
+            max_height: defaults.max_height + 1,
+            ..defaults.clone()
+        },
+        "another height limit renders"
+    );
+    render_with_limits!(
+        SourceViewLimits {
+            max_pixels: defaults.max_pixels + 1,
+            ..defaults.clone()
+        },
+        "another pixel limit renders"
+    );
+    render_with_limits!(
+        SourceViewLimits {
+            max_image_bytes: defaults.max_image_bytes + 1,
+            ..defaults.clone()
+        },
+        "another image-byte limit renders"
+    );
+    render_with_limits!(
+        SourceViewLimits {
+            max_decoded_stream_bytes: defaults.max_decoded_stream_bytes + 1,
+            ..defaults.clone()
+        },
+        "another stream limit renders"
+    );
+    render_with_limits!(
+        SourceViewLimits {
+            format: SourceViewOutputFormat::Png,
+            ..defaults.clone()
+        },
+        "png mode renders separately"
+    );
+
+    let changed_directory = directory.path().join("changed-content");
+    std::fs::create_dir(&changed_directory).expect("changed fixture directory should be created");
+    let mut changed_bytes = build_fidelity_pdf();
+    changed_bytes.extend_from_slice(b"\n% content-hash key input\n");
+    let (changed_repository, changed_opened, changed_first, _) =
+        open_cache_fidelity_pdf_bytes(&changed_directory, changed_bytes).await;
+    SourceViewUseCase::new(
+        changed_repository,
+        Arc::new(FileRetriever),
+        renderer.clone(),
+        SourceViewLimits::default(),
+    )
+    .with_render_cache(cache.clone())
+    .execute(cache_command(&changed_opened, changed_first, 72))
+    .await
+    .expect("another content hash renders");
+
+    let other_renderer = Arc::new(CountingSourceViewRenderer {
+        renders: AtomicUsize::new(0),
+        namespace: "test-renderer/other-version",
+    });
+    SourceViewUseCase::new(
+        repository,
+        Arc::new(FileRetriever),
+        other_renderer.clone(),
+        SourceViewLimits::default(),
+    )
+    .with_render_cache(cache)
+    .execute(cache_command(&opened, first, 72))
+    .await
+    .expect("another renderer namespace renders");
+    assert_eq!(renderer.renders.load(Ordering::Relaxed), 11);
+    assert_eq!(other_renderer.renders.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn warm_render_cache_preserves_local_policy_size_and_stale_refusals() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let path = directory.path().join("fidelity.pdf");
+    let (repository, opened, first, _) = open_cache_fidelity_pdf(directory.path()).await;
+    let cache = Arc::new(
+        FileSourceViewCache::open(directory.path().join("render-cache"), 4)
+            .expect("render cache should open"),
+    );
+    let renderer = Arc::new(CountingSourceViewRenderer::default());
+    let local = |roots: Vec<std::path::PathBuf>, size| {
+        Arc::new(LocalFileSourceAccess::new(
+            LocalFileSourcePolicy::allow_roots(roots),
+            size,
+        ))
+    };
+    let usecase = |access: Arc<LocalFileSourceAccess>| {
+        SourceViewUseCase::new(
+            repository.clone(),
+            Arc::new(FileRetriever),
+            renderer.clone(),
+            SourceViewLimits::default(),
+        )
+        .with_local_source_access(access)
+        .with_render_cache(cache.clone())
+    };
+    usecase(local(vec![directory.path().to_path_buf()], usize::MAX))
+        .execute(cache_command(&opened, first.clone(), 72))
+        .await
+        .expect("the entry warms through the mapped local path");
+
+    let error = usecase(local(Vec::new(), usize::MAX))
+        .execute(cache_command(&opened, first.clone(), 72))
+        .await
+        .expect_err("a local-root refusal precedes the warm cache");
+    assert!(matches!(error, ApplicationError::BlockedSource(_)));
+
+    let error = usecase(local(vec![directory.path().to_path_buf()], 16))
+        .execute(cache_command(&opened, first.clone(), 72))
+        .await
+        .expect_err("a size refusal precedes the warm cache");
+    assert!(matches!(error, ApplicationError::ResourceLimitExceeded(_)));
+
+    let mut changed = build_fidelity_pdf();
+    changed.extend_from_slice(b"changed after warm cache");
+    std::fs::write(&path, changed).expect("source should be rewritten");
+    let error = usecase(local(vec![directory.path().to_path_buf()], usize::MAX))
+        .execute(cache_command(&opened, first, 72))
+        .await
+        .expect_err("a stale source must not answer from the warm cache");
+    assert!(matches!(error, ApplicationError::StaleLocator(_)));
+}
+
+#[tokio::test]
+async fn concurrent_same_page_cache_requests_return_complete_identical_bytes() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let (repository, opened, first, _) = open_cache_fidelity_pdf(directory.path()).await;
+    let cache = Arc::new(
+        FileSourceViewCache::open(directory.path().join("render-cache"), 4)
+            .expect("render cache should open"),
+    );
+    let renderer = Arc::new(CountingSourceViewRenderer::default());
+    let usecase = Arc::new(
+        SourceViewUseCase::new(
+            repository,
+            Arc::new(FileRetriever),
+            renderer,
+            SourceViewLimits::default(),
+        )
+        .with_render_cache(cache),
+    );
+    let (a, b) = tokio::join!(
+        usecase.execute(cache_command(&opened, first.clone(), 72)),
+        usecase.execute(cache_command(&opened, first, 72))
+    );
+    let a = a.expect("first concurrent render");
+    let b = b.expect("second concurrent render");
+    assert_eq!(
+        a.view, b.view,
+        "concurrent requests never expose a corrupt entry"
+    );
+    assert_eq!(&a.view.bytes[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+#[test]
+fn source_view_render_cache_eviction_temp_cleanup_and_zero_cap() {
+    let directory = tempdir().expect("temporary directory should be created");
+    let cache_dir = directory.path().join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let leftover = cache_dir.join(".orphan.rsv.tmp-1");
+    std::fs::write(&leftover, b"interrupted").unwrap();
+    let cache = FileSourceViewCache::open(&cache_dir, 1).expect("cache should open");
+    assert!(
+        !leftover.exists(),
+        "startup removes an interrupted temp write"
+    );
+
+    let view = |byte: u8, len: usize| RenderedSourceView {
+        media_type: MediaType("image/png".into()),
+        bytes: vec![byte; len],
+        width: 1,
+        height: 1,
+        page_count: 1,
+    };
+    cache.put("a", &view(1, 600_000), None).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    cache.put("b", &view(2, 600_000), None).unwrap();
+    assert!(
+        cache.get(&["a".into()], None).unwrap().is_none(),
+        "oldest entry is evicted at the cap"
+    );
+    assert!(
+        cache.get(&["b".into()], None).unwrap().is_some(),
+        "newest entry remains"
+    );
+    let total: u64 = std::fs::read_dir(&cache_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.metadata().unwrap().len())
+        .sum();
+    assert!(total <= 1024 * 1024, "cache remains capped: {total}");
+
+    let disabled_dir = directory.path().join("disabled");
+    let disabled = FileSourceViewCache::open(&disabled_dir, 0).expect("disabled cache opens");
+    disabled.put("a", &view(1, 10), None).unwrap();
+    assert!(
+        disabled.get(&["a".into()], None).unwrap().is_none(),
+        "cap 0 disables reads and writes"
+    );
+    assert_eq!(std::fs::read_dir(&disabled_dir).unwrap().count(), 0);
+}
+
+#[test]
+fn source_view_format_auto_detects_raster_and_png_mode_preserves_png() {
+    let raster = std::fs::read("tests/fixtures/scanned_pdf/pdf/F02.pdf").unwrap();
+    let text = std::fs::read("tests/fixtures/pdf_tex/type1-builtin.pdf").unwrap();
+    let options = |format| SourceViewRenderOptions {
+        dpi: 144,
+        max_pages: 2_000,
+        max_width: 2_400,
+        max_height: 3_200,
+        max_pixels: 16_000_000,
+        max_image_bytes: 8 * 1024 * 1024,
+        max_decoded_stream_bytes: 33_554_432,
+        format,
+    };
+    let raster_auto = PdfSourceViewRenderer
+        .render(
+            raster.clone(),
+            MediaType("application/pdf".into()),
+            1,
+            options(SourceViewOutputFormat::Auto),
+        )
+        .expect("raster fixture renders");
+    assert_eq!(raster_auto.media_type.0, "image/jpeg");
+    assert_eq!(&raster_auto.bytes[..3], b"\xff\xd8\xff");
+    let text_auto = PdfSourceViewRenderer
+        .render(
+            text,
+            MediaType("application/pdf".into()),
+            1,
+            options(SourceViewOutputFormat::Auto),
+        )
+        .expect("text fixture renders");
+    assert_eq!(text_auto.media_type.0, "image/png");
+    let raster_png = PdfSourceViewRenderer
+        .render(
+            raster,
+            MediaType("application/pdf".into()),
+            1,
+            options(SourceViewOutputFormat::Png),
+        )
+        .expect("png mode renders");
+    assert_eq!(raster_png.media_type.0, "image/png");
+    assert_eq!(&raster_png.bytes[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(
+        raster_png.bytes.len(),
+        287_157,
+        "png compatibility bytes for this fixture"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #274: a URL source with a usable raw-cache entry renders its stored body —
 // the worker maps the cache file and checks its sha256 against `content_hash`
 // — without contacting the origin. Anything else falls back to today's
@@ -890,6 +1331,7 @@ fn test_render_options() -> SourceViewRenderOptions {
         max_pixels: 4_000_000,
         max_image_bytes: 8 * 1024 * 1024,
         max_decoded_stream_bytes: 16 * 1024 * 1024,
+        format: reading_mcp::application::ports::SourceViewOutputFormat::Auto,
     }
 }
 
@@ -1183,6 +1625,45 @@ async fn source_view_url_source_refused_by_the_url_policy() {
         0,
         "the policy refusal never contacts the origin"
     );
+    fixture.server.abort();
+}
+
+/// A warm rendered-page cache never bypasses the URL-level policy: the first
+/// call renders and stores the page, then the same document under an
+/// https-only policy is still the policy refusal, with no origin request.
+#[tokio::test]
+async fn warm_render_cache_preserves_url_policy_refusals() {
+    let fixture = spawn_counting_pdf_fixture().await;
+    let cache_dir = tempdir().expect("cache directory should be created");
+    let raw_cache = Arc::new(FileRawResourceCache::new(cache_dir.path()));
+    let opened = open_url_pdf(&fixture, raw_cache.clone()).await;
+    let render_cache = Arc::new(
+        FileSourceViewCache::open(cache_dir.path().join("rendered"), 4)
+            .expect("render cache should open"),
+    );
+    url_source_view(
+        &opened,
+        raw_cache.clone(),
+        opened.policy.clone(),
+        usize::MAX,
+    )
+    .with_render_cache(render_cache.clone())
+    .execute(url_source_view_command(&opened))
+    .await
+    .expect("the first allowed render warms the cache");
+
+    let before = fixture.requests.load(Ordering::Relaxed);
+    let https_only: Arc<dyn HttpUrlPolicy> = Arc::new(PublicHttpAccessPolicy::https_only());
+    let error = url_source_view(&opened, raw_cache, https_only, 16)
+        .with_render_cache(render_cache)
+        .execute(url_source_view_command(&opened))
+        .await
+        .expect_err("a warm cache must not bypass the URL policy");
+    assert_eq!(
+        error,
+        ApplicationError::BlockedSource("plain HTTP is disabled by policy".into())
+    );
+    assert_eq!(fixture.requests.load(Ordering::Relaxed) - before, 0);
     fixture.server.abort();
 }
 

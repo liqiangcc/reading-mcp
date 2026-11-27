@@ -13,17 +13,17 @@ use pdf_render::pdf_interpret::{InterpreterSettings, InterpreterWarning};
 use pdf_render::pdf_syntax::content::TypedIter;
 use pdf_render::pdf_syntax::content::ops::TypedInstruction;
 use pdf_render::pdf_syntax::object::dict::keys::{
-    FORM, H, HEIGHT, IMAGE, MASK, RESOURCES, SMASK, SMASK_IN_DATA, SUBTYPE, W, WIDTH,
+    BBOX, FORM, H, HEIGHT, IMAGE, MASK, MATRIX, RESOURCES, SMASK, SMASK_IN_DATA, SUBTYPE, W, WIDTH,
 };
-use pdf_render::pdf_syntax::object::{Dict, Name, ObjectIdentifier, Stream};
+use pdf_render::pdf_syntax::object::{Dict, Name, ObjectIdentifier, Rect, Stream};
 use pdf_render::pdf_syntax::page::{Page, Resources};
 use pdf_render::pdf_syntax::{self, LoadPdfError, Pdf, PdfData, PdfLoadLimits};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::application::ports::{
-    ApplicationError, RenderedSourceView, SourceViewLimitDetail, SourceViewLimitKind,
-    SourceViewRenderOptions, SourceViewRenderer,
+    ApplicationError, RenderedSourceView, SOURCE_VIEW_JPEG_QUALITY, SourceViewLimitDetail,
+    SourceViewLimitKind, SourceViewOutputFormat, SourceViewRenderOptions, SourceViewRenderer,
 };
 use crate::domain::MediaType;
 
@@ -237,7 +237,8 @@ impl PdfSourceViewRenderer {
         // same bound `pdf-syntax` applies in `decoded_image` before rendering:
         // the first oversized one rejects the page instead of silently missing
         // from the PNG (for a scanned page, the image *is* the page).
-        if let Some(measured) = first_oversized_drawn_image(source_page, options.max_pixels) {
+        let image_analysis = analyze_page_images(source_page, options.max_pixels);
+        if let Some(measured) = image_analysis.oversized_pixels {
             return Err(ApplicationError::SourceViewLimitExceeded(
                 SourceViewLimitDetail::new(
                     page,
@@ -301,15 +302,42 @@ impl PdfSourceViewRenderer {
                 "PDF renderer returned an invalid RGBA image buffer".into(),
             )
         })?;
-        let mut encoded = Cursor::new(Vec::new());
-        image
-            .write_to(&mut encoded, ImageFormat::Png)
-            .map_err(|error| {
-                ApplicationError::SourceViewFailed(format!(
-                    "failed to encode source-view PNG: {error}"
-                ))
-            })?;
-        let encoded = encoded.into_inner();
+        let jpeg = matches!(options.format, SourceViewOutputFormat::Auto)
+            && image_analysis.raster_dominated;
+        let (encoded, media_type) = if jpeg {
+            let mut encoded = Vec::new();
+            jpeg_encoder::Encoder::new(&mut encoded, SOURCE_VIEW_JPEG_QUALITY)
+                .encode(
+                    image.as_raw(),
+                    u16::try_from(image.width()).map_err(|_| {
+                        ApplicationError::SourceViewFailed(
+                            "source-view image width exceeds JPEG dimensions".into(),
+                        )
+                    })?,
+                    u16::try_from(image.height()).map_err(|_| {
+                        ApplicationError::SourceViewFailed(
+                            "source-view image height exceeds JPEG dimensions".into(),
+                        )
+                    })?,
+                    jpeg_encoder::ColorType::Rgba,
+                )
+                .map_err(|error| {
+                    ApplicationError::SourceViewFailed(format!(
+                        "failed to encode source-view JPEG: {error}"
+                    ))
+                })?;
+            (encoded, MediaType("image/jpeg".into()))
+        } else {
+            let mut encoded = Cursor::new(Vec::new());
+            image
+                .write_to(&mut encoded, ImageFormat::Png)
+                .map_err(|error| {
+                    ApplicationError::SourceViewFailed(format!(
+                        "failed to encode source-view PNG: {error}"
+                    ))
+                })?;
+            (encoded.into_inner(), MediaType("image/png".into()))
+        };
         if encoded.len() > options.max_image_bytes {
             return Err(ApplicationError::SourceViewLimitExceeded(
                 SourceViewLimitDetail::new(
@@ -322,7 +350,7 @@ impl PdfSourceViewRenderer {
         }
 
         Ok(RenderedSourceView {
-            media_type: MediaType("image/png".into()),
+            media_type,
             bytes: encoded,
             width: u32::from(pixmap.width()),
             height: u32::from(pixmap.height()),
@@ -332,6 +360,10 @@ impl PdfSourceViewRenderer {
 }
 
 impl SourceViewRenderer for PdfSourceViewRenderer {
+    fn cache_namespace(&self) -> &'static str {
+        "pdf-render/1.0.0-beta.18+pdf-syntax/0.5.6+jpeg-encoder/0.7.1"
+    }
+
     fn render(
         &self,
         bytes: Vec<u8>,
@@ -435,78 +467,292 @@ const DRAWN_IMAGE_MAX_FORM_DEPTH: u32 = 64;
 /// carries no caps, so `decoded_image` never applies `max_image_pixels` to it.
 /// Checking an inline image here would reject a page the interpreter draws in
 /// full.
-fn first_oversized_drawn_image(page: &Page<'_>, max_pixels: u64) -> Option<u64> {
+///
+/// The raster rule is structural and deterministic: walk the page's content
+/// stream, follow `Do` into form XObjects, track the graphics-state transform,
+/// and sum the page area covered by the axis-aligned bounding boxes of drawn
+/// raster images. A page whose covered area is at least half of its effective
+/// crop area is raster-dominated. The walk does not decode image samples; it
+/// reads only content streams, resources, matrices and bounding boxes.
+const RASTER_COVERAGE_THRESHOLD: f64 = 0.5;
+
+#[derive(Default)]
+struct PageImageAnalysis {
+    oversized_pixels: Option<u64>,
+    raster_dominated: bool,
+}
+
+/// Walks the drawn-image content once for both jobs that need the same form
+/// tree: the embedded-pixel limit and the raster-output decision. Reusing the
+/// walk matters on text-heavy pages whose content streams are large; parsing
+/// them a second time after rendering would be pure overhead on the cold path.
+fn analyze_page_images(page: &Page<'_>, max_pixels: u64) -> PageImageAnalysis {
+    let Some(content) = page.page_stream() else {
+        return PageImageAnalysis::default();
+    };
+    let clip = effective_page_clip(page);
+    let page_area = clip.width().max(0.0) * clip.height().max(0.0);
     let mut walk = DrawnImageWalk::default();
-    walk.content(page.page_stream()?, page.resources(), max_pixels, 0)
+    let oversized_pixels = walk.content(
+        content,
+        page.resources(),
+        max_pixels,
+        PdfMatrix::IDENTITY,
+        clip,
+        0,
+        true,
+    );
+    let raster_dominated = oversized_pixels.is_none()
+        && page_area > 0.0
+        && page_area.is_finite()
+        && walk.covered_area / page_area >= RASTER_COVERAGE_THRESHOLD;
+    PageImageAnalysis {
+        oversized_pixels,
+        raster_dominated,
+    }
+}
+
+/// The rectangle `Page::base_dimensions` effectively renders. `base_dimensions`
+/// exposes only width and height, so repeat its crop/media choice here for the
+/// coverage ratio; rotation permutes the axes but leaves area unchanged.
+fn effective_page_clip(page: &Page<'_>) -> Rect {
+    let crop = page.crop_box();
+    let media = page.media_box();
+    let effective = if crop.x0 >= media.x0 && crop.y0 >= media.y0 {
+        crop.intersect(media)
+    } else {
+        crop
+    };
+    if effective.width() > 0.0 && effective.height() > 0.0 {
+        effective
+    } else {
+        let (width, height) = page.base_dimensions();
+        Rect::new(0.0, 0.0, f64::from(width), f64::from(height))
+    }
+}
+
+/// A PDF transformation matrix in `[a b c d e f]` order. Concatenation uses
+/// the same `self * rhs` order as `kurbo::Affine`, matching `pdf-interpret`'s
+/// handling of `cm` and form matrices.
+#[derive(Clone, Copy)]
+struct PdfMatrix {
+    coefficients: [f64; 6],
+}
+
+impl PdfMatrix {
+    const IDENTITY: Self = Self {
+        coefficients: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    };
+
+    fn concat(self, rhs: Self) -> Self {
+        let [sa, sb, sc, sd, se, sf] = self.coefficients;
+        let [ra, rb, rc, rd, re, rf] = rhs.coefficients;
+        Self {
+            coefficients: [
+                sa * ra + sc * rb,
+                sb * ra + sd * rb,
+                sa * rc + sc * rd,
+                sb * rc + sd * rd,
+                sa * re + sc * rf + se,
+                sb * re + sd * rf + sf,
+            ],
+        }
+    }
+
+    fn point(self, x: f64, y: f64) -> (f64, f64) {
+        let [a, b, c, d, e, f] = self.coefficients;
+        (a * x + c * y + e, b * x + d * y + f)
+    }
+}
+
+/// The area of `rect` after `matrix`, clipped to `clip`. The rectangle is
+/// reduced to its axis-aligned bounding box, which is exact for the rotations
+/// and scales scan pages use and deterministic for arbitrary transforms.
+fn transformed_rect_area(matrix: PdfMatrix, rect: [f64; 4], clip: Rect) -> f64 {
+    let rect = transformed_clip(matrix, rect, clip);
+    rect.width().max(0.0) * rect.height().max(0.0)
+}
+
+fn transformed_clip(matrix: PdfMatrix, rect: [f64; 4], clip: Rect) -> Rect {
+    let [x0, y0, x1, y1] = rect;
+    let points = [
+        matrix.point(x0, y0),
+        matrix.point(x1, y0),
+        matrix.point(x0, y1),
+        matrix.point(x1, y1),
+    ];
+    let min_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if ![min_x, max_x, min_y, max_y]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Rect::ZERO;
+    }
+    Rect::new(min_x, min_y, max_x, max_y).intersect(clip)
 }
 
 #[derive(Default)]
 struct DrawnImageWalk {
-    /// Each form's content is walked once, keyed by object reference; the set
-    /// also breaks form cycles (`/Fm0 Do` inside `/Fm0`'s own stream).
+    /// Forms whose image streams have already been limit-checked, keyed by
+    /// object reference. This preserves the original embedded-pixel walk's
+    /// first-oversized result while the coverage side still descends into a
+    /// repeated form to measure each placement.
     walked_forms: HashSet<ObjectIdentifier>,
     /// Each image is measured once, keyed by object reference — a page can
     /// draw thousands of images.
     checked_images: HashSet<ObjectIdentifier>,
+    /// Forms currently on the coverage recursion stack; a form that refers to
+    /// itself is cut off instead of recursing until the depth cap.
+    active_forms: HashSet<ObjectIdentifier>,
+    /// Clipped page area covered by drawn raster bounding boxes.
+    covered_area: f64,
 }
 
 impl DrawnImageWalk {
+    #[allow(clippy::too_many_arguments)]
     fn content(
         &mut self,
         content: &[u8],
         resources: &Resources<'_>,
         max_pixels: u64,
+        initial_matrix: PdfMatrix,
+        clip: Rect,
         depth: u32,
+        check_limits: bool,
     ) -> Option<u64> {
+        let mut ctm = initial_matrix;
+        let mut states = Vec::new();
         for instruction in TypedIter::new(content) {
-            let TypedInstruction::XObject(x_object) = instruction else {
-                continue;
-            };
-            // `get_x_object` resolves the name exactly the way the interpreter
-            // does: the level's own `/XObject` dict, then the parent chain.
-            let Some(stream) = resources.get_x_object(x_object.0) else {
-                continue;
-            };
-            let dict = stream.dict();
-            match dict.get::<Name>(SUBTYPE).as_deref() {
-                Some(IMAGE) => {
-                    if let Some(obj_id) = stream.obj_id()
-                        && !self.checked_images.insert(obj_id)
-                    {
-                        continue;
-                    }
-                    if let Some(pixels) = self.oversized_image(dict, max_pixels) {
-                        return Some(pixels);
+            match instruction {
+                TypedInstruction::SaveState(_) => states.push(ctm),
+                TypedInstruction::RestoreState(_) => {
+                    if let Some(state) = states.pop() {
+                        ctm = state;
                     }
                 }
-                Some(FORM) => {
-                    if depth >= DRAWN_IMAGE_MAX_FORM_DEPTH {
-                        continue;
-                    }
-                    if let Some(obj_id) = stream.obj_id()
-                        && !self.walked_forms.insert(obj_id)
-                    {
-                        continue;
-                    }
-                    // The same decode `FormXObject::new` performs through
-                    // `decode_or_warn`: a form stream that cannot be decoded
-                    // (including one over `max_decoded_stream_bytes`) is
-                    // skipped here; the `StreamTooLarge` warning sink still
-                    // reports that path during the render pass itself.
-                    let Ok(decoded) = stream.decoded() else {
+                TypedInstruction::Transform(transform) => {
+                    ctm = ctm.concat(PdfMatrix {
+                        coefficients: [
+                            transform.0.as_f64(),
+                            transform.1.as_f64(),
+                            transform.2.as_f64(),
+                            transform.3.as_f64(),
+                            transform.4.as_f64(),
+                            transform.5.as_f64(),
+                        ],
+                    });
+                }
+                TypedInstruction::InlineImage(_) => {
+                    self.covered_area += transformed_rect_area(ctm, [0.0, 0.0, 1.0, 1.0], clip);
+                }
+                TypedInstruction::XObject(x_object) => {
+                    // `get_x_object` resolves the name exactly the way the
+                    // interpreter does: the level's own `/XObject` dict, then
+                    // the parent chain.
+                    let Some(stream) = resources.get_x_object(x_object.0) else {
                         continue;
                     };
-                    // `Resources::from_parent` mirrors `draw_form_xobject`: the
-                    // form's own `/Resources` over the chain in effect at the
-                    // `Do` that reached it.
-                    let form_resources = Resources::from_parent(
-                        dict.get::<Dict<'_>>(RESOURCES).unwrap_or_default(),
-                        resources.clone(),
-                    );
-                    if let Some(pixels) =
-                        self.content(&decoded, &form_resources, max_pixels, depth + 1)
-                    {
-                        return Some(pixels);
+                    let dict = stream.dict();
+                    match dict.get::<Name>(SUBTYPE).as_deref() {
+                        Some(IMAGE) => {
+                            self.covered_area +=
+                                transformed_rect_area(ctm, [0.0, 0.0, 1.0, 1.0], clip);
+                            if check_limits {
+                                if let Some(obj_id) = stream.obj_id()
+                                    && !self.checked_images.insert(obj_id)
+                                {
+                                    continue;
+                                }
+                                if let Some(pixels) = self.oversized_image(dict, max_pixels) {
+                                    return Some(pixels);
+                                }
+                            }
+                        }
+                        Some(FORM) => {
+                            if depth >= DRAWN_IMAGE_MAX_FORM_DEPTH {
+                                continue;
+                            }
+                            let mut active_inserted = false;
+                            if let Some(obj_id) = stream.obj_id() {
+                                if !self.active_forms.insert(obj_id) {
+                                    continue;
+                                }
+                                active_inserted = true;
+                            }
+                            // Only the first limit-checking descent marks a
+                            // form as walked. Coverage descends into repeats,
+                            // but with limit checking disabled just as the
+                            // original one-pass limit walk skipped them.
+                            let first_limit_walk = check_limits
+                                && stream
+                                    .obj_id()
+                                    .map(|obj_id| self.walked_forms.insert(obj_id))
+                                    .unwrap_or(true);
+                            // The same decode `FormXObject::new` performs
+                            // through `decode_or_warn`: a form stream that
+                            // cannot be decoded (including one over
+                            // `max_decoded_stream_bytes`) is skipped here; the
+                            // `StreamTooLarge` warning sink still reports that
+                            // path during the render pass itself.
+                            let Ok(decoded) = stream.decoded() else {
+                                if active_inserted && let Some(obj_id) = stream.obj_id() {
+                                    self.active_forms.remove(&obj_id);
+                                }
+                                continue;
+                            };
+                            let form_matrix = PdfMatrix {
+                                coefficients: dict
+                                    .get::<[f64; 6]>(MATRIX)
+                                    .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                            };
+                            let form_matrix = ctm.concat(form_matrix);
+                            let form_clip = dict
+                                .get::<[f32; 4]>(BBOX)
+                                .map(|bbox| {
+                                    let bbox = bbox.map(f64::from);
+                                    transformed_clip(form_matrix, bbox, clip)
+                                })
+                                .unwrap_or(clip);
+                            // `Resources::from_parent` mirrors
+                            // `draw_form_xobject`: the form's own `/Resources`
+                            // over the chain in effect at the `Do` that
+                            // reached it.
+                            let form_resources = Resources::from_parent(
+                                dict.get::<Dict<'_>>(RESOURCES).unwrap_or_default(),
+                                resources.clone(),
+                            );
+                            let nested = self.content(
+                                &decoded,
+                                &form_resources,
+                                max_pixels,
+                                form_matrix,
+                                form_clip,
+                                depth + 1,
+                                check_limits && first_limit_walk,
+                            );
+                            if active_inserted && let Some(obj_id) = stream.obj_id() {
+                                self.active_forms.remove(&obj_id);
+                            }
+                            if let Some(pixels) = nested {
+                                return Some(pixels);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -592,6 +838,10 @@ impl ProcessIsolatedPdfSourceViewRenderer {
 }
 
 impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
+    fn cache_namespace(&self) -> &'static str {
+        "pdf-render/1.0.0-beta.18+pdf-syntax/0.5.6+jpeg-encoder/0.7.1"
+    }
+
     fn render(
         &self,
         bytes: Vec<u8>,
@@ -624,6 +874,7 @@ impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
             .arg(options.max_pixels.to_string())
             .arg(options.max_image_bytes.to_string())
             .arg(options.max_decoded_stream_bytes.to_string())
+            .arg(options.format.as_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -713,7 +964,7 @@ impl SourceViewRenderer for ProcessIsolatedPdfSourceViewRenderer {
         }
 
         Ok(RenderedSourceView {
-            media_type: MediaType("image/png".into()),
+            media_type: MediaType(metadata.media_type.clone()),
             bytes: encoded,
             width: metadata.width,
             height: metadata.height,
@@ -728,6 +979,12 @@ struct WorkerMetadata {
     height: u32,
     page_count: usize,
     image_bytes: usize,
+    #[serde(default = "default_png_media_type")]
+    media_type: String,
+}
+
+fn default_png_media_type() -> String {
+    "image/png".into()
 }
 
 pub fn run_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error::Error>> {
@@ -749,6 +1006,15 @@ pub fn run_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error:
     let max_pixels = parse_worker_arg::<u64>(&mut args, "max pixels")?;
     let max_image_bytes = parse_worker_arg::<usize>(&mut args, "max image bytes")?;
     let max_decoded_stream_bytes = parse_worker_arg::<u64>(&mut args, "max decoded stream bytes")?;
+    let format = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .map(|value| {
+            SourceViewOutputFormat::parse(&value)
+                .ok_or_else(|| format!("invalid source-view output format: {value}"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     if args.next().is_some() {
         return Err("source-view worker received unexpected trailing arguments".into());
     }
@@ -768,6 +1034,7 @@ pub fn run_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error:
                 max_pixels,
                 max_image_bytes,
                 max_decoded_stream_bytes,
+                format,
             },
         )
         .map_err(report_worker_limit)?;
@@ -777,6 +1044,7 @@ pub fn run_source_view_worker_if_requested() -> Result<bool, Box<dyn std::error:
         height: rendered.height,
         page_count: rendered.page_count,
         image_bytes: rendered.bytes.len(),
+        media_type: rendered.media_type.0,
     };
     print!("{}", serde_json::to_string(&metadata)?);
     Ok(true)

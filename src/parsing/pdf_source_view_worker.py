@@ -26,6 +26,8 @@ import sys
 # Keep in sync with WORKER_LIMIT_STDERR_MARKER / WorkerLimitKind in
 # src/parsing/source_view.rs.
 LIMIT_MARKER = "READING-MCP-SOURCE-VIEW-LIMIT "
+JPEG_QUALITY = 85
+RASTER_COVERAGE_THRESHOLD = 0.5
 
 
 class LimitRejected(Exception):
@@ -47,12 +49,28 @@ def source_sha256(source):
     return "sha256:" + digest.hexdigest()
 
 
+def raster_dominated(page):
+    """Deterministic scan/photo rule: drawn raster bounding boxes cover at least half the crop box."""
+    clip = page.cropbox
+    page_area = max(0.0, clip.width) * max(0.0, clip.height)
+    if page_area <= 0:
+        return False
+    covered = 0.0
+    for image in page.get_image_info():
+        bbox = pymupdf.Rect(image["bbox"]).intersect(clip)
+        covered += max(0.0, bbox.width) * max(0.0, bbox.height)
+    return covered / page_area >= RASTER_COVERAGE_THRESHOLD
+
+
 def main():
-    if len(sys.argv) not in (13, 14):
+    if len(sys.argv) not in (13, 14, 15):
         raise ValueError("invalid source-view worker arguments")
     _, source, output, metadata = sys.argv[1:5]
     page_no, dpi, max_pages, max_width, max_height, max_pixels, max_image, max_stream = map(int, sys.argv[5:13])
-    expected_sha256 = sys.argv[13] if len(sys.argv) == 14 else None
+    expected_sha256 = sys.argv[13] if len(sys.argv) >= 14 else None
+    output_format = sys.argv[14] if len(sys.argv) == 15 else "auto"
+    if output_format not in ("auto", "png"):
+        raise ValueError("invalid source-view output format")
     if min(page_no, dpi, max_pages, max_width, max_height, max_pixels, max_image, max_stream) <= 0:
         raise ValueError("source-view limits must be positive")
     actual_sha256 = source_sha256(source)
@@ -71,6 +89,7 @@ def main():
         memory = min(1024 * 1024 * 1024, 256 * 1024 * 1024 + os.path.getsize(source) * 3 + max_pixels * 16 + max_stream * 2)
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
         resource.setrlimit(resource.RLIMIT_FSIZE, (max(max_image, 4096) + 1,) * 2)
+    global pymupdf
     import pymupdf
     with pymupdf.open(source) as doc:
         if doc.needs_pass:
@@ -108,11 +127,13 @@ def main():
             raise LimitRejected("page_dimensions", "rendered height exceeds configured limit", pixmap.height, max_height)
         if pixmap.width * pixmap.height > max_pixels:
             raise LimitRejected("rendered_pixels", "rendered pixel count exceeds configured limit", pixmap.width * pixmap.height, max_pixels)
-        encoded = pixmap.tobytes("png")
+        jpeg = output_format == "auto" and raster_dominated(page)
+        encoded = pixmap.tobytes("jpeg", jpg_quality=JPEG_QUALITY) if jpeg else pixmap.tobytes("png")
+        media_type = "image/jpeg" if jpeg else "image/png"
         if len(encoded) > max_image:
             raise LimitRejected("image_bytes", "source-view image exceeds byte limit", len(encoded), max_image)
         Path(output).write_bytes(encoded)
-        Path(metadata).write_text(json.dumps({"width": pixmap.width, "height": pixmap.height, "page_count": len(doc), "image_bytes": len(encoded), "source_sha256": actual_sha256}))
+        Path(metadata).write_text(json.dumps({"width": pixmap.width, "height": pixmap.height, "page_count": len(doc), "image_bytes": len(encoded), "media_type": media_type, "source_sha256": actual_sha256}))
 
 
 if __name__ == "__main__":

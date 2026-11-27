@@ -3,8 +3,8 @@ use crate::application::light_sections::SectionTexts;
 use crate::application::ports::{ApplicationError, OwnedStreamUnit, TextUnitIndex};
 use crate::application::section_view::{DocumentView, carrier_section};
 use crate::domain::{
-    Document, NormalizedDocumentHash, NormalizedTextRange, Section, TEXT_SEGMENTATION_VERSION,
-    TextLocator,
+    Document, Location, NormalizedDocumentHash, NormalizedTextRange, Section,
+    TEXT_SEGMENTATION_VERSION, TextLocator,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +31,9 @@ pub(crate) struct ResolvedTextLocator {
     pub(crate) locator: TextLocator,
     pub(crate) kind: ResolvedLocatorKind,
     pub(crate) range: NormalizedTextRange,
+    /// The owner section's source location, carried separately because the
+    /// section itself may be a lightweight row carrier with no text or tree.
+    pub(crate) section_location: Location,
 }
 
 /// Resolves `locator` against `document`, looking its owner section up in the document's tree.
@@ -125,6 +128,7 @@ async fn resolve_in_section(
                 ),
                 kind: ResolvedLocatorKind::Section,
                 range,
+                section_location: section.location.clone(),
             })
         }
         (None, None, Some(range), None) => {
@@ -141,6 +145,7 @@ async fn resolve_in_section(
                 ),
                 kind: ResolvedLocatorKind::CharacterRange,
                 range,
+                section_location: section.location.clone(),
             })
         }
         (Some(paragraph_index), None, Some(range), Some(segmentation_version)) => {
@@ -177,6 +182,7 @@ async fn resolve_in_section(
                 locator: TextLocator::for_paragraph(document, section, &paragraph),
                 kind: ResolvedLocatorKind::Paragraph,
                 range,
+                section_location: section.location.clone(),
             })
         }
         (Some(paragraph_index), Some(sentence_index), Some(range), Some(segmentation_version)) => {
@@ -213,6 +219,7 @@ async fn resolve_in_section(
                 locator: TextLocator::for_sentence(document, section, &sentence),
                 kind: ResolvedLocatorKind::Sentence,
                 range,
+                section_location: section.location.clone(),
             })
         }
         _ => Err(ApplicationError::InvalidLocator(

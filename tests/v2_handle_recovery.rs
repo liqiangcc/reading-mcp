@@ -5,8 +5,9 @@ mod v2_mcp;
 
 use serde_json::json;
 use v2_mcp::{
-    call, flat_text, http_server_command, payload, reserve_port, start_client,
-    start_client_with_env, start_http_client, tool_error, v2_open, v2_read, wait_until_ready,
+    call, flat_text, http_server_command, payload, reserve_port, section_items_with, section_of,
+    start_client, start_client_with_env, start_http_client, tool_error, v2_open, v2_read,
+    wait_until_ready,
 };
 
 fn strip_ws(text: &str) -> String {
@@ -39,10 +40,14 @@ async fn whitespace_only_reingest_remaps_sentence_and_paragraph_reads_stdio() {
     let opened = v2_open(&first, &document_path).await;
     let doc = opened["doc"].as_str().expect("doc handle").to_owned();
     let read = payload(&v2_read(&first, &doc, json!({})).await);
-    let old_text = flat_text(&read);
-    assert_eq!(old_text, "Alpha sentence one.");
+    assert_eq!(flat_text(&read), "Alpha sentence one.");
     let sentence = read["at"].as_str().expect("sentence handle").to_owned();
-    let paragraph = paragraph_handle(&sentence);
+    let section = section_of(&paragraph_handle(&sentence));
+    let sentences = section_items_with(&first, &section, json!({}), 16_000).await;
+    let paragraphs =
+        section_items_with(&first, &section, json!({"unit": "paragraph"}), 16_000).await;
+    assert_eq!(sentences.len(), 3, "{sentences:?}");
+    assert_eq!(paragraphs.len(), 2, "{paragraphs:?}");
     first.cancel().await.expect("first client should stop");
 
     let second = start_client_with_env(
@@ -51,32 +56,25 @@ async fn whitespace_only_reingest_remaps_sentence_and_paragraph_reads_stdio() {
         &[("READING_MCP_TEST_EXTRACTION_VARIANT", "spaces")],
     )
     .await;
-    let stale = v2_read(&second, &sentence, json!({})).await;
-    let error = tool_error(&stale);
-    assert_eq!(error["error"], "stale_handle", "{error}");
-    let retry = error["retry"].as_object().expect("a proven retry");
-    let target = retry["from"].as_str().expect("read retry.from").to_owned();
-    assert_ne!(target, sentence);
-    let retried = payload(&v2_read(&second, &target, json!({})).await);
-    assert_eq!(
-        strip_ws(&flat_text(&retried)),
-        strip_ws(&old_text),
-        "{retried}"
-    );
-
-    let stale = v2_read(&second, &paragraph, json!({})).await;
-    let error = tool_error(&stale);
-    assert_eq!(error["error"], "stale_handle", "{error}");
-    let target = error["retry"]["from"]
-        .as_str()
-        .expect("paragraph retry.from")
-        .to_owned();
-    let retried = payload(&v2_read(&second, &target, json!({})).await);
-    assert_eq!(
-        strip_ws(&flat_text(&retried)),
-        strip_ws(&old_text),
-        "{retried}"
-    );
+    for (items, extra) in [
+        (sentences, json!({})),
+        (paragraphs, json!({"unit": "paragraph"})),
+    ] {
+        for (old_handle, old_text) in items {
+            let stale = v2_read(&second, &old_handle, extra.clone()).await;
+            let error = tool_error(&stale);
+            assert_eq!(error["error"], "stale_handle", "{error}");
+            let retry = error["retry"].clone();
+            let target = retry["from"].as_str().expect("read retry.from").to_owned();
+            assert_ne!(target, old_handle);
+            let retried = payload(&call(&second, "read", retry).await);
+            assert_eq!(
+                strip_ws(&flat_text(&retried)),
+                strip_ws(&old_text),
+                "retry of {old_handle}: {retried}"
+            );
+        }
+    }
 
     second.cancel().await.expect("second client should stop");
 }
@@ -147,7 +145,7 @@ async fn stale_handles_carry_tool_specific_retries_stdio() {
     let result = call(
         &second,
         "search",
-        json!({"doc": doc, "query": "needle", "limit": 5}),
+        json!({"doc": doc.clone(), "query": "needle", "limit": 5}),
     )
     .await;
     let error = tool_error(&result);
@@ -158,6 +156,27 @@ async fn stale_handles_carry_tool_specific_retries_stdio() {
             .expect("search retry.doc")
             .starts_with('d')
     );
+
+    // `source_view` rejects Markdown only after resolving the handle, so the stale answer still
+    // proves the stdio wire shape without a PDF fixture.
+    let result = call(&second, "source_view", json!({"at": sentence})).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "stale_handle", "{error}");
+    assert!(
+        error["retry"]["at"]
+            .as_str()
+            .expect("source_view retry.at")
+            .starts_with('d')
+    );
+
+    // A document handle needs no per-unit text proof: it names the same re-ingested document.
+    let result = v2_read(&second, &doc, json!({})).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "stale_handle", "{error}");
+    let target = error["retry"]["from"]
+        .as_str()
+        .expect("document retry.from");
+    assert_eq!(target.matches('.').count(), 0, "{target}");
 
     second.cancel().await.expect("second client should stop");
 }
@@ -296,6 +315,11 @@ async fn backward_cursor_remaps_to_the_same_item_stdio() {
         "the retry is the proven item handle: {target}"
     );
     let retry_args = error["retry"].clone();
+    assert_eq!(
+        retry_args["direction"].as_str(),
+        Some("backward"),
+        "a backward cursor retry must keep its direction: {retry_args}"
+    );
     let retried = payload(&call(&second, "read", retry_args).await);
     assert_eq!(
         strip_ws(&flat_text(&retried)),

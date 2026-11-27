@@ -3460,6 +3460,7 @@ fn delete_unreachable_document(
             "section_text_v3",
             "section_layout_v2",
             "section_layout_chunk_v2",
+            "handle_remap_v1",
         ] {
             if has_table(transaction, table)? {
                 report.rows_removed += transaction
@@ -6127,6 +6128,32 @@ mod proof_automaton_tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn suffix_automaton_matches_naive_counting_for_absent_and_present_needles() {
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..160 {
+            let text_len = (random() % 24 + 1) as usize;
+            let text = (0..text_len)
+                .map(|_| (b'a' + (random() % 4) as u8) as char)
+                .collect::<String>();
+            let needle_len = (random() % 8 + 1) as usize;
+            let needle = (0..needle_len)
+                .map(|_| (b'a' + (random() % 5) as u8) as char)
+                .collect::<String>();
+            assert_eq!(
+                ProofAutomaton::new(&text).lookup(needle.as_bytes()),
+                naive(&text, &needle),
+                "case={case} text={text:?} needle={needle:?}"
+            );
         }
     }
 }

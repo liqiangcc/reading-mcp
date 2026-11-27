@@ -554,6 +554,10 @@ pub fn stale_read_retry(request: &ReadRequest, error: &ReadingError) -> Option<V
     }
     if let Some(direction) = &request.direction {
         retry.insert("direction".into(), Value::String(direction.clone()));
+    } else if request.from.starts_with("b:") {
+        // A `b:` cursor carries its direction. Its proven retry is the current item handle, which
+        // does not, so the argument object must say backward explicitly to repeat the same read.
+        retry.insert("direction".into(), Value::String("backward".into()));
     }
     if let Some(back) = request.back.filter(|back| *back > 0) {
         retry.insert("back".into(), json!(back));

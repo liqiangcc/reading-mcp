@@ -285,10 +285,14 @@ impl OpenDocumentUseCase {
             .validate_ocr_publication()
             .map_err(ApplicationError::ParseFailed)?;
         // A parser that had to segment the document already (EPUB validation does) hands that
-        // segmentation back, so the open never builds the same one twice.
+        // segmentation back, so the open never builds the same one twice. A test extraction
+        // variant is the exception: it changes the text after parsing, so only a segmentation
+        // built afterwards matches the ranges of the document being stored.
+        let test_variant_active = std::env::var("READING_MCP_TEST_EXTRACTION_VARIANT")
+            .is_ok_and(|variant| !variant.is_empty());
         let segmentation = match parsed_segmentation {
-            Some(segmentation) => segmentation,
-            None => Arc::new(document.try_segmentation().map_err(|error| {
+            Some(segmentation) if !test_variant_active => segmentation,
+            _ => Arc::new(document.try_segmentation().map_err(|error| {
                 ApplicationError::TextUnitIndexFailed(format!(
                     "cannot build current Paragraph coverage from persisted block evidence: {error}"
                 ))

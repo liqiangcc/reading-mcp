@@ -92,6 +92,13 @@ jobs:
           ref: ${{ github.sha }}
           path: packaging
 
+      - name: Trust the container checkouts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/packaging"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/source"
+
       - name: Record packaging infrastructure identity
         shell: bash
         run: |

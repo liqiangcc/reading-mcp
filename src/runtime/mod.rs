@@ -371,7 +371,10 @@ fn build_state_components(
     if let Err(error) = open_results.prune_at_startup() {
         eprintln!("warning: failed to prune stale reading state: {error}");
     }
-    let file_raw_cache = Arc::new(FileRawResourceCache::new(&cache_root));
+    let file_raw_cache = Arc::new(FileRawResourceCache::with_cap_mib(
+        &cache_root,
+        config.raw_cache_mib,
+    ));
     let source_view_cache = Arc::new(FileSourceViewCache::open(
         cache_root.join("source-view"),
         config.source_view_cache_mib as u64,

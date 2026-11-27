@@ -17,19 +17,188 @@ use crate::domain::{
     ContentHash, Document, DocumentId, DocumentSource, Location, MediaType, Section, SectionId,
 };
 
+const MIB: u64 = 1024 * 1024;
+
+/// A file-per-entry raw resource cache: one `<key>.bin` body and one
+/// `<key>.json` metadata file per URL source, both replaced by rename (#275).
+///
+/// The cache is bounded by a size cap that evicts whole entries — body and
+/// metadata together — least recently used first, and it removes the temp files
+/// an interrupted writer leaves behind at startup.
 #[derive(Clone, Debug)]
 pub struct FileRawResourceCache {
     root: PathBuf,
+    cap_bytes: u64,
 }
 
 impl FileRawResourceCache {
+    /// `READING_MCP_RAW_CACHE_MIB`'s default cap, in MiB.
+    pub const DEFAULT_CAP_MIB: u64 = 1024;
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self::with_cap_mib(root, Self::DEFAULT_CAP_MIB)
+    }
+
+    /// Opens the cache with `cap_mib` as its size cap (`0` = no cap, which is
+    /// the behaviour before the cap existed), then tidies once: leftover temp
+    /// files are removed and an inherited over-cap cache is evicted down to the
+    /// cap, so a cache that grew before the cap was configured shrinks at
+    /// startup rather than at the next write. Both steps are best effort —
+    /// hygiene must never stop the server from serving.
+    pub fn with_cap_mib(root: impl Into<PathBuf>, cap_mib: u64) -> Self {
+        let cache = Self {
+            root: root.into(),
+            cap_bytes: cap_mib.saturating_mul(MIB),
+        };
+        if let Err(error) =
+            crate::infrastructure::temp_cleanup::remove_stale_temp_files(&cache.directory())
+        {
+            eprintln!("warning: failed to clean raw cache temp files: {error}");
+        }
+        if let Err(error) = cache.prune() {
+            eprintln!("warning: failed to prune the raw cache: {error}");
+        }
+        cache
     }
 
     fn directory(&self) -> PathBuf {
         self.root.join("raw")
     }
+
+    fn body_path(&self, key: &str) -> PathBuf {
+        self.directory().join(format!("{key}.bin"))
+    }
+
+    fn metadata_path(&self, key: &str) -> PathBuf {
+        self.directory().join(format!("{key}.json"))
+    }
+
+    /// Evicts whole entries until the cache fits `cap_bytes`. `0` disables the
+    /// cap, which is today's unbounded behaviour.
+    ///
+    /// Recency is the newest of the entry's two files' access and modification
+    /// times. Reads refresh the access time explicitly (see [`mark_used`]), so
+    /// the order is "last used", not "last written", and it survives mounts
+    /// that never update access times implicitly (`noatime`, `relatime`); where
+    /// a platform refuses the update the modification time still orders an
+    /// entry after everything written before it. A body that was written but
+    /// whose metadata never landed is not an entry (the reader treats it as a
+    /// miss), so it is garbage and goes before any whole entry.
+    ///
+    /// Each eviction removes the metadata first: its presence is what makes an
+    /// entry exist, so a reader that races the eviction reads a missing
+    /// metadata file (clean miss) or the missing body (also a clean miss) and
+    /// never a body that claims metadata it does not have. A reader that
+    /// already opened or mapped the body keeps its inode and bytes.
+    fn prune(&self) -> Result<(), ApplicationError> {
+        if self.cap_bytes == 0 {
+            return Ok(());
+        }
+        let directory = self.directory();
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(cache_io_error(&directory, error)),
+        };
+        let mut candidates: BTreeMap<String, Candidate> = BTreeMap::new();
+        let mut total = 0_u64;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            // Temp files are transient — startup cleanup owns them — and are
+            // not part of any entry's size.
+            if name.contains(".tmp-") {
+                continue;
+            }
+            let (key, is_body) = match name.strip_suffix(".bin") {
+                Some(key) => (key, true),
+                None => match name.strip_suffix(".json") {
+                    Some(key) => (key, false),
+                    None => continue,
+                },
+            };
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let len = metadata.len();
+            total = total.saturating_add(len);
+            let candidate = candidates.entry(key.to_owned()).or_default();
+            candidate.recency = candidate.recency.max(recency(&metadata));
+            let file = FileRef {
+                path: entry.path(),
+                len,
+            };
+            if is_body {
+                candidate.body = Some(file);
+            } else {
+                candidate.metadata = Some(file);
+            }
+        }
+        let mut candidates: Vec<Candidate> = candidates.into_values().collect();
+        // Incomplete entries first (garbage), then least recently used.
+        candidates.sort_by_key(|candidate| (candidate.is_complete(), candidate.recency));
+        for candidate in candidates {
+            if total <= self.cap_bytes {
+                break;
+            }
+            for file in candidate.metadata.iter().chain(candidate.body.iter()) {
+                match std::fs::remove_file(&file.path) {
+                    Ok(()) => total = total.saturating_sub(file.len),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        total = total.saturating_sub(file.len)
+                    }
+                    Err(error) => return Err(cache_io_error(&file.path, error)),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Candidate {
+    body: Option<FileRef>,
+    metadata: Option<FileRef>,
+    recency: u128,
+}
+
+impl Candidate {
+    fn is_complete(&self) -> bool {
+        self.body.is_some() && self.metadata.is_some()
+    }
+}
+
+struct FileRef {
+    path: PathBuf,
+    len: u64,
+}
+
+/// The newest timestamp the file carries, in nanoseconds since the epoch.
+fn recency(metadata: &std::fs::Metadata) -> u128 {
+    let nanos = |time: std::io::Result<SystemTime>| {
+        time.ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    };
+    nanos(metadata.accessed()).max(nanos(metadata.modified()))
+}
+
+/// Records that the entry's files were used now, which is what eviction orders
+/// by. Best effort: a filesystem that refuses the update leaves the entry
+/// ordered by its write time.
+fn mark_used(path: &Path) {
+    if let Ok(file) = std::fs::File::open(path) {
+        let times = std::fs::FileTimes::new().set_accessed(SystemTime::now());
+        let _ = file.set_times(times);
+    }
+}
+
+fn mark_entry_used(metadata_path: &Path, body_path: &Path) {
+    mark_used(metadata_path);
+    mark_used(body_path);
 }
 
 #[async_trait]
@@ -39,9 +208,8 @@ impl RawResourceCache for FileRawResourceCache {
         source: &DocumentSource,
     ) -> Result<Option<RetrievedResource>, ApplicationError> {
         let key = digest_key(source.0.as_bytes());
-        let directory = self.directory();
-        let metadata_path = directory.join(format!("{key}.json"));
-        let body_path = directory.join(format!("{key}.bin"));
+        let metadata_path = self.metadata_path(&key);
+        let body_path = self.body_path(&key);
 
         let metadata_bytes = match fs::read(&metadata_path).await {
             Ok(bytes) => bytes,
@@ -61,6 +229,9 @@ impl RawResourceCache for FileRawResourceCache {
                 ))
             })?;
 
+        // A hit is a use: this is what keeps a re-read document out of the
+        // eviction order's front.
+        mark_entry_used(&metadata_path, &body_path);
         Ok(Some(metadata.into_resource(body)))
     }
 
@@ -75,8 +246,8 @@ impl RawResourceCache for FileRawResourceCache {
             .await
             .map_err(|error| cache_io_error(&directory, error))?;
 
-        let body_path = directory.join(format!("{key}.bin"));
-        let metadata_path = directory.join(format!("{key}.json"));
+        let body_path = self.body_path(&key);
+        let metadata_path = self.metadata_path(&key);
         let metadata = RawResourceMetadata::from_resource(&resource);
         let metadata_bytes = serde_json::to_vec(&metadata).map_err(|error| {
             ApplicationError::CacheFailed(format!("failed to encode raw cache metadata: {error}"))
@@ -89,7 +260,10 @@ impl RawResourceCache for FileRawResourceCache {
         // cache miss, not as valid data.
         write_replacing(&body_path, &resource.bytes).await?;
         write_replacing(&metadata_path, &metadata_bytes).await?;
-        Ok(())
+        // Enforce the cap on the write path, so a long-running server stays
+        // bounded without waiting for the next start. An entry bigger than the
+        // whole cap is not retained.
+        self.prune()
     }
 
     async fn locate(
@@ -97,9 +271,8 @@ impl RawResourceCache for FileRawResourceCache {
         source: &DocumentSource,
     ) -> Result<Option<LocatedRawResource>, ApplicationError> {
         let key = digest_key(source.0.as_bytes());
-        let directory = self.directory();
-        let metadata_path = directory.join(format!("{key}.json"));
-        let body_path = directory.join(format!("{key}.bin"));
+        let metadata_path = self.metadata_path(&key);
+        let body_path = self.body_path(&key);
 
         // Anything short of a clean locate is "no usable entry": the caller's
         // fallback reads the entry through `get`, which reports a corrupt or
@@ -113,6 +286,10 @@ impl RawResourceCache for FileRawResourceCache {
         let Ok(body) = fs::metadata(&body_path).await else {
             return Ok(None);
         };
+        // `locate` is how `source_view` reaches a cached URL body without
+        // reading it, so a clean locate is a use even though the bytes are not
+        // read here; a view of a document must not age it out of the cache.
+        mark_entry_used(&metadata_path, &body_path);
         Ok(Some(LocatedRawResource {
             body_path,
             final_source: DocumentSource(metadata.final_source),

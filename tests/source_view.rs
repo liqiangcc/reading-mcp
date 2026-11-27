@@ -1085,6 +1085,16 @@ fn source_view_render_cache_eviction_temp_cleanup_and_zero_cap() {
     std::fs::create_dir_all(&cache_dir).unwrap();
     let leftover = cache_dir.join(".orphan.rsv.tmp-1");
     std::fs::write(&leftover, b"interrupted").unwrap();
+    // Startup only removes temp files no write can still own, so age this one
+    // past the shared threshold; a fresh temp file is kept.
+    std::fs::File::options()
+        .write(true)
+        .open(&leftover)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60),
+        ))
+        .unwrap();
     let cache = FileSourceViewCache::open(&cache_dir, 1).expect("cache should open");
     assert!(
         !leftover.exists(),
@@ -1496,6 +1506,50 @@ async fn source_view_url_source_without_a_cache_entry_falls_back() {
         fixture.requests.load(Ordering::Relaxed) - before,
         1,
         "the cache miss fetched through the retriever"
+    );
+    fixture.server.abort();
+}
+
+/// The raw cache's cap evicts whole entries least recently used first, and an
+/// evicted entry costs a re-download, never correctness: `source_view` on a URL
+/// PDF whose entry the LRU took misses on `locate`, takes the revalidating
+/// path, fetches the document once more and renders it.
+#[tokio::test]
+async fn source_view_url_source_after_raw_cache_eviction_renders_through_revalidation() {
+    let fixture = spawn_counting_pdf_fixture().await;
+    let cache_dir = tempdir().expect("cache directory should be created");
+    // One MiB of cache: three 400 KiB filler entries push the document's own
+    // entry, the oldest, out.
+    let raw_cache = Arc::new(FileRawResourceCache::with_cap_mib(cache_dir.path(), 1));
+    let opened = open_url_pdf(&fixture, raw_cache.clone()).await;
+
+    for index in 0..3 {
+        let filler = DocumentSource(format!("http://example.test/filler-{index}.pdf"));
+        raw_cache
+            .put(&filler, pdf_resource(&filler, vec![b'f'; 400_000]))
+            .await
+            .expect("the filler entry should be written");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        raw_cache
+            .locate(&opened.source)
+            .await
+            .expect("locate should not fail")
+            .is_none(),
+        "the cap evicted the document's own entry"
+    );
+
+    let before = fixture.requests.load(Ordering::Relaxed);
+    let result = url_source_view(&opened, raw_cache, opened.policy.clone(), usize::MAX)
+        .execute(url_source_view_command(&opened))
+        .await
+        .expect("the eviction falls back to the revalidating path, which renders");
+    assert_eq!(&result.view.bytes[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(
+        fixture.requests.load(Ordering::Relaxed) - before,
+        1,
+        "the evicted entry cost exactly one re-download"
     );
     fixture.server.abort();
 }

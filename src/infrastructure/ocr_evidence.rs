@@ -28,8 +28,16 @@ impl Drop for TempFileGuard {
 }
 
 impl FileOcrEvidenceStore {
+    /// Opens the store and removes the temp files a killed `put_immutable` left
+    /// behind (`TempFileGuard` covers every non-crash exit). Best effort.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let store = Self { root: root.into() };
+        if let Err(error) =
+            crate::infrastructure::temp_cleanup::remove_stale_temp_files(&store.root)
+        {
+            eprintln!("warning: failed to clean OCR evidence temp files: {error}");
+        }
+        store
     }
     fn path(&self, digest: &str) -> PathBuf {
         self.root.join(digest)

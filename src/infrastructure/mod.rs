@@ -17,6 +17,7 @@ mod source_view_cache;
 mod sqlite;
 mod sqlite_search_index;
 mod sqlite_support;
+mod temp_cleanup;
 
 pub use budget::{BudgetedParser, BudgetedRetriever, OCR_PARSE_TIMEOUT, ResourceBudget};
 pub use cache::{

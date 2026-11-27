@@ -225,6 +225,7 @@ READING_MCP_RESOLVE_LANDING_PAGES=off   关闭；行为与未引入解析时逐�
 | `READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES` | 16777216 | 单页 PDF 解压 stream 最大字节数 |
 | `READING_MCP_SOURCE_VIEW_TIMEOUT_SECS` | 10 | 单页渲染超时 |
 | `READING_MCP_SOURCE_VIEW_CACHE_MIB` | 256 | 已渲染页磁盘缓存上限（MiB），0 关闭读写；启动时仍清理中断写入 |
+| `READING_MCP_RAW_CACHE_MIB` | 1024 | Raw（URL 下载字节）磁盘缓存上限（MiB），0 表示不设上限；启动时清理中断写入并淘汰到上限 |
 | `READING_MCP_SOURCE_VIEW_FORMAT` | auto | 输出格式：`auto` 对确定性 raster-dominated PDF 页输出 JPEG（固定 quality 85）、其他页输出 PNG；`png` 禁用 JPEG 并完全保留 PNG 输出 |
 | `READING_MCP_PARSE_TIMEOUT_SECS` | 30 | Parser cooperative timeout |
 | `READING_MCP_SEARCH_CACHE_MIB` | 48 | 搜索扫描保留的单个文档 section 文本缓存上限（MiB），0 关闭缓存 |
@@ -236,6 +237,17 @@ renderer 版本键控的已渲染页；缓存项单文件原子改名写入，�
 上限。命中只重放同一份已编码 bytes，不跳过本地 root、URL policy、文档大小或 stale-source 检查；直接映射
 文件的缓存项额外保存长度/mtime/ctime/device/inode fingerprint 作为命中前的新鲜度证据，路径字节变化后
 必然 miss 并由 worker 重新校验 sha256。缓存只保存成功渲染，错误永不写入。`READING_MCP_SOURCE_VIEW_CACHE_MIB=0` 关闭读写。
+
+Raw cache 位于 `<state>/cache/raw`，按 URL source 的 sha256 键控，每个条目由 `<key>.bin` body 与
+`<key>.json` metadata 两个文件组成，两者各自以「同目录临时文件 + rename」写入（body 先、metadata 后，
+所以 metadata 缺失即视为 miss）。启动时先删除残留的临时文件，再把整个缓存淘汰到
+`READING_MCP_RAW_CACHE_MIB`（默认 1024 MiB）以内：按条目整体（body 与 metadata 一起）淘汰，最久
+未被使用的先走。临时文件只在一次 `put` 的写入与改名之间存在，且 state dir 可能被两个进程共用，所以
+只删除修改时间超过 1 小时的临时文件，更新的文件一律保留。命中（`get`，以及 `source_view` 的
+`locate`）会把条目的两个文件访问时间显式刷新为当前时间，因此「最近使用」不依赖挂载是否开启
+atime；淘汰先删 metadata、再删 body，并发读者只会读到完整条目或干净的 miss。被淘汰的 URL 文档
+只多付一次重新下载（`source_view` 走回 revalidating 检索路径），结果不变。
+`READING_MCP_RAW_CACHE_MIB=0` 关闭上限（即今日行为），临时文件清理仍会执行。
 
 source-view worker 对本地文件源直接只读映射（memory-map）原始 PDF，并自行校验其 sha256；
 URL 来源在 raw-cache 存有可用 body（final_source 一致、PDF、未超 `READING_MCP_MAX_DOCUMENT_BYTES`、

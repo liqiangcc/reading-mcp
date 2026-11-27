@@ -653,3 +653,426 @@ fn source_binding_error(error: OriginalSourceBindingError) -> ApplicationError {
         )),
     }
 }
+
+#[cfg(test)]
+mod locator_differential_tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::application::cite_reading::CiteReadingUseCase;
+    use crate::application::locator_resolution::ResolvedLocatorKind;
+    use crate::application::open_document::{OpenDocumentCommand, OpenDocumentUseCase};
+    use crate::application::ports::{Parser, SourcePolicy};
+    use crate::application::short_handle::{
+        DocumentHandle, SectionHandle, handle_checksum, paragraph_handle, sentence_handle,
+    };
+    use crate::application::text_unit_store::store_text_units;
+    use crate::domain::{
+        ContentHash, DocumentSource, Location, MediaType, NormalizedTextRange,
+        OriginalSourceBinding, OriginalSourceBindingMap, OriginalSourceTarget, Section, SectionId,
+    };
+    use crate::infrastructure::{
+        InMemorySearchIndex, SqliteDocumentRepository, SqliteTextUnitIndex,
+    };
+    use crate::parsing::ParserRouter;
+    use crate::retrieval::{FileRetriever, LocalFileSourcePolicy};
+
+    /// Compare the pre-change tree/binding-map source-view resolution with the
+    /// indexed point-query resolution on every stored paragraph and sentence
+    /// handle of every text-layer PDF fixture. Large measurement PDFs can be
+    /// added locally through `READING_MCP_SOURCE_VIEW_DIFFERENTIAL_INPUTS`;
+    /// CI need not download them.
+    #[tokio::test]
+    async fn indexed_source_view_resolution_matches_tree_resolution_for_every_unit_handle() {
+        let mut inputs = Vec::new();
+        collect_pdfs(Path::new("tests/fixtures"), &mut inputs);
+        // The large public measurement PDFs are not committed fixtures. A
+        // local differential run names them with this variable, separated by
+        // `;`; CI still runs every committed fixture without downloading
+        // anything.
+        if let Ok(extra) = std::env::var("READING_MCP_SOURCE_VIEW_DIFFERENTIAL_INPUTS") {
+            for input in extra.split(';').filter(|input| !input.is_empty()) {
+                inputs.push(PathBuf::from(input));
+            }
+        }
+        inputs.sort();
+        assert!(inputs.len() >= 20, "fixture PDFs should be present");
+
+        let state = tempfile::tempdir().expect("differential state");
+        let database = state.path().join("store.db");
+        let repository =
+            Arc::new(SqliteDocumentRepository::open(&database).expect("differential repository"));
+        let index = Arc::new(SqliteTextUnitIndex::open(&database).expect("differential index"));
+        let mut roots = vec![PathBuf::from("tests/fixtures")];
+        for input in &inputs {
+            if let Some(parent) = input.parent()
+                && !roots.iter().any(|root| root == parent)
+            {
+                roots.push(parent.to_path_buf());
+            }
+        }
+        let policy: Arc<dyn SourcePolicy> = Arc::new(LocalFileSourcePolicy::allow_roots(roots));
+        let retriever: Arc<dyn Retriever> = Arc::new(FileRetriever);
+        let parser: Arc<dyn Parser> = Arc::new(ParserRouter::phase4());
+
+        let mut opened_documents = 0usize;
+        let mut compared = 0usize;
+        let mut matching_refusals = 0usize;
+        let mut mismatches = Vec::new();
+        for input in inputs {
+            let opened = OpenDocumentUseCase::with_text_unit_index(
+                Arc::clone(&policy),
+                Arc::clone(&retriever),
+                Arc::clone(&parser),
+                Arc::clone(&repository) as Arc<dyn DocumentRepository>,
+                Arc::clone(&index) as Arc<dyn TextUnitIndex>,
+                Arc::new(InMemorySearchIndex::default()),
+            )
+            .execute(OpenDocumentCommand {
+                source: DocumentSource(input.to_string_lossy().into_owned()),
+                options: RetrievalOptions::default(),
+            })
+            .await;
+            let opened = match opened {
+                Ok(opened) => opened,
+                // Scanned fixtures without a text layer refuse open with
+                // `ocr_required`; they have no sentence or paragraph handles
+                // for this differential.
+                Err(_) => continue,
+            };
+            opened_documents += 1;
+            let Some((full_document, _)) = repository
+                .get_rebuilt_with_hash(&opened.document_id, true)
+                .await
+                .expect("full document should load")
+            else {
+                continue;
+            };
+            let document_key = index
+                .document_key(&opened.document_id)
+                .await
+                .expect("document key query")
+                .expect("opened document should have a key");
+            let document_handle = DocumentHandle {
+                doc_key: document_key,
+                checksum: handle_checksum(
+                    &opened.document_id,
+                    &opened.normalized_document_hash,
+                    &full_document.media_type,
+                ),
+            };
+            let mut sections = Vec::new();
+            collect_sections(&full_document.root_sections, &mut sections);
+            for section in sections {
+                let Some(units) = index
+                    .section_units(&opened.document_id, &section.id)
+                    .await
+                    .expect("section units query")
+                else {
+                    continue;
+                };
+                if units.paragraphs.is_empty() && units.sentences.is_empty() {
+                    continue;
+                }
+                let section_key = index
+                    .section_key(&opened.document_id, &section.id)
+                    .await
+                    .expect("section key query")
+                    .expect("stored section should have a key");
+                let section_handle = SectionHandle {
+                    document: document_handle.clone(),
+                    section_key,
+                };
+                let mut handles = Vec::new();
+                for unit in &units.paragraphs {
+                    handles.push(paragraph_handle(&section_handle, unit.paragraph_index));
+                }
+                for unit in &units.sentences {
+                    handles.push(sentence_handle(
+                        &section_handle,
+                        unit.paragraph_index,
+                        unit.sentence_index,
+                    ));
+                }
+                for handle in handles {
+                    compared += 1;
+                    if let Err(mismatch) = compare_one_handle(
+                        &handle,
+                        &input,
+                        repository.clone(),
+                        index.clone(),
+                        &opened.document_id,
+                    )
+                    .await
+                    {
+                        if mismatch.starts_with("matching refusal:") {
+                            matching_refusals += 1;
+                        } else {
+                            mismatches.push(mismatch);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Valid fixture handles usually render one page. Add one minimal
+        // multi-page binding case whose paragraph and first sentence cross the
+        // page boundary, so the refusal path is differentially exercised too.
+        let cross_handles = save_cross_page_case(&repository, &index).await;
+        for handle in cross_handles {
+            compared += 1;
+            if let Err(mismatch) = compare_one_handle(
+                &handle,
+                Path::new("memory:cross-page.pdf"),
+                repository.clone(),
+                index.clone(),
+                &DocumentId("doc:cross-page".into()),
+            )
+            .await
+            {
+                if mismatch.starts_with("matching refusal:") {
+                    matching_refusals += 1;
+                } else {
+                    mismatches.push(mismatch);
+                }
+            }
+        }
+
+        eprintln!(
+            "source-view locator differential: documents={opened_documents} handles={compared} matching_refusals={matching_refusals}"
+        );
+        assert!(opened_documents >= 8, "text-layer fixtures should open");
+        assert!(compared >= 100, "the fixtures should exercise many handles");
+        assert!(
+            matching_refusals >= 2,
+            "the synthetic page-crossing paragraph and sentence must both refuse"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "indexed/tree source-view resolution mismatches:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    async fn compare_one_handle(
+        handle: &str,
+        input: &Path,
+        repository: Arc<SqliteDocumentRepository>,
+        index: Arc<SqliteTextUnitIndex>,
+        document_id: &DocumentId,
+    ) -> Result<(), String> {
+        let cite = CiteReadingUseCase::new(
+            repository.clone() as Arc<dyn DocumentRepository>,
+            index.clone() as Arc<dyn TextUnitIndex>,
+        );
+        let locator = cite.source_locator(handle).await.map_err(|error| {
+            format!(
+                "{} {handle}: cite failed: {}",
+                input.display(),
+                error.detail
+            )
+        })?;
+
+        let old = old_resolution(&repository, &index, document_id, &locator).await;
+        let new = new_resolution(&repository, &index, document_id, &locator).await;
+        match (old, new) {
+            (Ok(old), Ok(new)) if old == new => Ok(()),
+            (Err(old), Err(new)) if old == new => Err(format!("matching refusal: {old}")),
+            (old, new) => Err(format!(
+                "{} {handle}: old={:?} new={:?}",
+                input.display(),
+                old,
+                new
+            )),
+        }
+    }
+
+    type ResolutionOutcome = (
+        ResolvedLocatorKind,
+        NormalizedTextRange,
+        u32,
+        String,
+        TextLocator,
+    );
+
+    async fn old_resolution(
+        repository: &Arc<SqliteDocumentRepository>,
+        index: &Arc<SqliteTextUnitIndex>,
+        document_id: &DocumentId,
+        locator: &TextLocator,
+    ) -> Result<ResolutionOutcome, String> {
+        let result = async {
+            let (document, hash) = repository
+                .get_rebuilt_with_hash(document_id, false)
+                .await?
+                .ok_or(ApplicationError::DocumentNotFound)?;
+            let mut texts = SectionTexts::from_repository(
+                &document,
+                repository.clone() as Arc<dyn DocumentRepository>,
+            );
+            let resolved =
+                resolve_text_locator(&document, locator, &hash, index.as_ref(), &mut texts).await?;
+            let binding_map =
+                load_binding_map(repository.as_ref(), &document, true, &mut texts).await?;
+            let (page, version) = resolve_original_page(
+                &resolved.locator.owner_section_id,
+                &resolved.section_location,
+                resolved.range,
+                binding_map.as_ref(),
+            )?;
+            Ok((
+                resolved.kind,
+                resolved.range,
+                page,
+                version,
+                resolved.locator,
+            ))
+        }
+        .await;
+        result.map_err(|error: ApplicationError| error.to_string())
+    }
+
+    async fn new_resolution(
+        repository: &Arc<SqliteDocumentRepository>,
+        index: &Arc<SqliteTextUnitIndex>,
+        document_id: &DocumentId,
+        locator: &TextLocator,
+    ) -> Result<ResolutionOutcome, String> {
+        let result = async {
+            let (view, hash) = DocumentView::load_with_hash(
+                repository.clone() as Arc<dyn DocumentRepository>,
+                document_id,
+            )
+            .await?
+            .ok_or(ApplicationError::DocumentNotFound)?;
+            let document = view.document();
+            let mut texts = SectionTexts::from_repository(
+                &document,
+                repository.clone() as Arc<dyn DocumentRepository>,
+            );
+            let resolved = resolve_text_locator_at(
+                &document,
+                &view,
+                locator,
+                &hash,
+                index.as_ref(),
+                &mut texts,
+            )
+            .await?;
+            let (page, version) = resolve_original_page_indexed(
+                repository.as_ref(),
+                document_id,
+                &resolved.locator.owner_section_id,
+                &resolved.section_location,
+                resolved.range,
+            )
+            .await?;
+            Ok((
+                resolved.kind,
+                resolved.range,
+                page,
+                version,
+                resolved.locator,
+            ))
+        }
+        .await;
+        result.map_err(|error: ApplicationError| error.to_string())
+    }
+
+    async fn save_cross_page_case(
+        repository: &Arc<SqliteDocumentRepository>,
+        index: &Arc<SqliteTextUnitIndex>,
+    ) -> Vec<String> {
+        let section_id = SectionId("section://chapter".into());
+        let content = "Alpha bravo charlie. Delta echo foxtrot.".to_owned();
+        let boundary = 15;
+        let mut document = Document {
+            id: DocumentId("doc:cross-page".into()),
+            source: DocumentSource("memory:cross-page.pdf".into()),
+            title: "Cross page".into(),
+            media_type: MediaType("application/pdf".into()),
+            content_hash: ContentHash("sha256:cross-page".into()),
+            metadata: BTreeMap::new(),
+            root_sections: vec![Section {
+                id: section_id.clone(),
+                parent_id: None,
+                title: "Chapter".into(),
+                level: 1,
+                content: content.clone(),
+                location: Location {
+                    page: Some(1),
+                    native_location: Some("pdf:pages:1-2".into()),
+                    ..Location::default()
+                },
+                children: vec![],
+            }],
+        };
+        document
+            .set_original_source_binding_map(OriginalSourceBindingMap::new(vec![
+                OriginalSourceBinding {
+                    owner_section_id: section_id.clone(),
+                    normalized_range: NormalizedTextRange::new(0, boundary).expect("range"),
+                    target: OriginalSourceTarget::Page { page_number: 1 },
+                },
+                OriginalSourceBinding {
+                    owner_section_id: section_id.clone(),
+                    normalized_range: NormalizedTextRange::new(boundary, content.chars().count())
+                        .expect("range"),
+                    target: OriginalSourceTarget::Page { page_number: 2 },
+                },
+            ]))
+            .expect("binding map should validate");
+        let normalized_document_hash = document.normalized_document_hash();
+        repository
+            .save(document.clone())
+            .await
+            .expect("cross-page document should save");
+        store_text_units(index.as_ref(), &document)
+            .await
+            .expect("cross-page units should store");
+        let document_handle = DocumentHandle {
+            doc_key: index
+                .document_key(&document.id)
+                .await
+                .expect("document key")
+                .expect("stored document"),
+            checksum: handle_checksum(
+                &document.id,
+                &normalized_document_hash,
+                &document.media_type,
+            ),
+        };
+        let section = SectionHandle {
+            document: document_handle,
+            section_key: index
+                .section_key(&document.id, &section_id)
+                .await
+                .expect("section key")
+                .expect("stored section"),
+        };
+        vec![
+            paragraph_handle(&section, 1),
+            sentence_handle(&section, 1, 1),
+        ]
+    }
+
+    fn collect_pdfs(directory: &Path, output: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).expect("fixture directory should read") {
+            let path = entry.expect("fixture directory entry").path();
+            if path.is_dir() {
+                collect_pdfs(&path, output);
+            } else if path.extension().is_some_and(|extension| extension == "pdf") {
+                output.push(path);
+            }
+        }
+    }
+
+    fn collect_sections<'a>(sections: &'a [Section], output: &mut Vec<&'a Section>) {
+        for section in sections {
+            output.push(section);
+            collect_sections(&section.children, output);
+        }
+    }
+}

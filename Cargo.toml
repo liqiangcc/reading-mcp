@@ -17,7 +17,7 @@ path = "src/bin/reading-mcp.rs"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 lopdf = { version = "0.44", default-features = false }
 markup5ever = "0.39"
@@ -43,6 +43,7 @@ flate2 = { version = "1", default-features = false }
 jpeg-encoder = { version = "0.7.1", features = ["simd"] }
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rmcp = { version = "3.5.1", features = [
     "client",
     "transport-child-process",

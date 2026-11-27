@@ -269,6 +269,30 @@ section，读到即释放，前台读取可与之交错；文档超过缓存上�
 `READING_MCP_SEARCH_THREADS` 只影响文本不少于 1 MiB 且已缓存的文档：SQLite 读取始终留在连接的线程上，
 worker 线程只做 section 预筛与段落/句子打分，各自保留自己的命中再合并，结果与串行扫描逐条相同。
 
+## 读取连接池（`READING_MCP_READ_POOL`）
+
+`READING_MCP_READ_POOL` 是每个 SQLite store 给读取路径保留的只读连接数，默认 `4`，上限 `16`；
+`0` 关闭连接池。空值或非数字取默认值。
+
+三个 store（document repository、text-unit index、open-result store）各自只有一个写连接，`run_sqlite`
+在整个闭包期间持有它，所以一次整本书的 ingest 写入（宋史 1.15 s）或一次整本书的 lexical 扫描（0.36 s）
+会挡住**其他文档**的读取：大 EPUB `open` 期间 `read` 的 p95 是 1,010 ms，空闲时约 5 ms。WAL 本来就允许
+读连接在写者运行时读取最近一次提交的快照，因此读取路径改用少量只读连接：同一个文件、同一套快照规则，
+每条连接 `query_only=1`（拒绝这些连接上的任何写入）并有 `busy_timeout`（5 s），一次 checkpoint 于是变成
+等待而不是 `SQLITE_BUSY`。
+
+一次读取先用**空闲的**写连接：那条连接已经打开、缓存已经热，所以从不并发写入的 store 不会打开第二条连接，
+启动、单个文档 `open` 与 `read`/`search` 的开销与引入连接池之前相同。只有当写连接被占用（正在 ingest 或
+扫描）时，读取才取一条池内连接，因此它不会等在写者后面。连接池打开时，每个逻辑读取在一个 deferred 事务里
+执行，所以同一次读取的多条语句看到同一个快照。
+
+写入（ingest、替换 segmentation、open-result 的 put/remove、整本书扫描 `scan_lexical` 与预热）仍在写连接上，
+写入路径与字节完全不变。读取自己刚写入的数据的调用（例如 ingest 里判断 units 是否已存、扫描文本缓存的预热）
+也留在写连接上。连接池不改变任何存储格式：schema、表、行字节与写入顺序都不变。
+
+`READING_MCP_READ_POOL=0` 关闭连接池：所有操作都在写连接上，autocommit 与等待行为都与引入连接池之前逐字节
+一致，用于回滚。
+
 `READING_MCP_TELEMETRY` 打开时，每次完整解码 `document_json`（`get_with_hash`，或 light 读取无法走轻量路径时）
 额外向 stderr 输出一条 `repository_get`（`stage: decode`）事件，带 `json_bytes`、`row_read_ms`、`parse_ms`、
 `section_text_load_ms`、`validate_ms`、`hash_ms` 以及每个 `metadata` key 的字节数。读取路径上没有进程内的

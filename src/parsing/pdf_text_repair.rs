@@ -13,17 +13,36 @@
 //! * Simple Type 1 fonts with an embedded program and no `/ToUnicode` get a
 //!   synthesised CMap from the program's own encoding (PDF-6b, see
 //!   `pdf_type1_builtin`).
+//! * Simple fonts whose `/Encoding` `/Differences` hold a glyph name lopdf
+//!   cannot resolve fall back to StandardEncoding, which garbles every code of
+//!   the font.  Those are decoded through the font's `/ToUnicode` when it has
+//!   one, and otherwise through a tolerant map built here: the base encoding
+//!   plus every `/Differences` name that resolves, unknown names skipped.  A
+//!   font that declares a name with no Unicode at a code the base encoding does
+//!   not cover keeps the encoding it has, because a CMap cannot say "no text"
+//!   and lopdf would turn those codes into U+FFFD.
+//!
+//! The first three repairs rewrite a copy of the document, which the page text
+//! is read from and which is then dropped.  The fourth rewrites a handful of
+//! font dictionaries in place instead (`repair_fallback_fonts`) and puts them
+//! back afterwards: a second object tree costs about three times the file size
+//! in peak RSS, and this repair reaches a fifth of the corpus.
 //!
 //! Every repair is best effort.  Any error leaves the affected page or font
 //! exactly as lopdf saw it before, so the old result is never made worse.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as LopdfDocument, Encoding, Object, ObjectId, Stream};
 
+use super::pdf_type1_builtin::glyph_name_units;
+
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_XOBJECT_DEPTH: usize = 8;
+/// A `/ToUnicode` CMap for a simple font is a few kilobytes; 2 MiB bounds a
+/// crafted one.
+const MAX_TO_UNICODE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Return a document copy with the text repairs applied, or `None` when the
 /// document has none of the shapes the repairs target: a text-bearing Form
@@ -190,20 +209,32 @@ fn synthesised_entries(
     differences: &[Object],
     uni_entries: &[(u8, char)],
 ) -> Option<BTreeMap<u8, Vec<u16>>> {
+    let extra = uni_entries
+        .iter()
+        .map(|(code, character)| {
+            let mut units = [0_u16; 2];
+            (*code, character.encode_utf16(&mut units).to_vec())
+        })
+        .collect::<BTreeMap<_, _>>();
+    let old = old_decoding_map(doc, font, differences).unwrap_or_default();
+    Some(merged_entries(&old, &extra))
+}
+
+/// The decoding of every code, overlaid with `extra`.
+fn merged_entries(
+    old: &[Option<String>],
+    extra: &BTreeMap<u8, Vec<u16>>,
+) -> BTreeMap<u8, Vec<u16>> {
     let mut entries = BTreeMap::new();
-    if let Some(old) = old_decoding_map(doc, font, differences) {
-        for (code, text) in old.into_iter().enumerate() {
-            if let Some(text) = text {
-                entries.insert(code as u8, text.encode_utf16().collect());
-            }
+    for (code, text) in old.iter().enumerate() {
+        if let Some(text) = text {
+            entries.insert(code as u8, text.encode_utf16().collect());
         }
     }
-    for (code, character) in uni_entries {
-        let mut units = [0_u16; 2];
-        let units = character.encode_utf16(&mut units);
-        entries.insert(*code, units.to_vec());
+    for (code, units) in extra {
+        entries.insert(*code, units.clone());
     }
-    Some(entries)
+    entries
 }
 
 /// Decode every byte code with the encoding lopdf used to build from this
@@ -215,6 +246,16 @@ fn old_decoding_map(
     differences: &[Object],
 ) -> Option<Vec<Option<String>>> {
     let filtered = filtered_differences(differences)?;
+    decoding_map_from_differences(doc, font, &filtered)
+}
+
+/// Decode every byte code with `BaseEncoding` plus `differences`, as lopdf
+/// builds it.
+fn decoding_map_from_differences(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+    differences: &[Object],
+) -> Option<Vec<Option<String>>> {
     let mut encoding_dictionary = Dictionary::new();
     encoding_dictionary.set("Type", Object::Name(b"Encoding".to_vec()));
     if let Some(base) = font
@@ -226,7 +267,7 @@ fn old_decoding_map(
     {
         encoding_dictionary.set("BaseEncoding", base.clone());
     }
-    encoding_dictionary.set("Differences", Object::Array(filtered));
+    encoding_dictionary.set("Differences", Object::Array(differences.to_vec()));
 
     let mut temporary = font.clone();
     temporary.set("Encoding", Object::Dictionary(encoding_dictionary));
@@ -271,8 +312,489 @@ fn filtered_differences(differences: &[Object]) -> Option<Vec<Object>> {
     Some(filtered)
 }
 
+// ---------------------------------------------------------------------------
+// A3: `/Encoding` `/Differences` that lopdf cannot build
+// ---------------------------------------------------------------------------
+
+/// Whether lopdf abandons this font's `/Encoding` and decodes with
+/// StandardEncoding instead.
+///
+/// lopdf resolves a simple font's encoding from `/Encoding` first and consults
+/// `/ToUnicode` only when `/Encoding` is absent (`object.rs:441-445`), and it
+/// builds `/Differences` strictly: the first glyph name its table does not know
+/// aborts the whole array (`object.rs:563-566`).  That error is swallowed into
+/// `STANDARD_ENCODING` (`object.rs:458-462`).  One unknown name therefore
+/// discards every other name, and the `/ToUnicode` sitting in the file is never
+/// read.
+///
+/// An `/Encoding` dictionary that resolves always yields
+/// `Encoding::Differences`, so `OneByteEncoding` here means the fallback fired.
+/// Only an `/Encoding` dictionary with a `/Differences` array is considered: a
+/// named `/Encoding` that shadows a `/ToUnicode` is a different, riskier repair
+/// and is left alone.  lopdf also falls back for reasons other than a name - an
+/// encoding dictionary without `/Type /Encoding`, an out-of-range code - so the
+/// question is asked of lopdf itself rather than of the names.
+fn font_has_fallback_encoding(doc: &LopdfDocument, font: &Dictionary) -> bool {
+    if !font.has_type(b"Font") {
+        return false;
+    }
+    let subtype = font.get(b"Subtype").and_then(Object::as_name).ok();
+    if subtype != Some(&b"Type1"[..]) && subtype != Some(&b"TrueType"[..]) {
+        return false;
+    }
+    if encoding_differences(doc, font).is_none() {
+        return false;
+    }
+    matches!(
+        font.get_font_encoding_with_limit(doc, MAX_TO_UNICODE_BYTES),
+        Ok(Encoding::OneByteEncoding(_))
+    )
+}
+
+/// The names of a `/Differences` array, joined: the key of one array's answer,
+/// which the font dictionaries of one font repeat.
+fn differences_key(differences: &[Object]) -> Option<Vec<u8>> {
+    let mut key = Vec::new();
+    for object in differences {
+        match object {
+            Object::Name(name) => {
+                key.extend_from_slice(name);
+                key.push(0);
+            }
+            Object::Integer(_) => {}
+            _ => return None,
+        }
+    }
+    Some(key)
+}
+
+/// The `/Encoding` and `/ToUnicode` a fallback font had before
+/// `repair_fallback_fonts` rewrote it, and the CMap streams that repair added.
+pub(super) struct FallbackFonts {
+    fonts: Vec<(ObjectId, Option<Object>, Option<Object>)>,
+    added: Vec<ObjectId>,
+}
+
+impl FallbackFonts {
+    /// Put every rewritten font back exactly as it was and drop the synthesised
+    /// CMaps, so the document leaves the extraction as it entered it.
+    pub(super) fn restore(self, doc: &mut LopdfDocument) {
+        for (font_id, encoding, to_unicode) in self.fonts {
+            let Some(font) = doc
+                .get_object_mut(font_id)
+                .and_then(Object::as_dict_mut)
+                .ok()
+            else {
+                continue;
+            };
+            match encoding {
+                Some(value) => font.set("Encoding", value),
+                None => {
+                    let _ = font.remove(b"Encoding");
+                }
+            }
+            match to_unicode {
+                Some(value) => font.set("ToUnicode", value),
+                None => {
+                    let _ = font.remove(b"ToUnicode");
+                }
+            }
+        }
+        for id in self.added {
+            doc.objects.remove(&id);
+        }
+    }
+}
+
+/// Decode the fonts lopdf abandons to StandardEncoding, on the document the page
+/// text is read from.  `FallbackFonts::restore` undoes it.
+pub(super) fn repair_fallback_fonts(doc: &mut LopdfDocument) -> FallbackFonts {
+    let mut saved = FallbackFonts {
+        fonts: Vec::new(),
+        added: Vec::new(),
+    };
+    // One CMap object per distinct decoding: the font dictionaries of one font
+    // share an array, and a CMap is expensive to parse, so they share the stream
+    // as well as the bytes.
+    let mut streams: HashMap<Vec<u8>, ObjectId> = HashMap::new();
+    for (font_id, cmap) in fallback_font_cmaps(doc) {
+        let to_unicode = match streams.get(&cmap) {
+            Some(id) => *id,
+            None => {
+                let id = doc.add_object(Stream::new(Dictionary::new(), cmap.clone()));
+                saved.added.push(id);
+                streams.insert(cmap, id);
+                id
+            }
+        };
+        let Some(font) = doc
+            .get_object_mut(font_id)
+            .and_then(Object::as_dict_mut)
+            .ok()
+        else {
+            continue;
+        };
+        let encoding = font.get(b"Encoding").ok().cloned();
+        let previous = font.get(b"ToUnicode").ok().cloned();
+        // lopdf prefers `/Encoding` over `/ToUnicode`; the CMap holds the
+        // decoding of every code, so the encoding that failed can go.
+        let _ = font.remove(b"Encoding");
+        font.set("ToUnicode", Object::Reference(to_unicode));
+        saved.fonts.push((font_id, encoding, previous));
+    }
+    saved
+}
+
+/// The CMap every fallback font of `doc` should decode with.
+///
+/// A document repeats one `/Differences` array and one `/BaseEncoding` across
+/// the font dictionaries of one font - pdfTeX writes one per size - and the
+/// decoding depends on nothing else, so each distinct pair is worked out once.
+fn fallback_font_cmaps(doc: &LopdfDocument) -> Vec<(ObjectId, Vec<u8>)> {
+    let mut probes = GlyphProbes::default();
+    let mut bases = BaseDecodings::default();
+    let mut shared = SharedCmaps::new();
+    let mut repairs = Vec::new();
+    for (font_id, object) in &doc.objects {
+        let Ok(font) = object.as_dict() else {
+            continue;
+        };
+        if !font_has_fallback_encoding(doc, font) {
+            continue;
+        }
+        let Some(differences) = encoding_differences(doc, font) else {
+            continue;
+        };
+        let Some(key) = differences_key(differences) else {
+            continue;
+        };
+        let base = base_encoding_name(doc, font);
+        // A font with its own `/ToUnicode` decodes its own codes, so it is
+        // worked out on its own.
+        let to_unicode = to_unicode_entries(doc, font);
+        let cmap = match (&to_unicode, shared.get(&(key.clone(), base.clone()))) {
+            (None, Some(cached)) => cached.clone(),
+            _ => {
+                let built = build_fallback_cmap(
+                    doc,
+                    font,
+                    differences,
+                    &base,
+                    to_unicode,
+                    &mut probes,
+                    &mut bases,
+                );
+                if built.is_some() {
+                    shared.insert((key, base), built.clone());
+                }
+                built
+            }
+        };
+        if let Some(cmap) = cmap {
+            repairs.push((*font_id, cmap));
+        }
+    }
+    repairs
+}
+
+/// The CMap that decodes one fallback font, or `None` when the font is left
+/// exactly as it is.
+fn build_fallback_cmap(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+    differences: &[Object],
+    base: &Option<Vec<u8>>,
+    to_unicode: Option<BTreeMap<u8, Vec<u16>>>,
+    probes: &mut GlyphProbes,
+    bases: &mut BaseDecodings,
+) -> Option<Vec<u8>> {
+    let decoding = tolerant_decoding(doc, font, differences, base, probes, bases)?;
+    let mut entries = decoding.entries;
+    match to_unicode {
+        // The font's own `/ToUnicode` is the answer the file states; the
+        // tolerant map only fills the codes it leaves out.
+        Some(to_unicode) => entries.extend(to_unicode),
+        // Without a `/ToUnicode` the only gain is a name lopdf could not
+        // resolve; a font whose names all resolve in the base encoding gains
+        // nothing and stays exactly as it was.
+        None => {
+            if decoding.extra.is_empty() || !decoding_changes(doc, font, &entries) {
+                return None;
+            }
+        }
+    }
+    // A declared name with no Unicode at a code that decodes to nothing is a
+    // glyph that reads as nothing today.  A CMap cannot say "no text" - lopdf
+    // turns every code it does not name into U+FFFD - so such a font keeps the
+    // encoding it has rather than gain a replacement character where the
+    // fallback gave none.
+    if decoding
+        .untexted
+        .iter()
+        .any(|code| !entries.contains_key(code))
+    {
+        return None;
+    }
+    Some(build_to_unicode_cmap(&entries))
+}
+
+/// lopdf's answers, kept because they are the whole cost of this repair and a
+/// document asks the same few hundred glyph names over and over: pdfTeX writes
+/// one font dictionary per size, and each repeats the names of the font.
+#[derive(Default)]
+struct GlyphProbes {
+    /// The text lopdf decodes for a glyph name.
+    names: BTreeMap<Vec<u8>, Option<Vec<u16>>>,
+}
+
+/// The decoding of every code under a `/BaseEncoding`, by the name the font
+/// gives for it: every font of a document shares one or two of them.
+type BaseDecodings = HashMap<Option<Vec<u8>>, Vec<Option<String>>>;
+
+/// The CMap one `/Differences` array and `/BaseEncoding` pair decodes to, by the
+/// names of the array and the base encoding: `None` for a pair left alone.
+type SharedCmaps = HashMap<(Vec<u8>, Option<Vec<u8>>), Option<Vec<u8>>>;
+
+/// A font's `/Differences` in the forms the fallback repair needs.
+struct TolerantDecoding {
+    /// `BaseEncoding` plus every name lopdf resolves: the decoding the font
+    /// would have without the names it cannot resolve.
+    entries: BTreeMap<u8, Vec<u16>>,
+    /// The text of every name lopdf cannot resolve but `extra_glyph_units` can.
+    extra: BTreeMap<u8, Vec<u16>>,
+    /// The codes of declared names that resolve to no Unicode at all.
+    untexted: BTreeSet<u8>,
+}
+
+/// `BaseEncoding` plus every `/Differences` name that resolves - from lopdf's
+/// glyph table or, for the names it lacks, from `extra_glyph_units`.  Unknown
+/// names are skipped, which leaves the base encoding in place for their code,
+/// exactly as lopdf's StandardEncoding fallback does today.
+fn tolerant_decoding(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+    differences: &[Object],
+    base: &Option<Vec<u8>>,
+    probes: &mut GlyphProbes,
+    bases: &mut BaseDecodings,
+) -> Option<TolerantDecoding> {
+    let base = base_decoding(doc, font, base, bases)?;
+    let mut entries = BTreeMap::new();
+    for (code, text) in base.iter().enumerate() {
+        if let Some(text) = text {
+            entries.insert(code as u8, text.encode_utf16().collect());
+        }
+    }
+    let mut extra = BTreeMap::new();
+    let mut untexted = BTreeSet::new();
+    let mut code = 0_i64;
+    for object in differences {
+        match object {
+            Object::Integer(value) if (0_i64..=255).contains(value) => code = *value,
+            Object::Integer(_) => return None,
+            Object::Name(name) => {
+                if let Some(units) = lopdf_glyph_text(doc, font, name, probes) {
+                    entries.insert(code as u8, units);
+                } else if let Some(units) = extra_glyph_units(doc, font, name, probes) {
+                    extra.insert(code as u8, units.clone());
+                    entries.insert(code as u8, units);
+                } else {
+                    untexted.insert(code as u8);
+                }
+                code = code.wrapping_add(1);
+            }
+            _ => return None,
+        }
+    }
+    Some(TolerantDecoding {
+        entries,
+        extra,
+        untexted,
+    })
+}
+
+/// The `/BaseEncoding` name a font's `/Encoding` dictionary gives, if any.
+fn base_encoding_name(doc: &LopdfDocument, font: &Dictionary) -> Option<Vec<u8>> {
+    font.get(b"Encoding")
+        .ok()
+        .and_then(|encoding| doc.dereference(encoding).ok())
+        .and_then(|(_, encoding)| encoding.as_dict().ok())
+        .and_then(|encoding| encoding.get(b"BaseEncoding").ok())
+        .and_then(|name| name.as_name().ok())
+        .map(<[u8]>::to_vec)
+}
+
+/// Decode every code with the font's `/BaseEncoding`, the encoding lopdf's
+/// StandardEncoding fallback destroys.  One build per distinct base encoding.
+fn base_decoding<'a>(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+    base: &Option<Vec<u8>>,
+    bases: &'a mut BaseDecodings,
+) -> Option<&'a Vec<Option<String>>> {
+    if !bases.contains_key(base) {
+        let mut temporary = font.clone();
+        let _ = temporary.remove(b"ToUnicode");
+        match base {
+            // A named base encoding is a whole `/Encoding` for lopdf; an
+            // unnamed one is its StandardEncoding default.
+            Some(name) => temporary.set("Encoding", Object::Name(name.clone())),
+            None => {
+                let _ = temporary.remove(b"Encoding");
+            }
+        }
+        let encoding = temporary.get_font_encoding(doc).ok()?;
+        if !matches!(encoding, Encoding::OneByteEncoding(_)) {
+            return None;
+        }
+        let mut map = Vec::with_capacity(256);
+        for code in 0_u16..=255 {
+            let mut text = String::new();
+            if encoding.write_to_string(&[code as u8], &mut text).is_err() {
+                text.clear();
+            }
+            map.push((!text.is_empty()).then_some(text));
+        }
+        bases.insert(base.clone(), map);
+    }
+    bases.get(base)
+}
+
+/// The text lopdf decodes for a glyph name, or `None` when its glyph table does
+/// not know the name.  A one-name `/Differences` array answers both questions:
+/// it resolves to `Differences` only when the name is known.
+fn lopdf_glyph_text(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+    name: &[u8],
+    probes: &mut GlyphProbes,
+) -> Option<Vec<u16>> {
+    if let Some(cached) = probes.names.get(name) {
+        return cached.clone();
+    }
+    let units = lopdf_glyph_units(doc, font, name);
+    probes.names.insert(name.to_vec(), units.clone());
+    units
+}
+
+/// The probe `lopdf_glyph_text` caches: lopdf's own answer for one name.
+fn lopdf_glyph_units(doc: &LopdfDocument, font: &Dictionary, name: &[u8]) -> Option<Vec<u16>> {
+    let mut encoding_dictionary = Dictionary::new();
+    encoding_dictionary.set("Type", Object::Name(b"Encoding".to_vec()));
+    encoding_dictionary.set(
+        "Differences",
+        Object::Array(vec![Object::Integer(0), Object::Name(name.to_vec())]),
+    );
+    let mut temporary = font.clone();
+    temporary.set("Encoding", Object::Dictionary(encoding_dictionary));
+    let _ = temporary.remove(b"ToUnicode");
+    let encoding = temporary
+        .get_font_encoding_with_limit(doc, MAX_TO_UNICODE_BYTES)
+        .ok()?;
+    if !matches!(encoding, Encoding::Differences(_)) {
+        return None;
+    }
+    let mut text = String::new();
+    encoding.write_to_string(&[0], &mut text).ok()?;
+    (!text.is_empty()).then_some(text.encode_utf16().collect())
+}
+
+/// The decoding of every code from the font's own `/ToUnicode`, when it has one
+/// that lopdf parses.  Codes the CMap leaves out are dropped here: lopdf decodes
+/// an unmapped code to U+FFFD, and the tolerant map fills those codes instead.
+fn to_unicode_entries(doc: &LopdfDocument, font: &Dictionary) -> Option<BTreeMap<u8, Vec<u16>>> {
+    let mut temporary = font.clone();
+    let _ = temporary.remove(b"Encoding");
+    let encoding = temporary
+        .get_font_encoding_with_limit(doc, MAX_TO_UNICODE_BYTES)
+        .ok()?;
+    if !matches!(encoding, Encoding::UnicodeMapEncoding(_)) {
+        return None;
+    }
+    let mut entries = BTreeMap::new();
+    for code in 0_u16..=255 {
+        let mut text = String::new();
+        if encoding.write_to_string(&[code as u8], &mut text).is_err() {
+            continue;
+        }
+        if text.is_empty() || text.contains(char::REPLACEMENT_CHARACTER) {
+            continue;
+        }
+        entries.insert(code as u8, text.encode_utf16().collect());
+    }
+    (!entries.is_empty()).then_some(entries)
+}
+
+/// Whether `entries` would decode any code differently from today.
+fn decoding_changes(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+    entries: &BTreeMap<u8, Vec<u16>>,
+) -> bool {
+    let Ok(encoding) = font.get_font_encoding_with_limit(doc, MAX_TO_UNICODE_BYTES) else {
+        return false;
+    };
+    (0_u16..=255).any(|code| {
+        let mut text = String::new();
+        if encoding.write_to_string(&[code as u8], &mut text).is_err() {
+            text.clear();
+        }
+        match entries.get(&(code as u8)) {
+            Some(units) => text != String::from_utf16_lossy(units),
+            None => !text.is_empty(),
+        }
+    })
+}
+
+/// A `/Differences` name lopdf's glyph table lacks, resolved here.
+///
+/// The names come from the TeX glyph-name table (`pdf_type1_builtin`), which
+/// has the names lopdf 0.44's list (the pre-AGL1.2 set plus TeX ligatures) does
+/// not: `phi1` from AGL 2.0, the Computer Modern and AMS symbol names
+/// (`mapsto`, `arrowhookleft`, `square`, ...), and the TeX-Cyrillic `*.cyr`
+/// family, which is not in AGL at all.  A name with no Unicode at all - XY-Pic's
+/// `aNNN`/`dNNN` diagram points, the `suppress` and `.notdef` placeholders,
+/// Type 3 `/BD` - is in neither table: it decodes to nothing, and when its code
+/// has no base glyph either the font is left to the fallback.
+fn extra_glyph_units(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+    name: &[u8],
+    probes: &mut GlyphProbes,
+) -> Option<Vec<u16>> {
+    if let Some(units) = glyph_name_units(name) {
+        return Some(units);
+    }
+    // OpenType-derived fonts name variants with a suffix (`e.sc` small caps,
+    // `zero.sup` superior, `radical.alt3`, `quotesingle.Var`, `grave.ts1`);
+    // the base glyph is the character.
+    let base = suffix_base(name)?;
+    glyph_name_units(base).or_else(|| lopdf_glyph_text(doc, font, base, probes))
+}
+
+/// The base glyph of a variant name such as `e.sc` or `radical.alt3`, when the
+/// suffix is one of the known variant markers.
+fn suffix_base(name: &[u8]) -> Option<&[u8]> {
+    const VARIANTS: &[&[u8]] = &[
+        b"sc", b"pc", b"sup", b"disp", b"Var", b"ts1", b"left", b"right",
+    ];
+    let dot = name.iter().rposition(|byte| *byte == b'.')?;
+    let (base, suffix) = (&name[..dot], &name[dot + 1..]);
+    if base.is_empty() {
+        return None;
+    }
+    let variant = VARIANTS.contains(&suffix)
+        || (suffix.starts_with(b"alt")
+            && suffix.len() > 3
+            && suffix[3..].iter().all(u8::is_ascii_digit));
+    variant.then_some(base)
+}
+
 pub(super) fn build_to_unicode_cmap(entries: &BTreeMap<u8, Vec<u16>>) -> Vec<u8> {
-    let mut cmap = String::from(
+    use std::fmt::Write as _;
+
+    let mut cmap = String::with_capacity(512 + entries.len() * 24);
+    cmap.push_str(
         "/CIDInit /ProcSet findresource begin\n\
          12 dict begin\n\
          begincmap\n\
@@ -284,11 +806,11 @@ pub(super) fn build_to_unicode_cmap(entries: &BTreeMap<u8, Vec<u16>>) -> Vec<u8>
          endcodespacerange\n",
     );
     if !entries.is_empty() {
-        cmap.push_str(&format!("{} beginbfchar\n", entries.len()));
+        let _ = writeln!(cmap, "{} beginbfchar", entries.len());
         for (code, units) in entries {
-            cmap.push_str(&format!("<{code:02X}> <"));
+            let _ = write!(cmap, "<{code:02X}> <");
             for unit in units {
-                cmap.push_str(&format!("{unit:04X}"));
+                let _ = write!(cmap, "{unit:04X}");
             }
             cmap.push_str(">\n");
         }
@@ -786,4 +1308,44 @@ fn is_form(stream: &Stream) -> bool {
 fn dictionary_of<'a>(doc: &'a LopdfDocument, object: &'a Object) -> Option<&'a Dictionary> {
     let (_, object) = doc.dereference(object).ok()?;
     object.as_dict().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_variant_suffix_falls_back_to_its_base_glyph() {
+        for (name, base) in [
+            (&b"e.sc"[..], &b"e"[..]),
+            (b"udieresis.sc", b"udieresis"),
+            (b"zero.sup", b"zero"),
+            (b"radical.alt3", b"radical"),
+            (b"quotesingle.Var", b"quotesingle"),
+            (b"grave.ts1", b"grave"),
+            (b"slash.left", b"slash"),
+        ] {
+            assert_eq!(
+                suffix_base(name),
+                Some(base),
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    #[test]
+    fn a_suffix_that_is_not_a_variant_keeps_the_whole_name() {
+        for name in [
+            &b"emdash.cyr"[..],
+            b".notdef",
+            b"a12",
+            b"d51",
+            b"foo.bar",
+            b"radical.alt",
+            b"sc",
+        ] {
+            assert_eq!(suffix_base(name), None, "{}", String::from_utf8_lossy(name));
+        }
+    }
 }

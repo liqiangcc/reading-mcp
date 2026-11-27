@@ -161,7 +161,7 @@ impl PdfParser {
     /// at it: then it comes back in the `Some`, which is what the front-matter evidence pass uses.
     pub(super) fn build_document(
         &self,
-        pdf: LopdfDocument,
+        mut pdf: LopdfDocument,
         resource: RetrievedResource,
         hash: ContentHash,
     ) -> Result<(Document, Option<LopdfDocument>), ApplicationError> {
@@ -179,16 +179,25 @@ impl PdfParser {
 
         // The repair copy is a second full object tree, made only for the page text: it is
         // released as soon as the pages are read instead of being carried through the section
-        // build and the save.
+        // build and the save.  The fallback-font repair runs last, on whichever tree the pages
+        // are read from - a font PDF-6b rewrote has no `/Encoding` left to fall back from - and
+        // it rewrites its few font dictionaries in place instead of asking for a second tree:
+        // that costs about three times the file size in peak RSS, and the repair reaches a fifth
+        // of the corpus.  It is undone right after the pages are read.
         let (mut pages, extraction_errors) = {
-            let prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
+            let mut prepared = super::pdf_text_repair::prepare_text_extraction(&pdf);
+            let fallback_fonts = match prepared.as_mut() {
+                Some(copy) => super::pdf_text_repair::repair_fallback_fonts(copy),
+                None => super::pdf_text_repair::repair_fallback_fonts(&mut pdf),
+            };
             #[cfg(test)]
             held_buffers::repair_copy_present(prepared.is_some());
             let extracted =
                 extract_page_texts_raw(prepared.as_ref().unwrap_or(&pdf), &page_numbers);
-            drop(prepared);
+            fallback_fonts.restore(prepared.as_mut().unwrap_or(&mut pdf));
             #[cfg(test)]
             held_buffers::repair_copy_present(false);
+            drop(prepared);
             extracted
         };
         // The two conditions must hold together: almost no text for the page
@@ -335,8 +344,16 @@ impl Parser for PdfParser {
 
 #[cfg(test)]
 fn extract_page_texts(pdf: &LopdfDocument, page_numbers: &[u32]) -> (Vec<PageText>, Vec<String>) {
-    let prepared = super::pdf_text_repair::prepare_text_extraction(pdf);
-    extract_page_texts_raw(prepared.as_ref().unwrap_or(pdf), page_numbers)
+    // The production repairs, applied to a copy so the caller keeps the tree it asserted on.
+    let mut copy = pdf.clone();
+    let mut prepared = super::pdf_text_repair::prepare_text_extraction(&copy);
+    let fallback_fonts = match prepared.as_mut() {
+        Some(prepared) => super::pdf_text_repair::repair_fallback_fonts(prepared),
+        None => super::pdf_text_repair::repair_fallback_fonts(&mut copy),
+    };
+    let extracted = extract_page_texts_raw(prepared.as_ref().unwrap_or(&copy), page_numbers);
+    fallback_fonts.restore(prepared.as_mut().unwrap_or(&mut copy));
+    extracted
 }
 
 /// Reads every page's text with one content walk per page.
@@ -351,15 +368,14 @@ fn extract_page_texts_raw(
 ) -> (Vec<PageText>, Vec<String>) {
     let mut pages = Vec::with_capacity(page_numbers.len());
     let mut errors = Vec::new();
+    // One walk for the whole document: a page's fonts are the previous page's
+    // fonts, and a CMap is expensive to parse.
+    let mut walk = super::pdf_text_extract::TextWalk::new(pdf);
 
     for page_number in page_numbers {
         let mut fragments = Vec::new();
         let mut first_error = None;
-        for fragment in super::pdf_text_extract::extract_text_chunks_with_limit(
-            pdf,
-            &[*page_number],
-            MAX_PAGE_DECOMPRESSED_BYTES,
-        ) {
+        for fragment in walk.chunks(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES) {
             match fragment {
                 Ok(fragment) => fragments.push(fragment),
                 // The whole page's text is the error, exactly as the concatenating variant
@@ -2519,6 +2535,220 @@ mod tests {
         // stays unmapped and decodes to the replacement character as before.
         assert_eq!(page_texts(&document)[0].text, "Z\u{fffd}");
         assert_eq!(page_texts(&document), old_page_texts(&document));
+    }
+
+    /// A Type 1 font with an `/Encoding` `/Differences` array and no embedded
+    /// program, so PDF-6b does not apply and `/Encoding` is the only decode
+    /// path.  `alpha` resolves in lopdf's glyph table, `phi1` and `emdash.cyr`
+    /// do not, and `d51` is an XY-Pic diagram point with no Unicode at all.
+    fn differences_font(
+        document: &mut LopdfDocument,
+        differences: Vec<Object>,
+        to_unicode: Option<&[u8]>,
+    ) -> ObjectId {
+        let mut font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "SFRM1000",
+            "FirstChar" => 0_i64,
+            "LastChar" => 255_i64,
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "BaseEncoding" => "WinAnsiEncoding",
+                "Differences" => differences,
+            },
+        };
+        if let Some(to_unicode) = to_unicode {
+            let stream = document.add_object(Stream::new(Dictionary::new(), to_unicode.to_vec()));
+            font.set("ToUnicode", stream);
+        }
+        document.add_object(font)
+    }
+
+    fn fallback_differences() -> Vec<Object> {
+        vec![
+            Object::Integer(65),
+            Object::Name(b"alpha".to_vec()),
+            Object::Name(b"phi1".to_vec()),
+            Object::Name(b"emdash.cyr".to_vec()),
+            Object::Name(b"d51".to_vec()),
+        ]
+    }
+
+    /// One `bfchar` for code 0x41 that deliberately disagrees with the glyph
+    /// name `/alpha` at the same code.
+    const PARTIAL_TO_UNICODE: &[u8] = b"/CIDInit /ProcSet findresource begin\n\
+        12 dict begin\n\
+        begincmap\n\
+        /CMapName /Adobe-Identity-UCS def\n\
+        /CMapType 2 def\n\
+        1 begincodespacerange\n\
+        <00> <FF>\n\
+        endcodespacerange\n\
+        1 beginbfchar\n\
+        <41> <0416>\n\
+        endbfchar\n\
+        endcmap\n\
+        CMapName currentdict /CMap defineresource pop\n\
+        end\n\
+        end\n";
+
+    /// MCP-96 A: one unknown `/Differences` name used to throw the whole
+    /// encoding away; the font's own `/ToUnicode` now decodes it.
+    #[test]
+    fn a_differences_name_lopdf_cannot_resolve_decodes_through_to_unicode() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(
+            &mut document,
+            fallback_differences(),
+            Some(PARTIAL_TO_UNICODE),
+        );
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66, 67, 68]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // 0x41 is the `/ToUnicode` answer, not the `/alpha` the name says.  The
+        // codes the CMap leaves out come from the tolerant map, so none of them
+        // becomes the replacement character.
+        assert_eq!(page_texts(&document)[0].text, "\u{416}\u{3d5}\u{2014}D");
+        assert_eq!(old_page_texts(&document)[0].text, "ABCD");
+    }
+
+    /// MCP-96 B: without a `/ToUnicode` the tolerant map decodes the names that
+    /// resolve and leaves the base encoding in place for the ones that do not.
+    #[test]
+    fn a_differences_name_lopdf_cannot_resolve_decodes_through_the_tolerant_map() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(&mut document, fallback_differences(), None);
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66, 67, 68]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // `alpha` resolves in lopdf's table, `phi1` and `emdash.cyr` in the TeX
+        // table, and `d51` is skipped: code 68 keeps WinAnsi's `D`.
+        assert_eq!(page_texts(&document)[0].text, "\u{3b1}\u{3d5}\u{2014}D");
+        assert_eq!(old_page_texts(&document)[0].text, "ABCD");
+    }
+
+    /// lopdf falls back for reasons other than an unknown name - here an
+    /// `/Encoding` dictionary without `/Type /Encoding` - and such a font is
+    /// repaired too: the question is put to lopdf, not to the names.
+    #[test]
+    fn a_font_lopdf_falls_back_for_without_a_type_still_decodes() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let mut font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "SFRM1000",
+            "FirstChar" => 0_i64,
+            "LastChar" => 255_i64,
+        };
+        font.set(
+            "Encoding",
+            dictionary! {
+                "BaseEncoding" => "WinAnsiEncoding",
+                "Differences" => fallback_differences(),
+            },
+        );
+        let font_id = document.add_object(font);
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66, 67, 68]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(page_texts(&document)[0].text, "\u{3b1}\u{3d5}\u{2014}D");
+        assert_eq!(old_page_texts(&document)[0].text, "ABCD");
+    }
+
+    /// The fallback repair rewrites the caller's font dictionaries in place and
+    /// puts them back exactly as they were, with the synthesised CMaps gone.
+    #[test]
+    fn the_fallback_repair_is_undone_after_the_page_text() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(&mut document, fallback_differences(), None);
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+        let before = document.clone();
+
+        let saved = crate::parsing::pdf_text_repair::repair_fallback_fonts(&mut document);
+        let font = document.get_dictionary(font_id).unwrap();
+        assert!(
+            font.get(b"Encoding").is_err(),
+            "the encoding that failed is gone"
+        );
+        assert!(font.get(b"ToUnicode").is_ok(), "the CMap decodes the font");
+        assert!(document.objects.len() > before.objects.len());
+
+        saved.restore(&mut document);
+        assert_eq!(
+            document.get_dictionary(font_id).unwrap(),
+            before.get_dictionary(font_id).unwrap()
+        );
+        assert_eq!(document.objects.len(), before.objects.len());
+    }
+
+    /// MCP-96: a name with no Unicode at a code the base encoding does not
+    /// cover reads as nothing today, and a CMap can only turn it into U+FFFD.
+    /// Such a font keeps the encoding it has.
+    #[test]
+    fn a_name_with_no_unicode_at_an_undecodable_code_keeps_the_fallback() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(
+            &mut document,
+            vec![
+                Object::Integer(0),
+                Object::Name(b"d51".to_vec()),
+                Object::Integer(65),
+                Object::Name(b"phi1".to_vec()),
+            ],
+            None,
+        );
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[0, 65, 66]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // Code 0 is an XY-Pic diagram point: StandardEncoding has no glyph for
+        // it, and no table has a Unicode for its name.
+        assert_eq!(page_texts(&document), old_page_texts(&document));
+        assert_eq!(page_texts(&document)[0].text, "AB");
+    }
+
+    /// A font whose `/Encoding` resolves decodes exactly as it did, and the
+    /// document is not even copied for a repair.
+    #[test]
+    fn a_resolvable_differences_keeps_todays_decoding() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(
+            &mut document,
+            vec![
+                Object::Integer(65),
+                Object::Name(b"alpha".to_vec()),
+                Object::Name(b"beta".to_vec()),
+            ],
+            None,
+        );
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66, 90]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert!(
+            crate::parsing::pdf_text_repair::prepare_text_extraction(&document).is_none(),
+            "a resolvable /Encoding needs no repair copy"
+        );
+        assert_eq!(page_texts(&document), old_page_texts(&document));
+        assert_eq!(page_texts(&document)[0].text, "\u{3b1}\u{3b2}Z");
     }
 
     /// PDF-6c: the normaliser over one page of one chunk.

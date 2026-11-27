@@ -8,59 +8,232 @@
 //!
 //! A gap between two CJK characters is never a word boundary, so no space is inserted there:
 //! CJK fonts encode justification and compressed punctuation as large negative adjustments.
+//!
+//! The walk keeps the font encodings of the whole document (`FontEncodings`) instead of
+//! resolving one per page, and decodes a one-byte `/ToUnicode` CMap through a table
+//! (`CodeTable`) instead of lopdf's generic four-byte walk.  Both produce the same text; the
+//! second falls back to lopdf for a run the table cannot answer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use lopdf::content::Content;
-use lopdf::{Document as LopdfDocument, Encoding, Error, Object, Result};
+use lopdf::{Dictionary, Document as LopdfDocument, Encoding, Error, Object, ObjectId, Result};
 
 /// lopdf's long-standing word-gap threshold, in thousandths of a text-space unit. A negative
 /// adjustment moves the next glyph forward, so `-300` is a 0.3 em extra gap; small positive and
 /// negative values are ordinary kerning and never reach this threshold.
 const TJ_WORD_GAP_THRESHOLD: f32 = 100.0;
 
-/// The page text chunks of `page_numbers`, with the same chunk boundaries, error ordering and
-/// decompression limit as `Document::extract_text_chunks_with_limit`.
-pub(super) fn extract_text_chunks_with_limit(
-    pdf: &LopdfDocument,
-    page_numbers: &[u32],
-    max_decompressed_size: usize,
-) -> Vec<Result<String>> {
-    let pages = pdf.get_pages();
-    page_numbers
-        .iter()
-        .flat_map(|page_number| {
-            match extract_text_chunks_from_page(pdf, &pages, *page_number, max_decompressed_size) {
-                Ok(chunks) => chunks,
-                Err(error) => vec![Err(error)],
-            }
-        })
-        .collect()
+/// One document's page text walk, keeping the font encodings it has already
+/// resolved: the caller walks the pages one at a time, so the memo has to live
+/// across those calls to be worth anything.
+pub(super) struct TextWalk<'a> {
+    pdf: &'a LopdfDocument,
+    pages: BTreeMap<u32, lopdf::ObjectId>,
+    encodings: FontEncodings<'a>,
 }
 
-fn extract_text_chunks_from_page(
-    pdf: &LopdfDocument,
+impl<'a> TextWalk<'a> {
+    pub(super) fn new(pdf: &'a LopdfDocument) -> Self {
+        Self {
+            pdf,
+            pages: pdf.get_pages(),
+            encodings: FontEncodings::default(),
+        }
+    }
+
+    /// The page text chunks of `page_numbers`, with the same chunk boundaries,
+    /// error ordering and decompression limit as
+    /// `Document::extract_text_chunks_with_limit`.
+    pub(super) fn chunks(
+        &mut self,
+        page_numbers: &[u32],
+        max_decompressed_size: usize,
+    ) -> Vec<Result<String>> {
+        page_numbers
+            .iter()
+            .flat_map(|page_number| {
+                match extract_text_chunks_from_page(
+                    self.pdf,
+                    &self.pages,
+                    *page_number,
+                    max_decompressed_size,
+                    &mut self.encodings,
+                ) {
+                    Ok(chunks) => chunks,
+                    Err(error) => vec![Err(error)],
+                }
+            })
+            .collect()
+    }
+}
+
+/// The encodings of the fonts one document puts on its pages, resolved once per
+/// font instead of once per page.
+///
+/// A font dictionary is shared by every page that sets it, so the page walk used
+/// to rebuild its encoding on every page that draws text with it, and a CMap is
+/// expensive to parse: 0.2 to 0.8 ms for the 256-code CMaps of a pdfTeX
+/// document, against microseconds for a `/Differences` map.  The key is the
+/// dictionary's address, which is stable for as long as the document is not
+/// mutated, the same key `pdf_layout::FontEncodingMemo` uses.
+///
+/// A simple font whose only encoding source is its `/ToUnicode` decodes the same
+/// as every other font that references that stream, so those share one parse.
+#[derive(Default)]
+struct FontEncodings<'a> {
+    resolved: HashMap<usize, Rc<ResolvedEncoding<'a>>>,
+    shared: HashMap<ObjectId, Rc<ResolvedEncoding<'a>>>,
+}
+
+/// One font's encoding and, when it decodes through a `/ToUnicode` CMap, the
+/// table that answers a one-byte text run.
+struct ResolvedEncoding<'a> {
+    encoding: Encoding<'a>,
+    table: Option<CodeTable>,
+}
+
+impl<'a> ResolvedEncoding<'a> {
+    /// An encoding with no CMap table, decoded by lopdf.
+    #[cfg(test)]
+    fn plain(encoding: Encoding<'a>) -> Self {
+        Self {
+            encoding,
+            table: None,
+        }
+    }
+
+    /// Decode one string operand, through the CMap table when it answers the run.
+    fn write_text(&self, bytes: &[u8], text: &mut String) -> Result<()> {
+        if let Some(table) = &self.table
+            && table.decode_into(bytes, text)
+        {
+            return Ok(());
+        }
+        self.encoding.write_to_string(bytes, text)
+    }
+}
+
+impl<'a> FontEncodings<'a> {
+    /// The font's encoding, or the error lopdf raised for it.  An error is not
+    /// kept: it is reported on every page that sets the font, as it was before.
+    fn resolve(
+        &mut self,
+        pdf: &'a LopdfDocument,
+        font: &'a Dictionary,
+        max_decompressed_bytes: usize,
+    ) -> Result<Rc<ResolvedEncoding<'a>>> {
+        let key = font as *const Dictionary as usize;
+        if let Some(resolved) = self.resolved.get(&key) {
+            return Ok(Rc::clone(resolved));
+        }
+        let shared_key = to_unicode_only(font);
+        if let Some(shared) = shared_key.as_ref().and_then(|id| self.shared.get(id)) {
+            let shared = Rc::clone(shared);
+            self.resolved.insert(key, Rc::clone(&shared));
+            return Ok(shared);
+        }
+        let encoding = font.get_font_encoding_with_limit(pdf, max_decompressed_bytes)?;
+        let resolved = Rc::new(ResolvedEncoding {
+            table: CodeTable::build(&encoding),
+            encoding,
+        });
+        if let Some(id) = shared_key {
+            self.shared.insert(id, Rc::clone(&resolved));
+        }
+        self.resolved.insert(key, Rc::clone(&resolved));
+        Ok(resolved)
+    }
+}
+
+/// A `/ToUnicode` CMap as a table of one character per one-byte code.
+///
+/// lopdf's generic walk accepts source codes of one to four bytes and re-encodes
+/// the run to UTF-16 on every call: 611 ns for a ten-byte run against 26 ns for a
+/// `/Differences` map, paid once per `Tj`/`TJ` string of the page text.  A CMap
+/// that maps every one-byte code to at most one character - the CMaps this build
+/// synthesises, and the one-byte CMaps of the corpus - is answered by a table
+/// lookup, and a run with a byte the table does not hold is handed back to lopdf,
+/// so the decoded text is unchanged.
+struct CodeTable {
+    /// One character per code, `None` for a code the CMap does not hold or that
+    /// decodes to more than one character.
+    single: [Option<char>; 256],
+}
+
+impl CodeTable {
+    fn build(encoding: &Encoding<'_>) -> Option<Self> {
+        let Encoding::UnicodeMapEncoding(map) = encoding else {
+            return None;
+        };
+        let mut single = [None; 256];
+        for code in 0_u16..=255 {
+            let Some(units) = map.get(code as u32, 1) else {
+                continue;
+            };
+            let mut chars = char::decode_utf16(units.iter().copied());
+            if let (Some(Ok(character)), None) = (chars.next(), chars.next()) {
+                single[code as usize] = Some(character);
+            }
+        }
+        Some(Self { single })
+    }
+
+    /// Append the run's characters, or `false` and nothing at all when a byte is
+    /// not in the table.
+    fn decode_into(&self, bytes: &[u8], out: &mut String) -> bool {
+        let start = out.len();
+        for byte in bytes {
+            match self.single[*byte as usize] {
+                Some(character) => out.push(character),
+                None => {
+                    out.truncate(start);
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// The `/ToUnicode` stream of a simple font that has no `/Encoding` to decode
+/// with instead, the case where that stream alone decides the encoding.
+fn to_unicode_only(font: &Dictionary) -> Option<ObjectId> {
+    let subtype = font.get(b"Subtype").and_then(Object::as_name).ok()?;
+    if subtype != b"Type1" && subtype != b"TrueType" {
+        return None;
+    }
+    if font.get(b"Encoding").is_ok() {
+        return None;
+    }
+    match font.get(b"ToUnicode").ok()? {
+        Object::Reference(id) => Some(*id),
+        _ => None,
+    }
+}
+
+fn extract_text_chunks_from_page<'a>(
+    pdf: &'a LopdfDocument,
     pages: &BTreeMap<u32, lopdf::ObjectId>,
     page_number: u32,
     max_decompressed_size: usize,
+    encodings: &mut FontEncodings<'a>,
 ) -> Result<Vec<Result<String>>> {
     let mut chunks = Vec::new();
     let page_id = *pages
         .get(&page_number)
         .ok_or(Error::PageNumberNotFound(page_number))?;
     let fonts = pdf.get_page_fonts(page_id)?;
-    let encodings: BTreeMap<Vec<u8>, Encoding> = fonts
-        .into_iter()
-        .filter_map(|(name, font)| {
-            match font.get_font_encoding_with_limit(pdf, max_decompressed_size) {
-                Ok(encoding) => Some((name, encoding)),
-                Err(error) => {
-                    chunks.push(Err(error));
-                    None
-                }
+    let mut page_encodings: BTreeMap<Vec<u8>, Rc<ResolvedEncoding<'a>>> = BTreeMap::new();
+    for (name, font) in fonts {
+        match encodings.resolve(pdf, font, max_decompressed_size) {
+            Ok(resolved) => {
+                page_encodings.insert(name, resolved);
             }
-        })
-        .collect();
+            Err(error) => chunks.push(Err(error)),
+        }
+    }
     let content_data = pdf.get_page_content_with_limit(page_id, max_decompressed_size)?;
     let content = Content::decode(&content_data)?;
 
@@ -76,7 +249,7 @@ fn extract_text_chunks_from_page(
                     .ok_or_else(|| Error::Syntax("missing font operand".to_string()))?
                     .as_name();
                 current_encoding = match current_font {
-                    Ok(font) => encodings.get(font),
+                    Ok(font) => page_encodings.get(font),
                     Err(error) => {
                         chunks.push(Err(error));
                         None
@@ -147,14 +320,14 @@ fn extract_text_chunks_from_page(
 
 fn collect_text(
     text: &mut String,
-    encoding: &Encoding,
+    encoding: &ResolvedEncoding<'_>,
     operands: &[Object],
     whitespace_tail: &mut bool,
 ) -> Result<()> {
     for operand in operands {
         match operand {
             Object::String(bytes, _) => {
-                encoding.write_to_string(bytes, text)?;
+                encoding.write_text(bytes, text)?;
                 refresh_whitespace_tail(text, whitespace_tail);
             }
             Object::Array(array) => {
@@ -170,7 +343,7 @@ fn collect_text(
 
 fn collect_array_text(
     text: &mut String,
-    encoding: &Encoding,
+    encoding: &ResolvedEncoding<'_>,
     operands: &[Object],
     whitespace_tail: &mut bool,
 ) -> Result<()> {
@@ -179,7 +352,7 @@ fn collect_array_text(
         match operand {
             Object::String(bytes, _) => {
                 let mut decoded = String::new();
-                encoding.write_to_string(bytes, &mut decoded)?;
+                encoding.write_text(bytes, &mut decoded)?;
                 if pending_word_gap && !decoded.is_empty() {
                     if !*whitespace_tail
                         && !starts_with_whitespace(&decoded)
@@ -260,7 +433,7 @@ mod tests {
         let mut whitespace_tail = false;
         collect_text(
             &mut text,
-            &Encoding::SimpleEncoding(b"WinAnsiEncoding"),
+            &ResolvedEncoding::plain(Encoding::SimpleEncoding(b"WinAnsiEncoding")),
             &operands,
             &mut whitespace_tail,
         )
@@ -273,7 +446,7 @@ mod tests {
         let mut whitespace_tail = false;
         collect_text(
             &mut text,
-            &Encoding::SimpleEncoding(b"UniGB-UCS2-H"),
+            &ResolvedEncoding::plain(Encoding::SimpleEncoding(b"UniGB-UCS2-H")),
             &operands,
             &mut whitespace_tail,
         )
@@ -358,9 +531,60 @@ mod tests {
         );
     }
 
+    /// The CMap table is only a shortcut: a run it answers decodes to exactly
+    /// what lopdf's walk produces, and a run with a byte it does not hold is
+    /// left to lopdf.
+    #[test]
+    fn the_cmap_table_decodes_exactly_as_lopdf_does() {
+        let full = (0_u8..=255)
+            .map(|code| (code, vec![0x20 + (code as u16 % 90)]))
+            .collect::<BTreeMap<u8, Vec<u16>>>();
+        with_cmap_encoding(&full, |encoding| {
+            let table = CodeTable::build(encoding).expect("a one-byte CMap has a table");
+            for bytes in [&b"abc"[..], &[0, 1, 2, 255][..], &b""[..], &[32][..]] {
+                let mut lopdf_text = String::new();
+                encoding
+                    .write_to_string(bytes, &mut lopdf_text)
+                    .expect("lopdf decodes the run");
+                let mut table_text = String::new();
+                assert!(
+                    table.decode_into(bytes, &mut table_text),
+                    "the table answers the run"
+                );
+                assert_eq!(table_text, lopdf_text);
+            }
+        });
+
+        // A code the CMap leaves out makes the whole run lopdf's business, and
+        // nothing of the run is left in the output.
+        let partial = BTreeMap::from([(65_u8, vec![0x41_u16])]);
+        with_cmap_encoding(&partial, |encoding| {
+            let table = CodeTable::build(encoding).expect("a one-byte CMap has a table");
+            let mut text = String::from("before ");
+            assert!(!table.decode_into(&[65, 66], &mut text));
+            assert_eq!(text, "before ");
+            assert!(table.decode_into(&[65], &mut text));
+            assert_eq!(text, "before A");
+        });
+    }
+
+    /// Run `check` over the encoding of a font whose only encoding source is a
+    /// `/ToUnicode` stream holding `entries`.
+    fn with_cmap_encoding(entries: &BTreeMap<u8, Vec<u16>>, check: impl FnOnce(&Encoding<'_>)) {
+        let mut document = LopdfDocument::with_version("1.5");
+        let cmap = crate::parsing::pdf_text_repair::build_to_unicode_cmap(entries);
+        let stream = document.add_object(lopdf::Stream::new(Dictionary::new(), cmap));
+        let mut font = Dictionary::new();
+        font.set("Type", Object::Name(b"Font".to_vec()));
+        font.set("Subtype", Object::Name(b"Type1".to_vec()));
+        font.set("ToUnicode", Object::Reference(stream));
+        let encoding = font.get_font_encoding(&document).expect("the CMap parses");
+        check(&encoding);
+    }
+
     #[test]
     fn a_gap_after_a_fragment_boundary_sees_the_previous_whitespace_tail() {
-        let encoding = Encoding::SimpleEncoding(b"WinAnsiEncoding");
+        let encoding = ResolvedEncoding::plain(Encoding::SimpleEncoding(b"WinAnsiEncoding"));
         let mut whitespace_tail = false;
         let mut first = String::new();
         collect_text(

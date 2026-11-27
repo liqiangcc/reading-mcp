@@ -85,6 +85,7 @@ impl SearchDocumentUseCase {
             )));
         }
 
+        let phase = std::time::Instant::now();
         let loaded = match self.text_unit_index {
             Some(_) => {
                 self.repository
@@ -99,6 +100,12 @@ impl SearchDocumentUseCase {
         };
         let (document, normalized_document_hash) =
             loaded.ok_or(ApplicationError::DocumentNotFound)?;
+        crate::infrastructure::sqlite_trace::emit(
+            "phase",
+            "search_document::execute",
+            &format!("phase=search.load_document ms={}", phase.elapsed().as_millis()),
+        );
+        let phase = std::time::Instant::now();
         // The scan walks the tree (a search is a scan), but every section it reports is resolved
         // from one row instead of a walk of that tree.
         let view = match self.text_unit_index {
@@ -120,6 +127,12 @@ impl SearchDocumentUseCase {
             None => Arc::new(DerivedTextUnits::new(Arc::clone(&document))),
         };
 
+        crate::infrastructure::sqlite_trace::emit(
+            "phase",
+            "search_document::execute",
+            &format!("phase=search.view ms={}", phase.elapsed().as_millis()),
+        );
+        let phase = std::time::Instant::now();
         let hits = if self.search_index.supports_precise_lexical_candidates() {
             self.precise_hits(
                 &document,
@@ -141,6 +154,11 @@ impl SearchDocumentUseCase {
             .await?
         };
 
+        crate::infrastructure::sqlite_trace::emit(
+            "phase",
+            "search_document::execute",
+            &format!("phase=search.scan ms={}", phase.elapsed().as_millis()),
+        );
         Ok(SearchDocumentResult {
             document_id: command.document_id,
             tokenizer_version: tokenizer_version.into(),

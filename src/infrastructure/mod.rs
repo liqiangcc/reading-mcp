@@ -17,6 +17,7 @@ mod source_view_cache;
 mod sqlite;
 mod sqlite_search_index;
 mod sqlite_support;
+pub(crate) use sqlite_support::trace as sqlite_trace;
 mod temp_cleanup;
 
 pub use budget::{BudgetedParser, BudgetedRetriever, OCR_PARSE_TIMEOUT, ResourceBudget};

@@ -213,12 +213,15 @@ impl OpenDocumentUseCase {
             return Err(ApplicationError::OcrTimeout);
         }
 
+        let phase = std::time::Instant::now();
         let (document, parsed_segmentation) = self.parser.parse_with_segmentation(resource).await?;
+        trace_phase("open.parse", phase);
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::ParseFailed)?;
         // A parser that had to segment the document already (EPUB validation does) hands that
         // segmentation back, so the open never builds the same one twice.
+        let phase = std::time::Instant::now();
         let segmentation = match parsed_segmentation {
             Some(segmentation) => segmentation,
             None => Arc::new(document.try_segmentation().map_err(|error| {
@@ -227,6 +230,8 @@ impl OpenDocumentUseCase {
                 ))
             })?),
         };
+        trace_phase("open.segmentation", phase);
+        let phase = std::time::Instant::now();
         let normalized_document_hash = document.normalized_document_hash();
         let reliability = match &self.reliability_inspector {
             Some(inspector) => inspector.inspect_with_segmentation(&document, &segmentation)?,
@@ -238,6 +243,7 @@ impl OpenDocumentUseCase {
             reliability,
             self.search_index.supports_precise_lexical_candidates(),
         )?;
+        trace_phase("open.reading_profile", phase);
         let result = OpenDocumentResult {
             document_id: document.id.clone(),
             source: document.source.clone(),
@@ -260,6 +266,7 @@ impl OpenDocumentUseCase {
         let document = Arc::new(document);
         // Drop any stored result before re-indexing, so a crash part way through can never leave a row that
         // claims the document is complete.
+        let phase = std::time::Instant::now();
         if let Some((store, _)) = &self.open_results {
             store.remove(&document.id).await?;
         }
@@ -271,7 +278,11 @@ impl OpenDocumentUseCase {
                 .replace_document_segmentation(&document, Arc::clone(&segmentation))
                 .await?;
         }
+        trace_phase("open.store.remove+text_units", phase);
+        let phase = std::time::Instant::now();
         self.repository.save_shared(Arc::clone(&document)).await?;
+        trace_phase("open.save_shared", phase);
+        let phase = std::time::Instant::now();
         self.search_index
             .index_with_segmentation(
                 Arc::clone(&document),
@@ -279,15 +290,32 @@ impl OpenDocumentUseCase {
                 segmentation,
             )
             .await?;
+        trace_phase("open.index_with_segmentation", phase);
 
+        let phase = std::time::Instant::now();
         if let Some((store, ingest_fingerprint)) = &self.open_results {
             let fingerprint = self.open_result_fingerprint(ingest_fingerprint);
             store.put(&result, &fingerprint).await?;
         }
+        trace_phase("open.open_result_put", phase);
         // The result is complete, so the bounded warm may start: it runs in the background, never
         // touches this response, yields to a foreground request and stops at its time budget.
+        crate::infrastructure::sqlite_trace::emit(
+            "phase",
+            "open_document::ingest",
+            "phase=open.prewarm_start ms=0",
+        );
         self.search_index
             .prewarm(&result.document_id, &result.normalized_document_hash);
         Ok(result)
     }
+}
+
+/// OBR trace: one ingest phase and how long it took.
+fn trace_phase(name: &str, started: std::time::Instant) {
+    crate::infrastructure::sqlite_trace::emit(
+        "phase",
+        "open_document::ingest",
+        &format!("phase={name} ms={}", started.elapsed().as_millis()),
+    );
 }

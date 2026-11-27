@@ -27,7 +27,7 @@ use super::section_layout::{
     SectionLayout, decode_paragraph_coverage, decode_stream_coverage, encode_paragraph_coverage,
     encode_stream_coverage,
 };
-use super::sqlite_support::{open_connection, run_sqlite};
+use super::sqlite_support::{ReadPool, open_connection, run_sqlite, run_sqlite_read};
 use crate::application::get_text_units::{
     EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
     TextUnitEnumerationCoverage,
@@ -624,10 +624,22 @@ fn warm_scan_text(
             break;
         }
         let (text, chunks) = {
+            let queued = Instant::now();
             let connection = connection.lock().map_err(|_| {
                 ApplicationError::TextUnitIndexFailed("SQLite lock poisoned".into())
             })?;
-            load_section_text_counted(&connection, plan.doc_key, *section_key)?
+            let locked = Instant::now();
+            let loaded = load_section_text_counted(&connection, plan.doc_key, *section_key)?;
+            crate::infrastructure::sqlite_trace::emit(
+                "prewarm_section",
+                "sqlite::warm_scan_text",
+                &format!(
+                    "wait_ms={} hold_ms={}",
+                    locked.duration_since(queued).as_millis(),
+                    Instant::now().duration_since(locked).as_millis()
+                ),
+            );
+            loaded
         };
         report.rows_read += chunks;
         plan.store
@@ -757,6 +769,8 @@ impl Default for ScanOptions {
 pub struct SqliteDocumentRepository {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
+    /// OBR prototype: read-only connections, so a read never waits behind a write.
+    readers: Arc<ReadPool>,
     /// Whether a full decode reports its phases; only when telemetry is on.
     decode_timing: bool,
 }
@@ -837,8 +851,9 @@ impl SqliteDocumentRepository {
         ensure_body_order_rows_shape(&connection)?;
         ensure_section_rows_shape(&connection)?;
         Ok(Self {
-            path,
+            path: path.clone(),
             connection: Arc::new(Mutex::new(connection)),
+            readers: Arc::new(ReadPool::new(&path)),
             decode_timing: telemetry_enabled(),
         })
     }
@@ -897,7 +912,7 @@ impl DocumentRepository for SqliteDocumentRepository {
             .validate_ocr_publication()
             .map_err(ApplicationError::RepositoryFailed)?;
         let normalized_document_hash = document.normalized_document_hash();
-        run_sqlite(
+        run_sqlite("save_shared", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -1034,7 +1049,7 @@ impl DocumentRepository for SqliteDocumentRepository {
     ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
         let id = id.clone();
         let decode_timing = self.decode_timing;
-        run_sqlite(
+        run_sqlite("get_with_hash", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| load_document_row(connection, &id, decode_timing),
@@ -1070,7 +1085,7 @@ impl DocumentRepository for SqliteDocumentRepository {
     ) -> Result<Option<(Arc<Document>, NormalizedDocumentHash)>, ApplicationError> {
         let id = id.clone();
         let decode_timing = self.decode_timing;
-        run_sqlite(
+        run_sqlite("get_light_with_hash", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -1114,7 +1129,7 @@ impl DocumentRepository for SqliteDocumentRepository {
     ) -> Result<Option<String>, ApplicationError> {
         let id = id.clone();
         let key = key.to_owned();
-        run_sqlite(
+        run_sqlite("load_metadata", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| load_stored_metadata(connection, &id, &key),
@@ -1129,8 +1144,7 @@ impl DocumentRepository for SqliteDocumentRepository {
     ) -> Result<Option<String>, ApplicationError> {
         let id = id.clone();
         let section_id = section_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("load_section_text", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| load_one_section_text(connection, &id, &section_id),
         )
@@ -1144,8 +1158,7 @@ impl DocumentRepository for SqliteDocumentRepository {
     ) -> Result<Option<usize>, ApplicationError> {
         let id = id.clone();
         let section_id = section_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("load_section_char_len", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| load_one_section_char_len(connection, &id, &section_id),
         )
@@ -1163,7 +1176,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         let id = id.clone();
         let section_id = section_id.clone();
         let offset = usize_to_i64(offset)?;
-        run_sqlite(
+        run_sqlite("original_source_page_at", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -1205,7 +1218,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         let section_id = section_id.clone();
         let range_start = usize_to_i64(range.start())?;
         let range_end = usize_to_i64(range.end())?;
-        run_sqlite(
+        run_sqlite("original_source_page_for_range", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -1265,7 +1278,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         id: &DocumentId,
     ) -> Result<bool, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
+        run_sqlite("original_source_bindings_stale", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -1306,8 +1319,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         id: &DocumentId,
     ) -> Result<Option<Result<Vec<SectionId>, ApplicationError>>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("body_order", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| stored_or_computed_body_order(connection, &id),
         )
@@ -1321,8 +1333,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         id: &DocumentId,
     ) -> Result<Option<Result<Vec<i64>, ApplicationError>>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("body_order_keys", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| stored_or_computed_body_order_keys(connection, &id),
         )
@@ -1336,8 +1347,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         id: &DocumentId,
     ) -> Result<Option<DocumentHeader>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("document_header", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 if let Some(header) = load_document_header(connection, &id)? {
@@ -1358,8 +1368,7 @@ impl DocumentRepository for SqliteDocumentRepository {
     ) -> Result<Option<SectionRow>, ApplicationError> {
         let id = id.clone();
         let section_id = section_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_by_id", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 let row = load_section_row_by_id(connection, &id, &section_id)?;
@@ -1380,8 +1389,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         section_key: i64,
     ) -> Result<Option<SectionRow>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_by_key", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 let row = load_section_row_by_key(connection, &id, section_key)?;
@@ -1404,8 +1412,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         limit: usize,
     ) -> Result<Vec<SectionRow>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("sections_in_key_range", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 let rows =
@@ -1437,8 +1444,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         limit: usize,
     ) -> Result<Vec<SectionRow>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_children", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 let rows = load_section_children(connection, &id, parent_key, limit)?;
@@ -1461,8 +1467,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         section_key: i64,
     ) -> Result<Vec<SectionRow>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_ancestors", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 let rows = load_section_ancestors(connection, &id, section_key)?;
@@ -1488,8 +1493,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         after: usize,
     ) -> Result<Option<BodyOrderWindow>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("body_order_window", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 if let Some(window) =
@@ -1520,8 +1524,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         section_key: i64,
     ) -> Result<Option<usize>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("body_order_position", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 if let Some(ord) = load_body_order_position(connection, &id, section_key)? {
@@ -1555,8 +1558,7 @@ impl DocumentRepository for SqliteDocumentRepository {
         ord: usize,
     ) -> Result<Option<i64>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("body_order_at", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 if let Some(key) = load_body_order_at(connection, &id, ord)? {
@@ -1582,8 +1584,7 @@ impl DocumentRepository for SqliteDocumentRepository {
     /// The length of the stored body order.
     async fn body_order_len(&self, id: &DocumentId) -> Result<Option<usize>, ApplicationError> {
         let id = id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("body_order_len", &self.readers, 
             ApplicationError::RepositoryFailed,
             move |connection| {
                 let len = load_body_order_len(connection, &id)?;
@@ -3577,7 +3578,7 @@ impl OpenResultStore for SqliteOpenResultStore {
     ) -> Result<Option<OpenDocumentResult>, ApplicationError> {
         let id = id.0.clone();
         let fingerprint = fingerprint.to_owned();
-        run_sqlite(
+        run_sqlite("get", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -3610,7 +3611,7 @@ impl OpenResultStore for SqliteOpenResultStore {
             .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?;
         let id = result.document_id.0.clone();
         let fingerprint = fingerprint.to_owned();
-        run_sqlite(
+        run_sqlite("put", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -3667,7 +3668,7 @@ impl OpenResultStore for SqliteOpenResultStore {
 
     async fn remove(&self, id: &DocumentId) -> Result<(), ApplicationError> {
         let id = id.0.clone();
-        run_sqlite(
+        run_sqlite("remove", 
             &self.connection,
             ApplicationError::RepositoryFailed,
             move |connection| {
@@ -3687,6 +3688,8 @@ impl OpenResultStore for SqliteOpenResultStore {
 pub struct SqliteTextUnitIndex {
     path: PathBuf,
     connection: Arc<Mutex<Connection>>,
+    /// OBR prototype: read-only connections, so a read never waits behind a write or a scan.
+    readers: Arc<ReadPool>,
     /// The section texts the last scanned document was scanned from. One document at a time.
     ///
     /// The only in-process cache the store keeps is this #194 scan text cache: no per-call TextUnit
@@ -3855,8 +3858,9 @@ impl SqliteTextUnitIndex {
             .map_err(text_unit_index_error)?;
         drop_legacy_lexical_search_tables(&connection)?;
         Ok(Self {
-            path,
+            path: path.clone(),
             connection: Arc::new(Mutex::new(connection)),
+            readers: Arc::new(ReadPool::new(&path)),
             scan_text: Arc::new(Mutex::new(None)),
             prewarming: Arc::new(Mutex::new(HashSet::new())),
             foreground: Arc::new(ForegroundSignal::default()),
@@ -4041,8 +4045,7 @@ impl SqliteTextUnitIndex {
         document_id: &DocumentId,
     ) -> Result<Option<NormalizedDocumentHash>, ApplicationError> {
         let document_id = document_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("stored_unit_hash", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
@@ -4073,8 +4076,7 @@ impl SqliteTextUnitIndex {
         document_id: &DocumentId,
     ) -> Result<Vec<(String, Vec<u8>)>, ApplicationError> {
         let document_id = document_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("stored_section_layouts", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let doc_key: i64 = connection
@@ -4131,7 +4133,7 @@ impl SqliteTextUnitIndex {
         let document_id = document_id.clone();
         let expected_hash = expected_hash.clone();
         let cache = Arc::clone(&self.scan_text);
-        run_sqlite(
+        run_sqlite("scan_lexical", 
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
@@ -4179,7 +4181,7 @@ impl SqliteTextUnitIndex {
         let lexical = Arc::new(lexical);
         let document_id = document_id.clone();
         let cache = Arc::clone(&self.scan_text);
-        run_sqlite(
+        run_sqlite("scan_lexical_profile", 
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
@@ -6109,7 +6111,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
 
         let document_id = document_id.clone();
         let units = units.to_vec();
-        run_sqlite(
+        run_sqlite("replace_document", 
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
@@ -6172,7 +6174,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Vec<TextUnit>, ApplicationError> {
         let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
-        run_sqlite(
+        run_sqlite("list_document", 
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
@@ -6194,7 +6196,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         validate_paragraph_units(&document.id, &paragraphs.units)?;
 
         let document = Arc::clone(document);
-        run_sqlite(
+        run_sqlite("replace_document_sets", 
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
@@ -6249,7 +6251,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
         let document = Arc::clone(document);
-        run_sqlite(
+        run_sqlite("replace_document_segmentation", 
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
@@ -6280,8 +6282,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         let section_id = section_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_units", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
@@ -6390,8 +6391,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         let section_id = section_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_unit", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
@@ -6489,8 +6489,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_stream_summary", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
@@ -6553,8 +6552,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_stream_items", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
@@ -6619,8 +6617,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let section_id = key.section_id.clone();
         let kind = key.kind;
         let policy = key.policy;
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_stream_position", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let Some(meta) = load_stored_document(connection, &document_id)? else {
@@ -6746,8 +6743,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Option<i64>, ApplicationError> {
         let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("document_key", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| stored_document_key(connection, &document_id),
         )
@@ -6759,8 +6755,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         doc_key: i64,
     ) -> Result<Option<DocumentId>, ApplicationError> {
         let _foreground = self.foreground.enter();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("document_id_for_key", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| stored_document_id_at_key(connection, doc_key),
         )
@@ -6775,8 +6770,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
         let section_id = section_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_key", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| stored_section_key(connection, &document_id, &section_id),
         )
@@ -6790,8 +6784,7 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Option<SectionId>, ApplicationError> {
         let _foreground = self.foreground.enter();
         let document_id = document_id.clone();
-        run_sqlite(
-            &self.connection,
+        run_sqlite_read("section_id_for_key", &self.readers, 
             ApplicationError::TextUnitIndexFailed,
             move |connection| stored_section_id_at_key(connection, &document_id, section_key),
         )

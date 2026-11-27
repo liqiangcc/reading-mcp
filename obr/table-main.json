@@ -1,0 +1,46 @@
+[
+ {
+  "label": "main",
+  "case": "open-epub",
+  "heavy_ms": 5427.83,
+  "p50": 8.1,
+  "p95": 1010.61,
+  "max": 1246.07,
+  "idle_p50": 4.19,
+  "idle_p95": 9.48,
+  "reads": 107
+ },
+ {
+  "label": "main",
+  "case": "open-pdf",
+  "heavy_ms": 6080.23,
+  "p50": 5.99,
+  "p95": 22.88,
+  "max": 191.3,
+  "idle_p50": 4.52,
+  "idle_p95": 12.08,
+  "reads": 118
+ },
+ {
+  "label": "main",
+  "case": "search",
+  "heavy_ms": 592.76,
+  "p50": 286.85,
+  "p95": 524.28,
+  "max": 524.28,
+  "idle_p50": 4.49,
+  "idle_p95": 9.91,
+  "reads": 12
+ },
+ {
+  "label": "main",
+  "case": "source-view",
+  "heavy_ms": 9.69,
+  "p50": NaN,
+  "p95": NaN,
+  "max": 4.65,
+  "idle_p50": 3.97,
+  "idle_p95": 12.38,
+  "reads": 0
+ }
+]

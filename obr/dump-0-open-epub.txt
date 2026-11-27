@@ -1,0 +1,243 @@
+[New LWP 715874]
+[New LWP 715875]
+[New LWP 715876]
+[New LWP 715877]
+[New LWP 715878]
+[New LWP 715879]
+[New LWP 715880]
+[New LWP 715881]
+[New LWP 715882]
+[New LWP 715883]
+[New LWP 715886]
+[New LWP 715923]
+[New LWP 715925]
+[New LWP 716050]
+[New LWP 716051]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 16 (Thread 0x72fb6e9f4640 (LWP 716051) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51596 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::mutex::futex::Mutex::lock_contended () at library/std/src/sys/sync/mutex/futex.rs:61
+#3  0x000064c650dc31a0 in lock () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/sync/mutex/futex.rs:33
+#4  lock<rusqlite::Connection> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/mutex.rs:492
+#5  {closure#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}> () at src/infrastructure/sqlite_support.rs:46
+#6  poll<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>, core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/blocking/task.rs:42
+#7  0x000064c650c41b3b in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:380
+#8  with_mut<tokio::runtime::task::core::Stage<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>>, core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::core::{impl#6}::poll::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/loom/std/unsafe_cell.rs:16
+#9  poll<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:369
+#10 0x000064c650e3e998 in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/harness.rs:535
+#11 call_once<core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::harness::poll_future::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panic/unwind_safe.rs:275
+
+Thread 15 (Thread 0x72fb6ebf5640 (LWP 716050) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51596 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::mutex::futex::Mutex::lock_contended () at library/std/src/sys/sync/mutex/futex.rs:61
+#3  0x000064c650dc31a0 in lock () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/sync/mutex/futex.rs:33
+#4  lock<rusqlite::Connection> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/mutex.rs:492
+#5  {closure#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}> () at src/infrastructure/sqlite_support.rs:46
+#6  poll<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>, core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/blocking/task.rs:42
+#7  0x000064c650c41b3b in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:380
+#8  with_mut<tokio::runtime::task::core::Stage<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>>, core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::core::{impl#6}::poll::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/loom/std/unsafe_cell.rs:16
+#9  poll<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:369
+#10 0x000064c650e3e998 in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/harness.rs:535
+#11 call_once<core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::harness::poll_future::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panic/unwind_safe.rs:275
+
+Thread 14 (Thread 0x72fb6edf6640 (LWP 715925) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51596 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::mutex::futex::Mutex::lock_contended () at library/std/src/sys/sync/mutex/futex.rs:61
+#3  0x000064c650dc31a0 in lock () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/sync/mutex/futex.rs:33
+#4  lock<rusqlite::Connection> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/mutex.rs:492
+#5  {closure#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}> () at src/infrastructure/sqlite_support.rs:46
+#6  poll<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>, core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/blocking/task.rs:42
+#7  0x000064c650c41b3b in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:380
+#8  with_mut<tokio::runtime::task::core::Stage<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>>, core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::core::{impl#6}::poll::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/loom/std/unsafe_cell.rs:16
+#9  poll<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:369
+#10 0x000064c650e3e998 in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/harness.rs:535
+#11 call_once<core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::harness::poll_future::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panic/unwind_safe.rs:275
+
+Thread 13 (Thread 0x72fb6eff7640 (LWP 715923) "tokio-rt-worker"):
+#0  0x000072fb7c91496c in read () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d77786 in std::sys::fd::unix::FileDesc::read () at library/std/src/sys/fd/unix.rs:140
+#2  std::sys::stdio::unix::{impl#1}::read () at library/std/src/sys/stdio/unix.rs:23
+#3  std::io::stdio::{impl#0}::read () at library/std/src/io/stdio.rs:100
+#4  alloc::io::buffered::bufreader::{impl#6}::read<std::io::stdio::StdinRaw> () at library/alloc/src/io/buffered/bufreader.rs:358
+#5  0x000064c651d76edd in std::io::stdio::{impl#8}::read () at library/std/src/io/stdio.rs:514
+#6  std::io::stdio::{impl#5}::read () at library/std/src/io/stdio.rs:448
+#7  0x000064c651d2d4a6 in read_from<std::io::stdio::Stdin> () at src/io/blocking.rs:252
+#8  0x000064c651d2762f in {closure#0}<std::io::stdio::Stdin> () at src/io/blocking.rs:78
+#9  poll<tokio::io::blocking::{impl#0}::poll_read::{closure_env#0}<std::io::stdio::Stdin>, (core::result::Result<usize, core::io::error::Error>, tokio::io::blocking::Buf, std::io::stdio::Stdin)> () at src/runtime/blocking/task.rs:42
+#10 0x000064c651d1823b in {closure#0}<tokio::runtime::blocking::task::BlockingTask<tokio::io::blocking::{impl#0}::poll_read::{closure_env#0}<std::io::stdio::Stdin>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at src/runtime/task/core.rs:380
+#11 with_mut<tokio::runtime::task::core::Stage<tokio::runtime::blocking::task::BlockingTask<tokio::io::blocking::{impl#0}::poll_read::{closure_env#0}<std::io::stdio::Stdin>>>, core::task::poll::Poll<(core::result::Result<usize, core::io::error::Error>, tokio::io::blocking::Buf, std::io::stdio::Stdin)>, tokio::runtime::task::core::{impl#6}::poll::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<tokio::io::blocking::{impl#0}::poll_read::{closure_env#0}<std::io::stdio::Stdin>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at src/loom/std/unsafe_cell.rs:16
+
+Thread 12 (Thread 0x72fb6f1f8640 (LWP 715886) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51596 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::mutex::futex::Mutex::lock_contended () at library/std/src/sys/sync/mutex/futex.rs:61
+#3  0x000064c650dc31a0 in lock () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/sync/mutex/futex.rs:33
+#4  lock<rusqlite::Connection> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/mutex.rs:492
+#5  {closure#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}> () at src/infrastructure/sqlite_support.rs:46
+#6  poll<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>, core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/blocking/task.rs:42
+#7  0x000064c650c41b3b in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:380
+#8  with_mut<tokio::runtime::task::core::Stage<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>>, core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::core::{impl#6}::poll::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/loom/std/unsafe_cell.rs:16
+#9  poll<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/core.rs:369
+#10 0x000064c650e3e998 in {closure#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/task/harness.rs:535
+#11 call_once<core::task::poll::Poll<core::result::Result<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::application::ports::ApplicationError>>, tokio::runtime::task::harness::poll_future::{closure_env#0}<tokio::runtime::blocking::task::BlockingTask<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<core::option::Option<reading_mcp::domain::DocumentId>, reading_mcp::infrastructure::sqlite::{impl#67}::document_id_for_key::{async_block#0}::{closure_env#0}>>, tokio::runtime::blocking::schedule::BlockingSchedule>> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panic/unwind_safe.rs:275
+
+Thread 11 (Thread 0x72fb6f3f9640 (LWP 715883) "tokio-rt-worker"):
+#0  0x000064c651d9038c in core::str::count::do_count_chars () at library/core/src/str/count.rs:85
+#1  0x000064c650bca7cf in count_chars () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/str/count.rs:35
+#2  count () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/str/iter.rs:47
+#3  validate_for_text () at src/domain/normalized_text.rs:61
+#4  validate_normalized_range () at src/domain/normalized_text.rs:228
+#5  validate_normalized_block_map () at src/domain/normalized_block.rs:248
+#6  0x000064c650bc9dd4 in normalized_block_map () at src/domain/normalized_block.rs:172
+#7  0x000064c650a31bd1 in hash_normalized_block_projection () at src/domain/normalized_text.rs:257
+#8  0x000064c650bcb547 in normalized_document_hash () at src/domain/normalized_text.rs:183
+#9  0x000064c650dd2da8 in {closure#0} () at src/infrastructure/sqlite.rs:6256
+#10 {closure#0}<(), reading_mcp::infrastructure::sqlite::{impl#67}::replace_document_segmentation::{async_block#0}::{closure_env#0}> () at src/infrastructure/sqlite_support.rs:48
+#11 poll<reading_mcp::infrastructure::sqlite_support::run_sqlite::{async_fn#0}::{closure_env#0}<(), reading_mcp::infrastructure::sqlite::{impl#67}::replace_document_segmentation::{async_block#0}::{closure_env#0}>, core::result::Result<(), reading_mcp::application::ports::ApplicationError>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/blocking/task.rs:42
+
+Thread 10 (Thread 0x72fb6f5fa640 (LWP 715882) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51abb in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  0x000064c651d0bc1b in wait_timeout<tokio::runtime::blocking::pool::Shared> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:330
+#4  run () at src/runtime/blocking/pool.rs:529
+#5  0x000064c651d219ff in {closure#0} () at src/runtime/blocking/pool.rs:474
+#6  __rust_begin_short_backtrace<tokio::runtime::blocking::pool::{impl#6}::spawn_thread::{closure_env#0}, ()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/backtrace.rs:166
+#7  0x000064c651d0dc03 in {closure#0}<tokio::runtime::blocking::pool::{impl#6}::spawn_thread::{closure_env#0}, ()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/thread/lifecycle.rs:70
+#8  call_once<(), std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<tokio::runtime::blocking::pool::{impl#6}::spawn_thread::{closure_env#0}, ()>> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/core/src/panic/unwind_safe.rs:275
+#9  do_call<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<tokio::runtime::blocking::pool::{impl#6}::spawn_thread::{closure_env#0}, ()>>, ()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panicking.rs:576
+#10 catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<tokio::runtime::blocking::pool::{impl#6}::spawn_thread::{closure_env#0}, ()>>> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panicking.rs:544
+#11 catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked::{closure#1}::{closure_env#0}<tokio::runtime::blocking::pool::{impl#6}::spawn_thread::{closure_env#0}, ()>>, ()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/panic.rs:359
+
+Thread 9 (Thread 0x72fb6f7fb640 (LWP 715881) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2c7a9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park_condvar () at src/runtime/scheduler/multi_thread/park.rs:203
+#6  0x000064c651d08c19 in park () at src/runtime/scheduler/multi_thread/park.rs:146
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 8 (Thread 0x72fb6f9fc640 (LWP 715880) "tokio-rt-worker"):
+#0  0x000072fb7c925ebe in epoll_wait () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d34a9c in select () at src/sys/unix/mod.rs:8
+#2  poll () at src/poll.rs:443
+#3  0x000064c651d2933a in turn () at src/runtime/io/driver.rs:188
+#4  0x000064c651d1271f in park_internal () at src/runtime/io/driver.rs:161
+#5  0x000064c651d08bda in park_driver () at src/runtime/scheduler/multi_thread/park.rs:265
+#6  park () at src/runtime/scheduler/multi_thread/park.rs:144
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 7 (Thread 0x72fb6fbfd640 (LWP 715879) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2c7a9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park_condvar () at src/runtime/scheduler/multi_thread/park.rs:203
+#6  0x000064c651d08c19 in park () at src/runtime/scheduler/multi_thread/park.rs:146
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 6 (Thread 0x72fb6fdfe640 (LWP 715878) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2c7a9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park_condvar () at src/runtime/scheduler/multi_thread/park.rs:203
+#6  0x000064c651d08c19 in park () at src/runtime/scheduler/multi_thread/park.rs:146
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 5 (Thread 0x72fb6ffff640 (LWP 715877) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2c7a9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park_condvar () at src/runtime/scheduler/multi_thread/park.rs:203
+#6  0x000064c651d08c19 in park () at src/runtime/scheduler/multi_thread/park.rs:146
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 4 (Thread 0x72fb7c3fd640 (LWP 715876) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2c7a9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park_condvar () at src/runtime/scheduler/multi_thread/park.rs:203
+#6  0x000064c651d08c19 in park () at src/runtime/scheduler/multi_thread/park.rs:146
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 3 (Thread 0x72fb7c5fe640 (LWP 715875) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2c7a9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park_condvar () at src/runtime/scheduler/multi_thread/park.rs:203
+#6  0x000064c651d08c19 in park () at src/runtime/scheduler/multi_thread/park.rs:146
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 2 (Thread 0x72fb7c7ff640 (LWP 715874) "tokio-rt-worker"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2c7a9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park_condvar () at src/runtime/scheduler/multi_thread/park.rs:203
+#6  0x000064c651d08c19 in park () at src/runtime/scheduler/multi_thread/park.rs:146
+#7  park () at src/runtime/scheduler/multi_thread/park.rs:77
+#8  park_internal () at src/runtime/scheduler/multi_thread/worker.rs:887
+#9  0x000064c651d05276 in park () at src/runtime/scheduler/multi_thread/worker.rs:835
+#10 run () at src/runtime/scheduler/multi_thread/worker.rs:614
+#11 {closure#0} () at src/runtime/scheduler/multi_thread/worker.rs:561
+
+Thread 1 (Thread 0x72fb7cae2f80 (LWP 715872) "main"):
+#0  0x000072fb7c91e9dd in syscall () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x000064c651d51b85 in std::sys::sync::futex::unix::futex_wait () at library/std/src/sys/sync/futex/unix.rs:63
+#2  std::sys::sync::condvar::futex::Condvar::wait_optional_timeout () at library/std/src/sys/sync/condvar/futex.rs:49
+#3  std::sys::sync::condvar::futex::Condvar::wait () at library/std/src/sys/sync/condvar/futex.rs:33
+#4  0x000064c651d2cdc9 in wait<()> () at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sync/poison/condvar.rs:128
+#5  park () at src/runtime/park.rs:111
+#6  0x000064c6508aafc8 in block_on<reading_mcp::main::{async_block_env#0}> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/park.rs:288
+#7  0x000064c65085e8be in block_on<reading_mcp::main::{async_block_env#0}> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/blocking.rs:66
+#8  {closure#0}<reading_mcp::main::{async_block_env#0}> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/multi_thread/mod.rs:92
+#9  enter_runtime<tokio::runtime::scheduler::multi_thread::{impl#0}::block_on::{closure_env#0}<reading_mcp::main::{async_block_env#0}>, core::result::Result<(), alloc::boxed::Box<dyn core::error::Error, alloc::alloc::Global>>> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65
+#10 0x000064c65086f77b in block_on<reading_mcp::main::{async_block_env#0}> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/multi_thread/mod.rs:91
+#11 block_on_inner<reading_mcp::main::{async_block_env#0}> () at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:376
+[Inferior 1 (process 715872) detached]

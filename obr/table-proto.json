@@ -1,0 +1,35 @@
+[
+ {
+  "label": "proto-read",
+  "case": "open-epub",
+  "heavy_ms": 4954.81,
+  "p50": 4.88,
+  "p95": 12.62,
+  "max": 40.49,
+  "idle_p50": 5.24,
+  "idle_p95": 12.36,
+  "reads": 98
+ },
+ {
+  "label": "proto-read",
+  "case": "open-pdf",
+  "heavy_ms": 5122.72,
+  "p50": 4.85,
+  "p95": 10.95,
+  "max": 17.46,
+  "idle_p50": 2.76,
+  "idle_p95": 6.97,
+  "reads": 101
+ },
+ {
+  "label": "proto-read",
+  "case": "search",
+  "heavy_ms": 327.08,
+  "p50": 4.2,
+  "p95": 7.89,
+  "max": 7.89,
+  "idle_p50": 3.35,
+  "idle_p95": 14.04,
+  "reads": 7
+ }
+]

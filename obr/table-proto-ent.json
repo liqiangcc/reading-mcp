@@ -1,0 +1,13 @@
+[
+ {
+  "label": "proto-ent",
+  "case": "open-pdf-entropy",
+  "heavy_ms": 5302.58,
+  "p50": 4.58,
+  "p95": 16.17,
+  "max": 31.35,
+  "idle_p50": 3.92,
+  "idle_p95": 13.18,
+  "reads": 104.0
+ }
+]

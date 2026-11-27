@@ -1559,14 +1559,24 @@ fn count_glue_events(chars: &[char], pdf: bool, repeated: Option<&HashSet<String
         let current = chars[index];
         let glued = (previous.is_ascii_digit()
             && current.is_uppercase()
-            && !(pdf && is_terminal_single_capital(chars, index)))
+            && !(pdf && is_tight_unit_capital(chars, index)))
             || (matches!(previous, ',' | ';' | ':' | '.' | '!' | '?') && current.is_uppercase())
             || (previous == ')' && current.is_alphabetic())
-            // An all-caps run of 3+ immediately continued by a lowercase tail inside
-            // one token ("SCIENCEStrong") means two fragments were merged.
+            // An all-caps run immediately continued by a lowercase tail inside
+            // one token ("SCIENCEStrong") means two fragments were merged. PDF-7c (#232):
+            // in a PDF the shape counts only when both sides are long - a run of 4+
+            // continued by a tail of 4+ - because the short shapes are names
+            // (`SASRec`, `RESTful`, `MLPs`), and 0 of the 177 junctions the census
+            // judged was real glue. Every other format keeps the 3+ run exactly as
+            // #139 wrote it.
             || (previous.is_uppercase()
                 && current.is_lowercase()
-                && uppercase_run_ending_at(chars, index - 1) >= 3)
+                && if pdf {
+                    uppercase_run_ending_at(chars, index - 1) >= 4
+                        && lowercase_run_starting_at(chars, index) >= 4
+                } else {
+                    uppercase_run_ending_at(chars, index - 1) >= 3
+                })
             // Interior lowercase->uppercase junction only: single-letter brand
             // prefixes ("iPhone") and surname patterns ("McDonald") are not glue.
             || (previous.is_lowercase()
@@ -1609,9 +1619,24 @@ fn repeated_name_tokens(chars: &[char]) -> HashSet<String> {
     }
     counts
         .into_iter()
-        .filter(|(token, count)| *count >= 2 && has_capital_run(token))
+        .filter(|(token, count)| {
+            *count >= 2 && (has_capital_run(token) || is_capitalized_name_token(token))
+        })
         .map(|(token, _)| token)
         .collect()
+}
+
+/// PDF-7c (#232): a repeated token that starts with a capital and carries one interior
+/// capital is a name too (`TensorFlow`, `PyTorch`, `LaTeX`, `GitHub`, `OpenAI`, `WebTables`,
+/// `EchoMimicV2`) - the two-adjacent-capitals shape PDF-6e wrote is only the acronym-shaped
+/// half of them. Starting with a capital is what keeps the shape honest: a merged run of
+/// ordinary words (`thecaseofRedPajama`) starts lowercase and keeps counting even when it
+/// repeats. Both letters are ASCII, as `has_capital_run` already is, so a garbled text
+/// layer's lowercase-led tokens are never names.
+fn is_capitalized_name_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    chars.next().is_some_and(|first| first.is_ascii_uppercase())
+        && chars.any(|ch| ch.is_ascii_uppercase())
 }
 
 fn has_capital_run(token: &str) -> bool {
@@ -1641,17 +1666,37 @@ fn is_repeated_name_token(chars: &[char], index: usize, tokens: &HashSet<String>
     tokens.contains(&chars[start..=end].iter().copied().collect::<String>())
 }
 
-/// A digit directly before **one** capital that ends its token: a size (`7B`), a dimension
-/// (`3D`), a unit (`4K,`), a panel label (`Fig. 3A`). The two shapes that carry real glue keep
-/// counting: a run of two or more capitals (`3642SCIENCE`, `10GUO-DONGHONG`, an author list,
-/// and a unit written that way, `474GB`) and a capital continued by lowercase (`7Binstruct`,
-/// `5Gnetwork`).
-fn is_terminal_single_capital(chars: &[char], index: usize) -> bool {
+/// A digit directly before a capital run of at most two letters that ends its token: a size
+/// (`7B`), a dimension (`3D`), a unit (`36GB`, `4K,`), a protocol (`2PC`, `3PC`), a panel
+/// label (`Fig. 3A`). The reference extractor produces these tokens exactly as written, so
+/// the guard would be inventing a lost space. The two shapes that carry real glue keep
+/// counting: a capital run of three or more (`3642SCIENCE`, `10GUO-DONGHONG`, an author
+/// list, the Caesar-shifted `7KHREVHUYDWRU`) and a capital continued by lowercase
+/// (`7Binstruct`, `5Gnetwork`).
+fn is_tight_unit_capital(chars: &[char], index: usize) -> bool {
     // chars[index] is the uppercase side of the junction.
-    chars[index].is_uppercase()
+    let mut run = 0usize;
+    while chars
+        .get(index + run)
+        .is_some_and(|next| next.is_uppercase())
+    {
+        run += 1;
+    }
+    run <= 2
         && !chars
-            .get(index + 1)
+            .get(index + run)
             .is_some_and(|next| next.is_alphabetic())
+}
+
+fn lowercase_run_starting_at(chars: &[char], index: usize) -> usize {
+    let mut run = 0usize;
+    while chars
+        .get(index + run)
+        .is_some_and(|next| next.is_lowercase())
+    {
+        run += 1;
+    }
+    run
 }
 
 fn is_surname_junction(chars: &[char], index: usize) -> bool {
@@ -2400,8 +2445,6 @@ mod tests {
             // second event of its own kind, so the pair counts two.
             ("Birbal:Anefficient7Binstruct-model", 2),
             ("the 5Gnetwork layer", 1),
-            // A capital run of two, which is a unit but not the shape the exemption names.
-            ("474GB of memory", 1),
         ] {
             assert_eq!(
                 missing_space_glue_events(text, FallbackGuardProfile::PdfProse),
@@ -2410,6 +2453,48 @@ mod tests {
             );
             assert_eq!(
                 missing_space_glue_events(text, FallbackGuardProfile::AllFormats),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    /// PDF-7c (#232): a capital run of one or two that ends its token is a tight unit in a
+    /// PDF paragraph (`36GB`, `474GB`, `2PC`, `3PC`); the reference extractor writes it the
+    /// same way, so the guard would be inventing a lost space. The shapes that carry real
+    /// damage - a run of three or more, a capital continued by lowercase - keep counting.
+    #[test]
+    fn a_tight_unit_capital_run_after_a_digit_is_not_glue_in_pdf_prose() {
+        for text in [
+            "36GB of memory",
+            "474GB of memory",
+            "the 2PC setting",
+            "a 95HD panel",
+        ] {
+            assert_eq!(
+                missing_space_glue_events(text, FallbackGuardProfile::PdfProse),
+                0,
+                "{text}"
+            );
+            // Every other format keeps the junction exactly as #139 wrote it.
+            assert!(
+                missing_space_glue_events(text, FallbackGuardProfile::AllFormats) > 0,
+                "{text}"
+            );
+        }
+        for (text, expected) in [
+            // A run of three or more that ends its token: the shifted raster fixtures
+            // and a page number glued to a running header.
+            ("7KHREVHUYDWRU opens before sunrise", 1),
+            ("the w24458NATIONAL header", 1),
+            // A run of two continued by lowercase: two words merged. The `zC` lower->upper
+            // junction is a second event of its own kind, so the pair counts two.
+            ("the 2.2GHzCPUs setting", 2),
+            // The digit->uppercase junction alone, inside one lowercase-led token.
+            ("the a2GHzcpus setting", 1),
+        ] {
+            assert_eq!(
+                missing_space_glue_events(text, FallbackGuardProfile::PdfProse),
                 expected,
                 "{text}"
             );

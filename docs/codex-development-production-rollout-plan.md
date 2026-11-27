@@ -183,8 +183,8 @@ Do not rewrite already proven foundations while converging release blockers.
 The repository currently contains:
 
 ```text
-deploy-tunnel.sh
-.github/workflows/deploy-tunnel.yml
+~~deploy-tunnel.sh~~ (removed 2026-11-27: production moved to devin-box Docker Compose with its own Cloudflare tunnel)
+~~.github/workflows/deploy-tunnel.yml~~ (removed 2026-11-27: same reason; the workflow last ran, cancelled, on 2026-08-19)
 .env.example
 ```
 
@@ -895,7 +895,7 @@ If the tunnel protocol exposes a safe discovery/diagnostic probe, use it. Do not
 
 ## 5.4 Fix hardcoded environment assumptions
 
-Review current `deploy-tunnel.sh` and `.env.example` for deployment-specific defaults.
+Review current `deploy-tunnel.sh` and `.env.example` for deployment-specific defaults. (Obsolete since 2026-11-27: `deploy-tunnel.sh` was removed when production moved to devin-box Docker Compose with its own Cloudflare tunnel; `.env.example` no longer carries the tunnel-only variables.)
 
 Production scripts should prefer explicit environment/configuration over repository-hardcoded real tunnel IDs or `/root`-only assumptions.
 

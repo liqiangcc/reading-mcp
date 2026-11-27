@@ -98,18 +98,20 @@ reading-mcp-release-manifest/v1
   "version": "0.1.0",
   "tag": "v0.1.0",
   "git_sha": "<40-char source sha>",
-  "target": "x86_64-unknown-linux-musl",
+  "target": "x86_64-unknown-linux-gnu",
   "platform": "linux-x86_64",
   "binary_sha256": "<sha256>",
-  "binary_libc_requirement": "static",
+  "binary_libc_requirement": "GLIBC_2.31",
   "cargo_lock_sha256": "<sha256>",
   "packaging_commit_sha": "<packaging infrastructure sha>"
 }
 ```
 
-`binary_libc_requirement` 是 binary 需要的最高 `GLIBC_` 符号版本；完全静态 binary 记录为 `static`。`packaging_commit_sha` 是构建基础设施身份，不参与 Source identity，也不能把新的 main commit 冒充为旧 tag 的源码。
+`binary_libc_requirement` 是 binary 需要的最高 `GLIBC_` 符号版本；Linux GNU release 必须不超过 `GLIBC_2.31`。`packaging_commit_sha` 是构建基础设施身份，不参与 Source identity，也不能把新的 main commit 冒充为旧 tag 的源码。
 
 ## 6. Package 生成
+
+Linux GNU release 在 `debian:11`（glibc 2.31）container 中构建，使用 rustup 安装仓库 pin 的 Rust toolchain 和发行版自带 gcc；不使用 zig。
 
 统一入口：
 
@@ -118,7 +120,7 @@ REPO_DIR=<clean-checkout-at-tag> \
 RELEASE_VERSION=0.1.0 \
 RELEASE_TAG=v0.1.0 \
 RELEASE_SHA=<frozen-sha> \
-TARGET_TRIPLE=x86_64-unknown-linux-musl \
+TARGET_TRIPLE=x86_64-unknown-linux-gnu \
 PLATFORM=linux-x86_64 \
 OUTPUT_DIR=<dist-dir> \
 PACKAGING_COMMIT_SHA=<packaging-infra-sha> \

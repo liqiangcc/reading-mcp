@@ -5,7 +5,7 @@ set -euo pipefail
 : "${RELEASE_VERSION:?set RELEASE_VERSION, for example 0.1.0}"
 : "${RELEASE_SHA:?set RELEASE_SHA to the exact frozen source SHA}"
 : "${RELEASE_TAG:=v$RELEASE_VERSION}"
-: "${TARGET_TRIPLE:=x86_64-unknown-linux-musl}"
+: "${TARGET_TRIPLE:=x86_64-unknown-linux-gnu}"
 : "${PLATFORM:=linux-x86_64}"
 : "${OUTPUT_DIR:=$REPO_DIR/dist}"
 : "${BUILD_TARGET_DIR:=$REPO_DIR/target/package-$RELEASE_SHA-$TARGET_TRIPLE}"
@@ -130,6 +130,21 @@ major, minor = max((int(major), int(minor)) for major, minor in versions)
 print(f"GLIBC_{major}.{minor}")
 PY
 )
+
+python3 - "$binary_libc_requirement" <<'PY'
+import re
+import sys
+
+requirement = sys.argv[1]
+if requirement == "static":
+    raise SystemExit("static binaries are outside the glibc 2.31 release route")
+match = re.fullmatch(r"GLIBC_(\d+)\.(\d+)", requirement)
+if not match:
+    raise SystemExit(f"unsupported binary_libc_requirement: {requirement}")
+version = tuple(int(part) for part in match.groups())
+if version > (2, 31):
+    raise SystemExit(f"binary requires {requirement}, above the supported glibc 2.31 floor")
+PY
 
 output_dir=$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)
 package_name="reading-mcp-v${RELEASE_VERSION}-${PLATFORM}"

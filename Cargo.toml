@@ -55,7 +55,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-[target.'cfg(target_env = "musl")'.dependencies]
-mimalloc = { version = "0.1.52", features = ["no_thp", "override"] }
-libmimalloc-sys = { version = "0.1.49", features = ["extended"] }

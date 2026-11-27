@@ -14,7 +14,7 @@ on:
       target_triple:
         description: Rust target triple
         required: true
-        default: x86_64-unknown-linux-musl
+        default: x86_64-unknown-linux-gnu
       platform:
         description: Artifact platform label
         required: true
@@ -36,6 +36,8 @@ jobs:
   package:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    container:
+      image: debian:11
     outputs:
       artifact_name: ${{ steps.mode.outputs.artifact_name }}
     steps:
@@ -71,6 +73,14 @@ jobs:
             exit 1
           fi
 
+      - name: Install Debian 11 build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential binutils python3 pkg-config perl
+
       - name: Checkout packaging infrastructure
         uses: actions/checkout@v4
         with:
@@ -103,14 +113,30 @@ jobs:
           actual_sha=$(git -C source rev-parse 'HEAD^{commit}')
           tag_sha="$actual_sha"
           if [[ "$VERIFY_RELEASE_TAG" == "true" ]]; then
-            tag_ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")
-            tag_object=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
-            tag_type=$(printf '%s' "$tag_ref" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["type"])')
-            if [[ "$tag_type" == tag ]]; then
-              tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" --jq .object.sha)
-            else
-              tag_sha="$tag_object"
-            fi
+            tag_sha=$(python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          def api(path):
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/{path}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          ref = api(f"git/ref/tags/{os.environ['RELEASE_TAG']}")
+          obj = ref["object"]
+          if obj["type"] == "tag":
+              obj = api(f"git/tags/{obj['sha']}")["object"]
+          print(obj["sha"])
+          PY
+          )
           fi
           source_status=$(git -C source status --porcelain --untracked-files=all)
           printf 'source_sha=%s tag_sha=%s status_bytes=%s verify_tag=%s\n' "$actual_sha" "$tag_sha" "${#source_status}" "$VERIFY_RELEASE_TAG"
@@ -118,21 +144,16 @@ jobs:
           [[ "$tag_sha" == "$EXPECTED_SHA" ]]
           [[ -z "$source_status" ]]
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.99.1
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install musl toolchain
+      - name: Install pinned Rust toolchain with rustup
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v musl-gcc >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y musl-tools
-          fi
-          musl-gcc --version | head -1
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup target add x86_64-unknown-linux-gnu --toolchain 1.99.1
+          rustc --version
+          gcc --version | head -1
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -149,8 +170,6 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           OUTPUT_DIR: ${{ github.workspace }}/dist
           PACKAGING_COMMIT_SHA: ${{ env.PACKAGING_COMMIT_SHA }}
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CXX_x86_64_unknown_linux_musl: musl-gcc
         run: |
           set -euo pipefail
           cargo_version=$(python3 - <<'PY'
@@ -244,12 +263,15 @@ jobs:
           echo "PACKAGE_DIR=${{ runner.temp }}/candidate/$package_dir" >> "$GITHUB_ENV"
           python3 - "$package_dir/release-manifest.json" <<'PY'
           import json
+          import re
           import sys
           manifest = json.load(open(sys.argv[1], encoding='utf-8'))
           print('manifest target:', manifest.get('target'))
           print('manifest libc requirement:', manifest.get('binary_libc_requirement'))
-          if manifest.get('binary_libc_requirement') != 'static' and not str(manifest.get('binary_libc_requirement', '')).startswith('GLIBC_'):
-              raise SystemExit('release manifest is missing a valid binary_libc_requirement')
+          requirement = str(manifest.get('binary_libc_requirement', ''))
+          match = re.fullmatch(r'GLIBC_(\d+)\.(\d+)', requirement)
+          if not match or tuple(int(part) for part in match.groups()) > (2, 31):
+              raise SystemExit('release manifest binary_libc_requirement must be GLIBC_2.31 or lower')
           PY
 
       - name: Pull ${{ matrix.image }}

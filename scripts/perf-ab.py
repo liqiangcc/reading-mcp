@@ -14,8 +14,11 @@ Three modes:
 - `analyze`: merge the shard and read-path results and compute the gates. `--phase initial`
   reads run1 only and says which jobs must be rechecked; `--phase final` reads run1 and run2,
   judges every metric on its recheck run when its feeding job was rerun, writes the Markdown
-  summary and the JSON artifact, and exits non-zero when a metric misses the 5% bar on the
-  recheck too, or when an outcome changed from ok to a failure, refusal or timeout.
+  summary and the JSON artifact, and exits non-zero when a metric is worse than base by more
+  than the 5% bar on the recheck too, or when an outcome changed from ok to a failure,
+  refusal or timeout. The bar is one-sided: positive deltas mean head is slower or uses more
+  memory, only a positive delta beyond the bar fails, and a big negative delta (an
+  improvement) passes and is reported as improved - never rechecked, never failed.
 
 Paired-ratio method: for the corpus, each id contributes one ratio per round - head's
 measurement of that round over base's measurement of the same round, measured back to back on
@@ -639,18 +642,43 @@ GATES = [
 ]
 
 
+def verdict_for_delta(delta_pct: float | None) -> str:
+    """One-sided verdict: only a positive delta beyond the bar is a failure.
+
+    Positive deltas mean head is slower or uses more memory. Any negative delta passes, and
+    a delta below -BAR_PCT is an improvement worth reporting. The bar never applies to
+    improvements: the head being much faster is a pass, not a regression.
+    """
+    if delta_pct is None:
+        return "no data"
+    if delta_pct > BAR_PCT:
+        return "FAIL"
+    if delta_pct < -BAR_PCT:
+        return "improved"
+    return "pass"
+
+
+def verdict_fails(verdict: str) -> bool:
+    return verdict in ("FAIL", "no data")
+
+
 def evaluate(metrics: dict) -> dict:
-    """Which feeding jobs must be rechecked: any of their metrics misses the 5% bar."""
+    """Which feeding jobs must be rechecked: any of their metrics misses the 5% bar.
+
+    A miss is a real slowdown or memory growth (positive delta beyond the bar) or missing
+    data. Improvements never trigger a recheck.
+    """
     misses = []
     for key, job, label in GATES:
         ratio = metrics.get(key)
         delta = pct_delta(ratio)
+        verdict = verdict_for_delta(delta)
         if delta is None:
             misses.append({"key": key, "job": job, "label": label, "delta_pct": None,
                            "reason": "no data"})
-        elif abs(delta) > BAR_PCT:
+        elif verdict == "FAIL":
             misses.append({"key": key, "job": job, "label": label, "delta_pct": delta,
-                           "reason": f"|delta| > {BAR_PCT}%"})
+                           "reason": f"delta > +{BAR_PCT}%"})
     return {
         "corpus": any(miss["job"] == "corpus" for miss in misses),
         "readpath": any(miss["job"] == "readpath" for miss in misses),
@@ -665,7 +693,7 @@ def metric_table(rows: list[dict]) -> str:
         delta = row.get("delta_pct")
         lines.append(
             f"| {row['label']} | {row['job']} | {row['run']} | "
-            f"{'no data' if delta is None else f'{delta:+.2f}%'} | ±{BAR_PCT:.0f}% | "
+            f"{'no data' if delta is None else f'{delta:+.2f}%'} | +{BAR_PCT:.0f}% | "
             f"{row['verdict']} |")
     return "\n".join(lines)
 
@@ -729,12 +757,8 @@ def analyze_mode(args) -> int:
         ratio = metrics.get(key)
         delta = pct_delta(ratio)
         first = run1.get(key)
-        verdict = "pass"
-        if delta is None:
-            verdict = "no data"
-            failed = True
-        elif abs(delta) > BAR_PCT:
-            verdict = "FAIL"
+        verdict = verdict_for_delta(delta)
+        if verdict_fails(verdict):
             failed = True
         rows.append({"key": key, "job": job, "label": label, "run": judged_tag,
                      "ratio": ratio, "delta_pct": delta,
@@ -758,7 +782,8 @@ def analyze_mode(args) -> int:
         "round ratios; the metric is the median (p95) of those per-id ratios. Read path: "
         "every round contributes the ratio of head's p50 (p95) over base's; the metric is "
         "the median of those round ratios. Positive deltas mean head is slower or uses "
-        "more memory.", "",
+        "more memory. The bar is one-sided: only a positive delta beyond +5% fails; "
+        "negative deltas pass and big ones are reported as improved.", "",
         "## Metrics", "",
         metric_table(rows), "",
     ]

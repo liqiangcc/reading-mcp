@@ -336,6 +336,10 @@ fn extract_page_texts(pdf: &LopdfDocument, page_numbers: &[u32]) -> (Vec<PageTex
 /// first error returned, so the page is walked once and both facts are derived from its one
 /// result: decoding the page's streams, every font's encoding and every `/ToUnicode` CMap twice
 /// per page bought nothing and held a second copy of the page's decoded content at the peak.
+///
+/// The walk itself is `super::pdf_text_extraction::extract_text_chunks_with_spacing`, lopdf's
+/// own walk with the `TJ` word-space test widened to `Real` adjustments (#232): pdfTeX writes a
+/// justified line's inter-word gap as a `Real`, and lopdf only spaced an `Integer` one.
 fn extract_page_texts_raw(
     pdf: &LopdfDocument,
     page_numbers: &[u32],
@@ -346,9 +350,11 @@ fn extract_page_texts_raw(
     for page_number in page_numbers {
         let mut fragments = Vec::new();
         let mut first_error = None;
-        for fragment in
-            pdf.extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
-        {
+        for fragment in super::pdf_text_extraction::extract_text_chunks_with_spacing(
+            pdf,
+            &[*page_number],
+            MAX_PAGE_DECOMPRESSED_BYTES,
+        ) {
             match fragment {
                 Ok(fragment) => fragments.push(fragment),
                 // The whole page's text is the error, exactly as the concatenating variant

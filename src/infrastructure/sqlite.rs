@@ -3976,6 +3976,25 @@ impl SqliteTextUnitIndex {
             .map_err(text_unit_index_error)?;
         ensure_handle_identity_columns(&connection)?;
         drop_legacy_lexical_search_tables(&connection)?;
+        // A process killed in the middle of a chunked ingest leaves the document row with the
+        // in-progress fingerprint and the chunks written so far. Nothing reads them (the sentinel
+        // gates every section read), but they are dead weight until the document's next open
+        // rewrites them, so they are removed here. The document row itself stays: its `doc_key` is
+        // the identity the stored handles and remap rows of that document are bound to, and the
+        // sentinel makes it invisible to reads until the re-ingest completes it.
+        connection
+            .execute_batch(
+                "DELETE FROM section_text_v3 WHERE doc_key IN (
+                    SELECT doc_key FROM text_unit_documents_v2
+                    WHERE ingest_fingerprint = 'chunked-ingest/in-progress');
+                 DELETE FROM section_layout_chunk_v2 WHERE doc_key IN (
+                    SELECT doc_key FROM text_unit_documents_v2
+                    WHERE ingest_fingerprint = 'chunked-ingest/in-progress');
+                 DELETE FROM section_layout_v2 WHERE doc_key IN (
+                    SELECT doc_key FROM text_unit_documents_v2
+                    WHERE ingest_fingerprint = 'chunked-ingest/in-progress');",
+            )
+            .map_err(text_unit_index_error)?;
         let connection = Arc::new(Mutex::new(connection));
         let readers = Arc::new(ReadPool::new(&path, Arc::clone(&connection), read_pool));
         Ok(Self {
@@ -4180,6 +4199,133 @@ impl SqliteTextUnitIndex {
             },
         )
         .await
+    }
+
+    /// Stores the prepared sections of one document. A write of at most one chunk runs as the
+    /// single transaction it always was. A larger write commits in chunks: the first transaction
+    /// upserts the document row with the in-progress sentinel fingerprint, builds the handle
+    /// remaps against the stored rows of the previous version and writes the first chunk;
+    /// middle transactions write one chunk each; the last transaction writes the final chunk,
+    /// removes the section rows a longer previous version left beyond the new end, and flips the
+    /// fingerprint to the real one. A crash anywhere before that flip leaves the sentinel row,
+    /// which no read accepts, so the document can never read as complete but partial.
+    async fn store_prepared_sections(
+        &self,
+        document: &Arc<Document>,
+        normalized_document_hash: &NormalizedDocumentHash,
+        prepared: PreparedSections,
+        ingest_fingerprint: Option<String>,
+    ) -> Result<(), ApplicationError> {
+        let ranges = prepared.chunk_ranges(ingest_chunk_sections());
+        if ranges.len() <= 1 {
+            let document = Arc::clone(document);
+            let hash = normalized_document_hash.clone();
+            return run_sqlite(
+                &self.connection,
+                ApplicationError::TextUnitIndexFailed,
+                move |connection| {
+                    write_document_sections(
+                        connection,
+                        &document,
+                        &hash,
+                        &prepared,
+                        ingest_fingerprint.as_deref(),
+                    )
+                },
+            )
+            .await;
+        }
+
+        let prepared = Arc::new(prepared);
+        let sentinel = Some(INGEST_IN_PROGRESS_FINGERPRINT);
+
+        // The first transaction: the sentinel upsert, the remap proof against the previous
+        // version's rows, then the first chunk overwriting those rows section by section.
+        let first_end = ranges[0].1;
+        let document_first = Arc::clone(document);
+        let hash_first = normalized_document_hash.clone();
+        let prepared_first = Arc::clone(&prepared);
+        let doc_key = run_sqlite(
+            &self.connection,
+            ApplicationError::TextUnitIndexFailed,
+            move |connection| {
+                let transaction = connection.transaction().map_err(text_unit_index_error)?;
+                let (doc_key, prior) = upsert_document_meta(
+                    &transaction,
+                    &document_first,
+                    &hash_first,
+                    sentinel,
+                )?;
+                build_remaps_if_identity_changed(
+                    &transaction,
+                    &document_first,
+                    &hash_first,
+                    doc_key,
+                    &prior,
+                    &prepared_first,
+                )?;
+                insert_prepared_sections(
+                    &transaction,
+                    doc_key,
+                    &prepared_first.sections[..first_end],
+                    true,
+                )?;
+                transaction.commit().map_err(text_unit_index_error)?;
+                Ok(doc_key)
+            },
+        )
+        .await?;
+
+        let total_sections = prepared.sections.len();
+        let final_fingerprint = ingest_fingerprint;
+        let chunk_delay = ingest_chunk_delay();
+        for (index, &(start, end)) in ranges.iter().enumerate().skip(1) {
+            if !chunk_delay.is_zero() {
+                tokio::time::sleep(chunk_delay).await;
+            }
+            let last = index == ranges.len() - 1;
+            let prepared_chunk = Arc::clone(&prepared);
+            let fingerprint = final_fingerprint.clone();
+            run_sqlite(
+                &self.connection,
+                ApplicationError::TextUnitIndexFailed,
+                move |connection| {
+                    let transaction = connection.transaction().map_err(text_unit_index_error)?;
+                    insert_prepared_sections(
+                        &transaction,
+                        doc_key,
+                        &prepared_chunk.sections[start..end],
+                        true,
+                    )?;
+                    if last {
+                        // A previous version with more sections leaves rows beyond the new end;
+                        // they belong to no section of this document and go with the final commit.
+                        delete_section_rows_from(
+                            &transaction,
+                            doc_key,
+                            i64::try_from(total_sections).map_err(|_| {
+                                ApplicationError::TextUnitIndexFailed(
+                                    "document has too many sections".into(),
+                                )
+                            })?,
+                        )?;
+                        // The completion marker: only this commit makes the document visible as
+                        // ingested. `None` is the pre-feature complete state, never the sentinel.
+                        transaction
+                            .execute(
+                                "UPDATE text_unit_documents_v2 SET ingest_fingerprint = ?2
+                                 WHERE doc_key = ?1",
+                                params![doc_key, fingerprint],
+                            )
+                            .map_err(text_unit_index_error)?;
+                    }
+                    transaction.commit().map_err(text_unit_index_error)?;
+                    Ok(())
+                },
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Forgets the cached scan text: the document it belongs to was re-stored, so its stored text may
@@ -6881,7 +7027,7 @@ fn build_handle_remaps(
     connection: &Connection,
     meta: &StoredUnitDocument,
     ordered_sections: &[&Section],
-    source: &SectionLayoutSource<'_>,
+    prepared: &PreparedSections,
     source_checksum: &str,
     target_checksum: &str,
 ) -> Result<(), ApplicationError> {
@@ -6921,7 +7067,10 @@ fn build_handle_remaps(
         let Ok(section_index) = usize::try_from(section_key) else {
             continue;
         };
-        let Some(current_section) = ordered_sections.get(section_index).copied() else {
+        let (Some(current_section), Some(prepared_section)) = (
+            ordered_sections.get(section_index).copied(),
+            prepared.sections.get(section_index),
+        ) else {
             continue;
         };
         let old_section_id = SectionId(old_section_id);
@@ -6935,7 +7084,9 @@ fn build_handle_remaps(
             header.section_key,
             header.char_len,
         )?;
-        let current_layout = source.layout(&current_section.id)?;
+        // The layout of the new version of this section is already computed in the prepared
+        // write: `section_key` is the depth-first index, so the row at that index is it.
+        let current_layout = &prepared_section.layout;
         let Some(stripped_current) = StrippedSection::new(&current_section.content) else {
             continue;
         };
@@ -7017,7 +7168,7 @@ fn build_handle_remaps(
                     continue;
                 };
                 let Some((target_kind, target_paragraph, target_sentence)) =
-                    target_at(&current_layout, original_start)
+                    target_at(current_layout, original_start)
                 else {
                     continue;
                 };
@@ -7050,17 +7201,450 @@ fn build_handle_remaps(
     Ok(())
 }
 
-/// Writes one document's `section_text_v3` chunks, `section_layout_v2` headers and
-/// `section_layout_chunk_v2` rows in a transaction.
-fn write_document_sections(
-    connection: &mut Connection,
+/// The ingest fingerprint stored in `text_unit_documents_v2` while a document's section rows are
+/// being replaced in chunks. A document becomes visible as complete only when the final chunk
+/// transaction flips the fingerprint from this sentinel to the real one (or NULL when the writer
+/// carries no fingerprint, the pre-feature complete state). Until then every read path that loads
+/// the document's rows must treat it as not ingested: a crash that stops between chunks can never
+/// leave a document that reads as complete but is partial.
+pub(crate) use crate::application::ports::INGEST_IN_PROGRESS_FINGERPRINT;
+
+/// The section-count cap of one ingest chunk transaction. Measured on the 543-section 宋史 EPUB
+/// (6.83 MB of compressed text, 2.45 MB of layout rows): 48 sections are ≈1 MB of rows, so the
+/// byte cap below is what sizes most chunks and the longest hold measures ≈130 ms of the ≈1150 ms
+/// whole-book write. 12 transactions instead of one add no measurable time to the whole `open`.
+const INGEST_CHUNK_SECTIONS: usize = 48;
+
+/// The compressed-payload cap of one ingest chunk transaction. A few very large sections must not
+/// silently make one transaction as long as the whole write used to be, so a chunk closes early
+/// when its compressed rows pass this many bytes (one section always fits one chunk).
+const INGEST_CHUNK_BYTES: usize = 512 * 1024;
+
+/// The section-count cap of one chunk transaction: [`INGEST_CHUNK_SECTIONS`], overridable with
+/// `READING_MCP_INGEST_CHUNK_SECTIONS` so a test can make a small document span many transactions
+/// and stop the write in the middle. `1` is one section per transaction, the most chunks possible.
+fn ingest_chunk_sections() -> usize {
+    std::env::var("READING_MCP_INGEST_CHUNK_SECTIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(INGEST_CHUNK_SECTIONS)
+        .max(1)
+}
+
+/// Test and measurement only: a pause between two chunk transactions of one ingest. The writer of
+/// a real book needs none; a test that must observe or stop the write between transactions —
+/// which are milliseconds apart on a small fixture — stretches them apart with
+/// `READING_MCP_INGEST_CHUNK_DELAY_MS` instead.
+fn ingest_chunk_delay() -> Duration {
+    std::env::var("READING_MCP_INGEST_CHUNK_DELAY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::ZERO)
+}
+
+/// One `section_text_v3` row of the prepared write: the compressed bytes are computed before the
+/// writer lock is taken, so the lock is held for database work only.
+struct PreparedTextChunk {
+    chunk_no: i64,
+    encoding: i64,
+    data: Vec<u8>,
+}
+
+/// One `section_layout_chunk_v2` row of the prepared write.
+struct PreparedLayoutChunk {
+    chunk_no: usize,
+    first_paragraph_index: usize,
+    first_sentence_index: usize,
+    paragraph_slot: usize,
+    sentence_slot: usize,
+    paragraph_entry: i64,
+    sentence_entry: i64,
+    eligible_paragraph_entry: i64,
+    eligible_sentence_entry: i64,
+    paragraph_count: usize,
+    sentence_count: usize,
+    blob: Vec<u8>,
+}
+
+/// One section of the prepared write: its row values and encoded blobs, computed without the
+/// writer lock, plus the layout the remap builder matches against the stored rows.
+struct PreparedSection {
+    section_key: i64,
+    section_id: SectionId,
+    normalized_text_len: usize,
+    text_chunks: Vec<PreparedTextChunk>,
+    layout: SectionLayout,
+    paragraph_coverage_blob: Option<Vec<u8>>,
+    plan_error: Option<String>,
+    chunk_count: usize,
+    sorted_flags: i64,
+    paragraph_count: usize,
+    sentence_count: usize,
+    total_paragraph_preserve: usize,
+    total_paragraph_eligible: usize,
+    total_sentence_preserve: usize,
+    total_sentence_eligible: usize,
+    paragraph_preserve: Vec<u8>,
+    paragraph_eligible: Vec<u8>,
+    sentence_preserve: Vec<u8>,
+    sentence_eligible: Vec<u8>,
+    chunks: Vec<PreparedLayoutChunk>,
+}
+
+/// The whole write of one document, prepared off the writer lock: ordered sections in depth-first
+/// document order paired with their rows, in the `section_key` order the chunks are written in.
+struct PreparedSections {
+    sections: Vec<PreparedSection>,
+}
+
+impl PreparedSections {
+    /// Groups the sections into write chunks: at most `per_chunk` sections and at most
+    /// [`INGEST_CHUNK_BYTES`] compressed payload bytes per transaction, never cutting a section.
+    fn chunk_ranges(&self, per_chunk: usize) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut start = 0usize;
+        while start < self.sections.len() {
+            let mut end = start;
+            let mut bytes = 0usize;
+            while end < self.sections.len() {
+                let section_bytes: usize = self.sections[end]
+                    .text_chunks
+                    .iter()
+                    .map(|chunk| chunk.data.len())
+                    .sum::<usize>()
+                    + self.sections[end]
+                        .chunks
+                        .iter()
+                        .map(|chunk| chunk.blob.len())
+                        .sum::<usize>();
+                if end > start && (end - start >= per_chunk || bytes + section_bytes > INGEST_CHUNK_BYTES)
+                {
+                    break;
+                }
+                bytes += section_bytes;
+                end += 1;
+            }
+            ranges.push((start, end));
+            start = end;
+        }
+        ranges
+    }
+}
+
+/// Prepares every row of one document's section write off the writer lock: the layout computation
+/// (validation and coverage encoding), the chunk range planning and every zlib compression the old
+/// single-transaction write ran while holding the store's mutex.
+fn prepare_document_sections(
+    document: &Document,
+    source: &SectionLayoutSource<'_>,
+) -> Result<PreparedSections, ApplicationError> {
+    let mut ordered_sections = Vec::new();
+    collect_sections(&document.root_sections, &mut ordered_sections);
+
+    // Section keys follow document order: a depth-first walk of the root sections and their
+    // children. Every section is stored, including sections without units or coverage.
+    let mut section_keys = HashMap::new();
+    for (index, section) in ordered_sections.iter().enumerate() {
+        let section_key = i64::try_from(index).map_err(|_| {
+            ApplicationError::TextUnitIndexFailed("document has too many sections".into())
+        })?;
+        // `section_layout_v2` used to enforce this with `UNIQUE(doc_key, section_id)`, which the
+        // compact row replaces with an `(doc_key, id_hash)` lookup index. Two sections of one
+        // document with the same id would now share a `section_key` instead of failing the insert,
+        // so the writer refuses them itself.
+        if section_keys
+            .insert(section.id.clone(), section_key)
+            .is_some()
+        {
+            return Err(ApplicationError::TextUnitIndexFailed(format!(
+                "document {} has two sections with id {}",
+                document.id.0, section.id.0
+            )));
+        }
+    }
+
+    let mut sections = Vec::with_capacity(ordered_sections.len());
+    for section in &ordered_sections {
+        let section_key = section_keys[&section.id];
+
+        // The section text in `CHUNK_CHARS` pieces, each compressed on its own, exactly as
+        // `insert_section_text` wrote them.
+        let mut text_chunks = Vec::new();
+        let text = &section.content;
+        let mut chunk_no = 0i64;
+        let mut start = 0usize;
+        let mut chars = 0usize;
+        for (index, _) in text.char_indices() {
+            if chars == CHUNK_CHARS {
+                let (encoding, data) = encode_text_chunk(&text[start..index])?;
+                text_chunks.push(PreparedTextChunk {
+                    chunk_no,
+                    encoding,
+                    data,
+                });
+                chunk_no += 1;
+                start = index;
+                chars = 0;
+            }
+            chars += 1;
+        }
+        if start < text.len() {
+            let (encoding, data) = encode_text_chunk(&text[start..])?;
+            text_chunks.push(PreparedTextChunk {
+                chunk_no,
+                encoding,
+                data,
+            });
+        }
+
+        let paragraph_coverage = source.paragraph_coverage(&section.id);
+        let paragraph_coverage_blob = source.paragraph_coverage_blob(&section.id)?;
+        let layout = source.layout(&section.id)?;
+        let paragraphs_sorted = layout
+            .paragraphs
+            .windows(2)
+            .all(|pair| pair[0].paragraph_index < pair[1].paragraph_index);
+        let sentences_sorted = layout.sentences.windows(2).all(|pair| {
+            (pair[0].paragraph_index, pair[0].sentence_index)
+                < (pair[1].paragraph_index, pair[1].sentence_index)
+        });
+        let sorted = paragraphs_sorted && sentences_sorted;
+        let ranges = build_chunk_ranges(&layout, sorted);
+        let mut chunks = ranges
+            .into_iter()
+            .map(|range| ChunkRow {
+                range,
+                paragraph_entry: 0,
+                sentence_entry: 0,
+                eligible_paragraph_entry: 0,
+                eligible_sentence_entry: 0,
+                paragraph_entries: 0,
+                paragraph_eligible_entries: 0,
+                sentence_entries: 0,
+                sentence_eligible_entries: 0,
+            })
+            .collect::<Vec<_>>();
+        let (paragraph_summary, sentence_summary, plan_error) =
+            plan_chunk_starts(&section.id, &layout, paragraph_coverage, &mut chunks)?;
+
+        let mut sorted_flags = 0i64;
+        if paragraphs_sorted {
+            sorted_flags |= 1;
+        }
+        if sentences_sorted {
+            sorted_flags |= 2;
+        }
+
+        let mut prepared_chunks = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let blob = chunk_layout(&layout, &chunk.range).encode()?;
+            prepared_chunks.push(PreparedLayoutChunk {
+                chunk_no: chunk.range.chunk_no,
+                first_paragraph_index: chunk.range.first_paragraph_index,
+                first_sentence_index: chunk.range.first_sentence_index,
+                paragraph_slot: chunk.range.paragraph_slot,
+                sentence_slot: chunk.range.sentence_slot,
+                paragraph_entry: usize_to_i64(chunk.paragraph_entry)?,
+                sentence_entry: usize_to_i64(chunk.sentence_entry)?,
+                eligible_paragraph_entry: usize_to_i64(chunk.eligible_paragraph_entry)?,
+                eligible_sentence_entry: usize_to_i64(chunk.eligible_sentence_entry)?,
+                paragraph_count: chunk.range.paragraph_end - chunk.range.paragraph_start,
+                sentence_count: chunk.range.sentence_end - chunk.range.sentence_start,
+                blob,
+            });
+        }
+        let chunk_count = chunks.len();
+        sections.push(PreparedSection {
+                section_key,
+                section_id: section.id.clone(),
+                normalized_text_len: section.normalized_text_len(),
+                text_chunks,
+                paragraph_coverage_blob,
+                plan_error,
+                chunk_count,
+                sorted_flags,
+                paragraph_count: layout.paragraphs.len(),
+                sentence_count: layout.sentences.len(),
+                total_paragraph_preserve: paragraph_summary.total_preserve,
+                total_paragraph_eligible: paragraph_summary.total_eligible,
+                total_sentence_preserve: sentence_summary.total_preserve,
+                total_sentence_eligible: sentence_summary.total_eligible,
+                paragraph_preserve: paragraph_summary.preserve,
+                paragraph_eligible: paragraph_summary.eligible,
+                sentence_preserve: sentence_summary.preserve,
+                sentence_eligible: sentence_summary.eligible,
+                layout,
+                chunks: prepared_chunks,
+        });
+    }
+    Ok(PreparedSections { sections })
+}
+
+/// Inserts the prepared rows of `sections[start..end]` into the three section tables. When
+/// `replace` is true the insert is `INSERT OR REPLACE` — the chunked write overwrites the previous
+/// version's rows section by section so a repository read of an unchanged section never meets a
+/// transiently missing text row; when false the caller has deleted the document's rows first and
+/// the plain insert keeps the single-transaction write byte-identical to what it always was.
+fn insert_prepared_sections(
+    transaction: &rusqlite::Transaction<'_>,
+    doc_key: i64,
+    sections: &[PreparedSection],
+    replace: bool,
+) -> Result<(), ApplicationError> {
+    let verb = if replace { "INSERT OR REPLACE" } else { "INSERT" };
+    let mut chunk_statement = transaction
+        .prepare(&format!(
+            "{verb} INTO section_text_v3(doc_key, section_key, chunk_no, encoding, data)
+             VALUES (?1, ?2, ?3, ?4, ?5)"
+        ))
+        .map_err(text_unit_index_error)?;
+    let mut header_statement = transaction
+        .prepare(&format!(
+            "{verb} INTO section_layout_v2(
+                doc_key,
+                section_key,
+                section_id,
+                id_hash,
+                char_len,
+                paragraph_coverage,
+                plan_error,
+                paragraph_count,
+                sentence_count,
+                chunk_count,
+                sorted_flags,
+                total_items_paragraph_preserve,
+                total_items_paragraph_eligible,
+                total_items_sentence_preserve,
+                total_items_sentence_eligible,
+                coverage_paragraph_preserve,
+                coverage_paragraph_eligible,
+                coverage_sentence_preserve,
+                coverage_sentence_eligible
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+             )"
+        ))
+        .map_err(text_unit_index_error)?;
+    let mut chunk_row_statement = transaction
+        .prepare(&format!(
+            "{verb} INTO section_layout_chunk_v2(
+                doc_key,
+                section_key,
+                chunk_no,
+                first_paragraph_index,
+                first_sentence_index,
+                paragraph_slot,
+                sentence_slot,
+                paragraph_entry,
+                sentence_entry,
+                eligible_paragraph_entry,
+                eligible_sentence_entry,
+                paragraph_count,
+                sentence_count,
+                blob
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+             )"
+        ))
+        .map_err(text_unit_index_error)?;
+
+    for prepared in sections {
+        for chunk in &prepared.text_chunks {
+            chunk_statement
+                .execute(params![
+                    doc_key,
+                    prepared.section_key,
+                    chunk.chunk_no,
+                    chunk.encoding,
+                    chunk.data,
+                ])
+                .map_err(text_unit_index_error)?;
+        }
+        header_statement
+            .execute(params![
+                doc_key,
+                prepared.section_key,
+                &prepared.section_id.0,
+                section_row_hash(&prepared.section_id.0),
+                usize_to_i64(prepared.normalized_text_len)?,
+                prepared.paragraph_coverage_blob,
+                prepared.plan_error,
+                usize_to_i64(prepared.paragraph_count)?,
+                usize_to_i64(prepared.sentence_count)?,
+                usize_to_i64(prepared.chunk_count)?,
+                prepared.sorted_flags,
+                usize_to_i64(prepared.total_paragraph_preserve)?,
+                usize_to_i64(prepared.total_paragraph_eligible)?,
+                usize_to_i64(prepared.total_sentence_preserve)?,
+                usize_to_i64(prepared.total_sentence_eligible)?,
+                prepared.paragraph_preserve,
+                prepared.paragraph_eligible,
+                prepared.sentence_preserve,
+                prepared.sentence_eligible,
+            ])
+            .map_err(text_unit_index_error)?;
+        for chunk in &prepared.chunks {
+            chunk_row_statement
+                .execute(params![
+                    doc_key,
+                    prepared.section_key,
+                    usize_to_i64(chunk.chunk_no)?,
+                    usize_to_i64(chunk.first_paragraph_index)?,
+                    usize_to_i64(chunk.first_sentence_index)?,
+                    usize_to_i64(chunk.paragraph_slot)?,
+                    usize_to_i64(chunk.sentence_slot)?,
+                    chunk.paragraph_entry,
+                    chunk.sentence_entry,
+                    chunk.eligible_paragraph_entry,
+                    chunk.eligible_sentence_entry,
+                    usize_to_i64(chunk.paragraph_count)?,
+                    usize_to_i64(chunk.sentence_count)?,
+                    chunk.blob,
+                ])
+                .map_err(text_unit_index_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Deletes the document's section rows with `section_key >= from_key` from all three section
+/// tables: the leftovers of a longer previous version when the new write committed fewer sections.
+fn delete_section_rows_from(
+    transaction: &rusqlite::Transaction<'_>,
+    doc_key: i64,
+    from_key: i64,
+) -> Result<(), ApplicationError> {
+    for table in [
+        "section_text_v3",
+        "section_layout_chunk_v2",
+        "section_layout_v2",
+    ] {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE doc_key = ?1 AND section_key >= ?2"),
+                params![doc_key, from_key],
+            )
+            .map_err(text_unit_index_error)?;
+    }
+    Ok(())
+}
+
+/// The facts of the document row a write replaces, when the document was stored before.
+type PriorDocumentRow = Option<(String, String, Option<String>, Option<String>)>;
+
+/// Upserts the document row of `text_unit_documents_v2` and returns its `doc_key` plus the row's
+/// previous facts `(normalized_document_hash, segmentation_version, ingest_fingerprint,
+/// handle_checksum)`, when the document was stored before. `fingerprint` is the value the row is
+/// left with: the real ingest fingerprint on the last write, or the in-progress sentinel on the
+/// first write of a chunked replace.
+fn upsert_document_meta(
+    transaction: &rusqlite::Transaction<'_>,
     document: &Document,
     normalized_document_hash: &NormalizedDocumentHash,
-    source: &SectionLayoutSource<'_>,
-    ingest_fingerprint: Option<&str>,
-) -> Result<(), ApplicationError> {
-    let transaction = connection.transaction().map_err(text_unit_index_error)?;
-
+    fingerprint: Option<&str>,
+) -> Result<(i64, PriorDocumentRow), ApplicationError> {
     let prior = transaction
         .query_row(
             "SELECT normalized_document_hash, segmentation_version, ingest_fingerprint, handle_checksum
@@ -7101,7 +7685,7 @@ fn write_document_sections(
                 &document.content_hash.0,
                 normalized_document_hash.as_ref(),
                 TEXT_SEGMENTATION_VERSION,
-                ingest_fingerprint,
+                fingerprint,
                 current_checksum,
             ],
         )
@@ -7113,38 +7697,81 @@ fn write_document_sections(
             |row| row.get(0),
         )
         .map_err(text_unit_index_error)?;
+    Ok((doc_key, prior))
+}
 
-    // Section keys follow document order: a depth-first walk of the root sections and their
-    // children. Every section is stored, including sections without units or coverage.
+/// Builds the handle remap rows of a re-ingest whose document identity changed. The proof reads
+/// the stored rows of the *previous* version, so it must run before that version's rows are
+/// overwritten, in the same first transaction of the write.
+fn build_remaps_if_identity_changed(
+    transaction: &rusqlite::Transaction<'_>,
+    document: &Document,
+    normalized_document_hash: &NormalizedDocumentHash,
+    doc_key: i64,
+    prior: &PriorDocumentRow,
+    prepared: &PreparedSections,
+) -> Result<(), ApplicationError> {
     let mut ordered_sections = Vec::new();
     collect_sections(&document.root_sections, &mut ordered_sections);
-
-    if let Some((prior_hash, prior_segmentation, _prior_ingest, prior_checksum)) = prior {
-        let prior_checksum = prior_checksum.unwrap_or_else(|| {
-            handle_checksum(
-                &document.id,
-                &NormalizedDocumentHash(prior_hash.clone()),
-                &document.media_type,
-            )
-        });
-        if prior_checksum != current_checksum {
-            let prior_meta = StoredUnitDocument {
-                doc_key,
-                document_id: document.id.clone(),
-                content_hash: document.content_hash.clone(),
-                normalized_document_hash: NormalizedDocumentHash(prior_hash),
-                segmentation_version: prior_segmentation,
-            };
-            build_handle_remaps(
-                &transaction,
-                &prior_meta,
-                &ordered_sections,
-                source,
-                &prior_checksum,
-                &current_checksum,
-            )?;
-        }
+    let Some((prior_hash, prior_segmentation, _prior_ingest, prior_checksum)) = prior else {
+        return Ok(());
+    };
+    let current_checksum =
+        handle_checksum(&document.id, normalized_document_hash, &document.media_type);
+    let prior_checksum = prior_checksum.clone().unwrap_or_else(|| {
+        handle_checksum(
+            &document.id,
+            &NormalizedDocumentHash(prior_hash.clone()),
+            &document.media_type,
+        )
+    });
+    if prior_checksum == current_checksum {
+        return Ok(());
     }
+    let prior_meta = StoredUnitDocument {
+        doc_key,
+        document_id: document.id.clone(),
+        content_hash: document.content_hash.clone(),
+        normalized_document_hash: NormalizedDocumentHash(prior_hash.clone()),
+        segmentation_version: prior_segmentation.clone(),
+    };
+    build_handle_remaps(
+        transaction,
+        &prior_meta,
+        &ordered_sections,
+        prepared,
+        &prior_checksum,
+        &current_checksum,
+    )
+}
+
+/// Writes one document's `section_text_v3` chunks, `section_layout_v2` headers and
+/// `section_layout_chunk_v2` rows in one transaction, exactly as the write always ran: the rows of
+/// a small document are one atomic replace and never pass through the in-progress sentinel.
+fn write_document_sections(
+    connection: &mut Connection,
+    document: &Document,
+    normalized_document_hash: &NormalizedDocumentHash,
+    prepared: &PreparedSections,
+    ingest_fingerprint: Option<&str>,
+) -> Result<(), ApplicationError> {
+    let transaction = connection.transaction().map_err(text_unit_index_error)?;
+
+    let (doc_key, prior) = upsert_document_meta(
+        &transaction,
+        document,
+        normalized_document_hash,
+        ingest_fingerprint,
+    )?;
+
+    build_remaps_if_identity_changed(
+        &transaction,
+        document,
+        normalized_document_hash,
+        doc_key,
+        &prior,
+        prepared,
+    )?;
 
     transaction
         .execute(
@@ -7165,172 +7792,7 @@ fn write_document_sections(
         )
         .map_err(text_unit_index_error)?;
 
-    let mut section_keys = HashMap::new();
-    for (index, section) in ordered_sections.iter().enumerate() {
-        let section_key = i64::try_from(index).map_err(|_| {
-            ApplicationError::TextUnitIndexFailed("document has too many sections".into())
-        })?;
-        // `section_layout_v2` used to enforce this with `UNIQUE(doc_key, section_id)`, which the
-        // compact row replaces with an `(doc_key, id_hash)` lookup index. Two sections of one
-        // document with the same id would now share a `section_key` instead of failing the insert,
-        // so the writer refuses them itself.
-        if section_keys
-            .insert(section.id.clone(), section_key)
-            .is_some()
-        {
-            return Err(ApplicationError::TextUnitIndexFailed(format!(
-                "document {} has two sections with id {}",
-                document.id.0, section.id.0
-            )));
-        }
-    }
-
-    {
-        let mut chunk_statement = transaction
-            .prepare(
-                "INSERT INTO section_text_v3(doc_key, section_key, chunk_no, encoding, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )
-            .map_err(text_unit_index_error)?;
-        let mut header_statement = transaction
-            .prepare(
-                "INSERT INTO section_layout_v2(
-                    doc_key,
-                    section_key,
-                    section_id,
-                    id_hash,
-                    char_len,
-                    paragraph_coverage,
-                    plan_error,
-                    paragraph_count,
-                    sentence_count,
-                    chunk_count,
-                    sorted_flags,
-                    total_items_paragraph_preserve,
-                    total_items_paragraph_eligible,
-                    total_items_sentence_preserve,
-                    total_items_sentence_eligible,
-                    coverage_paragraph_preserve,
-                    coverage_paragraph_eligible,
-                    coverage_sentence_preserve,
-                    coverage_sentence_eligible
-                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
-                 )",
-            )
-            .map_err(text_unit_index_error)?;
-        let mut chunk_row_statement = transaction
-            .prepare(
-                "INSERT INTO section_layout_chunk_v2(
-                    doc_key,
-                    section_key,
-                    chunk_no,
-                    first_paragraph_index,
-                    first_sentence_index,
-                    paragraph_slot,
-                    sentence_slot,
-                    paragraph_entry,
-                    sentence_entry,
-                    eligible_paragraph_entry,
-                    eligible_sentence_entry,
-                    paragraph_count,
-                    sentence_count,
-                    blob
-                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
-                 )",
-            )
-            .map_err(text_unit_index_error)?;
-
-        for section in &ordered_sections {
-            let section_key = section_keys[&section.id];
-            insert_section_text(&mut chunk_statement, doc_key, section_key, &section.content)?;
-
-            let paragraph_coverage = source.paragraph_coverage(&section.id);
-            let paragraph_coverage_blob = source.paragraph_coverage_blob(&section.id)?;
-            let layout = source.layout(&section.id)?;
-            let paragraphs_sorted = layout
-                .paragraphs
-                .windows(2)
-                .all(|pair| pair[0].paragraph_index < pair[1].paragraph_index);
-            let sentences_sorted = layout.sentences.windows(2).all(|pair| {
-                (pair[0].paragraph_index, pair[0].sentence_index)
-                    < (pair[1].paragraph_index, pair[1].sentence_index)
-            });
-            let sorted = paragraphs_sorted && sentences_sorted;
-            let ranges = build_chunk_ranges(&layout, sorted);
-            let mut chunks = ranges
-                .into_iter()
-                .map(|range| ChunkRow {
-                    range,
-                    paragraph_entry: 0,
-                    sentence_entry: 0,
-                    eligible_paragraph_entry: 0,
-                    eligible_sentence_entry: 0,
-                    paragraph_entries: 0,
-                    paragraph_eligible_entries: 0,
-                    sentence_entries: 0,
-                    sentence_eligible_entries: 0,
-                })
-                .collect::<Vec<_>>();
-            let (paragraph_summary, sentence_summary, plan_error) =
-                plan_chunk_starts(&section.id, &layout, paragraph_coverage, &mut chunks)?;
-
-            let mut sorted_flags = 0i64;
-            if paragraphs_sorted {
-                sorted_flags |= 1;
-            }
-            if sentences_sorted {
-                sorted_flags |= 2;
-            }
-            header_statement
-                .execute(params![
-                    doc_key,
-                    section_key,
-                    &section.id.0,
-                    section_row_hash(&section.id.0),
-                    usize_to_i64(section.normalized_text_len())?,
-                    paragraph_coverage_blob,
-                    plan_error,
-                    usize_to_i64(layout.paragraphs.len())?,
-                    usize_to_i64(layout.sentences.len())?,
-                    usize_to_i64(chunks.len())?,
-                    sorted_flags,
-                    usize_to_i64(paragraph_summary.total_preserve)?,
-                    usize_to_i64(paragraph_summary.total_eligible)?,
-                    usize_to_i64(sentence_summary.total_preserve)?,
-                    usize_to_i64(sentence_summary.total_eligible)?,
-                    paragraph_summary.preserve,
-                    paragraph_summary.eligible,
-                    sentence_summary.preserve,
-                    sentence_summary.eligible,
-                ])
-                .map_err(text_unit_index_error)?;
-
-            for chunk in &chunks {
-                let blob = chunk_layout(&layout, &chunk.range).encode()?;
-                chunk_row_statement
-                    .execute(params![
-                        doc_key,
-                        section_key,
-                        usize_to_i64(chunk.range.chunk_no)?,
-                        usize_to_i64(chunk.range.first_paragraph_index)?,
-                        usize_to_i64(chunk.range.first_sentence_index)?,
-                        usize_to_i64(chunk.range.paragraph_slot)?,
-                        usize_to_i64(chunk.range.sentence_slot)?,
-                        usize_to_i64(chunk.paragraph_entry)?,
-                        usize_to_i64(chunk.sentence_entry)?,
-                        usize_to_i64(chunk.eligible_paragraph_entry)?,
-                        usize_to_i64(chunk.eligible_sentence_entry)?,
-                        usize_to_i64(chunk.range.paragraph_end - chunk.range.paragraph_start)?,
-                        usize_to_i64(chunk.range.sentence_end - chunk.range.sentence_start)?,
-                        blob,
-                    ])
-                    .map_err(text_unit_index_error)?;
-            }
-        }
-    }
+    insert_prepared_sections(&transaction, doc_key, &prepared.sections, false)?;
 
     transaction.commit().map_err(text_unit_index_error)?;
     Ok(())
@@ -7458,53 +7920,51 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<(), ApplicationError> {
         validate_paragraph_units(&document.id, &paragraphs.units)?;
 
-        let document = Arc::clone(document);
-        run_sqlite(
-            &self.connection,
-            ApplicationError::TextUnitIndexFailed,
-            move |connection| {
-                let normalized_document_hash = paragraphs.normalized_document_hash.clone();
-
-                // Group each section's units and coverages in one pass over the sets.
-                let mut groups: HashMap<SectionId, SectionGroups<'_>> = HashMap::new();
-                for unit in &paragraphs.units {
-                    groups
-                        .entry(unit.owner_section_id.clone())
-                        .or_default()
-                        .paragraphs
-                        .push(unit);
-                }
-                for coverage in &paragraphs.coverage {
-                    groups
-                        .entry(coverage.owner_section_id.clone())
-                        .or_default()
-                        .paragraph_coverage = Some(coverage);
-                }
-                for unit in &sentences.units {
-                    groups
-                        .entry(unit.owner_section_id.clone())
-                        .or_default()
-                        .sentences
-                        .push(unit);
-                }
-                for coverage in &sentences.coverage {
-                    groups
-                        .entry(coverage.owner_section_id.clone())
-                        .or_default()
-                        .sentence_coverage
-                        .push(coverage);
-                }
-
-                write_document_sections(
-                    connection,
-                    &document,
-                    &normalized_document_hash,
-                    &SectionLayoutSource::Units(&groups),
-                    None,
-                )
-            },
-        )
-        .await?;
+        let normalized_document_hash = paragraphs.normalized_document_hash.clone();
+        // The layout planning, coverage encoding and compression of the whole document are pure
+        // functions of the units and the document, so they are prepared on a blocking worker before
+        // the writer lock is taken; what is written does not change.
+        let prep_document = Arc::clone(document);
+        let prepared = tokio::task::spawn_blocking(move || {
+            // Group each section's units and coverages in one pass over the sets.
+            let mut groups: HashMap<SectionId, SectionGroups<'_>> = HashMap::new();
+            for unit in &paragraphs.units {
+                groups
+                    .entry(unit.owner_section_id.clone())
+                    .or_default()
+                    .paragraphs
+                    .push(unit);
+            }
+            for coverage in &paragraphs.coverage {
+                groups
+                    .entry(coverage.owner_section_id.clone())
+                    .or_default()
+                    .paragraph_coverage = Some(coverage);
+            }
+            for unit in &sentences.units {
+                groups
+                    .entry(unit.owner_section_id.clone())
+                    .or_default()
+                    .sentences
+                    .push(unit);
+            }
+            for coverage in &sentences.coverage {
+                groups
+                    .entry(coverage.owner_section_id.clone())
+                    .or_default()
+                    .sentence_coverage
+                    .push(coverage);
+            }
+            prepare_document_sections(&prep_document, &SectionLayoutSource::Units(&groups))
+        })
+        .await
+        .map_err(|_| {
+            ApplicationError::TextUnitIndexFailed(
+                "section preparation worker terminated unexpectedly".into(),
+            )
+        })??;
+        self.store_prepared_sections(document, &normalized_document_hash, prepared, None)
+            .await?;
         self.drop_scan_text();
         Ok(())
     }
@@ -7526,26 +7986,26 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         "document hashing worker terminated unexpectedly".into(),
                     )
                 })?;
-        let document = Arc::clone(document);
-        run_sqlite(
-            &self.connection,
-            ApplicationError::TextUnitIndexFailed,
-            move |connection| {
-                let sections = segmentation
-                    .sections
-                    .iter()
-                    .map(|section| (&section.section_id, section))
-                    .collect::<HashMap<_, _>>();
-                write_document_sections(
-                    connection,
-                    &document,
-                    &normalized_document_hash,
-                    &SectionLayoutSource::Segmentation(&sections),
-                    None,
-                )
-            },
-        )
-        .await?;
+        // The layouts, coverages and compressed text chunks of the whole document are prepared on
+        // a blocking worker, before any writer transaction, so the lock is only ever held for the
+        // database work of one chunk.
+        let prep_document = Arc::clone(document);
+        let prepared = tokio::task::spawn_blocking(move || {
+            let sections = segmentation
+                .sections
+                .iter()
+                .map(|section| (&section.section_id, section))
+                .collect::<HashMap<_, _>>();
+            prepare_document_sections(&prep_document, &SectionLayoutSource::Segmentation(&sections))
+        })
+        .await
+        .map_err(|_| {
+            ApplicationError::TextUnitIndexFailed(
+                "section preparation worker terminated unexpectedly".into(),
+            )
+        })??;
+        self.store_prepared_sections(document, &normalized_document_hash, prepared, None)
+            .await?;
         self.drop_scan_text();
         Ok(())
     }
@@ -7566,25 +8026,27 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                         "document hashing worker terminated unexpectedly".into(),
                     )
                 })?;
-        let document = Arc::clone(document);
-        let ingest_fingerprint = ingest_fingerprint.to_owned();
-        run_sqlite(
-            &self.connection,
-            ApplicationError::TextUnitIndexFailed,
-            move |connection| {
-                let sections = segmentation
-                    .sections
-                    .iter()
-                    .map(|section| (&section.section_id, section))
-                    .collect::<HashMap<_, _>>();
-                write_document_sections(
-                    connection,
-                    &document,
-                    &normalized_document_hash,
-                    &SectionLayoutSource::Segmentation(&sections),
-                    Some(&ingest_fingerprint),
-                )
-            },
+        // Same preparation as `replace_document_segmentation`, off the writer lock.
+        let prep_document = Arc::clone(document);
+        let prepared = tokio::task::spawn_blocking(move || {
+            let sections = segmentation
+                .sections
+                .iter()
+                .map(|section| (&section.section_id, section))
+                .collect::<HashMap<_, _>>();
+            prepare_document_sections(&prep_document, &SectionLayoutSource::Segmentation(&sections))
+        })
+        .await
+        .map_err(|_| {
+            ApplicationError::TextUnitIndexFailed(
+                "section preparation worker terminated unexpectedly".into(),
+            )
+        })??;
+        self.store_prepared_sections(
+            document,
+            &normalized_document_hash,
+            prepared,
+            Some(ingest_fingerprint.to_owned()),
         )
         .await?;
         self.drop_scan_text();
@@ -8304,11 +8766,12 @@ fn load_stored_document(
             "SELECT doc_key, document_id, content_hash, normalized_document_hash, segmentation_version
              FROM text_unit_documents_v2
              WHERE document_id = ?1
+               AND (ingest_fingerprint IS NULL OR ingest_fingerprint != ?2)
                AND EXISTS (
                     SELECT 1 FROM section_layout_v2
                     WHERE section_layout_v2.doc_key = text_unit_documents_v2.doc_key
                )",
-            params![&document_id.0],
+            params![&document_id.0, INGEST_IN_PROGRESS_FINGERPRINT],
             |row| {
                 Ok(StoredUnitDocument {
                     doc_key: row.get(0)?,
@@ -9219,52 +9682,6 @@ fn collect_sections<'a>(sections: &'a [Section], out: &mut Vec<&'a Section>) {
         out.push(section);
         collect_sections(&section.children, out);
     }
-}
-
-/// Writes one section's text as `section_text_v3` chunks of at most [`CHUNK_CHARS`] chars each,
-/// compressing one chunk at a time so a document's text is never copied in full.
-fn insert_section_text(
-    statement: &mut rusqlite::Statement<'_>,
-    doc_key: i64,
-    section_key: i64,
-    text: &str,
-) -> Result<(), ApplicationError> {
-    let mut chunk_no = 0i64;
-    let mut start = 0usize;
-    let mut chars = 0usize;
-    for (index, _) in text.char_indices() {
-        if chars == CHUNK_CHARS {
-            insert_text_chunk(
-                statement,
-                doc_key,
-                section_key,
-                chunk_no,
-                &text[start..index],
-            )?;
-            chunk_no += 1;
-            start = index;
-            chars = 0;
-        }
-        chars += 1;
-    }
-    if start < text.len() {
-        insert_text_chunk(statement, doc_key, section_key, chunk_no, &text[start..])?;
-    }
-    Ok(())
-}
-
-fn insert_text_chunk(
-    statement: &mut rusqlite::Statement<'_>,
-    doc_key: i64,
-    section_key: i64,
-    chunk_no: i64,
-    text: &str,
-) -> Result<(), ApplicationError> {
-    let (encoding, data) = encode_text_chunk(text)?;
-    statement
-        .execute(params![doc_key, section_key, chunk_no, encoding, data])
-        .map_err(text_unit_index_error)?;
-    Ok(())
 }
 
 fn build_section_layout(group: &SectionGroups<'_>) -> Result<SectionLayout, ApplicationError> {
@@ -10248,10 +10665,14 @@ fn stored_doc_key(
     connection: &Connection,
     document_id: &DocumentId,
 ) -> Result<Option<i64>, ApplicationError> {
+    // An in-progress ingest owns these rows but has not finished them: section lookups of that
+    // document must answer "not stored", exactly as they do for a document that was never ingested.
     connection
         .query_row(
-            "SELECT doc_key FROM text_unit_documents_v2 WHERE document_id = ?1",
-            params![&document_id.0],
+            "SELECT doc_key FROM text_unit_documents_v2
+             WHERE document_id = ?1
+               AND (ingest_fingerprint IS NULL OR ingest_fingerprint != ?2)",
+            params![&document_id.0, INGEST_IN_PROGRESS_FINGERPRINT],
             |row| row.get(0),
         )
         .optional()

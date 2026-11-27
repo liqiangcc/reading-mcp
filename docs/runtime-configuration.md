@@ -304,6 +304,27 @@ worker 线程只做 section 预筛与段落/句子打分，各自保留自己的
 2. **Bounded in-process blocking work**：Parser timeout 仍是 Tokio cooperative timeout——它只停止等待，已开始的 blocking 线程不可被杀、会运行到有界完成。因此 PDF 页数、ZIP entry/解压大小、document/section 预算等前置 `ResourceBudget`/`ArchiveLimits` 仍是限制实际工作量的主要证据。
 3. **进程级隔离**：PDF layout worker 与 OCR 走独立子进程/systemd sandbox（可被 deadline 终止），与上述 in-process blocking 边界是不同层级。
 
+## 分块 ingest 写入（`READING_MCP_INGEST_CHUNK_SECTIONS`）
+
+一个文档的 `section_text_v3` / `section_layout_v2` / `section_layout_chunk_v2` 写入按 section 分块
+提交：每个事务最多 48 个 section、压缩后最多 512 KiB 的行字节（任一上限先到即关闭该块），
+而不是整本书一个事务。宋史（543 个 section、6.83 MB 压缩文本）的单次最长写锁持有因此从
+约 1,150 ms 降到约 130 ms。
+
+崩溃安全：第一块事务把 `text_unit_documents_v2` 行的 `ingest_fingerprint` 写成进行中标记
+（`chunked-ingest/in-progress`），只有最后一块事务把它翻成真正的指纹——文档只在那一刻
+对读取可见为完整。在进行中标记下，所有 section 读取路径把该文档当作「未 ingest」：
+句柄读取给 `not_opened`（恢复路径会先尝试重新 ingest），v1 读取给 StaleDocument。
+启动时（text-unit store 打开时）清掉进行中文档已写出的部分行；文档行本身保留，
+因为它的 `doc_key` 是既有句柄与 remap 行的身份，下一次 `open` 会重写全部行。
+至多一块（小节文档）的写入保持单个事务，与引入分块之前逐字节相同——进行中标记从不出现。
+全部块完成后落库的行与单事务写入逐字节一致（ingest parity 门禁）。
+
+`READING_MCP_INGEST_CHUNK_SECTIONS`（默认 48，最小 1）覆盖每块的 section 数上限，供测试让
+小文档跨越多个事务、在写入中途停止服务器。`READING_MCP_INGEST_CHUNK_DELAY_MS` 在两块事务
+之间插入暂停，同样只用于测试与测量：小样本上块间只有几毫秒，观察中途状态需要把事务拉开。
+生产部署两个变量都不应设置。
+
 ## MCP Response Budget
 
 资源预算限制“输入和规范化文档能有多大”；Response Budget 独立限制“一次 MCP Tool 调用最多返回多少”。这两个边界不能互相替代。

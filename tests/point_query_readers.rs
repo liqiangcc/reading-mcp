@@ -21,9 +21,9 @@ use reading_mcp::application::open_reading::{OpenReadingCommand, OpenReadingUseC
 use reading_mcp::application::outline_reading::{OutlineReadingCommand, OutlineReadingUseCase};
 use reading_mcp::application::ports::{
     ApplicationError, BodyOrderWindow, DocumentHeader, DocumentKeyRow, DocumentRepository,
-    HandleRemap, HandleRemapUnit, Parser, RetrievalOptions, RetrievedResource, Retriever, SearchHit,
-    SearchIndex, SectionRow, SectionTextUnits, SourcePolicy, StoredStreamItem, TextUnitIndex,
-    TextUnitStreamKey, TextUnitStreamSummary,
+    HandleRemap, HandleRemapUnit, Parser, RetrievalOptions, RetrievedResource, Retriever,
+    SearchHit, SearchIndex, SectionRow, SectionTextUnits, SourcePolicy, StoredStreamItem,
+    TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
@@ -1868,7 +1868,8 @@ impl TextUnitIndex for TallyIndex {
         stream_kind: RequestedTextUnitKind,
         position: usize,
     ) -> Result<Option<HandleRemap>, ApplicationError> {
-        self.tally.record("index.handle_remap_at_stream_position", 1);
+        self.tally
+            .record("index.handle_remap_at_stream_position", 1);
         self.inner
             .handle_remap_at_stream_position(
                 doc_key,

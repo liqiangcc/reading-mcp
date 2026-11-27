@@ -448,6 +448,57 @@ async fn changed_deleted_and_paragraph_resplit_text_follow_the_proof_stdio() {
 }
 
 #[tokio::test]
+async fn first_deploy_rows_without_ingest_metadata_remap_stdio() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let state = tempfile::tempdir().expect("temporary state directory should be created");
+    let document_path = directory.path().join("deploy.md");
+    tokio::fs::write(
+        &document_path,
+        "# Deploy\n\n## Alpha\n\nDeploy sentence one. Deploy sentence two.\n",
+    )
+    .await
+    .expect("fixture should be written");
+
+    let first = start_client(directory.path(), state.path()).await;
+    let opened = v2_open(&first, &document_path).await;
+    let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+    let read = payload(&v2_read(&first, &doc, json!({})).await);
+    let old_text = flat_text(&read);
+    let sentence = read["at"].as_str().expect("sentence handle").to_owned();
+    first.cancel().await.expect("first client should stop");
+
+    // Rows written by the pre-feature binary have no metadata values once the additive migration
+    // has added the columns. The first post-deploy stale access must still re-ingest those rows
+    // and build their proof mappings; it must not wait for an explicit `open`.
+    let database = state.path().join("reading-mcp.sqlite");
+    let connection = rusqlite::Connection::open(&database).expect("state database should open");
+    let updated = connection
+        .execute(
+            "UPDATE text_unit_documents_v2 SET ingest_fingerprint = NULL, handle_checksum = NULL",
+            [],
+        )
+        .expect("pre-feature row metadata should be simulated");
+    assert_eq!(updated, 1);
+    drop(connection);
+
+    let second = restart_variant(directory.path(), state.path(), "spaces").await;
+    let result = v2_read(&second, &sentence, json!({})).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "stale_handle", "{error}");
+    let target = error["retry"]["from"]
+        .as_str()
+        .expect("first-deploy retry")
+        .to_owned();
+    let retried = payload(&v2_read(&second, &target, json!({})).await);
+    assert_eq!(
+        strip_ws(&flat_text(&retried)),
+        strip_ws(&old_text),
+        "{retried}"
+    );
+    second.cancel().await.expect("second client should stop");
+}
+
+#[tokio::test]
 async fn whitespace_only_reingest_remaps_all_tool_retry_shapes_http() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let state = tempfile::tempdir().expect("temporary state directory should be created");

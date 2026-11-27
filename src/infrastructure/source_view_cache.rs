@@ -63,22 +63,11 @@ impl FileSourceViewCache {
         self.directory.join(format!("{key}.rsv"))
     }
 
+    /// Removes the temp files an interrupted writer left behind. Only files
+    /// older than the shared threshold go, so a second process sharing the
+    /// state directory keeps its in-flight write.
     fn cleanup_temp_files(&self) -> Result<(), ApplicationError> {
-        let entries = match fs::read_dir(&self.directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(cache_io_error(&self.directory, error)),
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if name.starts_with('.') && name.contains(".tmp-") {
-                fs::remove_file(entry.path())
-                    .map_err(|error| cache_io_error(&entry.path(), error))?;
-            }
-        }
+        crate::infrastructure::temp_cleanup::remove_stale_temp_files(&self.directory)?;
         Ok(())
     }
 

@@ -75,8 +75,17 @@ pub struct FileOcrCheckpointStore {
 }
 
 impl FileOcrCheckpointStore {
+    /// Opens the store and removes the temp files an interrupted `write_atomic`
+    /// left behind, per checkpoint directory. Best effort: stale progress
+    /// hygiene must never fail an ingest.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let store = Self { root: root.into() };
+        if let Err(error) =
+            crate::infrastructure::temp_cleanup::remove_stale_temp_files_in_children(&store.root)
+        {
+            eprintln!("warning: failed to clean OCR checkpoint temp files: {error}");
+        }
+        store
     }
 
     fn directory(&self, key: &str) -> PathBuf {

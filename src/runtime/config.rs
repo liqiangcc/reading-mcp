@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::application::ports::SourceViewOutputFormat;
 use crate::application::source_view::SourceViewLimits;
 use crate::domain::OcrConfig;
-use crate::infrastructure::ResourceBudget;
+use crate::infrastructure::{FileRawResourceCache, ResourceBudget};
 use crate::retrieval::HttpRetrieverConfig;
 
 #[derive(Clone, Debug)]
@@ -28,6 +28,8 @@ pub struct RuntimeConfig {
     pub source_view: SourceViewLimits,
     /// Rendered source-view page cache cap in MiB; 0 disables the cache.
     pub source_view_cache_mib: usize,
+    /// Raw resource (URL body) cache cap in MiB; 0 means no cap.
+    pub raw_cache_mib: u64,
     pub http: HttpRetrieverConfig,
 }
 
@@ -55,6 +57,7 @@ impl Default for RuntimeConfig {
             resource_budget,
             source_view: SourceViewLimits::default(),
             source_view_cache_mib: 256,
+            raw_cache_mib: FileRawResourceCache::DEFAULT_CAP_MIB,
             http,
         }
     }
@@ -228,6 +231,7 @@ impl RuntimeConfig {
             "READING_MCP_SOURCE_VIEW_CACHE_MIB",
             config.source_view_cache_mib,
         )?;
+        config.raw_cache_mib = env_u64("READING_MCP_RAW_CACHE_MIB", config.raw_cache_mib)?;
 
         config.http.max_redirects =
             env_usize("READING_MCP_HTTP_MAX_REDIRECTS", config.http.max_redirects)?;
@@ -375,7 +379,12 @@ fn env_u64(name: &str, default: u64) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_tools_env, parse_scan_prewarm};
+    use super::{RuntimeConfig, check_tools_env, parse_scan_prewarm};
+
+    #[test]
+    fn the_raw_cache_cap_defaults_to_one_gibibyte() {
+        assert_eq!(RuntimeConfig::default().raw_cache_mib, 1024);
+    }
 
     #[test]
     fn the_tools_env_accepts_only_v2() {

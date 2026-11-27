@@ -67,7 +67,9 @@ without a usable cache entry keeps the revalidating retrieval path; other
 sources' PDF bytes are staged in a private temporary directory instead of
 being streamed through a potentially back-pressured child stdin pipe; worker
 input, image, metadata, and diagnostics are file-backed, and an over-deadline
-worker is terminated with `kill + wait`.
+worker is terminated with `kill + wait`. The raw cache is bounded by
+`READING_MCP_RAW_CACHE_MIB`, so an entry the LRU evicted is a re-download on the
+revalidating path — never a wrong render.
 
 Defaults are deliberately suitable for review images rather than bulk PDF export
 and can be configured with the `READING_MCP_SOURCE_VIEW_*` variables documented

@@ -300,15 +300,17 @@ mod tests {
 
     #[test]
     fn a_letter_spaced_title_does_not_gain_spaces() {
+        // Tracking moves the next glyph right, so it is a negative adjustment; a title tracked
+        // at 54 thousandths of an em stays below the word-gap threshold.
         let text = collect(&tj(vec![
             string("I"),
-            Object::Real(54.0),
+            Object::Real(-54.0),
             string("N"),
-            Object::Real(54.0),
+            Object::Real(-54.0),
             string("T"),
-            Object::Real(54.0),
+            Object::Real(-54.0),
             string("R"),
-            Object::Real(54.0),
+            Object::Real(-54.0),
             string("O"),
         ]));
         assert_eq!(text, "INTRO ");

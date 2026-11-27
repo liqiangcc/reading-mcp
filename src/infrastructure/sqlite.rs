@@ -4250,12 +4250,8 @@ impl SqliteTextUnitIndex {
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let transaction = connection.transaction().map_err(text_unit_index_error)?;
-                let (doc_key, prior) = upsert_document_meta(
-                    &transaction,
-                    &document_first,
-                    &hash_first,
-                    sentinel,
-                )?;
+                let (doc_key, prior) =
+                    upsert_document_meta(&transaction, &document_first, &hash_first, sentinel)?;
                 build_remaps_if_identity_changed(
                     &transaction,
                     &document_first,
@@ -7316,7 +7312,8 @@ impl PreparedSections {
                         .iter()
                         .map(|chunk| chunk.blob.len())
                         .sum::<usize>();
-                if end > start && (end - start >= per_chunk || bytes + section_bytes > INGEST_CHUNK_BYTES)
+                if end > start
+                    && (end - start >= per_chunk || bytes + section_bytes > INGEST_CHUNK_BYTES)
                 {
                     break;
                 }
@@ -7454,26 +7451,26 @@ fn prepare_document_sections(
         }
         let chunk_count = chunks.len();
         sections.push(PreparedSection {
-                section_key,
-                section_id: section.id.clone(),
-                normalized_text_len: section.normalized_text_len(),
-                text_chunks,
-                paragraph_coverage_blob,
-                plan_error,
-                chunk_count,
-                sorted_flags,
-                paragraph_count: layout.paragraphs.len(),
-                sentence_count: layout.sentences.len(),
-                total_paragraph_preserve: paragraph_summary.total_preserve,
-                total_paragraph_eligible: paragraph_summary.total_eligible,
-                total_sentence_preserve: sentence_summary.total_preserve,
-                total_sentence_eligible: sentence_summary.total_eligible,
-                paragraph_preserve: paragraph_summary.preserve,
-                paragraph_eligible: paragraph_summary.eligible,
-                sentence_preserve: sentence_summary.preserve,
-                sentence_eligible: sentence_summary.eligible,
-                layout,
-                chunks: prepared_chunks,
+            section_key,
+            section_id: section.id.clone(),
+            normalized_text_len: section.normalized_text_len(),
+            text_chunks,
+            paragraph_coverage_blob,
+            plan_error,
+            chunk_count,
+            sorted_flags,
+            paragraph_count: layout.paragraphs.len(),
+            sentence_count: layout.sentences.len(),
+            total_paragraph_preserve: paragraph_summary.total_preserve,
+            total_paragraph_eligible: paragraph_summary.total_eligible,
+            total_sentence_preserve: sentence_summary.total_preserve,
+            total_sentence_eligible: sentence_summary.total_eligible,
+            paragraph_preserve: paragraph_summary.preserve,
+            paragraph_eligible: paragraph_summary.eligible,
+            sentence_preserve: sentence_summary.preserve,
+            sentence_eligible: sentence_summary.eligible,
+            layout,
+            chunks: prepared_chunks,
         });
     }
     Ok(PreparedSections { sections })
@@ -8028,7 +8025,10 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 .iter()
                 .map(|section| (&section.section_id, section))
                 .collect::<HashMap<_, _>>();
-            prepare_document_sections(&prep_document, &SectionLayoutSource::Segmentation(&sections))
+            prepare_document_sections(
+                &prep_document,
+                &SectionLayoutSource::Segmentation(&sections),
+            )
         })
         .await
         .map_err(|_| {
@@ -8066,7 +8066,10 @@ impl TextUnitIndex for SqliteTextUnitIndex {
                 .iter()
                 .map(|section| (&section.section_id, section))
                 .collect::<HashMap<_, _>>();
-            prepare_document_sections(&prep_document, &SectionLayoutSource::Segmentation(&sections))
+            prepare_document_sections(
+                &prep_document,
+                &SectionLayoutSource::Segmentation(&sections),
+            )
         })
         .await
         .map_err(|_| {

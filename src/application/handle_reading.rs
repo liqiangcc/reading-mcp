@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{
-    DocumentHeader, DocumentRepository, HandleRemap, HandleRemapUnit, INGEST_IN_PROGRESS_FINGERPRINT,
-    OwnedStreamUnit, SectionRow, TextUnitIndex,
+    DocumentHeader, DocumentRepository, HandleRemap, HandleRemapUnit,
+    INGEST_IN_PROGRESS_FINGERPRINT, OwnedStreamUnit, SectionRow, TextUnitIndex,
 };
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::{DocumentView, carrier_section};

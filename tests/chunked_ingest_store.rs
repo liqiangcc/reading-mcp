@@ -186,7 +186,10 @@ async fn an_in_progress_document_reads_as_not_ingested() {
     let index = SqliteTextUnitIndex::open(&database).expect("store");
     let document = Arc::new(document_with_sections(
         "doc:in-progress",
-        &["First paragraph.\n\nSecond paragraph.", "Other section text."],
+        &[
+            "First paragraph.\n\nSecond paragraph.",
+            "Other section text.",
+        ],
     ));
     store(&index, &document).await;
 

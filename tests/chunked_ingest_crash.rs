@@ -35,9 +35,7 @@ fn epub_with_chapters(chapters: usize) -> Vec<u8> {
     writer
         .start_file("mimetype", options)
         .expect("mimetype entry");
-    writer
-        .write_all(b"application/epub+zip")
-        .expect("mimetype");
+    writer.write_all(b"application/epub+zip").expect("mimetype");
 
     let mut manifest = String::new();
     let mut spine = String::new();
@@ -65,9 +63,7 @@ fn epub_with_chapters(chapters: usize) -> Vec<u8> {
         }
         files.push((
             format!("OPS/{name}"),
-            format!(
-                "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\n{body}</body></html>"
-            ),
+            format!("<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\n{body}</body></html>"),
         ));
     }
 
@@ -108,7 +104,9 @@ fn epub_with_chapters(chapters: usize) -> Vec<u8> {
     .collect();
 
     for (name, content) in entries.iter().chain(files.iter()) {
-        writer.start_file(name.as_str(), options).expect("ZIP entry");
+        writer
+            .start_file(name.as_str(), options)
+            .expect("ZIP entry");
         writer.write_all(content.as_bytes()).expect("ZIP content");
     }
     writer.finish().expect("ZIP finish").into_inner()
@@ -156,10 +154,7 @@ impl Server {
                     if let Ok(message) = serde_json::from_str::<Value>(&line)
                         && let Some(id) = message.get("id").and_then(Value::as_u64)
                     {
-                        responses
-                            .lock()
-                            .expect("responses")
-                            .insert(id, message);
+                        responses.lock().expect("responses").insert(id, message);
                         notify.notify_waiters();
                     }
                 }
@@ -192,10 +187,7 @@ impl Server {
 
     async fn send_notification(&mut self, method: &str, params: Value) {
         let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .expect("write");
+        self.stdin.write_all(line.as_bytes()).await.expect("write");
         self.stdin.write_all(b"\n").await.expect("newline");
         self.stdin.flush().await.expect("flush");
     }
@@ -204,12 +196,9 @@ impl Server {
     async fn send(&mut self, method: &str, params: Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-            .to_string();
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .expect("write");
+        let line =
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
+        self.stdin.write_all(line.as_bytes()).await.expect("write");
         self.stdin.write_all(b"\n").await.expect("newline");
         self.stdin.flush().await.expect("flush");
         id
@@ -276,7 +265,9 @@ impl Server {
 fn section_row_count(database: &Path) -> i64 {
     let connection = rusqlite::Connection::open(database).expect("database opens");
     connection
-        .query_row("SELECT COUNT(*) FROM section_layout_v2", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM section_layout_v2", [], |row| {
+            row.get(0)
+        })
         .expect("count")
 }
 
@@ -327,7 +318,11 @@ fn ingest_dump(database: &Path) -> Vec<String> {
             "doc_key, section_key, chunk_no, encoding, hex(data)",
             "doc_key, section_key, chunk_no",
         ),
-        ("documents", "id, source, content_hash, document_json, normalized_document_hash", "id"),
+        (
+            "documents",
+            "id, source, content_hash, document_json, normalized_document_hash",
+            "id",
+        ),
     ] {
         let mut statement = connection
             .prepare(&format!("SELECT {columns} FROM {table} ORDER BY {order}"))
@@ -470,7 +465,9 @@ async fn crash_point(root: &Path, book: &Path, kill_at: i64, total: i64, referen
     // ingest byte for byte.
     std::fs::copy(&backup, book).expect("restore the source");
     let mut healed = Server::spawn(root, &state, "1000").await;
-    let reopened = healed.open_book(book, false, Duration::from_secs(180)).await;
+    let reopened = healed
+        .open_book(book, false, Duration::from_secs(180))
+        .await;
     assert!(
         reopened.get("doc").is_some(),
         "open re-ingests the crashed document: {reopened}"
@@ -522,7 +519,9 @@ async fn a_concurrent_reader_never_sees_partial_or_mixed_sections() {
     let state = root.join("reader-state");
 
     let mut server = Server::spawn(root, &state, "1").await;
-    let opened = server.open_book(&book, false, Duration::from_secs(180)).await;
+    let opened = server
+        .open_book(&book, false, Duration::from_secs(180))
+        .await;
     let doc = opened["doc"].as_str().expect("doc handle").to_owned();
 
     // Walk the first handles of the book and remember the correct answer of each one.
@@ -600,7 +599,10 @@ async fn a_concurrent_reader_never_sees_partial_or_mixed_sections() {
             continue;
         }
         for id in arrived {
-            let position = read_ids.iter().position(|(read, _)| *read == id).expect("id");
+            let position = read_ids
+                .iter()
+                .position(|(read, _)| *read == id)
+                .expect("id");
             let (_, handle) = read_ids.remove(position);
             let message = server.wait(id, Duration::from_secs(1)).await;
             reads += 1;
@@ -623,7 +625,9 @@ async fn a_concurrent_reader_never_sees_partial_or_mixed_sections() {
                 let answer_text = payload["text"].as_str().unwrap_or("");
                 if !answer_text.is_empty() {
                     let expected = correct.get(&handle).unwrap_or_else(|| {
-                        panic!("{handle} answered non-empty text it never read before: {answer_text}")
+                        panic!(
+                            "{handle} answered non-empty text it never read before: {answer_text}"
+                        )
                     });
                     assert_eq!(
                         answer_text, expected,
@@ -641,8 +645,7 @@ async fn a_concurrent_reader_never_sees_partial_or_mixed_sections() {
     let refreshed_text = refreshed["result"]["content"][0]["text"]
         .as_str()
         .expect("refresh answer");
-    let refreshed_payload: Value =
-        serde_json::from_str(refreshed_text).expect("refresh payload");
+    let refreshed_payload: Value = serde_json::from_str(refreshed_text).expect("refresh payload");
     assert_eq!(
         refreshed_payload["doc"].as_str().expect("doc"),
         doc,

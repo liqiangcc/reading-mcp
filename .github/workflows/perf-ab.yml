@@ -1,0 +1,472 @@
+name: Perf A/B
+
+# Base vs head performance comparison on the same runner: release builds of both commits,
+# the 121-id PDF sweep corpus interleaved base/head five rounds in parallel shards, and the
+# EPUB read/search + source_view latency probes, with per-id (per-round) paired ratios, a 5%
+# bar and one automatic recheck of any job whose metrics miss it.
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base ref or full SHA the head is compared against
+        required: true
+      head:
+        description: Head ref or full SHA (defaults to the triggering ref)
+        required: false
+        default: ''
+  pull_request:
+    paths: ['src/**', 'Cargo.toml', 'Cargo.lock']
+
+concurrency:
+  group: perf-ab-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      base: ${{ steps.refs.outputs.base }}
+      head: ${{ steps.refs.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve base and head to full SHAs
+        id: refs
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
+            base=$(git merge-base HEAD "origin/${{ github.event.pull_request.base.ref }}")
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            raw_base="${{ inputs.base }}"
+            raw_head="${{ inputs.head }}"
+            [ -z "$raw_head" ] && raw_head="${{ github.sha }}"
+            git fetch --no-tags origin "$raw_base" "$raw_head"
+            base=$(git rev-parse "$raw_base^{commit}" 2>/dev/null || echo "")
+            if [ -z "$base" ]; then
+              echo "::error::cannot resolve base '$raw_base' to a commit"
+              exit 1
+            fi
+            head=$(git rev-parse "$raw_head^{commit}" 2>/dev/null || echo "")
+            if [ -z "$head" ]; then
+              echo "::error::cannot resolve head '$raw_head' to a commit"
+              exit 1
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "base: $base"
+          echo "head: $head"
+
+  build:
+    needs: [resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the base and head trees
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ needs.resolve.outputs.base }}" \
+            "${{ needs.resolve.outputs.head }}"
+          git worktree add base-src "${{ needs.resolve.outputs.base }}"
+          git worktree add head-src "${{ needs.resolve.outputs.head }}"
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      # One shared target dir: unchanged dependency artifacts are reused between the two
+      # builds and by the rust cache across runs, so the second build only compiles what the
+      # head actually changes.
+      - name: Build the base binary
+        run: |
+          # Cargo's fingerprint does not include the manifest path: after the base build it
+          # would call the identical head build fresh without recompiling. Touching the
+          # crate sources forces the rebuild through the mtime check while the shared target
+          # dir still reuses every unchanged dependency artifact.
+          find base-src/src -name '*.rs' -exec touch {} +
+          touch base-src/Cargo.toml
+          cargo build --release --locked --bin reading-mcp \
+            --manifest-path base-src/Cargo.toml --target-dir target 2>&1 | tail -5
+          mkdir -p "$RUNNER_TEMP/out"
+          cp target/release/reading-mcp "$RUNNER_TEMP/out/reading-mcp-base"
+      - name: Build the head binary
+        run: |
+          find head-src/src -name '*.rs' -exec touch {} +
+          touch head-src/Cargo.toml
+          cargo build --release --locked --bin reading-mcp \
+            --manifest-path head-src/Cargo.toml --target-dir target 2>&1 | tail -5
+          cp target/release/reading-mcp "$RUNNER_TEMP/out/reading-mcp-head"
+      - name: Verify the binaries differ when the trees differ
+        run: |
+          if [ "${{ needs.resolve.outputs.base }}" != "${{ needs.resolve.outputs.head }}" ] \
+              && cmp -s "$RUNNER_TEMP/out/reading-mcp-base" "$RUNNER_TEMP/out/reading-mcp-head"; then
+            echo "::error::base and head binaries are identical for different commits"
+            exit 1
+          fi
+      - name: Upload both binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab-bin
+          path: |
+            ${{ runner.temp }}/out/reading-mcp-base
+            ${{ runner.temp }}/out/reading-mcp-head
+          retention-days: 7
+
+  corpus:
+    needs: [build, resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    name: corpus shard ${{ matrix.shard }} run1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: perf-ab-bin
+          path: ${{ runner.temp }}/bin
+      - name: Flatten the artifact layout
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin/base" "$RUNNER_TEMP/bin/head" "$RUNNER_TEMP/results"
+          mv "$RUNNER_TEMP/bin/reading-mcp-base" "$RUNNER_TEMP/bin/base/reading-mcp"
+          mv "$RUNNER_TEMP/bin/reading-mcp-head" "$RUNNER_TEMP/bin/head/reading-mcp"
+          chmod +x "$RUNNER_TEMP/bin/base/reading-mcp" "$RUNNER_TEMP/bin/head/reading-mcp"
+          ls -l "$RUNNER_TEMP/bin/base" "$RUNNER_TEMP/bin/head"
+      - name: Measure
+        run: |
+          set -o pipefail
+          python3 scripts/perf-ab.py corpus \
+            --base-bin "$RUNNER_TEMP/bin/base/reading-mcp" \
+            --head-bin "$RUNNER_TEMP/bin/head/reading-mcp" \
+            --ids scripts/pdf-sweep-ids.txt \
+            --shard ${{ matrix.shard }} --shards 4 \
+            --rounds 5 --run-tag run1 \
+            --work-dir "$RUNNER_TEMP/work" \
+            --state-root "$RUNNER_TEMP/state" \
+            --out "$RUNNER_TEMP/results/corpus-run1-shard${{ matrix.shard }}.jsonl" \
+            --deadline-minutes 33 | tail -30
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab-corpus-run1-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  readpath:
+    needs: [build, resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: perf-ab-bin
+          path: ${{ runner.temp }}/bin
+      - name: Flatten the artifact layout
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin/base" "$RUNNER_TEMP/bin/head"
+          mv "$RUNNER_TEMP/bin/reading-mcp-base" "$RUNNER_TEMP/bin/base/reading-mcp"
+          mv "$RUNNER_TEMP/bin/reading-mcp-head" "$RUNNER_TEMP/bin/head/reading-mcp"
+          chmod +x "$RUNNER_TEMP/bin/base/reading-mcp" "$RUNNER_TEMP/bin/head/reading-mcp"
+      - name: Download the large EPUB and generate the text PDF
+        run: |
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p "$IN"
+          if ! bash scripts/fetch-url.sh "$IN/zh-large.epub" \
+              "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"; then
+            echo "::error::the large EPUB input is missing"
+            exit 1
+          fi
+          bash scripts/fetch-url.sh "$IN/war-and-peace.txt" \
+            "https://www.gutenberg.org/cache/epub/2600/pg2600.txt" \
+            || echo "::warning::plain text download failed, using the synthetic fallback"
+          python3 - <<'EOF'
+          import importlib.util, os
+          spec = importlib.util.spec_from_file_location("gen", "scripts/gen-stress-inputs.py")
+          gen = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gen)
+          out = os.path.join(os.environ["RUNNER_TEMP"], "inputs")
+          text = gen.read_plain_text(os.path.join(out, "war-and-peace.txt"))
+          if not text:
+              text = " ".join(
+                  "Pierre and Natasha walked along the river while the winter light fell on the old house."
+                  for _ in range(60000))
+          gen.write_text_pdf(os.path.join(out, "perfab-text.pdf"),
+                             gen.paginate(text, 2000, 300), fontsize=11, font_path=None)
+          print("pdf size:", os.path.getsize(os.path.join(out, "perfab-text.pdf")))
+          EOF
+          ls -l "$IN"
+      - name: Run the interleaved read-path probes (run1)
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          python3 scripts/perf-ab.py readpath \
+            --base-bin "$RUNNER_TEMP/bin/base/reading-mcp" \
+            --head-bin "$RUNNER_TEMP/bin/head/reading-mcp" \
+            --epub "$RUNNER_TEMP/inputs/zh-large.epub" \
+            --pdf "$RUNNER_TEMP/inputs/perfab-text.pdf" \
+            --rounds 5 --run-tag run1 \
+            --work-dir "$RUNNER_TEMP/work" \
+            --state-root "$RUNNER_TEMP/state" \
+            --out "$RUNNER_TEMP/results/readpath-run1.jsonl" | tail -20
+      - name: Upload read-path results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab-readpath-run1
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  analyze:
+    needs: [corpus, readpath, resolve]
+    if: always() && needs.corpus.result != 'cancelled' && needs.readpath.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      recheck_corpus: ${{ steps.an.outputs.recheck_corpus }}
+      recheck_readpath: ${{ steps.an.outputs.recheck_readpath }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: perf-ab-corpus-run1-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/all
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: perf-ab-readpath-run1
+          path: ${{ runner.temp }}/all
+      - name: Initial analysis
+        id: an
+        env:
+          NEEDS: ${{ runner.temp }}/analyze/needs.json
+        run: |
+          mkdir -p "$RUNNER_TEMP/analyze"
+          python3 scripts/perf-ab.py analyze \
+            --results-dir "$RUNNER_TEMP/all" \
+            --phase initial \
+            --needs "$NEEDS" \
+            --out "$RUNNER_TEMP/analyze/initial.json"
+          python3 - <<'EOF'
+          import json, os
+          with open(os.environ["NEEDS"]) as handle:
+              needs = json.load(handle)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"recheck_corpus={str(needs['corpus']).lower()}\n")
+              out.write(f"recheck_readpath={str(needs['readpath']).lower()}\n")
+          print("needs:", needs)
+          EOF
+      - name: Upload initial analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab-analysis
+          path: ${{ runner.temp }}/analyze/
+          if-no-files-found: warn
+          retention-days: 7
+
+  corpus-recheck:
+    needs: [analyze, build, resolve]
+    if: always() && needs.analyze.result == 'success' && needs.analyze.outputs.recheck_corpus == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    name: corpus shard ${{ matrix.shard }} run2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: perf-ab-bin
+          path: ${{ runner.temp }}/bin
+      - name: Flatten the artifact layout
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin/base" "$RUNNER_TEMP/bin/head" "$RUNNER_TEMP/results"
+          mv "$RUNNER_TEMP/bin/reading-mcp-base" "$RUNNER_TEMP/bin/base/reading-mcp"
+          mv "$RUNNER_TEMP/bin/reading-mcp-head" "$RUNNER_TEMP/bin/head/reading-mcp"
+          chmod +x "$RUNNER_TEMP/bin/base/reading-mcp" "$RUNNER_TEMP/bin/head/reading-mcp"
+      - name: Run the interleaved corpus shard (run2, recheck)
+        run: |
+          set -o pipefail
+          python3 scripts/perf-ab.py corpus \
+            --base-bin "$RUNNER_TEMP/bin/base/reading-mcp" \
+            --head-bin "$RUNNER_TEMP/bin/head/reading-mcp" \
+            --ids scripts/pdf-sweep-ids.txt \
+            --shard ${{ matrix.shard }} --shards 4 \
+            --rounds 5 --run-tag run2 \
+            --work-dir "$RUNNER_TEMP/work" \
+            --state-root "$RUNNER_TEMP/state" \
+            --out "$RUNNER_TEMP/results/corpus-run2-shard${{ matrix.shard }}.jsonl" \
+            --deadline-minutes 33 | tail -30
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab-corpus-run2-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  readpath-recheck:
+    needs: [analyze, build, resolve]
+    if: always() && needs.analyze.result == 'success' && needs.analyze.outputs.recheck_readpath == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF tooling
+        run: pip install pymupdf
+      - name: Restore the download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/reading-mcp-fetch
+          key: fetch-books-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: perf-ab-bin
+          path: ${{ runner.temp }}/bin
+      - name: Flatten the artifact layout
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin/base" "$RUNNER_TEMP/bin/head"
+          mv "$RUNNER_TEMP/bin/reading-mcp-base" "$RUNNER_TEMP/bin/base/reading-mcp"
+          mv "$RUNNER_TEMP/bin/reading-mcp-head" "$RUNNER_TEMP/bin/head/reading-mcp"
+          chmod +x "$RUNNER_TEMP/bin/base/reading-mcp" "$RUNNER_TEMP/bin/head/reading-mcp"
+      - name: Download the large EPUB and generate the text PDF
+        run: |
+          IN="$RUNNER_TEMP/inputs"
+          mkdir -p "$IN"
+          if ! bash scripts/fetch-url.sh "$IN/zh-large.epub" \
+              "https://www.gutenberg.org/cache/epub/24183/pg24183-images.epub"; then
+            echo "::error::the large EPUB input is missing"
+            exit 1
+          fi
+          bash scripts/fetch-url.sh "$IN/war-and-peace.txt" \
+            "https://www.gutenberg.org/cache/epub/2600/pg2600.txt" \
+            || echo "::warning::plain text download failed, using the synthetic fallback"
+          python3 - <<'EOF'
+          import importlib.util, os
+          spec = importlib.util.spec_from_file_location("gen", "scripts/gen-stress-inputs.py")
+          gen = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gen)
+          out = os.path.join(os.environ["RUNNER_TEMP"], "inputs")
+          text = gen.read_plain_text(os.path.join(out, "war-and-peace.txt"))
+          if not text:
+              text = " ".join(
+                  "Pierre and Natasha walked along the river while the winter light fell on the old house."
+                  for _ in range(60000))
+          gen.write_text_pdf(os.path.join(out, "perfab-text.pdf"),
+                             gen.paginate(text, 2000, 300), fontsize=11, font_path=None)
+          EOF
+      - name: Run the interleaved read-path probes (run2, recheck)
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          python3 scripts/perf-ab.py readpath \
+            --base-bin "$RUNNER_TEMP/bin/base/reading-mcp" \
+            --head-bin "$RUNNER_TEMP/bin/head/reading-mcp" \
+            --epub "$RUNNER_TEMP/inputs/zh-large.epub" \
+            --pdf "$RUNNER_TEMP/inputs/perfab-text.pdf" \
+            --rounds 5 --run-tag run2 \
+            --work-dir "$RUNNER_TEMP/work" \
+            --state-root "$RUNNER_TEMP/state" \
+            --out "$RUNNER_TEMP/results/readpath-run2.jsonl" | tail -20
+      - name: Upload read-path results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab-readpath-run2
+          path: ${{ runner.temp }}/results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  report:
+    needs: [analyze, corpus-recheck, readpath-recheck, resolve]
+    if: always() && needs.analyze.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: perf-ab-corpus-run*
+          merge-multiple: true
+          path: ${{ runner.temp }}/corpus
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: perf-ab-readpath-run*
+          merge-multiple: true
+          path: ${{ runner.temp }}/readpath
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: perf-ab-analysis
+          path: ${{ runner.temp }}/analysis
+      - name: Final analysis and summary
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/final" "$RUNNER_TEMP/all"
+          cp "$RUNNER_TEMP"/corpus/*.jsonl "$RUNNER_TEMP/all/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/readpath/*.jsonl "$RUNNER_TEMP/all/" 2>/dev/null || true
+          status=0
+          python3 scripts/perf-ab.py analyze \
+            --results-dir "$RUNNER_TEMP/all" \
+            --phase final \
+            --needs "$RUNNER_TEMP/analysis/needs.json" \
+            --base "${{ needs.resolve.outputs.base }}" \
+            --head "${{ needs.resolve.outputs.head }}" \
+            --markdown "$RUNNER_TEMP/final/perf-ab.md" \
+            --out "$RUNNER_TEMP/final/perf-ab.json" | tail -60 || status=$?
+          cat "$RUNNER_TEMP/final/perf-ab.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::perf-ab verdict FAIL: a metric missed the 5% bar on the recheck too, or an outcome regressed from ok"
+          fi
+          exit "$status"
+      - name: Upload the final report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-ab-final
+          path: |
+            ${{ runner.temp }}/final/
+            ${{ runner.temp }}/all/
+          if-no-files-found: warn
+          retention-days: 14

@@ -2521,6 +2521,159 @@ mod tests {
         assert_eq!(page_texts(&document), old_page_texts(&document));
     }
 
+    /// A Type 1 font with an `/Encoding` `/Differences` array and no embedded
+    /// program, so PDF-6b does not apply and `/Encoding` is the only decode
+    /// path.  `alpha` resolves in lopdf's glyph table, `phi1` and `emdash.cyr`
+    /// do not, and `d51` is an XY-Pic diagram point with no Unicode at all.
+    fn differences_font(
+        document: &mut LopdfDocument,
+        differences: Vec<Object>,
+        to_unicode: Option<&[u8]>,
+    ) -> ObjectId {
+        let mut font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "SFRM1000",
+            "FirstChar" => 0_i64,
+            "LastChar" => 255_i64,
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "BaseEncoding" => "WinAnsiEncoding",
+                "Differences" => differences,
+            },
+        };
+        if let Some(to_unicode) = to_unicode {
+            let stream = document.add_object(Stream::new(Dictionary::new(), to_unicode.to_vec()));
+            font.set("ToUnicode", stream);
+        }
+        document.add_object(font)
+    }
+
+    fn fallback_differences() -> Vec<Object> {
+        vec![
+            Object::Integer(65),
+            Object::Name(b"alpha".to_vec()),
+            Object::Name(b"phi1".to_vec()),
+            Object::Name(b"emdash.cyr".to_vec()),
+            Object::Name(b"d51".to_vec()),
+        ]
+    }
+
+    /// One `bfchar` for code 0x41 that deliberately disagrees with the glyph
+    /// name `/alpha` at the same code.
+    const PARTIAL_TO_UNICODE: &[u8] = b"/CIDInit /ProcSet findresource begin\n\
+        12 dict begin\n\
+        begincmap\n\
+        /CMapName /Adobe-Identity-UCS def\n\
+        /CMapType 2 def\n\
+        1 begincodespacerange\n\
+        <00> <FF>\n\
+        endcodespacerange\n\
+        1 beginbfchar\n\
+        <41> <0416>\n\
+        endbfchar\n\
+        endcmap\n\
+        CMapName currentdict /CMap defineresource pop\n\
+        end\n\
+        end\n";
+
+    /// MCP-96 A: one unknown `/Differences` name used to throw the whole
+    /// encoding away; the font's own `/ToUnicode` now decodes it.
+    #[test]
+    fn a_differences_name_lopdf_cannot_resolve_decodes_through_to_unicode() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(
+            &mut document,
+            fallback_differences(),
+            Some(PARTIAL_TO_UNICODE),
+        );
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66, 67, 68]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // 0x41 is the `/ToUnicode` answer, not the `/alpha` the name says.  The
+        // codes the CMap leaves out come from the tolerant map, so none of them
+        // becomes the replacement character.
+        assert_eq!(page_texts(&document)[0].text, "\u{416}\u{3d5}\u{2014}D");
+        assert_eq!(old_page_texts(&document)[0].text, "ABCD");
+    }
+
+    /// MCP-96 B: without a `/ToUnicode` the tolerant map decodes the names that
+    /// resolve and leaves the base encoding in place for the ones that do not.
+    #[test]
+    fn a_differences_name_lopdf_cannot_resolve_decodes_through_the_tolerant_map() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(&mut document, fallback_differences(), None);
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66, 67, 68]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // `alpha` resolves in lopdf's table, `phi1` and `emdash.cyr` in the TeX
+        // table, and `d51` is skipped: code 68 keeps WinAnsi's `D`.
+        assert_eq!(page_texts(&document)[0].text, "\u{3b1}\u{3d5}\u{2014}D");
+        assert_eq!(old_page_texts(&document)[0].text, "ABCD");
+    }
+
+    /// MCP-96: a name with no Unicode at a code the base encoding does not
+    /// cover reads as nothing today, and a CMap can only turn it into U+FFFD.
+    /// Such a font keeps the encoding it has.
+    #[test]
+    fn a_name_with_no_unicode_at_an_undecodable_code_keeps_the_fallback() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(
+            &mut document,
+            vec![
+                Object::Integer(0),
+                Object::Name(b"d51".to_vec()),
+                Object::Integer(65),
+                Object::Name(b"phi1".to_vec()),
+            ],
+            None,
+        );
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[0, 65, 66]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        // Code 0 is an XY-Pic diagram point: StandardEncoding has no glyph for
+        // it, and no table has a Unicode for its name.
+        assert_eq!(page_texts(&document), old_page_texts(&document));
+        assert_eq!(page_texts(&document)[0].text, "AB");
+    }
+
+    /// A font whose `/Encoding` resolves decodes exactly as it did, and the
+    /// document is not even copied for a repair.
+    #[test]
+    fn a_resolvable_differences_keeps_todays_decoding() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = differences_font(
+            &mut document,
+            vec![
+                Object::Integer(65),
+                Object::Name(b"alpha".to_vec()),
+                Object::Name(b"beta".to_vec()),
+            ],
+            None,
+        );
+        add_page(
+            &mut document,
+            byte_text_operations("F1", &[65, 66, 90]),
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert!(
+            crate::parsing::pdf_text_repair::prepare_text_extraction(&document).is_none(),
+            "a resolvable /Encoding needs no repair copy"
+        );
+        assert_eq!(page_texts(&document), old_page_texts(&document));
+        assert_eq!(page_texts(&document)[0].text, "\u{3b1}\u{3b2}Z");
+    }
+
     /// PDF-6c: the normaliser over one page of one chunk.
     fn normalized_dot_runs(value: &str) -> String {
         normalized_page_text(&[value.to_string()]).0

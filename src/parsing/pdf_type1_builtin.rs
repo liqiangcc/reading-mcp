@@ -366,7 +366,7 @@ fn parse_name(haystack: &[u8], at: usize) -> Option<(&[u8], usize)> {
 
 /// The Unicode text for a glyph name: the TeX names the Adobe Glyph List lacks
 /// or spells differently, then `uniXXXX` / `uXXXX`, then the glyph table.
-fn glyph_name_units(name: &[u8]) -> Option<Vec<u16>> {
+pub(super) fn glyph_name_units(name: &[u8]) -> Option<Vec<u16>> {
     if let Some(text) = tex_glyph_name(name) {
         return Some(text.encode_utf16().collect());
     }
@@ -380,8 +380,9 @@ fn glyph_name_units(name: &[u8]) -> Option<Vec<u16>> {
 /// TeX's names for the slots that matter to a reader: the OT1 ligatures as
 /// plain letters (so search and quoting see `ffi`, not U+FB03), the symbols
 /// whose Adobe Glyph List entry names a different glyph than TeX draws, and the
-/// names the list does not have at all (TeX Gyre's math and text fonts).
-fn tex_glyph_name(name: &[u8]) -> Option<&'static str> {
+/// names the list does not have at all (TeX Gyre's math and text fonts, the
+/// Computer Modern and AMS symbol fonts, the TeX-Cyrillic `*.cyr` family).
+pub(super) fn tex_glyph_name(name: &[u8]) -> Option<&'static str> {
     Some(match name {
         b"ff" | b"f_f" => "ff",
         b"fi" | b"f_i" => "fi",
@@ -403,6 +404,32 @@ fn tex_glyph_name(name: &[u8]) -> Option<&'static str> {
         b"arrowhookleft" => "\u{21a9}",
         b"arrowhookright" => "\u{21aa}",
         b"mapsto" => "\u{21a6}",
+        b"square" => "\u{25a1}",
+        b"squaresolid" => "\u{25a0}",
+        b"diamondsolid" => "\u{2666}",
+        b"trianglesolid" => "\u{25b2}",
+        b"arrowtailright" => "\u{21a3}",
+        // Rule and delimiter pieces of CMEX: the sign they build up to.
+        b"vextendsingle" => "\u{2223}",
+        b"vextenddouble" => "\u{2225}",
+        b"radicalvertex" | b"radicaltp" => "\u{221a}",
+        b"bracehtipdownleft" | b"bracehtipdownright" => "\u{fe37}",
+        b"bracehtipupleft" | b"bracehtipupright" => "\u{fe38}",
+        b"angbracketleftBig" | b"angbracketleftbigg" => "\u{2329}",
+        b"angbracketrightBig" | b"angbracketrightbigg" => "\u{232a}",
+        b"defines" => "\u{225c}",
+        b"lessorequalslant" => "\u{2a7d}",
+        b"greaterorequalslant" => "\u{2a7e}",
+        b"tildewidest" => "\u{2dc}",
+        // The TeX-Cyrillic family is not in the Adobe Glyph List at all.
+        b"emdash.cyr" => "\u{2014}",
+        b"guillemotleft.cyr" => "\u{ab}",
+        b"guillemotright.cyr" => "\u{bb}",
+        // Virtual-font variants of a plain letter (`t_t`, `f_t` in Linux
+        // Libertine, `Q_u` in Biolinum).
+        b"t_t" => "t",
+        b"f_t" => "f",
+        b"Q_u" => "Q",
         // Oldstyle figures are still the digit a reader searches for; the list
         // puts them in the private use area.
         b"zerooldstyle" => "0",
@@ -528,6 +555,57 @@ mod tests {
         );
         assert_eq!(glyph_name_units(b"mapsto").as_deref(), Some(&[0x21a6][..]));
         assert_eq!(glyph_name_units(b"notaglyphname"), None);
+    }
+
+    #[test]
+    fn the_tex_table_covers_the_names_lopdf_lacks() {
+        for (name, text) in [
+            (&b"square"[..], "\u{25a1}"),
+            (b"squaresolid", "\u{25a0}"),
+            (b"diamondsolid", "\u{2666}"),
+            (b"trianglesolid", "\u{25b2}"),
+            (b"arrowtailright", "\u{21a3}"),
+            (b"vextendsingle", "\u{2223}"),
+            (b"vextenddouble", "\u{2225}"),
+            (b"radicalvertex", "\u{221a}"),
+            (b"bracehtipupleft", "\u{fe38}"),
+            (b"angbracketleftBig", "\u{2329}"),
+            (b"defines", "\u{225c}"),
+            (b"lessorequalslant", "\u{2a7d}"),
+            (b"greaterorequalslant", "\u{2a7e}"),
+            (b"tildewidest", "\u{2dc}"),
+            // TeX-Cyrillic, which AGL does not have at all.
+            (b"emdash.cyr", "\u{2014}"),
+            (b"guillemotleft.cyr", "\u{ab}"),
+            (b"guillemotright.cyr", "\u{bb}"),
+            (b"t_t", "t"),
+            (b"Q_u", "Q"),
+        ] {
+            let expected = text.encode_utf16().collect::<Vec<u16>>();
+            assert_eq!(
+                glyph_name_units(name).as_deref(),
+                Some(expected.as_slice()),
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        // Names with no Unicode at all stay unmapped: XY-Pic diagram points,
+        // TeX's invisible `suppress`, Type 3's `/BD` and the `.notdef` placeholder.
+        for name in [
+            &b"a12"[..],
+            b"d51",
+            b"suppress",
+            b"BD",
+            b".notdef",
+            b"perthousandzero",
+        ] {
+            assert_eq!(
+                glyph_name_units(name),
+                None,
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 
     #[test]

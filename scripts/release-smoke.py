@@ -185,7 +185,7 @@ def exercise_document(client: McpClient, source: str) -> tuple[str, str]:
     return doc, item_handle
 
 
-def assert_source_view_png(client: McpClient, handle: str) -> None:
+def assert_source_view_image(client: McpClient, handle: str, mime_type: str, magic: bytes, label: str) -> None:
     result = client.tool("source_view", {"at": handle}, timeout=180.0)
     metadata = compact(result)
     if not isinstance(metadata.get("page"), int) or not isinstance(metadata.get("pages"), int):
@@ -193,22 +193,30 @@ def assert_source_view_png(client: McpClient, handle: str) -> None:
     image_blocks = [
         block
         for block in result.get("content", []) or []
-        if isinstance(block, dict) and block.get("type") == "image" and block.get("mimeType") == "image/png"
+        if isinstance(block, dict) and block.get("type") == "image" and block.get("mimeType") == mime_type
     ]
     if not image_blocks:
-        raise SmokeError(f"source_view returned no PNG image block: {result}")
+        raise SmokeError(f"source_view returned no {label} image block: {result}")
     encoded = image_blocks[0].get("data")
     if not isinstance(encoded, str):
-        raise SmokeError("source_view PNG image block has no base64 data")
+        raise SmokeError(f"source_view {label} image block has no base64 data")
     try:
-        png = base64.b64decode(encoded, validate=True)
+        image = base64.b64decode(encoded, validate=True)
     except ValueError as exc:
-        raise SmokeError("source_view PNG image block is invalid base64") from exc
-    if not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) < 100:
-        raise SmokeError(f"source_view image is not a plausible PNG ({len(png)} bytes)")
+        raise SmokeError(f"source_view {label} image block is invalid base64") from exc
+    if not image.startswith(magic) or len(image) < 100:
+        raise SmokeError(f"source_view image is not a plausible {label} ({len(image)} bytes)")
 
 
-def prepare_inputs(work_dir: Path, pdf_source: Path) -> tuple[Path, Path]:
+def assert_source_view_png(client: McpClient, handle: str) -> None:
+    assert_source_view_image(client, handle, "image/png", b"\x89PNG\r\n\x1a\n", "PNG")
+
+
+def assert_source_view_jpeg(client: McpClient, handle: str) -> None:
+    assert_source_view_image(client, handle, "image/jpeg", b"\xff\xd8\xff", "JPEG")
+
+
+def prepare_inputs(work_dir: Path, pdf_source: Path, raster_pdf_source: Path) -> tuple[Path, Path]:
     inputs = work_dir / "input"
     state = work_dir / "state"
     shutil.rmtree(inputs, ignore_errors=True)
@@ -222,6 +230,7 @@ def prepare_inputs(work_dir: Path, pdf_source: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     shutil.copy2(pdf_source, inputs / "fixture.pdf")
+    shutil.copy2(raster_pdf_source, inputs / "raster.pdf")
     return inputs, state
 
 
@@ -244,19 +253,23 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True, help="packaged reading-mcp path on the host")
     parser.add_argument("--pdf", type=Path, required=True, help="text-bearing PDF fixture path on the host")
+    parser.add_argument("--raster-pdf", type=Path, required=True, help="raster-page PDF fixture path on the host")
     parser.add_argument("--work-dir", type=Path, required=True, help="scratch directory on the host")
     parser.add_argument("--image", help="Docker image to run inside; omit for a direct native smoke test")
     args = parser.parse_args()
 
     binary = args.binary.resolve()
     pdf = args.pdf.resolve()
+    raster_pdf = args.raster_pdf.resolve()
     work_dir = args.work_dir.resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise SmokeError(f"binary is not executable: {binary}")
     if not pdf.is_file():
         raise SmokeError(f"PDF fixture does not exist: {pdf}")
+    if not raster_pdf.is_file():
+        raise SmokeError(f"raster PDF fixture does not exist: {raster_pdf}")
 
-    inputs, state = prepare_inputs(work_dir, pdf)
+    inputs, state = prepare_inputs(work_dir, pdf, raster_pdf)
     stderr_path = work_dir / "server-stderr.log"
     if args.image:
         if shutil.which("docker") is None:
@@ -286,11 +299,13 @@ def main() -> int:
         command.extend([args.image, "/pkg/reading-mcp"])
         text_source = "/smoke/input/fixture.txt"
         pdf_source = "/smoke/input/fixture.pdf"
+        raster_source = "/smoke/input/raster.pdf"
     else:
         command = [str(binary)]
         env = server_environment(str(inputs), str(state))
         text_source = str(inputs / "fixture.txt")
         pdf_source = str(inputs / "fixture.pdf")
+        raster_source = str(inputs / "raster.pdf")
 
     client = McpClient(command, env, stderr_path)
     try:
@@ -302,6 +317,11 @@ def main() -> int:
         exercise_document(client, text_source)
         _pdf_doc, pdf_item = exercise_document(client, pdf_source)
         assert_source_view_png(client, pdf_item)
+        raster_opened = compact(client.tool("open", {"source": raster_source}, timeout=180.0))
+        raster_doc = raster_opened.get("doc")
+        if not isinstance(raster_doc, str) or not raster_doc:
+            raise SmokeError(f"raster PDF open returned no document handle: {raster_opened}")
+        assert_source_view_jpeg(client, raster_doc)
     finally:
         try:
             client.close()

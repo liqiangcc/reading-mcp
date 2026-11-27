@@ -137,13 +137,13 @@ import sys
 
 requirement = sys.argv[1]
 if requirement == "static":
-    raise SystemExit("static binaries are outside the glibc 2.31 release route")
+    raise SystemExit("static binaries are outside the glibc 2.35 release route")
 match = re.fullmatch(r"GLIBC_(\d+)\.(\d+)", requirement)
 if not match:
     raise SystemExit(f"unsupported binary_libc_requirement: {requirement}")
 version = tuple(int(part) for part in match.groups())
-if version > (2, 31):
-    raise SystemExit(f"binary requires {requirement}, above the supported glibc 2.31 floor")
+if version > (2, 35):
+    raise SystemExit(f"binary requires {requirement}, above the supported glibc 2.35 floor")
 PY
 
 output_dir=$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)

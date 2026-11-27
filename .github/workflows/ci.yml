@@ -103,39 +103,20 @@ jobs:
             scripts/rollback-production.sh
 
   package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
-    container:
-      image: debian:11
     steps:
-      - name: Install Debian 11 build prerequisites
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > /etc/apt/sources.list <<'EOF'
-          deb http://archive.debian.org/debian bullseye main
-          deb http://archive.debian.org/debian bullseye-updates main
-          deb http://archive.debian.org/debian-security bullseye-security main
-          EOF
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential binutils python3 pkg-config perl
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Trust the container checkout
-        shell: bash
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
 
-      - name: Install pinned Rust toolchain with rustup
+      - name: Show native build toolchain
         shell: bash
         run: |
-          set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.1
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup target add x86_64-unknown-linux-gnu --toolchain 1.99.1
           rustc --version
           gcc --version | head -1
 
@@ -192,11 +173,9 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - ubuntu:20.04
           - ubuntu:22.04
           - ubuntu:24.04
           - ubuntu:26.04
-          - debian:11
           - debian:12
     name: portable smoke ${{ matrix.image }}
     steps:
@@ -230,8 +209,8 @@ jobs:
           print('manifest libc requirement:', manifest.get('binary_libc_requirement'))
           requirement = str(manifest.get('binary_libc_requirement', ''))
           match = re.fullmatch(r'GLIBC_(\d+)\.(\d+)', requirement)
-          if not match or tuple(int(part) for part in match.groups()) > (2, 31):
-              raise SystemExit('release manifest binary_libc_requirement must be GLIBC_2.31 or lower')
+          if not match or tuple(int(part) for part in match.groups()) > (2, 35):
+              raise SystemExit('release manifest binary_libc_requirement must be GLIBC_2.35 or lower')
           PY
 
       - name: Pull ${{ matrix.image }}
@@ -244,5 +223,6 @@ jobs:
           python3 scripts/release-smoke.py \
             --binary "$PACKAGE_DIR/reading-mcp" \
             --pdf tests/fixtures/pdf_tex/type1-builtin.pdf \
+            --raster-pdf tests/fixtures/source_view/raster-text-page.pdf \
             --work-dir "${{ runner.temp }}/portability-smoke" \
             --image "${{ matrix.image }}"

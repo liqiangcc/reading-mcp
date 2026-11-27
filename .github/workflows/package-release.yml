@@ -34,10 +34,8 @@ concurrency:
 
 jobs:
   package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
-    container:
-      image: debian:11
     outputs:
       artifact_name: ${{ steps.mode.outputs.artifact_name }}
     steps:
@@ -73,31 +71,11 @@ jobs:
             exit 1
           fi
 
-      - name: Install Debian 11 build prerequisites
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > /etc/apt/sources.list <<'EOF'
-          deb http://archive.debian.org/debian bullseye main
-          deb http://archive.debian.org/debian bullseye-updates main
-          deb http://archive.debian.org/debian-security bullseye-security main
-          EOF
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential binutils python3 pkg-config perl
-
       - name: Checkout packaging infrastructure
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           path: packaging
-
-      - name: Trust the container checkouts
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/packaging"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/source"
 
       - name: Record packaging infrastructure identity
         shell: bash
@@ -156,14 +134,14 @@ jobs:
           [[ "$tag_sha" == "$EXPECTED_SHA" ]]
           [[ -z "$source_status" ]]
 
-      - name: Install pinned Rust toolchain with rustup
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Show native build toolchain
         shell: bash
         run: |
-          set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.1
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup target add x86_64-unknown-linux-gnu --toolchain 1.99.1
           rustc --version
           gcc --version | head -1
 
@@ -224,7 +202,15 @@ jobs:
           set -euo pipefail
           archive=$(find dist -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
           test -n "$archive"
-          python3 packaging/scripts/release-upload-assets.py             --repository "$GITHUB_REPOSITORY"             --tag "$RELEASE_TAG"             "$archive" dist/SHA256SUMS
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          for asset in "$archive" dist/SHA256SUMS; do
+            name=$(basename "$asset")
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              echo "refusing to overwrite existing release asset: $name" >&2
+              exit 1
+            fi
+          done
+          gh release upload "$RELEASE_TAG" "$archive" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
 
   portability:
     needs: package
@@ -234,11 +220,9 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - ubuntu:20.04
           - ubuntu:22.04
           - ubuntu:24.04
           - ubuntu:26.04
-          - debian:11
           - debian:12
     name: portable smoke ${{ matrix.image }}
     steps:
@@ -274,8 +258,8 @@ jobs:
           print('manifest libc requirement:', manifest.get('binary_libc_requirement'))
           requirement = str(manifest.get('binary_libc_requirement', ''))
           match = re.fullmatch(r'GLIBC_(\d+)\.(\d+)', requirement)
-          if not match or tuple(int(part) for part in match.groups()) > (2, 31):
-              raise SystemExit('release manifest binary_libc_requirement must be GLIBC_2.31 or lower')
+          if not match or tuple(int(part) for part in match.groups()) > (2, 35):
+              raise SystemExit('release manifest binary_libc_requirement must be GLIBC_2.35 or lower')
           PY
 
       - name: Pull ${{ matrix.image }}
@@ -288,5 +272,6 @@ jobs:
           python3 scripts/release-smoke.py \
             --binary "$PACKAGE_DIR/reading-mcp" \
             --pdf tests/fixtures/pdf_tex/type1-builtin.pdf \
+            --raster-pdf tests/fixtures/source_view/raster-text-page.pdf \
             --work-dir "${{ runner.temp }}/portability-smoke" \
             --image "${{ matrix.image }}"

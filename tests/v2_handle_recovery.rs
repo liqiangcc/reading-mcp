@@ -24,6 +24,121 @@ fn paragraph_handle(sentence: &str) -> String {
         .to_owned()
 }
 
+/// One one-page PDF with a single sentence, the same fixture shape as
+/// `tests/v2_source_view_stdio.rs`.
+fn build_text_pdf() -> Vec<u8> {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Document as PdfDocument, Object, Stream, dictionary};
+
+    let mut document = PdfDocument::with_version("1.5");
+    let pages_id = document.new_object_id();
+    let font_id = document.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+    let resources_id = document.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let content = Content {
+        operations: vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 14.into()]),
+            Operation::new("Td", vec![72.into(), 720.into()]),
+            Operation::new("Tj", vec![Object::string_literal("SOURCE VIEW SENTENCE.")]),
+            Operation::new("ET", vec![]),
+        ],
+    };
+    let content_id = document.add_object(Stream::new(
+        dictionary! {},
+        content.encode().expect("fixture content should encode"),
+    ));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+
+    let mut bytes = Vec::new();
+    document
+        .save_to(&mut bytes)
+        .expect("fixture PDF should serialize");
+    bytes
+}
+
+/// The rendered-page cache is keyed on the raw content hash, which a whitespace-only extraction
+/// deploy does not change: a fresh handle's render after the deploy serves exactly the entry the
+/// pre-deploy render stored. A stale handle must therefore never reach the cache at all — the
+/// error with its `retry` is decided by handle resolution before any cache lookup. This test
+/// renders through the cache on the pre-deploy server, then proves the stale sentence handle is
+/// still refused with `retry.at` after the deploy restart, and that the retry target renders the
+/// same page (the cached entry) successfully.
+#[tokio::test]
+async fn stale_source_view_refusal_precedes_the_rendered_page_cache_stdio() {
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let state = tempfile::tempdir().expect("temporary state directory should be created");
+    let document_path = directory.path().join("page.pdf");
+    tokio::fs::write(&document_path, build_text_pdf())
+        .await
+        .expect("PDF fixture should be written");
+
+    let first = start_client(directory.path(), state.path()).await;
+    let opened = v2_open(&first, &document_path).await;
+    let doc = opened["doc"].as_str().expect("doc handle").to_owned();
+    let read = payload(&v2_read(&first, &doc, json!({})).await);
+    let sentence = read["at"].as_str().expect("sentence handle").to_owned();
+    assert_eq!(flat_text(&read), "SOURCE VIEW SENTENCE.", "{read}");
+    // Warm the rendered-page cache through the fresh handle.
+    let rendered = call(&first, "source_view", json!({"at": sentence})).await;
+    assert!(rendered.is_error != Some(true), "{rendered:?}");
+    first.cancel().await.expect("first client should stop");
+
+    let second = start_client_with_env(
+        directory.path(),
+        state.path(),
+        &[("READING_MCP_TEST_EXTRACTION_VARIANT", "spaces")],
+    )
+    .await;
+
+    // The stale handle is refused with its retry even though a cache entry keyed by the unchanged
+    // content hash sits in the state directory: the cache lookup never ran for it.
+    let result = call(&second, "source_view", json!({"at": sentence})).await;
+    let error = tool_error(&result);
+    assert_eq!(error["error"], "stale_handle", "{error}");
+    let target = error["retry"]["at"]
+        .as_str()
+        .expect("source_view retry.at")
+        .to_owned();
+    assert_ne!(target, sentence);
+
+    // The retry target is fresh: it reads the proven text. (`source_view` on it cannot render in
+    // this test because the test-only extraction variant rewrites the text after the parser fixed
+    // its page bindings, so the two no longer align; a real extraction deploy computes the
+    // bindings from the text it actually extracts.)
+    let retried = payload(&v2_read(&second, &target, json!({})).await);
+    assert_eq!(
+        strip_ws(retried["text"].as_str().expect("retry target reads")),
+        strip_ws("SOURCE VIEW SENTENCE."),
+        "{retried}"
+    );
+    second.cancel().await.expect("second client should stop");
+}
+
 #[tokio::test]
 async fn whitespace_only_reingest_remaps_sentence_and_paragraph_reads_stdio() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");

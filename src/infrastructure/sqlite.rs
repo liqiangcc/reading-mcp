@@ -36,8 +36,9 @@ use crate::application::get_text_units::{
 use crate::application::open_document::OpenDocumentResult;
 use crate::application::ports::{
     ApplicationError, BodyOrderWindow, DocumentHeader, DocumentKeyRow, DocumentRepository,
-    HandleRemap, HandleRemapUnit, OpenResultStore, OwnedStreamUnit, SearchHitKind, SectionRow,
-    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
+    HandleRemap, HandleRemapUnit, OpenResultStore, OriginalSourceRangePage, OwnedStreamUnit,
+    SearchHitKind, SectionRow, SectionTextUnits, StoredStreamItem, TextUnitIndex,
+    TextUnitStreamKey, TextUnitStreamSummary,
 };
 use crate::application::section_rows;
 use crate::application::short_handle::handle_checksum;
@@ -1188,6 +1189,75 @@ impl DocumentRepository for SqliteDocumentRepository {
                         })
                     })
                     .transpose()
+            },
+        )
+        .await
+    }
+
+    /// The binding row containing a whole range, or the same ambiguity
+    /// decision `OriginalSourceBindingMap::target_for_range` reports. The rows
+    /// of one section are non-overlapping when written; counting overlapping
+    /// rows here still preserves the map semantics if the store is corrupt.
+    async fn original_source_page_for_range(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+        range: crate::domain::NormalizedTextRange,
+    ) -> Result<OriginalSourceRangePage, ApplicationError> {
+        let id = id.clone();
+        let section_id = section_id.clone();
+        let range_start = usize_to_i64(range.start())?;
+        let range_end = usize_to_i64(range.end())?;
+        run_sqlite(
+            &self.connection,
+            ApplicationError::RepositoryFailed,
+            move |connection| {
+                let has_rows: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM original_source_bindings_v1
+                          WHERE document_id = ?1)",
+                        params![id.0],
+                        |row| row.get(0),
+                    )
+                    .map_err(repository_error)?;
+                if !has_rows {
+                    return Ok(OriginalSourceRangePage::NoBindings);
+                }
+                let mut statement = connection
+                    .prepare(
+                        "SELECT range_start, range_end, page_number
+                           FROM original_source_bindings_v1
+                          WHERE document_id = ?1 AND owner_section_id = ?2
+                            AND range_start < ?4 AND range_end > ?3
+                          ORDER BY range_start LIMIT 2",
+                    )
+                    .map_err(repository_error)?;
+                let rows = statement
+                    .query_map(params![id.0, section_id.0, range_start, range_end], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })
+                    .map_err(repository_error)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(repository_error)?;
+                if rows.len() > 1 {
+                    return Ok(OriginalSourceRangePage::Ambiguous);
+                }
+                let Some((binding_start, binding_end, page)) = rows.first().copied() else {
+                    return Ok(OriginalSourceRangePage::NoCoveringBinding);
+                };
+                if binding_start > range_start || range_end > binding_end {
+                    return Ok(OriginalSourceRangePage::Ambiguous);
+                }
+                let page = u32::try_from(page).map_err(|_| {
+                    ApplicationError::RepositoryFailed(format!(
+                        "persisted original source page {page} is outside u32 range"
+                    ))
+                })?;
+                Ok(OriginalSourceRangePage::Page(page))
             },
         )
         .await

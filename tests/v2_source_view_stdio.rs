@@ -522,6 +522,7 @@ fn isolated_worker_reports_a_corrupt_pdf_as_source_view_failure() {
                 max_pixels: 4_000_000,
                 max_image_bytes: 8 * 1024 * 1024,
                 max_decoded_stream_bytes: 64 * 1024 * 1024,
+                format: reading_mcp::application::ports::SourceViewOutputFormat::Auto,
             },
         )
         .expect_err("a corrupt PDF must not render");
@@ -562,6 +563,7 @@ fn isolated_renderer_terminates_a_worker_that_exceeds_the_deadline() {
                 max_pixels: 1_000_000,
                 max_image_bytes: 1024 * 1024,
                 max_decoded_stream_bytes: 1024 * 1024,
+                format: reading_mcp::application::ports::SourceViewOutputFormat::Auto,
             },
         )
         .expect_err("deadline must terminate the worker process");
@@ -586,6 +588,7 @@ fn source_view_options(max_pixels: u64) -> SourceViewRenderOptions {
         max_pixels,
         max_image_bytes: 8 * 1024 * 1024,
         max_decoded_stream_bytes: 16 * 1024 * 1024,
+        format: reading_mcp::application::ports::SourceViewOutputFormat::Auto,
     }
 }
 

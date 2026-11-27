@@ -12,7 +12,9 @@ rows, and an open still parses the PDF it was given.
 
 ## Method
 
-`.github/workflows/pdf2c-measure.yml` (added by this work) builds the release binary with
+`.github/workflows/pdf2c-measure.yml` (added by this work, removed once the PDF-2c measurement
+was done — `Heap profile` (`.github/workflows/heap-profile.yml`) covers the same heaptrack shape)
+builds the release binary with
 `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and, for each input on a fresh state directory:
 
 * opens it once through the real server (`READING_MCP_TOOLS=v1`, OCR off, default PDF backend,

@@ -143,7 +143,8 @@ READING_MCP_STATE_DIR
 ├── reading-mcp.sqlite
 └── cache/
     ├── raw/
-    └── parsed-v2/
+    ├── parsed-v2/
+    └── source-view/
 ```
 
 Parsed cache 只保存 PDF 的解析结果：PDF layout/OCR 解析以分钟计，值得为它多留一份缓存副本；
@@ -220,13 +221,21 @@ READING_MCP_RESOLVE_LANDING_PAGES=off   关闭；行为与未引入解析时逐�
 | `READING_MCP_SOURCE_VIEW_MAX_WIDTH` | 2400 | 单页渲染最大宽度（像素） |
 | `READING_MCP_SOURCE_VIEW_MAX_HEIGHT` | 3200 | 单页渲染最大高度（像素） |
 | `READING_MCP_SOURCE_VIEW_MAX_PIXELS` | 4000000 | 单页渲染最大像素数；同时约束每个被绘制嵌入图像的像素数，绘制超限图像的页应答 `too_large` |
-| `READING_MCP_SOURCE_VIEW_MAX_IMAGE_BYTES` | 8388608 | PNG 响应最大字节数 |
+| `READING_MCP_SOURCE_VIEW_MAX_IMAGE_BYTES` | 8388608 | 编码图像响应最大字节数 |
 | `READING_MCP_SOURCE_VIEW_MAX_DECODED_STREAM_BYTES` | 16777216 | 单页 PDF 解压 stream 最大字节数 |
 | `READING_MCP_SOURCE_VIEW_TIMEOUT_SECS` | 10 | 单页渲染超时 |
+| `READING_MCP_SOURCE_VIEW_CACHE_MIB` | 256 | 已渲染页磁盘缓存上限（MiB），0 关闭读写；启动时仍清理中断写入 |
+| `READING_MCP_SOURCE_VIEW_FORMAT` | auto | 输出格式：`auto` 对确定性 raster-dominated PDF 页输出 JPEG（固定 quality 85）、其他页输出 PNG；`png` 禁用 JPEG 并完全保留 PNG 输出 |
 | `READING_MCP_PARSE_TIMEOUT_SECS` | 30 | Parser cooperative timeout |
 | `READING_MCP_SEARCH_CACHE_MIB` | 48 | 搜索扫描保留的单个文档 section 文本缓存上限（MiB），0 关闭缓存 |
 | `READING_MCP_SEARCH_THREADS` | `min(available_parallelism, 4)` | 单个文档搜索扫描的线程数，1 表示串行 |
 | `READING_MCP_SCAN_PREWARM` | `1` | 打开文档后在后台预热上述 section 文本缓存；`0`/`off` 关闭 |
+
+source-view 还会在 `<state>/cache/source-view` 保留按内容 hash、页码、DPI、全部渲染预算/格式和
+renderer 版本键控的已渲染页；缓存项单文件原子改名写入，启动清理中断临时文件，并按访问时间淘汰到
+上限。命中只重放同一份已编码 bytes，不跳过本地 root、URL policy、文档大小或 stale-source 检查；直接映射
+文件的缓存项额外保存长度/mtime/ctime/device/inode fingerprint 作为命中前的新鲜度证据，路径字节变化后
+必然 miss 并由 worker 重新校验 sha256。缓存只保存成功渲染，错误永不写入。`READING_MCP_SOURCE_VIEW_CACHE_MIB=0` 关闭读写。
 
 source-view worker 对本地文件源直接只读映射（memory-map）原始 PDF，并自行校验其 sha256；
 URL 来源在 raw-cache 存有可用 body（final_source 一致、PDF、未超 `READING_MCP_MAX_DOCUMENT_BYTES`、

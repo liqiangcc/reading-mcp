@@ -9,10 +9,10 @@ use crate::application::get_text_units::{
 };
 use crate::application::ports::{
     ApplicationError, BodyOrderWindow, DocumentHeader, DocumentKeyRow, DocumentRepository,
-    HandleRemap, HandleRemapUnit, LexicalSearchHit, LocatedRawResource, OwnedStreamUnit,
-    ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache, RetrievalOptions,
-    RetrievedResource, Retriever, SearchHit, SearchIndex, SectionRow, SectionTextUnits,
-    StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
+    HandleRemap, HandleRemapUnit, LexicalSearchHit, LocatedRawResource, OriginalSourceRangePage,
+    OwnedStreamUnit, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
+    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex, SectionRow,
+    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSegmentation, DocumentSource, NormalizedDocumentHash,
@@ -501,6 +501,17 @@ impl DocumentRepository for ObservedDocumentRepository {
     ) -> Result<Option<u32>, ApplicationError> {
         self.inner
             .original_source_page_at(id, section_id, offset)
+            .await
+    }
+
+    async fn original_source_page_for_range(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+        range: crate::domain::NormalizedTextRange,
+    ) -> Result<OriginalSourceRangePage, ApplicationError> {
+        self.inner
+            .original_source_page_for_range(id, section_id, range)
             .await
     }
 

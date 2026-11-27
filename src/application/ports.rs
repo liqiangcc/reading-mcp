@@ -84,6 +84,39 @@ pub trait OcrEvidenceStore: Send + Sync {
     async fn get(&self, digest: &str) -> Result<Option<Vec<u8>>, ApplicationError>;
 }
 
+/// The encoded image format `source_view` may emit. `Auto` keeps text/vector
+/// pages as PNG and sends raster-dominated pages as JPEG; `Png` is the
+/// compatibility mode whose bytes are the historical PNG output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SourceViewOutputFormat {
+    #[default]
+    Auto,
+    Png,
+}
+
+impl SourceViewOutputFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Png => "png",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "png" => Some(Self::Png),
+            _ => None,
+        }
+    }
+}
+
+/// JPEG quality for raster-dominated pages in `auto` mode. It is deliberately
+/// constant, not an operator knob: the value is part of the render cache key.
+pub const SOURCE_VIEW_JPEG_QUALITY: u8 = 85;
+/// Version of the deterministic raster-page rule used in `auto` mode.
+pub const SOURCE_VIEW_RASTER_RULE_VERSION: &str = "raster-coverage-50-bbox/v1";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceViewRenderOptions {
     pub dpi: u32,
@@ -93,6 +126,7 @@ pub struct SourceViewRenderOptions {
     pub max_pixels: u64,
     pub max_image_bytes: usize,
     pub max_decoded_stream_bytes: u64,
+    pub format: SourceViewOutputFormat,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +136,46 @@ pub struct RenderedSourceView {
     pub width: u32,
     pub height: u32,
     pub page_count: usize,
+}
+
+/// File metadata the rendered-page cache uses to notice that a mapped source
+/// file no longer is the file a cache entry was rendered from. This is not a
+/// replacement for the worker's sha256 check on a miss; it is the cheap
+/// freshness check that lets a hit avoid reading a large PDF again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceViewCacheFileFingerprint {
+    pub len: u64,
+    pub modified_ns: u64,
+    pub changed_ns: Option<i64>,
+    pub device: Option<u64>,
+    pub inode: Option<u64>,
+}
+
+/// Synchronous rendered-page cache port. Calls happen inside the same blocking
+/// task as rendering; implementations must make every entry write atomic.
+pub trait RenderedSourceViewCache: Send + Sync {
+    /// Freshness evidence for a mapped source file. Implementations may use
+    /// filesystem metadata; the renderer's sha256 check remains authoritative
+    /// on every cache miss.
+    fn fingerprint(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<SourceViewCacheFileFingerprint, ApplicationError>;
+
+    /// Returns the first usable entry among `keys`. `fingerprint`, when given,
+    /// must match the fingerprint stored with the entry.
+    fn get(
+        &self,
+        keys: &[String],
+        fingerprint: Option<&SourceViewCacheFileFingerprint>,
+    ) -> Result<Option<RenderedSourceView>, ApplicationError>;
+
+    fn put(
+        &self,
+        key: &str,
+        view: &RenderedSourceView,
+        fingerprint: Option<SourceViewCacheFileFingerprint>,
+    ) -> Result<(), ApplicationError>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -368,6 +442,13 @@ pub trait Parser: Send + Sync {
 }
 
 pub trait SourceViewRenderer: Send + Sync {
+    /// The stable cache namespace of the concrete rendering engine and its
+    /// pinned versions. Renderers whose output bytes are interchangeable may
+    /// share one namespace; process isolation alone is not an output input.
+    fn cache_namespace(&self) -> &'static str {
+        "source-view-renderer/unversioned"
+    }
+
     fn render(
         &self,
         bytes: Vec<u8>,
@@ -594,6 +675,18 @@ pub struct BodyOrderWindow {
     pub window: Vec<(usize, i64)>,
 }
 
+/// The original-source page lookup of one normalized text range. `NoBindings`
+/// means the document has no binding rows at all, so legacy single-page section
+/// evidence may still apply; `NoCoveringBinding` means rows exist but none
+/// contains the range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginalSourceRangePage {
+    NoBindings,
+    NoCoveringBinding,
+    Page(u32),
+    Ambiguous,
+}
+
 #[async_trait]
 pub trait DocumentRepository: Send + Sync {
     async fn save(&self, document: Document) -> Result<(), ApplicationError>;
@@ -707,6 +800,37 @@ pub trait DocumentRepository: Send + Sync {
             return Ok(None);
         };
         Ok(map.page_at_offset(section_id, offset))
+    }
+
+    /// The page binding containing a whole normalized range, with the same
+    /// overlap/ambiguity decision as `OriginalSourceBindingMap::target_for_range`.
+    /// The default loads the document map; stores with indexed binding rows
+    /// answer with point queries.
+    async fn original_source_page_for_range(
+        &self,
+        id: &DocumentId,
+        section_id: &SectionId,
+        range: crate::domain::NormalizedTextRange,
+    ) -> Result<OriginalSourceRangePage, ApplicationError> {
+        let Some((document, _)) = self.get_with_hash(id).await? else {
+            return Ok(OriginalSourceRangePage::NoBindings);
+        };
+        let Some(map) = document
+            .original_source_binding_map()
+            .map_err(|error| ApplicationError::RepositoryFailed(error.to_string()))?
+        else {
+            return Ok(OriginalSourceRangePage::NoBindings);
+        };
+        match map.target_for_range(section_id, range) {
+            Ok(Some(crate::domain::OriginalSourceTarget::Page { page_number })) => {
+                Ok(OriginalSourceRangePage::Page(page_number))
+            }
+            Ok(None) => Ok(OriginalSourceRangePage::NoCoveringBinding),
+            Err(crate::domain::OriginalSourceBindingError::AmbiguousTarget) => {
+                Ok(OriginalSourceRangePage::Ambiguous)
+            }
+            Err(error) => Err(ApplicationError::RepositoryFailed(error.to_string())),
+        }
     }
 
     /// True when this document predates the original-source binding rows in a way a reopen

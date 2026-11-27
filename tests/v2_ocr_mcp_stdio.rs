@@ -444,7 +444,7 @@ async fn scanned_pdf_stdio_locator_reads_original_page_after_server_restart() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|block| block["type"] == "image" && block["mimeType"] == "image/png")
+                    .any(|block| block["type"] == "image" && block["mimeType"] == "image/jpeg")
             );
             let metadata = payload(&result);
             assert_eq!(metadata["page"], 1);

@@ -114,7 +114,7 @@ async fn real_ocr_http_saved_locator_survives_server_restart() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|block| block["type"] == "image" && block["mimeType"] == "image/png")
+                    .any(|block| block["type"] == "image" && block["mimeType"] == "image/jpeg")
             );
             let metadata = payload(&result);
             assert_eq!(metadata["page"], 1);

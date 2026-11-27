@@ -22,9 +22,10 @@ use crate::application::search_reading::SearchReadingUseCase;
 use crate::application::source_view::SourceViewUseCase;
 use crate::infrastructure::{
     BudgetedParser, BudgetedRetriever, CachingParser, FileParsedDocumentCache,
-    FileRawResourceCache, ObservedDocumentRepository, ObservedParsedDocumentCache, ObservedParser,
-    ObservedRawResourceCache, ObservedRetriever, ObservedSearchIndex, ObservedTextUnitIndex,
-    SqliteDocumentRepository, SqliteOpenResultStore, SqliteSearchIndex, SqliteTextUnitIndex,
+    FileRawResourceCache, FileSourceViewCache, ObservedDocumentRepository,
+    ObservedParsedDocumentCache, ObservedParser, ObservedRawResourceCache, ObservedRetriever,
+    ObservedSearchIndex, ObservedTextUnitIndex, SqliteDocumentRepository, SqliteOpenResultStore,
+    SqliteSearchIndex, SqliteTextUnitIndex,
 };
 use crate::mcp::ReadingMcpServer;
 use crate::parsing::{
@@ -50,6 +51,7 @@ struct RuntimeComponents {
     text_unit_index: Arc<dyn TextUnitIndex>,
     search_index: Arc<dyn SearchIndex>,
     open_results: Arc<dyn OpenResultStore>,
+    source_view_cache: Arc<FileSourceViewCache>,
 }
 
 impl RuntimeComponents {
@@ -62,6 +64,7 @@ impl RuntimeComponents {
             text_unit_index: Arc::new(ObservedTextUnitIndex::new(self.text_unit_index)),
             search_index: Arc::new(ObservedSearchIndex::new(self.search_index)),
             open_results: self.open_results,
+            source_view_cache: self.source_view_cache,
         }
     }
 }
@@ -246,7 +249,8 @@ pub fn build_server(
             components.file_raw_cache,
             source_view_http_policy,
             config.resource_budget.max_document_bytes,
-        ),
+        )
+        .with_render_cache(components.source_view_cache),
     );
     let open_document = Arc::new(
         OpenDocumentUseCase::with_text_unit_index(
@@ -394,6 +398,10 @@ fn build_state_components(
         eprintln!("warning: failed to prune stale reading state: {error}");
     }
     let file_raw_cache = Arc::new(FileRawResourceCache::new(&cache_root));
+    let source_view_cache = Arc::new(FileSourceViewCache::open(
+        cache_root.join("source-view"),
+        config.source_view_cache_mib as u64,
+    )?);
     Ok((
         RuntimeComponents {
             raw_cache: file_raw_cache.clone(),
@@ -406,6 +414,7 @@ fn build_state_components(
             repository,
             text_unit_index,
             open_results,
+            source_view_cache,
         },
         ephemeral_state,
     ))

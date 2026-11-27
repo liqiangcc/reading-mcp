@@ -1,4 +1,5 @@
 """Optional real renderer tests. Set READING_MCP_TEST_PYMUPDF_PYTHON to a pinned venv."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,29 @@ d.save(sys.argv[1])
                 failure = subprocess.run(limited, capture_output=True, text=True)
                 self.assertNotEqual(failure.returncode, 0)
                 self.assertIn(message, failure.stderr)
+
+
+    def test_source_view_auto_raster_jpeg_and_png_opt_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output, metadata = [root / n for n in ("raster.pdf", "page.img", "meta.json")]
+            # A one-pixel PNG drawn over the whole page is raster-dominated by
+            # the deterministic drawn-bbox rule, with one text line on top.
+            make = """import base64,pymupdf,sys
+png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+d=pymupdf.open(); p=d.new_page(width=200,height=100); p.insert_image(p.rect,stream=png); p.insert_text((20,40),'scan label',fontsize=8); d.save(sys.argv[1])
+"""
+            subprocess.run([PYTHON, "-I", "-c", make, str(source)], check=True)
+            expected = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+            base = [PYTHON, "-I", str(WORKER), "--reading-mcp-source-view-file-worker", str(source), str(output), str(metadata), "1", "72", "5", "500", "500", "250000", "1048576", "1048576", expected]
+            result = subprocess.run(base + ["auto"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(metadata.read_text())["media_type"], "image/jpeg")
+            self.assertTrue(output.read_bytes().startswith(b"\xff\xd8\xff"))
+            result = subprocess.run(base + ["png"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(metadata.read_text())["media_type"], "image/png")
+            self.assertTrue(output.read_bytes().startswith(b"\x89PNG"))
 
 
 if __name__ == "__main__":

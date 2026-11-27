@@ -513,7 +513,17 @@ fn collect_section_segmentation(
         let text = index
             .slice(candidate.range)
             .expect("generated paragraph range must be a valid owner slice");
-        let content_class = paragraph_content_class(&blocks, candidate.range, text);
+        let mut content_class = paragraph_content_class(&blocks, candidate.range, text);
+        // PDF-7a (#232): a caption line over a numeric body is a table, not prose. It is decided
+        // here, before the #139 guard, so the guard never sees the block and the reader gets one
+        // non-prose unit instead of a refused paragraph or a run of junk sentences. PDF-only, like
+        // PDF-6d/6e/6f: every other format keeps its classes.
+        if content_class == ParagraphContentClass::ProseOrUnknown
+            && guard == FallbackGuardProfile::PdfProse
+            && looks_like_caption_table_block(text)
+        {
+            content_class = ParagraphContentClass::Table;
+        }
         let mut eligibility = match content_class {
             ParagraphContentClass::ProseOrUnknown | ParagraphContentClass::NativeParagraph => {
                 SentenceEligibility::Eligible
@@ -546,7 +556,9 @@ fn collect_section_segmentation(
                 // paragraph they flag never reaches the per-sentence pass. Otherwise the
                 // paragraph stays refused only when one of its own sentences carries the
                 // missing-space count.
-                if contains_doubled_character_token(text) || has_bibliographic_metadata_run(text) {
+                if contains_doubled_character_token(text)
+                    || has_bibliographic_metadata_run(text, guard)
+                {
                     eligibility = SentenceEligibility::CoarseParagraphOnly;
                 } else {
                     let chars = text.chars().collect::<Vec<_>>();
@@ -1337,6 +1349,107 @@ const MIN_DOUBLED_RUN_CHARS: usize = 6;
 const MIN_BIBLIOGRAPHIC_MARKERS: usize = 4;
 const BIBLIOGRAPHIC_WINDOW_WORDS: usize = 10;
 
+/// PDF-7a (#232): the words that open a table, figure, panel, chart, algorithm or listing block.
+/// The leading alphabetic run of the block's first line must be one of these, so `Tabletop` and
+/// `Figures` are not captions.
+const CAPTION_MARKERS: [&str; 8] = [
+    "table",
+    "fig",
+    "figure",
+    "panel",
+    "chart",
+    "algorithm",
+    "listing",
+    "exhibit",
+];
+
+/// The measured threshold for "mostly numeric or whitespace": at least this share of a caption
+/// block's characters are digits, numeric punctuation (separators, signs, units) or whitespace.
+/// On the 133 measured inputs, 16 caption blocks reach 0.60 and every one of them is a numeric
+/// body; the highest-scoring caption over prose is 0.45 (a figure caption dense with numbers), and
+/// the blocks between 0.45 and 0.60 are table blocks whose body is a prose note, or pseudocode.
+const CAPTION_TABLE_MIN_NUMERIC_SHARE: f64 = 0.60;
+
+/// PDF-7a (#232): a block whose first line opens with a caption marker and whose body is mostly
+/// numeric or whitespace is a table body, not prose. The #139 guard is the wrong tool for it: a
+/// table that reaches the bibliographic density is not a masthead, and splitting its caption and
+/// cells into "sentences" produces junk. It becomes the existing non-prose class `table` before
+/// the guard runs, so it is one honest coarse unit with its own label.
+fn looks_like_caption_table_block(text: &str) -> bool {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    // A caption over nothing is a caption, not a table: the block needs a body.
+    if lines.next().is_none() || !opens_with_caption_marker(first) {
+        return false;
+    }
+    numeric_share(text) >= CAPTION_TABLE_MIN_NUMERIC_SHARE
+}
+
+/// The share of a block's characters that are digits, numeric punctuation or whitespace. A table
+/// body is mostly numbers, separators and the spaces between columns; prose is mostly letters.
+fn numeric_share(text: &str) -> f64 {
+    let mut total = 0usize;
+    let mut numeric = 0usize;
+    for ch in text.chars() {
+        total += 1;
+        if ch.is_numeric() || ch.is_whitespace() || is_numeric_punctuation(ch) {
+            numeric += 1;
+        }
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    numeric as f64 / total as f64
+}
+
+fn opens_with_caption_marker(line: &str) -> bool {
+    let marker = line
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_alphabetic())
+        .collect::<String>()
+        .to_lowercase();
+    !marker.is_empty() && CAPTION_MARKERS.contains(&marker.as_str())
+}
+
+fn is_numeric_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | ','
+            | ';'
+            | ':'
+            | '-'
+            | '+'
+            | '−'
+            | '–'
+            | '—'
+            | '/'
+            | '\\'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '%'
+            | '='
+            | '<'
+            | '>'
+            | '*'
+            | '·'
+            | '|'
+            | '$'
+            | '#'
+            | '~'
+            | '^'
+            | '°'
+            | '\''
+            | '"'
+    )
+}
+
 /// Proves the fallback guard cannot fire, without running its Unicode-heavy work.
 ///
 /// Every signal needs at least one of:
@@ -1416,7 +1529,7 @@ impl FallbackGuardProfile {
 fn looks_like_unreliable_fallback_text(text: &str, guard: FallbackGuardProfile) -> bool {
     contains_doubled_character_token(text)
         || missing_space_glue_events(text, guard) >= MIN_MISSING_SPACE_GLUE_EVENTS
-        || has_bibliographic_metadata_run(text)
+        || has_bibliographic_metadata_run(text, guard)
 }
 
 /// Missing-space concatenation evidence: `StrongInference`, `JohnR.Platt`,
@@ -1614,8 +1727,8 @@ fn token_is_pairwise_doubled(token: &[char]) -> bool {
 /// digits), dates, links, and rights markers also appear inside legitimate prose, so
 /// the signal is *density*: a masthead packs several markers into a handful of words
 /// while citation-dense prose spreads them across sentences.
-fn has_bibliographic_metadata_run(text: &str) -> bool {
-    let markers = bibliographic_marker_counts(text);
+fn has_bibliographic_metadata_run(text: &str, guard: FallbackGuardProfile) -> bool {
+    let markers = bibliographic_marker_counts(text, guard);
     if markers.len() < MIN_BIBLIOGRAPHIC_MARKERS {
         return false;
     }
@@ -1631,8 +1744,10 @@ fn has_bibliographic_metadata_run(text: &str) -> bool {
     best >= MIN_BIBLIOGRAPHIC_MARKERS
 }
 
-/// Per-word bibliographic marker counts used for the density check.
-fn bibliographic_marker_counts(text: &str) -> Vec<usize> {
+/// Per-word bibliographic marker counts used for the density check. `guard` decides only the
+/// PDF date rule (`PdfProse`): every other format counts a year beside a month as its own marker,
+/// exactly as #139 wrote it.
+fn bibliographic_marker_counts(text: &str, guard: FallbackGuardProfile) -> Vec<usize> {
     let words = text
         .split(|ch: char| !ch.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -1658,6 +1773,7 @@ fn bibliographic_marker_counts(text: &str) -> Vec<usize> {
             && word.bytes().all(|byte| byte.is_ascii_digit())
             && let Ok(year) = word.parse::<u32>()
             && (1800..=2099).contains(&year)
+            && !(guard == FallbackGuardProfile::PdfProse && near_month_word(&words, index))
         {
             count += 1;
         }
@@ -1694,6 +1810,19 @@ fn is_month_word(word: &str) -> bool {
                 | "dec"
         )
     ) && word.chars().all(|ch| ch.is_alphabetic())
+}
+
+/// A 4-digit year within +-2 words of a month word is one date, not a second marker. The month
+/// marker already prices that date; counting the year again turns `January 2000 through December
+/// 2016` into four markers in ten words. A masthead (`Vol.146, No.3642 (Oct.16,1964), pp.347-353`)
+/// keeps its volume, number and pages markers, so it still reaches the threshold.
+fn near_month_word(words: &[&str], index: usize) -> bool {
+    let lo = index.saturating_sub(2);
+    let hi = (index + 3).min(words.len());
+    words[lo..hi]
+        .iter()
+        .enumerate()
+        .any(|(offset, word)| lo + offset != index && is_month_word(&word.to_lowercase()))
 }
 
 fn nearby_number(words: &[&str], index: usize) -> bool {

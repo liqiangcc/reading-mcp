@@ -185,10 +185,53 @@ async fn degraded_blob_enumerates_as_paragraph_and_still_reads_exactly() {
 }
 
 #[test]
-fn fallback_pdf_with_unreliable_paragraphs_reports_reliability_degradation() {
+fn fallback_pdf_with_a_date_only_masthead_is_now_sentenced() {
+    // The fixture is the original one, unchanged: date, volume, number, title, opening
+    // sentence, and no page marker. PDF-7a (#232) counts a year beside a month as part of that
+    // date, so this blob has three bibliographic markers instead of four and is now
+    // sentence-eligible under the PDF profile - the trade-off the pdfc census accepted
+    // (w24458 34.5% -> 8.6% coarse). The all-formats profile still refuses this date + volume +
+    // number blob, which is what `merged_masthead_title_and_opening_blob_is_not_a_clean_sentence`
+    // pins. With no refused paragraph left there is nothing for the fallback inspector to
+    // report: a freed paragraph is not a degradation.
     let mut document = document_with_content(
         "16 October 1964, Volume 146, Number 3642 Strong Inference Certain systematic methods \
          of scientific thinking may produce much more rapid progress than others.",
+    );
+    document.media_type = MediaType("application/pdf".into());
+    document
+        .metadata
+        .insert("pdf_structure_provenance".into(), "page_fallback".into());
+
+    let set = document.sentence_text_units();
+    assert!(!set.units.is_empty());
+    assert_eq!(set.coverage[0].eligibility, SentenceEligibility::Eligible);
+
+    let summary = PersistedDocumentReliabilityInspector
+        .inspect(&document)
+        .expect("reliability inspection should succeed");
+    assert!(
+        summary
+            .evidence
+            .iter()
+            .all(|evidence| evidence.degradation_count == 0
+                && !evidence
+                    .degradation_codes
+                    .iter()
+                    .any(|code| code == "pdf_fallback_paragraph_unreliable")),
+        "a freed fallback paragraph is not a degradation"
+    );
+}
+
+#[test]
+fn fallback_pdf_with_a_full_masthead_reports_reliability_degradation() {
+    // The same blob with the page marker a real masthead carries: Volume, Number, Pp and the
+    // date reach four markers without the year, so the paragraph still refuses and the
+    // inspector still reports it.
+    let mut document = document_with_content(
+        "16 October 1964, Volume 146, Number 3642, Pp. 347-353 Strong Inference Certain \
+         systematic methods of scientific thinking may produce much more rapid progress than \
+         others.",
     );
     document.media_type = MediaType("application/pdf".into());
     document
@@ -291,15 +334,37 @@ fn pdf_per_sentence_verdict_keeps_paragraph_index_stable() {
 }
 
 #[test]
-fn pdf_masthead_blob_stays_coarse_under_the_per_sentence_guard() {
-    // The same text as `merged_masthead_title_and_opening_blob_is_not_a_clean_sentence`,
-    // under the PDF profile: its first sentence packs the bibliographic markers densely
-    // enough to fire on its own, so the verdict is unchanged.
+fn pdf_masthead_blob_without_pages_is_sentenced_under_the_per_sentence_guard() {
+    // The same text as `merged_masthead_title_and_opening_blob_is_not_a_clean_sentence`, and
+    // the fixture is that original text unchanged: date, volume, number, title, two opening
+    // sentences, no page marker. PDF-7a (#232) drops the year beside the month, so the blob
+    // carries three markers, not four, and the PDF profile now sentences it - the trade-off the
+    // pdfc census accepted. The all-formats profile still refuses it.
     let mut document = document_with_content(
         "16 October 1964, Volume 146, Number 3642 Strong Inference Certain systematic methods \
          of scientific thinking may produce much more rapid progress than others. John R. \
          Platt Scientists these days tend to keep up a polite fiction that all science is \
          equal.",
+    );
+    document.media_type = MediaType("application/pdf".into());
+    document
+        .metadata
+        .insert("pdf_structure_provenance".into(), "page_fallback".into());
+
+    let set = document.sentence_text_units();
+    assert!(!set.units.is_empty());
+    assert_eq!(set.coverage[0].eligibility, SentenceEligibility::Eligible);
+}
+
+#[test]
+fn pdf_masthead_blob_with_pages_stays_coarse_under_the_per_sentence_guard() {
+    // The same blob with the page marker a real masthead carries: Volume, Number, Pp and the
+    // date reach four markers without the year, so the verdict is unchanged.
+    let mut document = document_with_content(
+        "16 October 1964, Volume 146, Number 3642, Pp. 347-353 Strong Inference Certain \
+         systematic methods of scientific thinking may produce much more rapid progress than \
+         others. John R. Platt Scientists these days tend to keep up a polite fiction that all \
+         science is equal.",
     );
     document.media_type = MediaType("application/pdf".into());
     document

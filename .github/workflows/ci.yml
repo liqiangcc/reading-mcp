@@ -103,16 +103,22 @@ jobs:
             scripts/rollback-production.sh
 
   package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
+
+      - name: Show native build toolchain
+        shell: bash
+        run: |
+          rustc --version
+          gcc --version | head -1
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -145,7 +151,7 @@ jobs:
           VERIFY_RELEASE_TAG=false \
           TARGET_TRIPLE=x86_64-unknown-linux-gnu \
           PLATFORM=linux-x86_64 \
-          OUTPUT_DIR="$RUNNER_TEMP/package-smoke" \
+          OUTPUT_DIR="$GITHUB_WORKSPACE/dist" \
           PACKAGING_COMMIT_SHA="$release_sha" \
           bash scripts/package-release.sh
 
@@ -154,7 +160,69 @@ jobs:
         with:
           name: release-candidate-package
           path: |
-            ${{ runner.temp }}/package-smoke/*.tar.gz
-            ${{ runner.temp }}/package-smoke/SHA256SUMS
+            dist/*.tar.gz
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
+
+  portability:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+          - debian:12
+    name: portable smoke ${{ matrix.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download candidate package
+        uses: actions/download-artifact@v4
+        with:
+          name: release-candidate-package
+          path: ${{ runner.temp }}/candidate
+
+      - name: Verify and unpack candidate package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/candidate"
+          sha256sum -c SHA256SUMS
+          mkdir -p extracted
+          tar -xzf ./*.tar.gz -C extracted
+          package_dir=$(find extracted -mindepth 1 -maxdepth 1 -type d -print -quit)
+          test -n "$package_dir"
+          test -x "$package_dir/reading-mcp"
+          echo "PACKAGE_DIR=${{ runner.temp }}/candidate/$package_dir" >> "$GITHUB_ENV"
+          python3 - "$package_dir/release-manifest.json" <<'PY'
+          import json
+          import re
+          import sys
+          manifest = json.load(open(sys.argv[1], encoding='utf-8'))
+          print('manifest target:', manifest.get('target'))
+          print('manifest libc requirement:', manifest.get('binary_libc_requirement'))
+          requirement = str(manifest.get('binary_libc_requirement', ''))
+          match = re.fullmatch(r'GLIBC_(\d+)\.(\d+)', requirement)
+          if not match or tuple(int(part) for part in match.groups()) > (2, 35):
+              raise SystemExit('release manifest binary_libc_requirement must be GLIBC_2.35 or lower')
+          PY
+
+      - name: Pull ${{ matrix.image }}
+        run: docker pull ${{ matrix.image }}
+
+      - name: Smoke-test inside ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release-smoke.py \
+            --binary "$PACKAGE_DIR/reading-mcp" \
+            --pdf tests/fixtures/pdf_tex/type1-builtin.pdf \
+            --raster-pdf tests/fixtures/source_view/raster-text-page.pdf \
+            --work-dir "${{ runner.temp }}/portability-smoke" \
+            --image "${{ matrix.image }}"

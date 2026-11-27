@@ -853,7 +853,7 @@ mod locator_differential_tests {
             );
         } else {
             assert_eq!(
-                compared, 36,
+                compared, 43,
                 "the committed fixtures plus cross-page case are deterministic"
             );
         }

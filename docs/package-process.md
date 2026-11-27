@@ -101,14 +101,17 @@ reading-mcp-release-manifest/v1
   "target": "x86_64-unknown-linux-gnu",
   "platform": "linux-x86_64",
   "binary_sha256": "<sha256>",
+  "binary_libc_requirement": "GLIBC_2.35",
   "cargo_lock_sha256": "<sha256>",
   "packaging_commit_sha": "<packaging infrastructure sha>"
 }
 ```
 
-`packaging_commit_sha` 是构建基础设施身份，不参与 Source identity，也不能把新的 main commit 冒充为旧 tag 的源码。
+`binary_libc_requirement` 是 binary 需要的最高 `GLIBC_` 符号版本；Linux GNU release 必须不超过 `GLIBC_2.35`。`packaging_commit_sha` 是构建基础设施身份，不参与 Source identity，也不能把新的 main commit 冒充为旧 tag 的源码。
 
 ## 6. Package 生成
+
+Linux GNU release 在 GitHub `ubuntu-22.04` runner 上原生构建（无 container），使用仓库 pin 的 Rust toolchain 和 runner 自带 gcc；不使用 zig。二进制 glibc floor 最高为 `GLIBC_2.35`，支持 Ubuntu 22.04/24.04/26.04 和 Debian 12；Ubuntu 20.04 与 Debian 11 不再是支持的 release matrix 目标。
 
 统一入口：
 

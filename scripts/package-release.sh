@@ -33,7 +33,7 @@ if [[ "$VERIFY_RELEASE_TAG" == "true" && ! "$PACKAGING_COMMIT_SHA" =~ ^[0-9a-f]{
   exit 1
 fi
 
-for cmd in cargo git gzip python3 sha256sum tar; do
+for cmd in cargo git gzip python3 readelf sha256sum tar; do
   command -v "$cmd" >/dev/null || {
     echo "$cmd is required for packaging" >&2
     exit 1
@@ -99,6 +99,53 @@ built="$BUILD_TARGET_DIR/$TARGET_TRIPLE/release/reading-mcp"
   exit 1
 }
 
+binary_libc_requirement=$(python3 - "$built" <<'PY'
+import re
+import subprocess
+import sys
+
+binary = sys.argv[1]
+dynamic = subprocess.run(
+    ["readelf", "-d", binary], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    text=True,
+)
+headers = subprocess.run(
+    ["readelf", "-l", binary], check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    text=True,
+)
+if "There is no dynamic section in this file." in dynamic.stdout or (
+    "(NEEDED)" not in dynamic.stdout and "INTERP" not in headers.stdout
+):
+    print("static")
+    raise SystemExit(0)
+versions = set()
+for args in (["readelf", "-W", "--dyn-syms", binary], ["readelf", "-W", "--version-info", binary]):
+    result = subprocess.run(
+        args, check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    versions.update(re.findall(r"GLIBC_(\d+)\.(\d+)", result.stdout))
+if not versions:
+    raise SystemExit("dynamic binary has no GLIBC symbol versions; expected a glibc binary or a static binary")
+major, minor = max((int(major), int(minor)) for major, minor in versions)
+print(f"GLIBC_{major}.{minor}")
+PY
+)
+
+python3 - "$binary_libc_requirement" <<'PY'
+import re
+import sys
+
+requirement = sys.argv[1]
+if requirement == "static":
+    raise SystemExit("static binaries are outside the glibc 2.35 release route")
+match = re.fullmatch(r"GLIBC_(\d+)\.(\d+)", requirement)
+if not match:
+    raise SystemExit(f"unsupported binary_libc_requirement: {requirement}")
+version = tuple(int(part) for part in match.groups())
+if version > (2, 35):
+    raise SystemExit(f"binary requires {requirement}, above the supported glibc 2.35 floor")
+PY
+
 output_dir=$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)
 package_name="reading-mcp-v${RELEASE_VERSION}-${PLATFORM}"
 stage="$output_dir/$package_name"
@@ -132,7 +179,8 @@ python3 - \
   "$PLATFORM" \
   "$binary_sha256" \
   "$cargo_lock_sha256" \
-  "$PACKAGING_COMMIT_SHA" <<'PY'
+  "$PACKAGING_COMMIT_SHA" \
+  "$binary_libc_requirement" <<'PY'
 import json
 import pathlib
 import sys
@@ -147,6 +195,7 @@ import sys
     binary_sha256,
     cargo_lock_sha256,
     packaging_commit_sha,
+    binary_libc_requirement,
 ) = sys.argv[1:]
 
 manifest = {
@@ -157,6 +206,7 @@ manifest = {
     "target": target,
     "platform": platform,
     "binary_sha256": binary_sha256,
+    "binary_libc_requirement": binary_libc_requirement,
     "cargo_lock_sha256": cargo_lock_sha256,
     "packaging_commit_sha": packaging_commit_sha,
 }
@@ -202,13 +252,14 @@ python3 - \
   "$RELEASE_SHA" \
   "$TARGET_TRIPLE" \
   "$PLATFORM" \
-  "$binary" <<'PY'
+  "$binary" \
+  "$binary_libc_requirement" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 
-manifest_path, version, tag, git_sha, target, platform, binary_path = sys.argv[1:]
+manifest_path, version, tag, git_sha, target, platform, binary_path, binary_libc_requirement = sys.argv[1:]
 data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
 expected = {
     "schema": "reading-mcp-release-manifest/v1",
@@ -217,6 +268,7 @@ expected = {
     "git_sha": git_sha,
     "target": target,
     "platform": platform,
+    "binary_libc_requirement": binary_libc_requirement,
 }
 for key, value in expected.items():
     if data.get(key) != value:
@@ -231,5 +283,6 @@ echo "package=$archive"
 echo "checksums=$checksums"
 echo "archive_sha256=$archive_sha256"
 echo "binary_sha256=$binary_sha256"
+echo "binary_libc_requirement=$binary_libc_requirement"
 echo "source_sha=$RELEASE_SHA"
 echo "source_tag=$RELEASE_TAG"

@@ -4,13 +4,15 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::application::get_text_units::{EffectiveTextUnitKind, TextUnitDirection};
+use crate::application::get_text_units::{
+    EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitDirection,
+};
 use crate::application::ports::{
-    ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, LexicalSearchHit,
-    LocatedRawResource, OriginalSourceRangePage, OwnedStreamUnit, ParsedCacheKey,
-    ParsedDocumentCache, Parser, RawResourceCache, RetrievalOptions, RetrievedResource, Retriever,
-    SearchHit, SearchIndex, SectionRow, SectionTextUnits, StoredStreamItem, TextUnitIndex,
-    TextUnitStreamKey, TextUnitStreamSummary,
+    ApplicationError, BodyOrderWindow, DocumentHeader, DocumentKeyRow, DocumentRepository,
+    HandleRemap, HandleRemapUnit, LexicalSearchHit, LocatedRawResource, OriginalSourceRangePage,
+    OwnedStreamUnit, ParsedCacheKey, ParsedDocumentCache, Parser, RawResourceCache,
+    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex, SectionRow,
+    SectionTextUnits, StoredStreamItem, TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use crate::domain::{
     Document, DocumentId, DocumentSegmentation, DocumentSource, NormalizedDocumentHash,
@@ -700,6 +702,21 @@ impl TextUnitIndex for ObservedTextUnitIndex {
         result
     }
 
+    async fn replace_document_segmentation_with_ingest(
+        &self,
+        document: &Arc<Document>,
+        segmentation: Arc<DocumentSegmentation>,
+        ingest_fingerprint: &str,
+    ) -> Result<(), ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .replace_document_segmentation_with_ingest(document, segmentation, ingest_fingerprint)
+            .await;
+        emit_text_unit_write(started, result.is_ok());
+        result
+    }
+
     async fn section_units(
         &self,
         document_id: &DocumentId,
@@ -793,6 +810,69 @@ impl TextUnitIndex for ObservedTextUnitIndex {
         let started = Instant::now();
         let result = self.inner.document_id_for_key(doc_key).await;
         emit_text_unit_read(started, "document_id_for_key", result.is_ok());
+        result
+    }
+
+    async fn document_key_row(
+        &self,
+        doc_key: i64,
+    ) -> Result<Option<DocumentKeyRow>, ApplicationError> {
+        let started = Instant::now();
+        let result = self.inner.document_key_row(doc_key).await;
+        emit_text_unit_read(started, "document_key_row", result.is_ok());
+        result
+    }
+
+    async fn mark_ingest_fingerprint(
+        &self,
+        document_id: &DocumentId,
+        ingest_fingerprint: &str,
+        handle_checksum: &str,
+    ) -> Result<bool, ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .mark_ingest_fingerprint(document_id, ingest_fingerprint, handle_checksum)
+            .await;
+        emit_text_unit_write(started, result.is_ok());
+        result
+    }
+
+    async fn handle_remap(
+        &self,
+        doc_key: i64,
+        source_checksum: &str,
+        source: &HandleRemapUnit,
+    ) -> Result<Option<HandleRemap>, ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .handle_remap(doc_key, source_checksum, source)
+            .await;
+        emit_text_unit_read(started, "handle_remap", result.is_ok());
+        result
+    }
+
+    async fn handle_remap_at_stream_position(
+        &self,
+        doc_key: i64,
+        source_checksum: &str,
+        section_key: i64,
+        stream_kind: RequestedTextUnitKind,
+        position: usize,
+    ) -> Result<Option<HandleRemap>, ApplicationError> {
+        let started = Instant::now();
+        let result = self
+            .inner
+            .handle_remap_at_stream_position(
+                doc_key,
+                source_checksum,
+                section_key,
+                stream_kind,
+                position,
+            )
+            .await;
+        emit_text_unit_read(started, "handle_remap_at_stream_position", result.is_ok());
         result
     }
 

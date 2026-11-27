@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::application::handle_reading::resolve_header;
+use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{DocumentRepository, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
 use crate::application::search_document::{
@@ -46,6 +47,7 @@ pub struct SearchReadingUseCase {
     repository: Arc<dyn DocumentRepository>,
     text_unit_index: Arc<dyn TextUnitIndex>,
     search_document: Arc<SearchDocumentUseCase>,
+    handle_recovery: Option<Arc<HandleRecovery>>,
 }
 
 impl SearchReadingUseCase {
@@ -58,7 +60,13 @@ impl SearchReadingUseCase {
             repository,
             text_unit_index,
             search_document,
+            handle_recovery: None,
         }
+    }
+
+    pub(crate) fn with_handle_recovery(mut self, recovery: Arc<HandleRecovery>) -> Self {
+        self.handle_recovery = Some(recovery);
+        self
     }
 
     pub async fn execute(
@@ -80,7 +88,8 @@ impl SearchReadingUseCase {
         let resolved = resolve_header(
             self.text_unit_index.as_ref(),
             &self.repository,
-            handle.document(),
+            &handle,
+            self.handle_recovery.as_deref(),
         )
         .await?;
 

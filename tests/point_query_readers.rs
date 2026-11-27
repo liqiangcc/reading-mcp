@@ -20,10 +20,10 @@ use reading_mcp::application::open_document::OpenDocumentUseCase;
 use reading_mcp::application::open_reading::{OpenReadingCommand, OpenReadingUseCase};
 use reading_mcp::application::outline_reading::{OutlineReadingCommand, OutlineReadingUseCase};
 use reading_mcp::application::ports::{
-    ApplicationError, BodyOrderWindow, DocumentHeader, DocumentRepository, Parser,
-    RetrievalOptions, RetrievedResource, Retriever, SearchHit, SearchIndex, SectionRow,
-    SectionTextUnits, SourcePolicy, StoredStreamItem, TextUnitIndex, TextUnitStreamKey,
-    TextUnitStreamSummary,
+    ApplicationError, BodyOrderWindow, DocumentHeader, DocumentKeyRow, DocumentRepository,
+    HandleRemap, HandleRemapUnit, Parser, RetrievalOptions, RetrievedResource, Retriever,
+    SearchHit, SearchIndex, SectionRow, SectionTextUnits, SourcePolicy, StoredStreamItem,
+    TextUnitIndex, TextUnitStreamKey, TextUnitStreamSummary,
 };
 use reading_mcp::application::read_reading::{ReadReadingCommand, ReadReadingUseCase};
 use reading_mcp::application::search_document::{SearchDocumentCommand, SearchDocumentUseCase};
@@ -425,6 +425,19 @@ impl TextUnitIndex for KeyedTextUnitIndex {
             return Ok(None);
         }
         Ok(self.sections.read().expect("lock").keys().next().cloned())
+    }
+
+    async fn document_key_row(
+        &self,
+        doc_key: i64,
+    ) -> Result<Option<DocumentKeyRow>, ApplicationError> {
+        Ok(self
+            .document_id_for_key(doc_key)
+            .await?
+            .map(|document_id| DocumentKeyRow {
+                document_id,
+                ingest_fingerprint: None,
+            }))
     }
 
     async fn section_key(
@@ -1827,6 +1840,47 @@ impl TextUnitIndex for TallyIndex {
         self.inner.document_id_for_key(doc_key).await
     }
 
+    async fn document_key_row(
+        &self,
+        doc_key: i64,
+    ) -> Result<Option<DocumentKeyRow>, ApplicationError> {
+        self.tally.record("index.document_key_row", 1);
+        self.inner.document_key_row(doc_key).await
+    }
+
+    async fn handle_remap(
+        &self,
+        doc_key: i64,
+        source_checksum: &str,
+        source: &HandleRemapUnit,
+    ) -> Result<Option<HandleRemap>, ApplicationError> {
+        self.tally.record("index.handle_remap", 1);
+        self.inner
+            .handle_remap(doc_key, source_checksum, source)
+            .await
+    }
+
+    async fn handle_remap_at_stream_position(
+        &self,
+        doc_key: i64,
+        source_checksum: &str,
+        section_key: i64,
+        stream_kind: RequestedTextUnitKind,
+        position: usize,
+    ) -> Result<Option<HandleRemap>, ApplicationError> {
+        self.tally
+            .record("index.handle_remap_at_stream_position", 1);
+        self.inner
+            .handle_remap_at_stream_position(
+                doc_key,
+                source_checksum,
+                section_key,
+                stream_kind,
+                position,
+            )
+            .await
+    }
+
     async fn section_key(
         &self,
         document_id: &DocumentId,
@@ -2012,6 +2066,28 @@ async fn the_read_path_reads_the_same_rows_for_500_and_20000_sections() {
         "a read of 20,000 sections must read the same rows as a read of 500\n\
          500 sections (call, calls, rows): {small:?}\n\
          20,000 sections (call, calls, rows): {large:?}"
+    );
+}
+
+/// A checksum-fresh handle must keep the old hot path: one document-key lookup, and none of the
+/// remap probes that only a stale answer needs.
+#[tokio::test]
+async fn a_fresh_read_does_not_query_handle_remaps() {
+    let tally = read_path_tally(2, 2).await;
+    let count = |name: &str| {
+        tally
+            .iter()
+            .find(|(call, _, _)| call == name)
+            .map(|(_, count, _)| *count)
+            .unwrap_or(0)
+    };
+    assert_eq!(count("index.document_key_row"), 1, "{tally:?}");
+    assert_eq!(count("index.document_id_for_key"), 0, "{tally:?}");
+    assert_eq!(count("index.handle_remap"), 0, "{tally:?}");
+    assert_eq!(
+        count("index.handle_remap_at_stream_position"),
+        0,
+        "{tally:?}"
     );
 }
 

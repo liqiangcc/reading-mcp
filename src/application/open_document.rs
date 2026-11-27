@@ -15,7 +15,7 @@ use crate::application::text_unit_stream::{TEXT_UNIT_STORE_VERSION, TEXT_UNIT_ST
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, MediaType, NORMALIZATION_VERSION,
     NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE, NormalizedDocumentHash,
-    TEXT_SEGMENTATION_VERSION,
+    PDF_SENTENCE_RULES_VERSION, TEXT_SEGMENTATION_VERSION,
 };
 
 /// Version of the stored open result. Bump it when the result shape or its meaning changes.
@@ -40,6 +40,62 @@ pub struct OpenDocumentResult {
     pub normalized_text_coordinate_space: String,
     pub section_count: usize,
     pub reading_profile: ReadingProfile,
+}
+
+/// Test-only extraction variants let integration tests simulate a parser deploy without changing
+/// the source bytes. Production deployments never set this variable; the value is part of the
+/// ingest fingerprint in `runtime`, so changing it misses the open-result cache exactly like a real
+/// extraction-version bump.
+fn apply_test_extraction_variant(document: &mut crate::domain::Document) {
+    let variant = std::env::var("READING_MCP_TEST_EXTRACTION_VARIANT").unwrap_or_default();
+    fn transform(section: &mut crate::domain::Section, variant: &str) {
+        section.content = match variant {
+            "spaces" | "spaces2" => {
+                let spaces = if variant == "spaces2" { 2 } else { 1 };
+                let mut content = String::with_capacity(section.content.len() * 2);
+                for ch in section.content.chars() {
+                    content.push(ch);
+                    if ch.is_alphanumeric() {
+                        for _ in 0..spaces {
+                            content.push(' ');
+                        }
+                    }
+                }
+                content
+            }
+            // Whitespace decides whether an ASCII period is terminal. These variants therefore
+            // exercise merged and split sentences while every non-whitespace character stays put.
+            "tight" => section.content.replace(". ", "."),
+            "loose" => {
+                let chars = section.content.chars().collect::<Vec<_>>();
+                let mut content = String::with_capacity(section.content.len() * 2);
+                for (index, ch) in chars.iter().enumerate() {
+                    content.push(*ch);
+                    if *ch == '.'
+                        && chars
+                            .get(index + 1)
+                            .is_some_and(|next| next.is_ascii_alphabetic())
+                    {
+                        content.push(' ');
+                    }
+                }
+                content
+            }
+            // Blank lines decide fallback paragraph boundaries. Both directions are whitespace-only.
+            "parasplit" => section.content.replace(". ", ".\n\n"),
+            "parajoin" => section.content.replace("\n\n", " "),
+            // Negative controls: these alter non-whitespace text and therefore must fail closed.
+            "delete" => section.content.replacen('x', "", 1),
+            "change" => section.content.replacen('x', "z", 1),
+            _ => return,
+        };
+        for child in &mut section.children {
+            transform(child, variant);
+        }
+    }
+    for section in &mut document.root_sections {
+        transform(section, &variant);
+    }
 }
 
 pub struct OpenDocumentUseCase {
@@ -129,6 +185,21 @@ impl OpenDocumentUseCase {
         )
     }
 
+    /// The fingerprint this binary assigns to newly ingested segmentation rows, when open results
+    /// are enabled. It is deliberately narrower than the open-result key: search-index, profile,
+    /// package and open-result shape changes do not alter the stored text/layout units, so they
+    /// must not cause a lazy re-ingest of every document on its first handle read. Parser and
+    /// extraction configuration arrives in `ingest_fingerprint`; the versions here cover the
+    /// normalization, hashing, segmentation, PDF sentence-boundary and unit-stream semantics that
+    /// decide those rows.
+    pub fn current_ingest_fingerprint(&self) -> Option<String> {
+        self.open_results.as_ref().map(|(_, ingest_fingerprint)| {
+            format!(
+                "text-unit-ingest/v1|{NORMALIZATION_VERSION}|{NORMALIZED_DOCUMENT_HASH_VERSION}|{TEXT_SEGMENTATION_VERSION}|{PDF_SENTENCE_RULES_VERSION}|{TEXT_UNIT_STREAM_VERSION}|{ingest_fingerprint}"
+            )
+        })
+    }
+
     pub async fn execute(
         &self,
         command: OpenDocumentCommand,
@@ -213,15 +284,21 @@ impl OpenDocumentUseCase {
             return Err(ApplicationError::OcrTimeout);
         }
 
-        let (document, parsed_segmentation) = self.parser.parse_with_segmentation(resource).await?;
+        let (mut document, parsed_segmentation) =
+            self.parser.parse_with_segmentation(resource).await?;
+        apply_test_extraction_variant(&mut document);
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::ParseFailed)?;
         // A parser that had to segment the document already (EPUB validation does) hands that
-        // segmentation back, so the open never builds the same one twice.
+        // segmentation back, so the open never builds the same one twice. A test extraction
+        // variant is the exception: it changes the text after parsing, so only a segmentation
+        // built afterwards matches the ranges of the document being stored.
+        let test_variant_active = std::env::var("READING_MCP_TEST_EXTRACTION_VARIANT")
+            .is_ok_and(|variant| !variant.is_empty());
         let segmentation = match parsed_segmentation {
-            Some(segmentation) => segmentation,
-            None => Arc::new(document.try_segmentation().map_err(|error| {
+            Some(segmentation) if !test_variant_active => segmentation,
+            _ => Arc::new(document.try_segmentation().map_err(|error| {
                 ApplicationError::TextUnitIndexFailed(format!(
                     "cannot build current Paragraph coverage from persisted block evidence: {error}"
                 ))
@@ -267,9 +344,19 @@ impl OpenDocumentUseCase {
         // `document_json` only when `section_text_v3` already holds the text of this very document
         // version, and reads it back from there on load.
         if let Some(index) = &self.text_unit_index {
-            index
-                .replace_document_segmentation(&document, Arc::clone(&segmentation))
-                .await?;
+            if let Some(fingerprint) = self.current_ingest_fingerprint() {
+                index
+                    .replace_document_segmentation_with_ingest(
+                        &document,
+                        Arc::clone(&segmentation),
+                        &fingerprint,
+                    )
+                    .await?;
+            } else {
+                index
+                    .replace_document_segmentation(&document, Arc::clone(&segmentation))
+                    .await?;
+            }
         }
         self.repository.save_shared(Arc::clone(&document)).await?;
         self.search_index

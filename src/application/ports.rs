@@ -41,6 +41,42 @@ pub struct RetrievedResource {
     pub metadata: BTreeMap<String, String>,
 }
 
+/// The document identity row behind a v2 handle's `doc_key`, plus the ingest fingerprint stored
+/// beside it. Reading this row is the same lookup the handle needed anyway; the fingerprint lets a
+/// reader notice a parser deploy without adding a hot-path query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentKeyRow {
+    pub document_id: DocumentId,
+    pub ingest_fingerprint: Option<String>,
+}
+
+/// The unit a handle remap names. Document and section structure handles are units of the tree;
+/// paragraph and sentence handles are text units.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HandleRemapUnit {
+    Document,
+    Section {
+        section_key: i64,
+    },
+    Paragraph {
+        section_key: i64,
+        paragraph_index: usize,
+    },
+    Sentence {
+        section_key: i64,
+        paragraph_index: usize,
+        sentence_index: usize,
+    },
+}
+
+/// One stored remap step. The target checksum is the document identity checksum under which
+/// `target` was minted; a reader follows another step when that identity has itself been replaced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandleRemap {
+    pub target_checksum: String,
+    pub target: HandleRemapUnit,
+}
+
 #[async_trait]
 pub trait OcrEvidenceStore: Send + Sync {
     async fn put_immutable(&self, identity: &str, bytes: &[u8])
@@ -1111,6 +1147,19 @@ pub trait TextUnitIndex: Send + Sync {
             .await
     }
 
+    /// Persists a document's segmentation and the ingest fingerprint that produced it. Stores that
+    /// do not track ingest metadata use the ordinary write; the SQLite store overrides this so the
+    /// first read after a parser deploy can re-ingest without waiting for an explicit `open`.
+    async fn replace_document_segmentation_with_ingest(
+        &self,
+        document: &Arc<Document>,
+        segmentation: Arc<DocumentSegmentation>,
+        _ingest_fingerprint: &str,
+    ) -> Result<(), ApplicationError> {
+        self.replace_document_segmentation(document, segmentation)
+            .await
+    }
+
     /// Units of one section as persisted by `replace_document_sets`, or `None` when this document's units are not
     /// stored for the current `TEXT_SEGMENTATION_VERSION`.
     async fn section_units(
@@ -1249,6 +1298,58 @@ pub trait TextUnitIndex: Send + Sync {
         &self,
         _doc_key: i64,
     ) -> Result<Option<DocumentId>, ApplicationError> {
+        Ok(None)
+    }
+
+    /// The document row stored under `doc_key`. The default derives it from
+    /// [`Self::document_id_for_key`] and carries no ingest metadata; stores that keep the metadata
+    /// beside the key override this without costing the handle path another query.
+    async fn document_key_row(
+        &self,
+        doc_key: i64,
+    ) -> Result<Option<DocumentKeyRow>, ApplicationError> {
+        Ok(self
+            .document_id_for_key(doc_key)
+            .await?
+            .map(|document_id| DocumentKeyRow {
+                document_id,
+                ingest_fingerprint: None,
+            }))
+    }
+
+    /// Marks a document whose stored rows are already current but whose ingest metadata predates
+    /// the columns that record it. Returns whether the metadata was written. This is repair metadata
+    /// only: it never changes text, layout, keys or handles.
+    async fn mark_ingest_fingerprint(
+        &self,
+        _document_id: &DocumentId,
+        _ingest_fingerprint: &str,
+        _handle_checksum: &str,
+    ) -> Result<bool, ApplicationError> {
+        Ok(false)
+    }
+
+    /// The stored remap of one stale handle under `source_checksum`, or `None` when the old unit was
+    /// deleted, changed beyond whitespace, ambiguous, or never mapped.
+    async fn handle_remap(
+        &self,
+        _doc_key: i64,
+        _source_checksum: &str,
+        _source: &HandleRemapUnit,
+    ) -> Result<Option<HandleRemap>, ApplicationError> {
+        Ok(None)
+    }
+
+    /// The remap of the stream item at `position` of one stale section stream. `position` is an
+    /// item position, not the exclusive end a `b:` cursor carries; the caller subtracts one.
+    async fn handle_remap_at_stream_position(
+        &self,
+        _doc_key: i64,
+        _source_checksum: &str,
+        _section_key: i64,
+        _stream_kind: RequestedTextUnitKind,
+        _position: usize,
+    ) -> Result<Option<HandleRemap>, ApplicationError> {
         Ok(None)
     }
 

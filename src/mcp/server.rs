@@ -29,7 +29,8 @@ use crate::runtime::RuntimeConfig;
 use super::v2_contracts::{
     BrowseRequest, CiteRequest, CiteView, FlatReadView, OpenRequest, OpenView, OutlineRequest,
     OutlineView, ReadRequest, ReadView, SearchRequest, SearchView, SourceViewRequest, error_result,
-    retry_for, text_result, too_long_retry,
+    retry_for, stale_cite_retry, stale_outline_retry, stale_read_retry, stale_search_retry,
+    stale_source_view_retry, text_result, too_long_retry,
 };
 
 #[derive(Clone)]
@@ -169,6 +170,8 @@ impl ReadingMcpServer {
             Err(error) => {
                 let retry = if error.code == ReadingErrorCode::TooLong {
                     too_long_retry(&request, &error)
+                } else if error.code == ReadingErrorCode::StaleHandle {
+                    stale_read_retry(&request, &error)
                 } else {
                     retry_for(&error)
                 };
@@ -244,14 +247,17 @@ impl ReadingMcpServer {
         Parameters(request): Parameters<OutlineRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let command = OutlineReadingCommand {
-            at: request.at,
+            at: request.at.clone(),
             depth: request.depth,
             limit: request.limit,
-            cursor: request.cursor,
+            cursor: request.cursor.clone(),
         };
         Ok(match self.outline_reading.execute(command).await {
             Ok(result) => text_result(&OutlineView::from(result)),
-            Err(error) => error_result(&error, retry_for(&error)),
+            Err(error) => error_result(
+                &error,
+                stale_outline_retry(&request, &error).or_else(|| retry_for(&error)),
+            ),
         })
     }
 
@@ -263,13 +269,16 @@ impl ReadingMcpServer {
         Parameters(request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let command = SearchReadingCommand {
-            doc: request.doc,
-            query: request.query,
+            doc: request.doc.clone(),
+            query: request.query.clone(),
             limit: request.limit,
         };
         Ok(match self.search_reading.execute(command).await {
             Ok(result) => text_result(&SearchView::from(result)),
-            Err(error) => error_result(&error, retry_for(&error)),
+            Err(error) => error_result(
+                &error,
+                stale_search_retry(&request, &error).or_else(|| retry_for(&error)),
+            ),
         })
     }
 
@@ -282,7 +291,10 @@ impl ReadingMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(match self.cite_reading.execute(&request.at).await {
             Ok(result) => text_result(&CiteView::from(result)),
-            Err(error) => error_result(&error, retry_for(&error)),
+            Err(error) => error_result(
+                &error,
+                stale_cite_retry(&request, &error).or_else(|| retry_for(&error)),
+            ),
         })
     }
 
@@ -295,7 +307,12 @@ impl ReadingMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let locator = match self.cite_reading.source_locator(&request.at).await {
             Ok(locator) => locator,
-            Err(error) => return Ok(error_result(&error, retry_for(&error))),
+            Err(error) => {
+                return Ok(error_result(
+                    &error,
+                    stale_source_view_retry(&request, &error).or_else(|| retry_for(&error)),
+                ));
+            }
         };
         let result = match self
             .source_view

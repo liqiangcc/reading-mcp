@@ -11,6 +11,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 use crate::application::handle_reading::{ResolvedHeader, resolve_header, resolve_section};
+use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{ApplicationError, DocumentRepository, SectionRow, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::DocumentView;
@@ -54,6 +55,7 @@ pub struct OutlineReadingResult {
 pub struct OutlineReadingUseCase {
     repository: Arc<dyn DocumentRepository>,
     text_unit_index: Arc<dyn TextUnitIndex>,
+    handle_recovery: Option<Arc<HandleRecovery>>,
 }
 
 impl OutlineReadingUseCase {
@@ -64,7 +66,13 @@ impl OutlineReadingUseCase {
         Self {
             repository,
             text_unit_index,
+            handle_recovery: None,
         }
+    }
+
+    pub(crate) fn with_handle_recovery(mut self, recovery: Arc<HandleRecovery>) -> Self {
+        self.handle_recovery = Some(recovery);
+        self
     }
 
     pub async fn execute(
@@ -92,7 +100,8 @@ impl OutlineReadingUseCase {
         let resolved = resolve_header(
             self.text_unit_index.as_ref(),
             &self.repository,
-            handle.document(),
+            &handle,
+            self.handle_recovery.as_deref(),
         )
         .await?;
         let (scope_key, mut preorder) = match &handle {

@@ -42,11 +42,13 @@ use super::common::{content_hash, document_id, slugify, title_from_metadata};
 /// older PDF handle answers `stale_handle`.
 ///
 /// v6 -> v7 is the deploy-time bump for #276 (PDF word spacing) and #282 (the CJK gap guard):
-/// word-gap spaces are placed by glyph positions instead of trusting the text layer, and no space
-/// is inserted between two CJK characters, so the same bytes extract to different text and a stored
-/// PDF re-ingests. The bump keys the parsed cache and the stored open results, so every older PDF
-/// re-extracts on first access; the handle remap makes every older PDF handle answer `stale_handle`
-/// with a `retry` pointing at the new handle.
+/// #276 treats real-valued `TJ` word-gap adjustments (`-314.006`) as word gaps, as lopdf already
+/// did for integers, and adds no gap space next to existing whitespace; #282 adds no gap space
+/// between two CJK characters. The same bytes can extract to different text, so the bump keys the
+/// parsed cache and the stored open results and every older PDF re-extracts on first access. Its
+/// handles change only if its normalized text changed: a changed handle answers `stale_handle` with
+/// a `retry` when the remap can prove where the text is (#283), while a PDF whose text is identical
+/// keeps its handles (verified on CSAPP and Fama-French).
 pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v7";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";

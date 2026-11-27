@@ -14,7 +14,8 @@
 //! `-416.003` gets no space while a ragged line whose gaps are `-416` does. On NBER
 //! w24458 that is most of the body text ("China'smarketandinvestorsareseparated from the
 //! restoftheworld"). The walk below is lopdf's, unchanged, except that the space test
-//! reads the number as a float.
+//! reads the number as a float, at 0.12 em (`REAL_WORD_GAP_THOUSANDTHS`), while an
+//! `Integer` keeps lopdf's own -100 so an integer-only file publishes byte-identical text.
 //!
 //! Two guards keep the added spaces honest:
 //!
@@ -29,10 +30,6 @@ use std::collections::BTreeMap;
 
 use lopdf::content::Content;
 use lopdf::{Document as LopdfDocument, Encoding, Error, Object, ObjectId, Result};
-
-/// A `TJ` adjustment at or below this many thousandths of an em separates two words.
-/// lopdf's own threshold, kept so an `Integer` gap publishes exactly the text it did.
-const WORD_GAP_THOUSANDTHS: f32 = 100.0;
 
 pub(super) fn extract_text_chunks_with_spacing(
     pdf: &LopdfDocument,
@@ -162,6 +159,17 @@ fn extract_page_chunks(
     Ok(chunks)
 }
 
+/// lopdf's own `Integer` word-space threshold, kept exactly: every file whose gaps are all
+/// integers publishes byte-identical text.
+const INTEGER_WORD_GAP_THOUSANDTHS: i64 = 100;
+
+/// The threshold for a `Real` adjustment: 0.12 em, the calibration PDF-7b-A fixes for a word
+/// gap. A font's space advance is 0.2-0.35 em and justification only widens it, while kerning
+/// and tracking are a few hundredths of an em (the corpus' largest kern pair is 0.08 em) and
+/// the widest gap found inside a reference word is 0.1098 em (`mo|del` in 2410.05294, which
+/// PyMuPDF renders as one word).
+const REAL_WORD_GAP_THOUSANDTHS: f32 = 120.0;
+
 /// lopdf's `collect_text`, with the word-space test widened to `Real` adjustments and
 /// every inserted space recorded in `inserted_gaps` (its byte index in `text`).
 fn collect_text(
@@ -179,11 +187,11 @@ fn collect_text(
                 collect_text(text, inserted_gaps, encoding, array)?;
                 text.push(' ');
             }
-            Object::Integer(value) if *value < -100 => {
+            Object::Integer(value) if *value < -INTEGER_WORD_GAP_THOUSANDTHS => {
                 text.push(' ');
             }
             Object::Real(value)
-                if *value < -WORD_GAP_THOUSANDTHS
+                if *value < -REAL_WORD_GAP_THOUSANDTHS
                     && !text.is_empty()
                     && !text.ends_with(char::is_whitespace) =>
             {
@@ -272,6 +280,14 @@ mod tests {
             string("systems"),
         ]));
         assert_eq!(text, "financial systems ");
+    }
+
+    #[test]
+    fn a_gap_inside_a_word_is_not_a_space() {
+        // 2410.05294 carries a -109.8 adjustment between `mo` and `del`: the rendered gap is
+        // 0.11 em, and PyMuPDF keeps `model` as one word.
+        let text = collect(&tj(vec![string("mo"), Object::Real(-109.8), string("del")]));
+        assert_eq!(text, "model ");
     }
 
     #[test]

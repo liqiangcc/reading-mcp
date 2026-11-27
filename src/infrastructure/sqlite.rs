@@ -917,7 +917,23 @@ impl DocumentRepository for SqliteDocumentRepository {
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::RepositoryFailed)?;
-        let normalized_document_hash = document.normalized_document_hash();
+        // The hash and the body order are pure functions of the document — `epub_structure_map`
+        // parsing, block-map validation and whole-book hashing are the largest metadata work of a
+        // big book — so they are computed on a blocking worker before the writer lock is taken and
+        // their results passed into the closure. What is written does not change.
+        let blocking_document = Arc::clone(&document);
+        let (normalized_document_hash, body_order) = tokio::task::spawn_blocking(move || {
+            (
+                blocking_document.normalized_document_hash(),
+                crate::application::body_order_ids(&blocking_document),
+            )
+        })
+        .await
+        .map_err(|_| {
+            ApplicationError::RepositoryFailed(
+                "document projection worker terminated unexpectedly".into(),
+            )
+        })?;
         run_sqlite(
             &self.connection,
             ApplicationError::RepositoryFailed,
@@ -940,7 +956,6 @@ impl DocumentRepository for SqliteDocumentRepository {
                 // The body order costs an `epub_structure_map` parse, which is the largest metadata
                 // value of a book, so it is computed once here — from the document in hand — and
                 // stored, instead of on every `read`.
-                let body_order = crate::application::body_order_ids(&document);
                 let json = crate::json::to_string_exact(&StoredDocument::with_stores(
                     &document,
                     content_store,
@@ -7499,12 +7514,23 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         document: &Arc<Document>,
         segmentation: Arc<DocumentSegmentation>,
     ) -> Result<(), ApplicationError> {
+        // Hashing a whole book is the largest pure-CPU cost of this write (`count_chars` frames on
+        // the report's thread dump). It is computed once, on a blocking worker, before the writer
+        // lock is taken, so the lock is only held for the database work itself.
+        let hash_document = Arc::clone(document);
+        let normalized_document_hash =
+            tokio::task::spawn_blocking(move || hash_document.normalized_document_hash())
+                .await
+                .map_err(|_| {
+                    ApplicationError::TextUnitIndexFailed(
+                        "document hashing worker terminated unexpectedly".into(),
+                    )
+                })?;
         let document = Arc::clone(document);
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
-                let normalized_document_hash = document.normalized_document_hash();
                 let sections = segmentation
                     .sections
                     .iter()
@@ -7530,13 +7556,22 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         segmentation: Arc<DocumentSegmentation>,
         ingest_fingerprint: &str,
     ) -> Result<(), ApplicationError> {
+        // Same as `replace_document_segmentation`: the hash is computed outside the writer lock.
+        let hash_document = Arc::clone(document);
+        let normalized_document_hash =
+            tokio::task::spawn_blocking(move || hash_document.normalized_document_hash())
+                .await
+                .map_err(|_| {
+                    ApplicationError::TextUnitIndexFailed(
+                        "document hashing worker terminated unexpectedly".into(),
+                    )
+                })?;
         let document = Arc::clone(document);
         let ingest_fingerprint = ingest_fingerprint.to_owned();
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
-                let normalized_document_hash = document.normalized_document_hash();
                 let sections = segmentation
                     .sections
                     .iter()

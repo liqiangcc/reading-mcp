@@ -296,25 +296,61 @@ impl OpenDocumentUseCase {
         // built afterwards matches the ranges of the document being stored.
         let test_variant_active = std::env::var("READING_MCP_TEST_EXTRACTION_VARIANT")
             .is_ok_and(|variant| !variant.is_empty());
-        let segmentation = match parsed_segmentation {
-            Some(segmentation) if !test_variant_active => segmentation,
-            _ => Arc::new(document.try_segmentation().map_err(|error| {
-                ApplicationError::TextUnitIndexFailed(format!(
-                    "cannot build current Paragraph coverage from persisted block evidence: {error}"
+        let (document, segmentation) = match parsed_segmentation {
+            Some(segmentation) if !test_variant_active => (document, segmentation),
+            _ => {
+                // Segmenting a whole book is seconds of pure CPU on a big EPUB. It runs on the
+                // blocking pool so no async worker is parked for it: the values are identical,
+                // only the thread changes. The document rides along so the closure owns it for
+                // the call and hands it straight back.
+                tokio::task::spawn_blocking(move || {
+                    let segmentation = Arc::new(document.try_segmentation().map_err(|error| {
+                        ApplicationError::TextUnitIndexFailed(format!(
+                            "cannot build current Paragraph coverage from persisted block evidence: {error}"
+                        ))
+                    })?);
+                    Ok::<_, ApplicationError>((document, segmentation))
+                })
+                .await
+                .map_err(|_| {
+                    ApplicationError::TextUnitIndexFailed(
+                        "segmentation worker terminated unexpectedly".into(),
+                    )
+                })??
+            }
+        };
+        // The hash, the reliability inspection and the reading profile are pure functions of the
+        // document and its segmentation — a big book makes them a second of blocking CPU — so the
+        // whole chain runs on one blocking worker, once, and the async worker only awaits it.
+        let inspector = self.reliability_inspector.clone();
+        let precise_lexical_candidates = self.search_index.supports_precise_lexical_candidates();
+        let chain_document = Arc::new(document);
+        let chain_segmentation = Arc::clone(&segmentation);
+        let (document, normalized_document_hash, reading_profile) =
+            tokio::task::spawn_blocking(move || {
+                let normalized_document_hash = chain_document.normalized_document_hash();
+                let reliability = match &inspector {
+                    Some(inspector) => {
+                        inspector.inspect_with_segmentation(&chain_document, &chain_segmentation)?
+                    }
+                    None => ReliabilitySummary::not_applicable(),
+                };
+                let reading_profile = build_reading_profile(
+                    &chain_document,
+                    &chain_segmentation,
+                    reliability,
+                    precise_lexical_candidates,
+                )?;
+                Ok::<_, ApplicationError>((
+                    chain_document,
+                    normalized_document_hash,
+                    reading_profile,
                 ))
-            })?),
-        };
-        let normalized_document_hash = document.normalized_document_hash();
-        let reliability = match &self.reliability_inspector {
-            Some(inspector) => inspector.inspect_with_segmentation(&document, &segmentation)?,
-            None => ReliabilitySummary::not_applicable(),
-        };
-        let reading_profile = build_reading_profile(
-            &document,
-            &segmentation,
-            reliability,
-            self.search_index.supports_precise_lexical_candidates(),
-        )?;
+            })
+            .await
+            .map_err(|_| {
+                ApplicationError::IndexFailed("profiling worker terminated unexpectedly".into())
+            })??;
         let result = OpenDocumentResult {
             document_id: document.id.clone(),
             source: document.source.clone(),
@@ -334,7 +370,6 @@ impl OpenDocumentUseCase {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(ApplicationError::OcrTimeout);
         }
-        let document = Arc::new(document);
         // Drop any stored result before re-indexing, so a crash part way through can never leave a row that
         // claims the document is complete.
         if let Some((store, _)) = &self.open_results {

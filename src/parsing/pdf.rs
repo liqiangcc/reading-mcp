@@ -346,9 +346,11 @@ fn extract_page_texts_raw(
     for page_number in page_numbers {
         let mut fragments = Vec::new();
         let mut first_error = None;
-        for fragment in
-            pdf.extract_text_chunks_with_limit(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES)
-        {
+        for fragment in super::pdf_text_extract::extract_text_chunks_with_limit(
+            pdf,
+            &[*page_number],
+            MAX_PAGE_DECOMPRESSED_BYTES,
+        ) {
             match fragment {
                 Ok(fragment) => fragments.push(fragment),
                 // The whole page's text is the error, exactly as the concatenating variant
@@ -1843,6 +1845,50 @@ mod tests {
         );
 
         assert_eq!(page_texts(&document)[0].text, "AB");
+    }
+
+    #[test]
+    fn real_valued_tj_word_gaps_are_extracted_as_spaces() {
+        let mut document = LopdfDocument::with_version("1.5");
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let string = |text: &str| Object::String(text.as_bytes().to_vec(), StringFormat::Literal);
+        add_page(
+            &mut document,
+            vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), 720.into()]),
+                Operation::new(
+                    "TJ",
+                    vec![Object::Array(vec![
+                        string("economic"),
+                        Object::Real(-314.006),
+                        string("and"),
+                        Object::Real(-314.006),
+                        string("financial"),
+                        Object::Real(-431.996),
+                        string("systems."),
+                        Object::Real(-431.996),
+                        string("W"),
+                        Object::Real(81.998),
+                        string("e"),
+                        Object::Real(-313.997),
+                        string("explore"),
+                    ])],
+                ),
+                Operation::new("ET", vec![]),
+            ],
+            dictionary! { "Font" => dictionary! { "F1" => font_id } },
+        );
+
+        assert_eq!(
+            page_texts(&document)[0].text,
+            "economic and financial systems. We explore"
+        );
     }
 
     #[test]

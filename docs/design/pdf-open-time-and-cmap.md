@@ -2,7 +2,9 @@
 
 Measurement and diagnosis only. **No product code changed**: the new files are
 `scripts/pdf-open-profile.py`, `scripts/pdf-cmap-probe.py` and
-`.github/workflows/pdf-open-profile.yml`. Every number below comes from run
+`.github/workflows/pdf-open-profile.yml` (the workflow was removed once this PDF-2a measurement
+was done; `CPU profile` (`.github/workflows/cpu-profile.yml`), which shares its build shape,
+covers new open-time questions). Every number below comes from run
 [39775360134](https://github.com/liqiangcc/reading-mcp/actions/runs/39775360134)
 (`pdf-open-profile.yml`, commit `5ae595f` of `bench/pdf2a-open-time-cmap`; the only commits after
 it are this note and the PR body, which change no code), unless a sentence says otherwise. Two earlier runs of the same code ([39773370640](https://github.com/liqiangcc/reading-mcp/actions/runs/39773370640)

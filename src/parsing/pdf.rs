@@ -368,15 +368,14 @@ fn extract_page_texts_raw(
 ) -> (Vec<PageText>, Vec<String>) {
     let mut pages = Vec::with_capacity(page_numbers.len());
     let mut errors = Vec::new();
+    // One walk for the whole document: a page's fonts are the previous page's
+    // fonts, and a CMap is expensive to parse.
+    let mut walk = super::pdf_text_extract::TextWalk::new(pdf);
 
     for page_number in page_numbers {
         let mut fragments = Vec::new();
         let mut first_error = None;
-        for fragment in super::pdf_text_extract::extract_text_chunks_with_limit(
-            pdf,
-            &[*page_number],
-            MAX_PAGE_DECOMPRESSED_BYTES,
-        ) {
+        for fragment in walk.chunks(&[*page_number], MAX_PAGE_DECOMPRESSED_BYTES) {
             match fragment {
                 Ok(fragment) => fragments.push(fragment),
                 // The whole page's text is the error, exactly as the concatenating variant

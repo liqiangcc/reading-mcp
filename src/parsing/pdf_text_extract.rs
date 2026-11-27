@@ -25,30 +25,48 @@ use lopdf::{Dictionary, Document as LopdfDocument, Encoding, Error, Object, Obje
 /// negative values are ordinary kerning and never reach this threshold.
 const TJ_WORD_GAP_THRESHOLD: f32 = 100.0;
 
-/// The page text chunks of `page_numbers`, with the same chunk boundaries, error ordering and
-/// decompression limit as `Document::extract_text_chunks_with_limit`.
-pub(super) fn extract_text_chunks_with_limit(
-    pdf: &LopdfDocument,
-    page_numbers: &[u32],
-    max_decompressed_size: usize,
-) -> Vec<Result<String>> {
-    let pages = pdf.get_pages();
-    let mut encodings = FontEncodings::default();
-    page_numbers
-        .iter()
-        .flat_map(|page_number| {
-            match extract_text_chunks_from_page(
-                pdf,
-                &pages,
-                *page_number,
-                max_decompressed_size,
-                &mut encodings,
-            ) {
-                Ok(chunks) => chunks,
-                Err(error) => vec![Err(error)],
-            }
-        })
-        .collect()
+/// One document's page text walk, keeping the font encodings it has already
+/// resolved: the caller walks the pages one at a time, so the memo has to live
+/// across those calls to be worth anything.
+pub(super) struct TextWalk<'a> {
+    pdf: &'a LopdfDocument,
+    pages: BTreeMap<u32, lopdf::ObjectId>,
+    encodings: FontEncodings<'a>,
+}
+
+impl<'a> TextWalk<'a> {
+    pub(super) fn new(pdf: &'a LopdfDocument) -> Self {
+        Self {
+            pdf,
+            pages: pdf.get_pages(),
+            encodings: FontEncodings::default(),
+        }
+    }
+
+    /// The page text chunks of `page_numbers`, with the same chunk boundaries,
+    /// error ordering and decompression limit as
+    /// `Document::extract_text_chunks_with_limit`.
+    pub(super) fn chunks(
+        &mut self,
+        page_numbers: &[u32],
+        max_decompressed_size: usize,
+    ) -> Vec<Result<String>> {
+        page_numbers
+            .iter()
+            .flat_map(|page_number| {
+                match extract_text_chunks_from_page(
+                    self.pdf,
+                    &self.pages,
+                    *page_number,
+                    max_decompressed_size,
+                    &mut self.encodings,
+                ) {
+                    Ok(chunks) => chunks,
+                    Err(error) => vec![Err(error)],
+                }
+            })
+            .collect()
+    }
 }
 
 /// The encodings of the fonts one document puts on its pages, resolved once per

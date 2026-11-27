@@ -15,7 +15,7 @@ use crate::application::text_unit_stream::{TEXT_UNIT_STORE_VERSION, TEXT_UNIT_ST
 use crate::domain::{
     ContentHash, DocumentId, DocumentSource, MediaType, NORMALIZATION_VERSION,
     NORMALIZED_DOCUMENT_HASH_VERSION, NORMALIZED_TEXT_COORDINATE_SPACE, NormalizedDocumentHash,
-    TEXT_SEGMENTATION_VERSION,
+    PDF_SENTENCE_RULES_VERSION, TEXT_SEGMENTATION_VERSION,
 };
 
 /// Version of the stored open result. Bump it when the result shape or its meaning changes.
@@ -185,13 +185,19 @@ impl OpenDocumentUseCase {
         )
     }
 
-    /// The fingerprint this binary assigns to newly ingested rows, when open results are enabled.
-    /// Handle recovery compares the stored row with exactly the same string the open-result cache
-    /// uses, so a parser deploy is visible without another hot-path store query.
+    /// The fingerprint this binary assigns to newly ingested segmentation rows, when open results
+    /// are enabled. It is deliberately narrower than the open-result key: search-index, profile,
+    /// package and open-result shape changes do not alter the stored text/layout units, so they
+    /// must not cause a lazy re-ingest of every document on its first handle read. Parser and
+    /// extraction configuration arrives in `ingest_fingerprint`; the versions here cover the
+    /// normalization, hashing, segmentation, PDF sentence-boundary and unit-stream semantics that
+    /// decide those rows.
     pub fn current_ingest_fingerprint(&self) -> Option<String> {
-        self.open_results
-            .as_ref()
-            .map(|(_, ingest_fingerprint)| self.open_result_fingerprint(ingest_fingerprint))
+        self.open_results.as_ref().map(|(_, ingest_fingerprint)| {
+            format!(
+                "text-unit-ingest/v1|{NORMALIZATION_VERSION}|{NORMALIZED_DOCUMENT_HASH_VERSION}|{TEXT_SEGMENTATION_VERSION}|{PDF_SENTENCE_RULES_VERSION}|{TEXT_UNIT_STREAM_VERSION}|{ingest_fingerprint}"
+            )
+        })
     }
 
     pub async fn execute(

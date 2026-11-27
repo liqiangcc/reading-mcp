@@ -40,7 +40,16 @@ use super::common::{content_hash, document_id, slugify, title_from_metadata};
 /// same bytes yield different section contents; the bump keys the parsed cache so no stored PDF can
 /// keep the old whole-page sections. The normalized hash covers every section's content, so every
 /// older PDF handle answers `stale_handle`.
-pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v6";
+///
+/// v6 -> v7 is the deploy-time bump for #276 (PDF word spacing) and #282 (the CJK gap guard):
+/// #276 treats real-valued `TJ` word-gap adjustments (`-314.006`) as word gaps, as lopdf already
+/// did for integers, and adds no gap space next to existing whitespace; #282 adds no gap space
+/// between two CJK characters. The same bytes can extract to different text, so the bump keys the
+/// parsed cache and the stored open results and every older PDF re-extracts on first access. Its
+/// handles change only if its normalized text changed: a changed handle answers `stale_handle` with
+/// a `retry` when the remap can prove where the text is (#283), while a PDF whose text is identical
+/// keeps its handles (verified on CSAPP and Fama-French).
+pub const PDF_TEXT_EXTRACTION_VERSION: &str = "pdf-text-extraction/v7";
 const MAX_PAGE_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 const PDF_STRUCTURE_PROVENANCE_METADATA_KEY: &str = "pdf_structure_provenance";
 const PDF_STRUCTURE_NATIVE_TOC: &str = "native_toc";

@@ -920,8 +920,36 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
         return false;
     }
 
+    // sgr1 R-D (PDF only): LaTeX math extraction spaces decimals out (`where 0 . 5 < r < 1`),
+    // so the digit/digit guard above cannot see the digit past the space. A period with
+    // whitespace on both sides and a digit beyond each side is a decimal point. The
+    // sentence-final `0.` shape has no space before the period, so it still splits.
+    if pdf && spaced_decimal_point(chars, index) {
+        return false;
+    }
+
     let raw_token = preceding_period_token(chars, index);
     let token = raw_token.to_ascii_lowercase();
+
+    // sgr1 R-N (PDF only): `2.2. Title` re-flows so the numbering lands at a line end,
+    // `Fig. 3.` splits off its caption, and a contents entry whose line break the extraction
+    // dropped splits after its number. The final period of a numbering token that leads a
+    // line, a caption or a contents entry is not a sentence end; a cross-reference inside a
+    // sentence (`... in Section 2.2. The rest ...`) is not a lead and still ends it.
+    if pdf && numbering_lead_period(chars, index) {
+        return false;
+    }
+
+    // sgr1 R-4 (PDF only): reference-list abbreviations. Journal tokens (`Phys.`, `Rev.`,
+    // `Lett.`) chain inside a citation and never end a sentence; cross-reference tokens
+    // (`Ref.`, `Sec.`, `App.`, `Chap.`) also start citations but can end a real sentence, so
+    // they keep the `etc` shape: terminal only before an uppercase character.
+    if pdf
+        && index + 1 < chars.len()
+        && pdf_reference_abbreviation_is_terminal(chars, index, &token) == Some(false)
+    {
+        return false;
+    }
     if !token.is_empty() && is_protected_abbreviation(&token) && index + 1 < chars.len() {
         // A list-ending abbreviation can also end a sentence. Preserve interior
         // uses ("etc., including" / "etc. and") and title/example abbreviations.
@@ -978,6 +1006,149 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
     ascii_terminal_is_terminal(chars, index)
 }
 
+/// `0 . 5`: whitespace directly on both sides of the period, a digit beyond each side.
+fn spaced_decimal_point(chars: &[char], index: usize) -> bool {
+    if index == 0 || !chars[index - 1].is_whitespace() {
+        return false;
+    }
+    if !chars.get(index + 1).is_some_and(|ch| ch.is_whitespace()) {
+        return false;
+    }
+    let previous = chars[..index].iter().rev().find(|ch| !ch.is_whitespace());
+    previous.is_some_and(|ch| ch.is_ascii_digit())
+        && next_non_whitespace(chars, index + 1).is_some_and(|ch| ch.is_ascii_digit())
+}
+
+/// The caption and theorem labels whose number can lead a line: `Fig. 3.`, `Table 2.`,
+/// `Assumption 1.1.`. Cross-reference labels (`Section`, `Appendix`) are deliberately absent -
+/// `... in Section 2.2.` ends a sentence in prose and must keep splitting.
+const PDF_CAPTION_LABELS: &[&str] = &[
+    "alg",
+    "algorithm",
+    "algorithms",
+    "assumption",
+    "claim",
+    "corollary",
+    "definition",
+    "eq",
+    "eqs",
+    "equation",
+    "equations",
+    "example",
+    "fig",
+    "figure",
+    "figures",
+    "figs",
+    "lemma",
+    "listing",
+    "proposition",
+    "remark",
+    "step",
+    "tab",
+    "table",
+    "tables",
+    "theorem",
+];
+
+/// True when the period at `index` closes a numbering token (`3`, `2.2`, `1.1.2`) that leads a
+/// line (a re-flowed heading or a bare number unit), a caption line (`Fig. 3.`), or a
+/// table-of-contents entry whose line break the extraction dropped (`... proper. 1.3. The
+/// generalized vanishing theorem ...`).
+fn numbering_lead_period(chars: &[char], index: usize) -> bool {
+    let start = period_token_start(chars, index);
+    let token = chars[start..index].iter().collect::<String>();
+    if !is_numbering_token(&token) {
+        return false;
+    }
+    if starts_line(chars, start) {
+        return true;
+    }
+    // `Fig. 3.` opens a caption line, so the label itself must lead its line: a numbered
+    // cross-reference inside prose (`see Figure 3.7. It is believed ...`) still splits.
+    if word_before_position(chars, start)
+        .is_some_and(|(word, word_start)| is_caption_label(&word) && starts_line(chars, word_start))
+    {
+        return true;
+    }
+    // A dotted number that opens right after a sentence end leads a list entry or a heading.
+    // A cross-reference closes a sentence from inside it (`... in Section 2.2. The rest ...`)
+    // and no terminal precedes it, so it still ends the sentence.
+    token.contains('.') && follows_sentence_end(chars, start)
+}
+
+/// True when only whitespace separates `position` from a terminal mark.
+fn follows_sentence_end(chars: &[char], mut position: usize) -> bool {
+    while position > 0 && chars[position - 1].is_whitespace() {
+        position -= 1;
+    }
+    position > 0 && is_terminal_mark(chars[position - 1])
+}
+
+/// A numbering token: `3`, `2.2`, `1.1.2` - digits in dot-separated non-empty parts.
+fn is_numbering_token(token: &str) -> bool {
+    if token.is_empty() || token.len() > 16 {
+        return false;
+    }
+    token
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn is_caption_label(word: &str) -> bool {
+    let word = word.strip_suffix('.').unwrap_or(word);
+    PDF_CAPTION_LABELS.contains(&word)
+}
+
+/// True when only whitespace separates `position` from the start of its line.
+fn starts_line(chars: &[char], mut position: usize) -> bool {
+    while position > 0 {
+        let ch = chars[position - 1];
+        if matches!(ch, '\n' | '\r') {
+            return true;
+        }
+        if !ch.is_whitespace() {
+            return false;
+        }
+        position -= 1;
+    }
+    true
+}
+
+/// Journal abbreviations that never end a sentence, and cross-reference abbreviations that do
+/// when the next non-whitespace character is uppercase. None for every other token.
+fn pdf_reference_abbreviation_is_terminal(
+    chars: &[char],
+    index: usize,
+    token: &str,
+) -> Option<bool> {
+    if matches!(
+        token,
+        "phys"
+            | "rev"
+            | "lett"
+            | "math"
+            | "soc"
+            | "proc"
+            | "sci"
+            | "amer"
+            | "comput"
+            | "res"
+            | "nat"
+            | "trans"
+            | "inst"
+    ) {
+        return Some(false);
+    }
+    if matches!(token, "ref" | "sec" | "app" | "chap") {
+        return Some(
+            ascii_terminal_is_terminal(chars, index)
+                && next_non_whitespace(chars, extend_terminal_cluster(chars, index))
+                    .is_some_and(|ch| ch.is_uppercase()),
+        );
+    }
+    None
+}
+
 /// A token of two or more single uppercase ASCII letters joined by periods (`E.F`, `J.R.R`).
 fn is_uppercase_initials_token(token: &str) -> bool {
     let mut letters = 0usize;
@@ -996,25 +1167,18 @@ fn is_uppercase_initials_token(token: &str) -> bool {
     letters >= 2
 }
 
-/// True when the text contains a site where a PDF-6g rule could remove a boundary: an `et
-/// al.` period (R-A) or a multi-letter initials token (R-I-U). The check only decides whether
-/// a paragraph freed by the per-sentence verdict needs the PDF-rule unit ranges; it never
-/// changes a verdict, so matching the rule's own conditions exactly is not required - a
-/// candidate that resolves to the same ranges costs one extra segmentation and nothing else.
+/// True when the text contains a site where a PDF-rule could remove a boundary: an `et al.`
+/// period (R-A), a multi-letter initials token (R-I-U), a spaced decimal (R-D), a numbering
+/// lead (R-N) or a reference abbreviation (R-4). The check only decides whether a paragraph
+/// freed by the per-sentence verdict needs the PDF-rule unit ranges; it never changes a
+/// verdict, so matching each rule's own conditions exactly is not required - a candidate that
+/// resolves to the same ranges costs one extra segmentation and nothing else.
 fn pdf_sentence_rule_candidate(chars: &[char]) -> bool {
     chars.iter().enumerate().any(|(index, ch)| {
         if *ch != '.' {
             return false;
         }
-        let mut start = index;
-        while start > 0 {
-            let ch = chars[start - 1];
-            if ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
+        let start = period_token_start(chars, index);
         let token = chars[start..index].iter().collect::<String>();
         let mut parts = token.split('.');
         let dotted_letters = token.len() >= 3
@@ -1028,25 +1192,26 @@ fn pdf_sentence_rule_candidate(chars: &[char]) -> bool {
         dotted_letters
             || (token.eq_ignore_ascii_case("al")
                 && word_before_period_token(chars, index).is_some_and(|word| word == "et"))
+            || spaced_decimal_point(chars, index)
+            || numbering_lead_period(chars, index)
+            || pdf_reference_abbreviation_is_terminal(chars, index, &token.to_ascii_lowercase())
+                .is_some()
     })
 }
 
 /// The whitespace-separated word directly before `preceding_period_token`'s token, lowercase
 /// (`et` for `et al.`). None when the token does not directly follow whitespace.
 fn word_before_period_token(chars: &[char], index: usize) -> Option<String> {
-    let mut token_start = index;
-    while token_start > 0 {
-        let ch = chars[token_start - 1];
-        if ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-            token_start -= 1;
-        } else {
-            break;
-        }
-    }
-    if token_start == 0 || !chars[token_start - 1].is_whitespace() {
+    word_before_position(chars, period_token_start(chars, index)).map(|(word, _)| word)
+}
+
+/// The whitespace-separated word ending just before `position`, lowercased, with the position
+/// it starts at. None when `position` does not directly follow whitespace.
+fn word_before_position(chars: &[char], position: usize) -> Option<(String, usize)> {
+    if position == 0 || !chars[position - 1].is_whitespace() {
         return None;
     }
-    let mut cursor = token_start;
+    let mut cursor = position;
     while cursor > 0 && chars[cursor - 1].is_whitespace() {
         cursor -= 1;
     }
@@ -1054,7 +1219,12 @@ fn word_before_period_token(chars: &[char], index: usize) -> Option<String> {
     while cursor > 0 && !chars[cursor - 1].is_whitespace() {
         cursor -= 1;
     }
-    (end > cursor).then(|| chars[cursor..end].iter().collect::<String>().to_lowercase())
+    (end > cursor).then(|| {
+        (
+            chars[cursor..end].iter().collect::<String>().to_lowercase(),
+            cursor,
+        )
+    })
 }
 
 fn extend_terminal_cluster(chars: &[char], index: usize) -> usize {
@@ -1084,6 +1254,14 @@ fn is_identifier_char(ch: char) -> bool {
 }
 
 fn preceding_period_token(chars: &[char], index: usize) -> String {
+    chars[period_token_start(chars, index)..index]
+        .iter()
+        .collect()
+}
+
+/// The start of the token that `preceding_period_token` reads: the period itself when the
+/// character before it cannot continue a token.
+fn period_token_start(chars: &[char], index: usize) -> usize {
     let mut start = index;
     while start > 0 {
         let ch = chars[start - 1];
@@ -1093,7 +1271,7 @@ fn preceding_period_token(chars: &[char], index: usize) -> String {
             break;
         }
     }
-    chars[start..index].iter().collect()
+    start
 }
 
 fn is_protected_abbreviation(token: &str) -> bool {
@@ -2274,6 +2452,156 @@ mod tests {
             (
                 "as in Smith et al. The next step is W.",
                 vec!["as in Smith et al.", "The next step is W."],
+            ),
+        ] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType("text/markdown".into());
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// sgr1 R-D (PDF only): LaTeX math extraction spaces decimals out (`0 . 5`), so the
+    /// boundary must not land between the two digits. The sentence-final `0.` shape has no
+    /// space before the period and still ends the sentence, even when the next sentence
+    /// starts with a digit.
+    #[test]
+    fn pdf_sentence_rules_keep_spaced_decimals_inside_the_sentence() {
+        for (text, expected) in [
+            (
+                "uncertainty from these candidates, where 0 . 5 < r < 1 holds.",
+                vec!["uncertainty from these candidates, where 0 . 5 < r < 1 holds."],
+            ),
+            (
+                "the phase boundary sits at p A = 0 . 1 and p C = 0 . 9 here.",
+                vec!["the phase boundary sits at p A = 0 . 1 and p C = 0 . 9 here."],
+            ),
+            (
+                "The fraction equals 0. 5 patients were enrolled.",
+                vec!["The fraction equals 0.", "5 patients were enrolled."],
+            ),
+            (
+                "The intercept is 0 . 5 and the slope is 2. Then the fit holds.",
+                vec![
+                    "The intercept is 0 . 5 and the slope is 2.",
+                    "Then the fit holds.",
+                ],
+            ),
+        ] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType("application/pdf".into());
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// sgr1 R-N (PDF only): the final period of a numbering token that leads a line or a
+    /// caption stays inside the sentence, so `2.2.` and `Fig. 3.` stop being units of their
+    /// own. A cross-reference inside a sentence is not a lead and still ends it.
+    #[test]
+    fn pdf_sentence_rules_keep_numbering_leads_with_their_heading() {
+        for (text, expected) in [
+            (
+                "2.2. Model architecture. We study two factors.",
+                vec!["2.2. Model architecture.", "We study two factors."],
+            ),
+            (
+                "1.1. Setup\nWe study two factors.",
+                vec!["1.1. Setup\nWe study two factors."],
+            ),
+            (
+                "Fig. 3. Returns by size group. The spread widens.",
+                vec!["Fig. 3. Returns by size group.", "The spread widens."],
+            ),
+            (
+                "Table 2. Results by year. The trend is clear.",
+                vec!["Table 2. Results by year.", "The trend is clear."],
+            ),
+            (
+                "We describe the method in Section 2.2. The rest follows.",
+                vec![
+                    "We describe the method in Section 2.2.",
+                    "The rest follows.",
+                ],
+            ),
+            (
+                "The result equals 0. 5 patients were enrolled.",
+                vec!["The result equals 0.", "5 patients were enrolled."],
+            ),
+        ] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType("application/pdf".into());
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// sgr1 R-4 (PDF only): journal abbreviations chain inside a citation, and the
+    /// cross-reference abbreviations keep the `etc` shape - a real sentence can still end
+    /// with `Sec.`/`App.` before an uppercase word. `et al.` stays non-terminal before `(`
+    /// and `[`.
+    #[test]
+    fn pdf_sentence_rules_keep_reference_abbreviations_inside_the_sentence() {
+        for (text, expected) in [
+            (
+                "Phys. Rev. Lett. 12, 345 (2019).",
+                vec!["Phys. Rev. Lett. 12, 345 (2019)."],
+            ),
+            (
+                "the value follows from Proc. Math. Phys. 3, 1 (2020).",
+                vec!["the value follows from Proc. Math. Phys. 3, 1 (2020)."],
+            ),
+            (
+                "In Ref. [27], an interesting conjecture is stated.",
+                vec!["In Ref. [27], an interesting conjecture is stated."],
+            ),
+            (
+                "the estimate of Math. Res. Lett. 4 and Amer. Comput. Soc. 7 holds.",
+                vec!["the estimate of Math. Res. Lett. 4 and Amer. Comput. Soc. 7 holds."],
+            ),
+            (
+                "as in Smith et al. [13] and Smith et al. (2019), the bound holds.",
+                vec!["as in Smith et al. [13] and Smith et al. (2019), the bound holds."],
+            ),
+            (
+                "The bound is stated in Sec. We then prove it.",
+                vec!["The bound is stated in Sec.", "We then prove it."],
+            ),
+            (
+                "The proof is in App. The next chapter covers more.",
+                vec!["The proof is in App.", "The next chapter covers more."],
+            ),
+            (
+                "the ratio is bounded, see Ref. The next lemma uses it.",
+                vec!["the ratio is bounded, see Ref.", "The next lemma uses it."],
+            ),
+        ] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType("application/pdf".into());
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// R-D, R-N and R-4 are PDF-only: every one of their strings segments exactly as it did
+    /// before the rules in a non-PDF format.
+    #[test]
+    fn non_pdf_formats_keep_the_old_numbering_and_reference_boundaries() {
+        for (text, expected) in [
+            (
+                "uncertainty from these candidates, where 0 . 5 < r < 1 holds.",
+                vec![
+                    "uncertainty from these candidates, where 0 .",
+                    "5 < r < 1 holds.",
+                ],
+            ),
+            (
+                "2.2. Model architecture. We study two factors.",
+                vec!["2.2.", "Model architecture.", "We study two factors."],
+            ),
+            (
+                "Fig. 3. Returns by size group.",
+                vec!["Fig. 3.", "Returns by size group."],
+            ),
+            (
+                "Phys. Rev. Lett. 12, 345 (2019).",
+                vec!["Phys.", "Rev.", "Lett.", "12, 345 (2019)."],
             ),
         ] {
             let mut document = document(vec![section("s", None, text, Vec::new())]);

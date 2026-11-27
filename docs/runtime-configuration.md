@@ -545,6 +545,41 @@ search
 - Cookie；
 - 完整搜索词（只记录 query 字符数）。
 
+## Usage log（默认关闭，opt-in）
+
+`READING_MCP_USAGE_LOG` 控制每次 `tools/call` 写一行 JSON 的使用统计：未设置或 `off`（默认）不写任何东西，
+`on` 写到 `<state>/usage/`。取其他任何值启动时报错。
+
+```bash
+READING_MCP_USAGE_LOG=on
+READING_MCP_USAGE_LOG_DAYS=30   # 可选，保留天数
+```
+
+每行恰好只有这些字段：
+
+- `ts`：UTC 时间戳，毫秒精度，例如 `2026-11-27T13:45:01.234Z`；
+- `tool`：七个 v2 tool 之一；
+- `outcome`：`ok` 或错误种类（`too_long`、`stale_handle`、`unknown_handle`、`ocr_required`、`too_large` 等）；
+- `retry`：仅 `stale_handle` 出现，`true`/`false` 表示错误应答是否带有可执行的重试参数；
+- `ms`：服务端延迟；
+- `resp_bytes`：返回内容的字节数；
+- `doc`：句柄的 `d<key>` 部分，**不含校验和**；
+- `unit`：`sentence` 或 `paragraph`（仅 read）；
+- `batch_items`：批量 read 的条目数。
+
+**隐私保证**：日志绝不记录文档正文、搜索查询、来源路径或 URL、句柄校验和。记录结构是固定字段的
+struct，另有测试逐行断言日志里不出现夹具文本标记、查询标记、路径和校验和；出现任何约定之外的字段
+测试即失败。
+
+**不拖慢请求**：派发点把一行交给有界 channel，后台线程写文件。磁盘慢时多余的行被丢弃（计数），
+tool 调用永不阻塞在日志上。
+
+**轮转**：按日文件 `usage-YYYYMMDD.jsonl`；保留 `READING_MCP_USAGE_LOG_DAYS` 天（默认 30），
+启动时和每天首次写入时删除过期文件。
+
+**汇总**：`scripts/usage-summary.py <state>/usage [--days N]` 输出每个 tool 的调用量、错误构成、
+p50/p95/max 延迟、p50/p95 响应字节数，以及每日 top 错误种类。
+
 ## Error Metadata
 
 MCP error `data` 提供：

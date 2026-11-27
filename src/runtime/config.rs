@@ -30,6 +30,10 @@ pub struct RuntimeConfig {
     pub source_view_cache_mib: usize,
     /// Raw resource (URL body) cache cap in MiB; 0 means no cap.
     pub raw_cache_mib: u64,
+    /// `READING_MCP_USAGE_LOG=on`: one privacy-safe JSON line per tool call under `<state>/usage/`.
+    pub usage_log: bool,
+    /// Days of daily usage files kept (`READING_MCP_USAGE_LOG_DAYS`, default 30).
+    pub usage_log_days: u32,
     pub http: HttpRetrieverConfig,
 }
 
@@ -58,6 +62,8 @@ impl Default for RuntimeConfig {
             source_view: SourceViewLimits::default(),
             source_view_cache_mib: 256,
             raw_cache_mib: FileRawResourceCache::DEFAULT_CAP_MIB,
+            usage_log: false,
+            usage_log_days: crate::mcp::usage_log::DEFAULT_RETENTION_DAYS,
             http,
         }
     }
@@ -154,6 +160,20 @@ impl RuntimeConfig {
             && !value.trim().is_empty()
         {
             check_tools_env(&value)?;
+        }
+
+        config.usage_log = match std::env::var("READING_MCP_USAGE_LOG").as_deref() {
+            Err(_) | Ok("" | "off") => false,
+            Ok("on") => true,
+            Ok(other) => {
+                return Err(format!(
+                    "READING_MCP_USAGE_LOG must be on or off, got {other:?}"
+                ));
+            }
+        };
+        config.usage_log_days = env_u32("READING_MCP_USAGE_LOG_DAYS", config.usage_log_days)?;
+        if config.usage_log_days == 0 {
+            return Err("READING_MCP_USAGE_LOG_DAYS must be a positive integer of days".into());
         }
 
         config.resource_budget.max_document_bytes = env_usize(

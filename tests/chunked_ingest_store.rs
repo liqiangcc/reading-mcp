@@ -408,3 +408,113 @@ async fn handle_remaps_survive_a_chunked_replace_and_its_crash_cleanup() {
         .expect("remap count");
     assert!(count > 0, "remap rows exist for the old version");
 }
+
+#[tokio::test]
+async fn a_chunked_reingest_leaves_no_duplicate_or_stale_rows() {
+    unsafe {
+        std::env::set_var("READING_MCP_INGEST_CHUNK_SECTIONS", "2");
+    }
+    let directory = tempdir().expect("temporary directory");
+    let database = directory.path().join("state.sqlite");
+    let index = SqliteTextUnitIndex::open(&database).expect("store");
+
+    // One document id, two versions of its rows — the parser-deploy case. The second version
+    // differs in text and segmentation, and one section shrinks so old chunk rows would outlive it.
+    let before = Arc::new(document_with_sections(
+        "doc:redup",
+        &[
+            "Alpha version one.\n\nAlpha second paragraph.",
+            "Beta stays the same.",
+            "Gamma third section.",
+        ],
+    ));
+    store(&index, &before).await;
+    let mut after_document = document_with_sections(
+        "doc:redup",
+        &[
+            "Alpha version one. \n\nAlpha second paragraph.",
+            "Beta stays the same.",
+            "Gamma third section.",
+        ],
+    );
+    after_document.root_sections[0]
+        .content
+        .push_str("\n\nAn extra final paragraph.");
+    let after = Arc::new(after_document);
+    store(&index, &after).await;
+    unsafe {
+        std::env::remove_var("READING_MCP_INGEST_CHUNK_SECTIONS");
+    }
+
+    // Exactly one layout row and exactly the new chunk rows per section: no duplicates, no stale
+    // chunks of the previous version.
+    let connection = Connection::open(&database).expect("database");
+    let doc_key = index
+        .document_key(&after.id)
+        .await
+        .expect("key")
+        .expect("stored");
+    for table in [
+        "section_layout_v2",
+        "section_layout_chunk_v2",
+        "section_text_v3",
+    ] {
+        let total: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE doc_key = ?1"),
+                rusqlite::params![doc_key],
+                |row| row.get(0),
+            )
+            .expect("count");
+        let distinct: i64 = connection
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM (SELECT DISTINCT section_key, chunk_no FROM {table} WHERE doc_key = ?1)"
+                ),
+                rusqlite::params![doc_key],
+                |row| row.get(0),
+            )
+            .unwrap_or(total);
+        if table == "section_layout_v2" {
+            let sections: i64 = connection
+                .query_row(
+                    "SELECT COUNT(DISTINCT section_key) FROM section_layout_v2 WHERE doc_key = ?1",
+                    rusqlite::params![doc_key],
+                    |row| row.get(0),
+                )
+                .expect("sections");
+            assert_eq!(
+                total, sections,
+                "every layout row is unique per section: {total} rows for {sections} sections"
+            );
+        } else {
+            assert_eq!(total, distinct, "{table} rows are unique per chunk");
+        }
+    }
+
+    // The stored rows equal a fresh single-transaction ingest of the new version byte for byte.
+    let fresh_dir = tempdir().expect("fresh tempdir");
+    let fresh_db = fresh_dir.path().join("state.sqlite");
+    let fresh = SqliteTextUnitIndex::open(&fresh_db).expect("fresh store");
+    store(&fresh, &after).await;
+    drop(fresh);
+    assert_eq!(
+        section_rows_dump(&database),
+        section_rows_dump(&fresh_db),
+        "a chunked re-ingest converges to the same rows as a fresh ingest"
+    );
+
+    // And the new version reads correctly.
+    let units = index
+        .section_units(&after.id, &after.root_sections[0].id)
+        .await
+        .expect("read")
+        .expect("stored");
+    assert!(
+        units
+            .paragraphs
+            .iter()
+            .any(|unit| unit.text.contains("extra final paragraph")),
+        "the new version's text is what reads back"
+    );
+}

@@ -4264,11 +4264,10 @@ impl SqliteTextUnitIndex {
                     &prior,
                     &prepared_first,
                 )?;
-                insert_prepared_sections(
+                insert_chunk_sections(
                     &transaction,
                     doc_key,
                     &prepared_first.sections[..first_end],
-                    true,
                 )?;
                 transaction.commit().map_err(text_unit_index_error)?;
                 Ok(doc_key)
@@ -4291,11 +4290,10 @@ impl SqliteTextUnitIndex {
                 ApplicationError::TextUnitIndexFailed,
                 move |connection| {
                     let transaction = connection.transaction().map_err(text_unit_index_error)?;
-                    insert_prepared_sections(
+                    insert_chunk_sections(
                         &transaction,
                         doc_key,
                         &prepared_chunk.sections[start..end],
-                        true,
                     )?;
                     if last {
                         // A previous version with more sections leaves rows beyond the new end;
@@ -7481,27 +7479,61 @@ fn prepare_document_sections(
     Ok(PreparedSections { sections })
 }
 
-/// Inserts the prepared rows of `sections[start..end]` into the three section tables. When
-/// `replace` is true the insert is `INSERT OR REPLACE` — the chunked write overwrites the previous
-/// version's rows section by section so a repository read of an unchanged section never meets a
-/// transiently missing text row; when false the caller has deleted the document's rows first and
-/// the plain insert keeps the single-transaction write byte-identical to what it always was.
+/// Deletes every row of `section_key` in the three section tables of `doc_key`: the rows of the
+/// previous version a chunk overwrite replaces. It runs in the same transaction as the chunk's
+/// insert, so the section is never absent from a committed snapshot — only the old or the new
+/// version of it is ever visible.
+fn delete_section_rows_of(
+    transaction: &rusqlite::Transaction<'_>,
+    doc_key: i64,
+    section_key: i64,
+) -> Result<(), ApplicationError> {
+    for table in [
+        "section_text_v3",
+        "section_layout_chunk_v2",
+        "section_layout_v2",
+    ] {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE doc_key = ?1 AND section_key = ?2"),
+                params![doc_key, section_key],
+            )
+            .map_err(text_unit_index_error)?;
+    }
+    Ok(())
+}
+
+/// Writes one chunk: the previous version's rows of exactly these sections go first, in the same
+/// transaction, so no committed snapshot ever misses a section the document has — it is either the
+/// old version whole or the new version whole, never a transient gap, never a duplicate.
+fn insert_chunk_sections(
+    transaction: &rusqlite::Transaction<'_>,
+    doc_key: i64,
+    sections: &[PreparedSection],
+) -> Result<(), ApplicationError> {
+    for section in sections {
+        delete_section_rows_of(transaction, doc_key, section.section_key)?;
+    }
+    insert_prepared_sections(transaction, doc_key, sections)
+}
+
+/// Inserts the prepared rows of `sections` into the three section tables. The caller deletes the
+/// rows it replaces first, in the same transaction: the single-transaction write deletes the whole
+/// document as it always did, a chunk transaction deletes exactly the chunk's sections.
 fn insert_prepared_sections(
     transaction: &rusqlite::Transaction<'_>,
     doc_key: i64,
     sections: &[PreparedSection],
-    replace: bool,
 ) -> Result<(), ApplicationError> {
-    let verb = if replace { "INSERT OR REPLACE" } else { "INSERT" };
     let mut chunk_statement = transaction
-        .prepare(&format!(
-            "{verb} INTO section_text_v3(doc_key, section_key, chunk_no, encoding, data)
-             VALUES (?1, ?2, ?3, ?4, ?5)"
-        ))
+        .prepare(
+            "INSERT INTO section_text_v3(doc_key, section_key, chunk_no, encoding, data)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
         .map_err(text_unit_index_error)?;
     let mut header_statement = transaction
-        .prepare(&format!(
-            "{verb} INTO section_layout_v2(
+        .prepare(
+            "INSERT INTO section_layout_v2(
                 doc_key,
                 section_key,
                 section_id,
@@ -7524,12 +7556,12 @@ fn insert_prepared_sections(
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
-             )"
-        ))
+             )",
+        )
         .map_err(text_unit_index_error)?;
     let mut chunk_row_statement = transaction
-        .prepare(&format!(
-            "{verb} INTO section_layout_chunk_v2(
+        .prepare(
+            "INSERT INTO section_layout_chunk_v2(
                 doc_key,
                 section_key,
                 chunk_no,
@@ -7546,8 +7578,8 @@ fn insert_prepared_sections(
                 blob
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
-             )"
-        ))
+             )",
+        )
         .map_err(text_unit_index_error)?;
 
     for prepared in sections {
@@ -7792,7 +7824,7 @@ fn write_document_sections(
         )
         .map_err(text_unit_index_error)?;
 
-    insert_prepared_sections(&transaction, doc_key, &prepared.sections, false)?;
+    insert_prepared_sections(&transaction, doc_key, &prepared.sections)?;
 
     transaction.commit().map_err(text_unit_index_error)?;
     Ok(())

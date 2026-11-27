@@ -16,12 +16,6 @@ on:
         default: ''
   pull_request:
     paths: ['src/**', 'Cargo.toml', 'Cargo.lock']
-  # `workflow_dispatch` only fires for a workflow that already exists on the default branch, so
-  # this push trigger is how the validation runs on the branch that introduces the workflow
-  # happen; dispatch inputs are empty there and the validation inputs below fill in. Removed
-  # before the final head.
-  push:
-    branches: ['ci/perf-ab']
 
 concurrency:
   group: perf-ab-${{ github.event.pull_request.number || github.sha }}
@@ -48,14 +42,6 @@ jobs:
           else
             raw_base="${{ inputs.base }}"
             raw_head="${{ inputs.head }}"
-            # Validation on the introducing branch: dispatch inputs are empty on a push, and
-            # .github/perf-ab-validation-refs (committed only on this validation branch)
-            # supplies them. Removed before the final head.
-            if [ -z "$raw_base" ] && [ -f .github/perf-ab-validation-refs ]; then
-              raw_base=$(sed -n 's/^base=//p' .github/perf-ab-validation-refs)
-              raw_head=$(sed -n 's/^head=//p' .github/perf-ab-validation-refs)
-              echo "validation refs from .github/perf-ab-validation-refs"
-            fi
             [ -z "$raw_head" ] && raw_head="${{ github.sha }}"
             git fetch --no-tags origin "$raw_base" "$raw_head"
             base=$(git rev-parse "$raw_base^{commit}" 2>/dev/null || echo "")

@@ -5,6 +5,9 @@
 //! spelled them as integers (`-300`) or reals (`-300.004`). pdfTeX writes justified text both
 //! ways. Treating only the integer spelling as a possible word gap joins the words around every
 //! real-valued adjustment.
+//!
+//! A gap between two CJK characters is never a word boundary, so no space is inserted there:
+//! CJK fonts encode justification and compressed punctuation as large negative adjustments.
 
 use std::collections::BTreeMap;
 
@@ -178,7 +181,10 @@ fn collect_array_text(
                 let mut decoded = String::new();
                 encoding.write_to_string(bytes, &mut decoded)?;
                 if pending_word_gap && !decoded.is_empty() {
-                    if !*whitespace_tail && !starts_with_whitespace(&decoded) {
+                    if !*whitespace_tail
+                        && !starts_with_whitespace(&decoded)
+                        && !joins_two_cjk(text, &decoded)
+                    {
                         text.push(' ');
                     }
                     pending_word_gap = false;
@@ -202,6 +208,37 @@ fn collect_array_text(
         }
     }
     Ok(())
+}
+
+/// Whether the gap that just ended falls between two CJK characters, which is never a word
+/// boundary. CJK fonts routinely encode justification and compressed punctuation as large
+/// negative `TJ` adjustments (-250, -500), so `中文字` must not become `中 文 字`.
+fn joins_two_cjk(text: &str, decoded: &str) -> bool {
+    text.chars().next_back().is_some_and(is_cjk) && decoded.chars().next().is_some_and(is_cjk)
+}
+
+/// CJK script and CJK-set punctuation: an ideograph (including the extension blocks), a kana,
+/// a hangul syllable or jamo, CJK symbols and punctuation, or a fullwidth form.
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1100..=0x11FF   // hangul jamo
+        | 0x2E80..=0x2FDF // CJK radicals and kangxi radicals
+        | 0x3000..=0x303F // CJK symbols and punctuation
+        | 0x3040..=0x30FF // hiragana and katakana
+        | 0x3130..=0x318F // hangul compatibility jamo
+        | 0x31F0..=0x31FF // katakana phonetic extensions
+        | 0x3400..=0x4DBF // CJK unified ideographs extension A
+        | 0x4E00..=0x9FFF // CJK unified ideographs
+        | 0xA960..=0xA97F // hangul jamo extended-A
+        | 0xAC00..=0xD7AF // hangul syllables
+        | 0xD7B0..=0xD7FF // hangul jamo extended-B
+        | 0xF900..=0xFAFF // CJK compatibility ideographs
+        | 0xFE30..=0xFE4F // CJK compatibility forms
+        | 0xFF00..=0xFFEF // halfwidth and fullwidth forms
+        | 0x20000..=0x2FA1F // extensions B-F and compatibility supplement
+        | 0x30000..=0x323AF // extensions G-I
+    )
 }
 
 fn refresh_whitespace_tail(text: &str, whitespace_tail: &mut bool) {
@@ -413,6 +450,144 @@ mod tests {
                 literal_ucs2("Latin"),
             ])),
             "中文字 Latin "
+        );
+    }
+
+    #[test]
+    fn a_real_gap_between_two_cjk_characters_gets_no_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("中文"),
+                Object::Real(-250.0),
+                literal_ucs2("字"),
+            ])),
+            "中文字 "
+        );
+    }
+
+    #[test]
+    fn an_integer_gap_between_two_cjk_characters_gets_no_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("中文"),
+                Object::Integer(-500),
+                literal_ucs2("字"),
+            ])),
+            "中文字 "
+        );
+    }
+
+    #[test]
+    fn a_real_cjk_gap_before_latin_keeps_its_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("中文"),
+                Object::Real(-250.0),
+                literal_ucs2("Latin"),
+            ])),
+            "中文 Latin "
+        );
+    }
+
+    #[test]
+    fn an_integer_cjk_gap_before_latin_keeps_its_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("中文"),
+                Object::Integer(-250),
+                literal_ucs2("Latin"),
+            ])),
+            "中文 Latin "
+        );
+    }
+
+    #[test]
+    fn a_real_latin_gap_before_cjk_keeps_its_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("Latin"),
+                Object::Real(-250.0),
+                literal_ucs2("中文"),
+            ])),
+            "Latin 中文 "
+        );
+    }
+
+    #[test]
+    fn an_integer_latin_gap_before_cjk_keeps_its_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("Latin"),
+                Object::Integer(-250),
+                literal_ucs2("中文"),
+            ])),
+            "Latin 中文 "
+        );
+    }
+
+    #[test]
+    fn a_cjk_gap_before_a_digit_keeps_its_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("中文"),
+                Object::Integer(-250),
+                literal_ucs2("1"),
+            ])),
+            "中文 1 "
+        );
+    }
+
+    #[test]
+    fn a_gap_between_kana_gets_no_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("かな"),
+                Object::Real(-250.0),
+                literal_ucs2("カナ"),
+            ])),
+            "かなカナ "
+        );
+    }
+
+    #[test]
+    fn a_gap_between_hangul_syllables_gets_no_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("한"),
+                Object::Integer(-500),
+                literal_ucs2("글"),
+            ])),
+            "한글 "
+        );
+    }
+
+    #[test]
+    fn a_gap_around_fullwidth_punctuation_gets_no_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("中"),
+                Object::Real(-250.0),
+                literal_ucs2("，"),
+                Object::Integer(-250),
+                literal_ucs2("。"),
+            ])),
+            "中，。 "
+        );
+    }
+
+    #[test]
+    fn a_gap_between_extension_block_ideographs_gets_no_space() {
+        assert_eq!(
+            ucs2_text(tj(vec![
+                literal_ucs2("\u{3400}"),
+                Object::Integer(-250),
+                literal_ucs2("\u{4E00}"),
+                Object::Real(-250.0),
+                literal_ucs2("\u{20000}"),
+                Object::Integer(-500),
+                literal_ucs2("\u{20001}"),
+            ])),
+            "\u{3400}\u{4E00}\u{20000}\u{20001} "
         );
     }
 }

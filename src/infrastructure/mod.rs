@@ -13,6 +13,7 @@ mod ocr_identity;
 mod ocr_identity_process;
 mod ocr_singleflight;
 mod section_layout;
+mod source_view_cache;
 mod sqlite;
 mod sqlite_search_index;
 mod sqlite_support;
@@ -35,6 +36,7 @@ pub use ocr_evidence::FileOcrEvidenceStore;
 pub use ocr_identity::build_ocr_runtime_identity;
 pub(crate) use ocr_identity::{OCR_INTERPRETER_ARGS, OCR_PROCESS_ENV};
 pub(crate) use ocr_identity_process::dependency_output;
+pub use source_view_cache::{FileSourceViewCache, source_view_cache_file_fingerprint};
 pub use sqlite::{
     PruneReport, STARTUP_PRUNE_DOCUMENT_LIMIT, ScanOptions, ScanTimings, SqliteDocumentRepository,
     SqliteOpenResultStore, SqliteTextUnitIndex,

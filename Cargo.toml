@@ -40,8 +40,10 @@ unicode-normalization = "=0.1.25"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 encoding_rs = "0.8"
 flate2 = { version = "1", default-features = false }
+jpeg-encoder = { version = "0.7.1", features = ["simd"] }
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rmcp = { version = "3.5.1", features = [
     "client",
     "transport-child-process",

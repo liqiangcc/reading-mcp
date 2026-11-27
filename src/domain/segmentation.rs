@@ -853,12 +853,13 @@ fn sentence_ranges(
     pdf_sentence_rules: bool,
 ) -> Vec<NormalizedTextRange> {
     let chars = text.chars().collect::<Vec<_>>();
+    let parity = QuoteParity::of(&chars);
     let mut ranges = Vec::new();
     let mut start = skip_whitespace(&chars, 0);
     let mut cursor = start;
 
     while cursor < chars.len() {
-        if let Some(end) = sentence_boundary_end(&chars, cursor, pdf_sentence_rules) {
+        if let Some(end) = sentence_boundary_end(&chars, cursor, pdf_sentence_rules, &parity) {
             if start < end {
                 ranges.push(
                     NormalizedTextRange::new(
@@ -889,25 +890,30 @@ fn sentence_ranges(
     ranges
 }
 
-fn sentence_boundary_end(chars: &[char], index: usize, pdf: bool) -> Option<usize> {
+fn sentence_boundary_end(
+    chars: &[char],
+    index: usize,
+    pdf: bool,
+    parity: &QuoteParity,
+) -> Option<usize> {
     match chars[index] {
-        '。' | '！' | '？' => Some(extend_terminal_cluster(chars, index)),
-        '!' | '?' if ascii_terminal_is_terminal(chars, index) => {
-            Some(extend_terminal_cluster(chars, index))
+        '。' | '！' | '？' => Some(extend_terminal_cluster(chars, index, parity)),
+        '!' | '?' if ascii_terminal_is_terminal(chars, index, parity) => {
+            Some(extend_terminal_cluster(chars, index, parity))
         }
-        '.' if ascii_period_is_terminal(chars, index, pdf) => {
-            Some(extend_terminal_cluster(chars, index))
+        '.' if ascii_period_is_terminal(chars, index, pdf, parity) => {
+            Some(extend_terminal_cluster(chars, index, parity))
         }
         _ => None,
     }
 }
 
-fn ascii_terminal_is_terminal(chars: &[char], index: usize) -> bool {
-    let boundary_end = extend_terminal_cluster(chars, index);
+fn ascii_terminal_is_terminal(chars: &[char], index: usize, parity: &QuoteParity) -> bool {
+    let boundary_end = extend_terminal_cluster(chars, index, parity);
     boundary_end == chars.len() || chars[boundary_end].is_whitespace()
 }
 
-fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
+fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool, parity: &QuoteParity) -> bool {
     if chars.get(index + 1) == Some(&'.') {
         return false;
     }
@@ -958,7 +964,7 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
     // they keep the `etc` shape: terminal only before an uppercase character.
     if pdf
         && index + 1 < chars.len()
-        && pdf_reference_abbreviation_is_terminal(chars, index, &token) == Some(false)
+        && pdf_reference_abbreviation_is_terminal(chars, index, &token, parity) == Some(false)
     {
         return false;
     }
@@ -966,8 +972,8 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
         // A list-ending abbreviation can also end a sentence. Preserve interior
         // uses ("etc., including" / "etc. and") and title/example abbreviations.
         let terminal_etc = token == "etc"
-            && ascii_terminal_is_terminal(chars, index)
-            && next_non_whitespace(chars, extend_terminal_cluster(chars, index))
+            && ascii_terminal_is_terminal(chars, index, parity)
+            && next_non_whitespace(chars, extend_terminal_cluster(chars, index, parity))
                 .is_some_and(|ch| ch.is_uppercase());
         if !terminal_etc {
             return false;
@@ -983,8 +989,8 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
         && index + 1 < chars.len()
         && word_before_period_token(chars, index).is_some_and(|word| word == "et")
     {
-        let terminal_al = ascii_terminal_is_terminal(chars, index)
-            && next_non_whitespace(chars, extend_terminal_cluster(chars, index))
+        let terminal_al = ascii_terminal_is_terminal(chars, index, parity)
+            && next_non_whitespace(chars, extend_terminal_cluster(chars, index, parity))
                 .is_some_and(|ch| ch.is_uppercase());
         if !terminal_al {
             return false;
@@ -1015,7 +1021,7 @@ fn ascii_period_is_terminal(chars: &[char], index: usize, pdf: bool) -> bool {
         return false;
     }
 
-    ascii_terminal_is_terminal(chars, index)
+    ascii_terminal_is_terminal(chars, index, parity)
 }
 
 /// `0 . 5`: whitespace directly on both sides of the period, a digit beyond each side.
@@ -1132,6 +1138,7 @@ fn pdf_reference_abbreviation_is_terminal(
     chars: &[char],
     index: usize,
     token: &str,
+    parity: &QuoteParity,
 ) -> Option<bool> {
     if matches!(
         token,
@@ -1153,8 +1160,8 @@ fn pdf_reference_abbreviation_is_terminal(
     }
     if matches!(token, "ref" | "sec" | "app" | "chap") {
         return Some(
-            ascii_terminal_is_terminal(chars, index)
-                && next_non_whitespace(chars, extend_terminal_cluster(chars, index))
+            ascii_terminal_is_terminal(chars, index, parity)
+                && next_non_whitespace(chars, extend_terminal_cluster(chars, index, parity))
                     .is_some_and(|ch| ch.is_uppercase()),
         );
     }
@@ -1186,6 +1193,9 @@ fn is_uppercase_initials_token(token: &str) -> bool {
 /// verdict, so matching each rule's own conditions exactly is not required - a candidate that
 /// resolves to the same ranges costs one extra segmentation and nothing else.
 fn pdf_sentence_rule_candidate(chars: &[char]) -> bool {
+    // The re-check only asks whether a token is in a rule's set (`is_some`), never the verdict,
+    // so the quote parity the terminal lookups take cannot change this answer.
+    let parity = QuoteParity::of(chars);
     chars.iter().enumerate().any(|(index, ch)| {
         if *ch != '.' {
             return false;
@@ -1206,8 +1216,13 @@ fn pdf_sentence_rule_candidate(chars: &[char]) -> bool {
                 && word_before_period_token(chars, index).is_some_and(|word| word == "et"))
             || spaced_decimal_point(chars, index)
             || numbering_lead_period(chars, index)
-            || pdf_reference_abbreviation_is_terminal(chars, index, &token.to_ascii_lowercase())
-                .is_some()
+            || pdf_reference_abbreviation_is_terminal(
+                chars,
+                index,
+                &token.to_ascii_lowercase(),
+                &parity,
+            )
+            .is_some()
     })
 }
 
@@ -1239,13 +1254,150 @@ fn word_before_position(chars: &[char], position: usize) -> Option<(String, usiz
     })
 }
 
-fn extend_terminal_cluster(chars: &[char], index: usize) -> usize {
+/// Where the straight ASCII quotes are inside a paragraph: `dquote`/`squote[i]` is true when
+/// an odd number of delimiter quotes precedes character `i` - the quote at `i` then closes an
+/// open quote of the same paragraph. `"` cannot be told from its opening twin by shape, so
+/// parity is the only evidence; `'` additionally needs shape evidence, because an apostrophe
+/// inside a word (`don't`, `dogs'`) is not a quote delimiter at all.
+struct QuoteParity {
+    dquote: Vec<bool>,
+    squote: Vec<bool>,
+}
+
+impl QuoteParity {
+    fn of(chars: &[char]) -> Self {
+        let len = chars.len() + 1;
+        let mut dquote = vec![false; len];
+        let mut squote = vec![false; len];
+        let mut double_open = false;
+        let mut single_open = false;
+        for (index, ch) in chars.iter().copied().enumerate() {
+            match ch {
+                // The curly CJK quotes wear their direction, so they anchor the state: the
+                // owner books open speeches with `“` but close them with the straight `"`
+                // as often as with `”`, and a scan that ignores the curly marks never knows
+                // a speech is open when the straight closer arrives.
+                '“' | '「' | '『' => double_open = true,
+                '”' | '」' | '』' => double_open = false,
+                '‘' => single_open = true,
+                '’' => single_open = false,
+                // `` ` `` opens the single quotation the owner books carry (`說：`…'”) -
+                // without it the scan never knows the quotation is open when its apostrophe
+                // closer arrives. It only counts before a CJK letter: the Markdown code span
+                // is a Latin-shape token and would corrupt the state of prose paragraphs.
+                '`' if chars.get(index + 1).is_some_and(|ch| is_cjk_letter(*ch)) => {
+                    single_open = true
+                }
+                '"' => {
+                    // The straight double quote wears no direction, so the scan classifies it
+                    // by shape instead of counting. Counting flips on every stray quote and
+                    // misjudges everything after it: a hard-wrapped CJK dialogue line carries
+                    // several speeches per paragraph, so one stray mark poisons the rest.
+                    // The closer shape anchors the state; anywhere else the alternating state
+                    // decides, exactly like counting does on clean prose. A quote tight
+                    // against CJK (`鐫著"點犀"`) toggles the same way; inside a Latin word the
+                    // shape is a measurement and never a quote delimiter, but it is too rare
+                    // there to pay for.
+                    if quote_closes_by_shape(chars, index) {
+                        double_open = false;
+                    } else {
+                        double_open = !double_open;
+                    }
+                }
+                '\'' => {
+                    let previous_alnum = index > 0 && chars[index - 1].is_alphanumeric();
+                    let next_alnum = chars
+                        .get(index + 1)
+                        .is_some_and(|next| next.is_alphanumeric());
+                    // The same terminal shape the double quote wears: CJK books that quote
+                    // with `` `…' `` close the quotation right after the terminal mark, so
+                    // the apostrophe there is a closer even when the scan lost track. An
+                    // apostrophe inside a word is never a quote delimiter at all, so the
+                    // shape only applies outside a word.
+                    if !previous_alnum && quote_closes_by_shape(chars, index) {
+                        single_open = false;
+                    } else if single_open {
+                        // Outside a word, the closer shape wins; a trailing possessive
+                        // (`dogs'`) is indistinguishable from one and is the accepted cost.
+                        if !previous_alnum {
+                            single_open = false;
+                        }
+                    } else if !previous_alnum && next_alnum {
+                        single_open = true;
+                    }
+                }
+                _ => {}
+            }
+            dquote[index + 1] = double_open;
+            squote[index + 1] = single_open;
+        }
+        Self { dquote, squote }
+    }
+
+    fn dquote_open_before(&self, index: usize) -> bool {
+        self.dquote.get(index).copied().unwrap_or(false)
+    }
+
+    fn squote_open_before(&self, index: usize) -> bool {
+        self.squote.get(index).copied().unwrap_or(false)
+    }
+}
+
+/// The closing-quote shape a straight `"` or `'` wears: directly after a terminal mark, or
+/// after whitespace that follows a terminal mark when the text continues in CJK - the two ways
+/// a hard-wrapped CJK dialogue line ends a speech (`嗎？"`, `好了！\n"`).
+fn quote_closes_by_shape(chars: &[char], index: usize) -> bool {
+    if index == 0 {
+        return false;
+    }
+    if is_terminal_mark(chars[index - 1]) {
+        return true;
+    }
+    if !chars[index - 1].is_whitespace() {
+        return false;
+    }
+    chars[..index]
+        .iter()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(|ch| is_terminal_mark(*ch))
+        && chars.get(index + 1).is_some_and(|ch| is_cjk_letter(*ch))
+}
+
+/// scl1: after a sentence-ending mark the whole run of closing brackets and quotes belongs to
+/// the sentence. Brackets and the curly CJK quotes are unambiguous closers, so they always
+/// continue the cluster; `"` and `'` continue it only when they close an open quote of the
+/// same paragraph (the `QuoteParity` evidence), so an *opening* quote of the next speech is
+/// never swallowed.
+fn closer_continues_cluster(chars: &[char], index: usize, parity: &QuoteParity) -> bool {
+    match chars[index] {
+        '"' => parity.dquote_open_before(index),
+        '\'' => parity.squote_open_before(index),
+        ch => is_sentence_closer(ch),
+    }
+}
+
+fn extend_terminal_cluster(chars: &[char], index: usize, parity: &QuoteParity) -> usize {
     let mut end = index + 1;
     while end < chars.len() && is_terminal_mark(chars[end]) {
         end += 1;
     }
-    while end < chars.len() && is_sentence_closer(chars[end]) {
-        end += 1;
+    loop {
+        while end < chars.len() && closer_continues_cluster(chars, end, parity) {
+            end += 1;
+        }
+        // A hard-wrapped line can put the closer behind the newline (`。《四書》\n”` is how
+        // the owner books carry `。”`): whitespace inside a paragraph never opens a new
+        // sentence, so a closer that follows only whitespace still belongs to this one.
+        let mut probe = end;
+        while probe < chars.len() && chars[probe].is_whitespace() {
+            probe += 1;
+        }
+        if probe > end && probe < chars.len() && closer_continues_cluster(chars, probe, parity) {
+            end = probe + 1;
+        } else {
+            break;
+        }
     }
     end
 }
@@ -1254,10 +1406,20 @@ fn is_terminal_mark(ch: char) -> bool {
     matches!(ch, '.' | '!' | '?' | '。' | '！' | '？')
 }
 
+/// The unambiguous closers: brackets and the curly CJK quotes. The fullwidth `）` and the
+/// lenticular `〕` close the defect the owner books measured (a bare `）` as its own unit).
+/// A CJK ideograph: the shape evidence for an inline straight-quote opening (`鐫著"點犀"`).
+fn is_cjk_letter(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'
+    )
+}
+
 fn is_sentence_closer(ch: char) -> bool {
     matches!(
         ch,
-        '"' | '\'' | '”' | '’' | ')' | ']' | '}' | '》' | '」' | '』' | '】'
+        '”' | '’' | ')' | ']' | '}' | '》' | '」' | '』' | '】' | '）' | '〕'
     )
 }
 
@@ -2821,6 +2983,126 @@ mod tests {
             let mut document = document(vec![section("s", None, text, Vec::new())]);
             document.media_type = MediaType("text/markdown".into());
             assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// scl1: after a sentence-ending mark the run of closing brackets and quotes belongs to
+    /// the same sentence. `（……。）` is one unit, and the closing fullwidth bracket is never
+    /// split off as a bare `）` unit of its own.
+    #[test]
+    fn a_closing_bracket_after_a_terminal_mark_stays_in_the_sentence() {
+        for (text, expected) in [
+            // The owner-book defect: `）` after `。` inside fullwidth parentheses.
+            (
+                "（你可以看一下 AWS 上的 Simple Workflow 服务。）",
+                vec!["（你可以看一下 AWS 上的 Simple Workflow 服务。）"],
+            ),
+            // `。）` at the very end of a paragraph, after more prose.
+            (
+                "他说的办法很简单（就是先跑起来再说。）然后大家就散了。",
+                vec!["他说的办法很简单（就是先跑起来再说。）", "然后大家就散了。"],
+            ),
+            // Nested closers: the curly quote and the fullwidth bracket both stay.
+            (
+                "他低声说：“就这样吧。”）第二天他离开了。",
+                vec!["他低声说：“就这样吧。”）", "第二天他离开了。"],
+            ),
+            // The closing curly quote after `！` stays with its sentence; the narration
+            // after it segments exactly as it did before.
+            (
+                "“嗯，嗯！”他说。她点了点头。",
+                vec!["“嗯，嗯！”", "他说。", "她点了点头。"],
+            ),
+            // Every closer in the run is absorbed, not just the first.
+            ("“就这样。”）”她说。", vec!["“就这样。”）”", "她说。"]),
+            // A hard-wrapped line inside the paragraph puts the closer behind the newline;
+            // it still belongs to the sentence that ended before it.
+            (
+                "黛玉道：“只剛念了《四書》。\n”黛玉又問姊妹們讀何書。",
+                vec!["黛玉道：“只剛念了《四書》。\n”", "黛玉又問姊妹們讀何書。"],
+            ),
+        ] {
+            let document = document(vec![section("s", None, text, Vec::new())]);
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// scl1: the ASCII `"` is a closer only when it closes a quote opened earlier in the same
+    /// paragraph. English closing quotes keep absorbing, and the opening quote of the next
+    /// speech is never swallowed into the previous sentence.
+    #[test]
+    fn a_straight_double_quote_after_a_terminal_absorbs_only_as_a_closer() {
+        for (text, expected) in [
+            (
+                "He said \"Stop.\" Then he left.",
+                vec!["He said \"Stop.\"", "Then he left."],
+            ),
+            // Two speeches in one paragraph: the second opening quote stays with its speech.
+            (
+                "\"Yes!\" she said. \"No!\" he answered.",
+                vec!["\"Yes!\"", "she said.", "\"No!\"", "he answered."],
+            ),
+            // The quote after `ended.` opens the next speech (an even number of quotes
+            // precedes it), so it is not absorbed into the previous sentence - and the
+            // speech it opens still closes correctly.
+            (
+                "The speech ended. \"Now we go.\"",
+                vec!["The speech ended.", "\"Now we go.\""],
+            ),
+        ] {
+            let document = document(vec![section("s", None, text, Vec::new())]);
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// scl1: the apostrophe rule keeps contractions out of the quote count, so a single-quoted
+    /// speech inside a paragraph still closes correctly.
+    #[test]
+    fn a_straight_single_quote_after_a_terminal_absorbs_only_as_a_closer() {
+        for (text, expected) in [
+            (
+                "He said 'Stop.' Then he left.",
+                vec!["He said 'Stop.'", "Then he left."],
+            ),
+            // `don't` is a contraction, not an opening quote: the speech still balances.
+            (
+                "'I don't know.' He nodded.",
+                vec!["'I don't know.'", "He nodded."],
+            ),
+        ] {
+            let document = document(vec![section("s", None, text, Vec::new())]);
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// scl1: a closing bracket that is not preceded by a terminal mark is untouched - the
+    /// rule absorbs closers after a sentence end, it never invents a sentence end at a closer.
+    #[test]
+    fn a_closing_bracket_without_a_terminal_mark_is_untouched() {
+        for (text, expected) in [
+            (
+                "（你可以看一下 AWS 上的 Simple Workflow 服务）然后我们继续。",
+                vec!["（你可以看一下 AWS 上的 Simple Workflow 服务）然后我们继续。"],
+            ),
+            (
+                "Alpha (beta) gamma. Delta.",
+                vec!["Alpha (beta) gamma.", "Delta."],
+            ),
+        ] {
+            let document = document(vec![section("s", None, text, Vec::new())]);
+            assert_eq!(pdf6g_sentences(&document), vec![expected], "{text}");
+        }
+    }
+
+    /// scl1 applies to every format: the same CJK text segments identically under PDF prose
+    /// rules and under a Markdown document.
+    #[test]
+    fn trailing_closers_absorb_in_every_format() {
+        let text = "（你可以看一下 AWS 上的 Simple Workflow 服务。）";
+        for media in ["application/epub+zip", "text/markdown", "application/pdf"] {
+            let mut document = document(vec![section("s", None, text, Vec::new())]);
+            document.media_type = MediaType(media.into());
+            assert_eq!(pdf6g_sentences(&document), vec![vec![text]], "{media}");
         }
     }
 

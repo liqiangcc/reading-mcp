@@ -14,6 +14,13 @@ use rmcp::transport::streamable_http_server::{
 };
 use serde_json::{Value, json};
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(target_env = "musl")]
+const MI_OPTION_PURGE_DELAY: i32 = 15;
+
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
 const MCP_PATH: &str = "/mcp";
 const HEALTH_PATH: &str = "/healthz";
@@ -26,6 +33,10 @@ struct AuthState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_env = "musl")]
+    unsafe {
+        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 10);
+    }
     if reading_mcp::parsing::run_file_source_view_worker_if_requested()? {
         return Ok(());
     }

@@ -95,8 +95,7 @@ impl Transport<RoleServer> for DiscoveryCompatibleStdio {
     }
 }
 
-#[cfg_attr(not(target_env = "musl"), tokio::main)]
-#[cfg_attr(target_env = "musl", tokio::main(flavor = "current_thread"))]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_env = "musl")]
     unsafe {

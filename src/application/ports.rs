@@ -21,6 +21,13 @@ use super::reading_profile::ReliabilitySummary;
 use super::section_rows;
 use super::text_unit_stream::{SectionStreamPlan, StreamUnit, plan_section_stream};
 
+/// The ingest fingerprint a SQLite `text_unit_documents_v2` row carries while its document's
+/// section rows are being replaced in chunks. The row (and every section row under its `doc_key`)
+/// must answer "not ingested" to any read until the final chunk commit flips the fingerprint to
+/// the real one, so a crash in the middle of the write can never leave a document that reads as
+/// complete but is partial. It is part of the store contract because the v2 readers resolve it.
+pub const INGEST_IN_PROGRESS_FINGERPRINT: &str = "chunked-ingest/in-progress";
+
 pub const LEXICAL_TOKENIZER_VERSION: &str = "lexical-tokenizer/v1";
 pub const LEGACY_SEARCH_TOKENIZER_VERSION: &str = "legacy-search-tokenizer/unversioned";
 

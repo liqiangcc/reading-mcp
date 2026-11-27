@@ -13,7 +13,8 @@ use crate::application::get_text_units::{
 use crate::application::handle_reading::{remap_reading_cursor, remap_reading_handle};
 use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{
-    DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex, TextUnitStreamKey,
+    DocumentRepository, INGEST_IN_PROGRESS_FINGERPRINT, OwnedStreamUnit, StoredStreamItem,
+    TextUnitIndex, TextUnitStreamKey,
 };
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::DocumentView;
@@ -157,6 +158,7 @@ impl ReadReadingUseCase {
                 document_handle.doc_key
             )));
         };
+        let mut fingerprint = initial_row.ingest_fingerprint.clone();
         let mut document_id = initial_row.document_id;
         // The header carries the identity the handle is bound to; the body order is read by
         // position, never materialized as a `Vec<SectionId>`.
@@ -179,6 +181,7 @@ impl ReadReadingUseCase {
                     document_handle.doc_key
                 )));
             };
+            fingerprint = recovered.ingest_fingerprint.clone();
             document_id = recovered.document_id;
             (view, normalized_hash) =
                 DocumentView::load_with_hash(Arc::clone(&self.repository), &document_id)
@@ -186,6 +189,12 @@ impl ReadReadingUseCase {
                     .ok_or_else(ReadingError::not_opened)?;
             current_checksum =
                 handle_checksum(view.id(), &normalized_hash, &view.header().media_type);
+        }
+        // A document whose section rows are mid-replacement (or were left so by a crash) is not
+        // readable, exactly as it would be had it never been ingested: `open` re-ingests it, and
+        // its rows are never read half-written.
+        if fingerprint.as_deref() == Some(INGEST_IN_PROGRESS_FINGERPRINT) {
+            return Err(ReadingError::not_opened());
         }
         if current_checksum != document_handle.checksum {
             let mut error = ReadingError::stale_handle(format!(

@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{
-    DocumentHeader, DocumentRepository, HandleRemap, HandleRemapUnit, OwnedStreamUnit, SectionRow,
-    TextUnitIndex,
+    DocumentHeader, DocumentRepository, HandleRemap, HandleRemapUnit,
+    INGEST_IN_PROGRESS_FINGERPRINT, OwnedStreamUnit, SectionRow, TextUnitIndex,
 };
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::{DocumentView, carrier_section};
@@ -68,6 +68,7 @@ pub(crate) async fn resolve_header(
             document_handle.doc_key
         )));
     };
+    let mut fingerprint = initial_row.ingest_fingerprint.clone();
     let mut document_id = initial_row.document_id;
     let (mut view, mut normalized_document_hash) =
         DocumentView::load_with_hash(Arc::clone(repository), &document_id)
@@ -88,6 +89,7 @@ pub(crate) async fn resolve_header(
                 document_handle.doc_key
             )));
         };
+        fingerprint = recovered.ingest_fingerprint.clone();
         document_id = recovered.document_id;
         (view, normalized_document_hash) =
             DocumentView::load_with_hash(Arc::clone(repository), &document_id)
@@ -98,6 +100,12 @@ pub(crate) async fn resolve_header(
             &normalized_document_hash,
             &view.header().media_type,
         );
+    }
+    // A document whose section rows are mid-replacement (or were left so by a crash) is not
+    // readable, exactly as it would be had it never been ingested: `open` re-ingests it, and its
+    // rows are never read half-written.
+    if fingerprint.as_deref() == Some(INGEST_IN_PROGRESS_FINGERPRINT) {
+        return Err(ReadingError::not_opened());
     }
     if current_checksum != document_handle.checksum {
         let detail = format!(

@@ -186,9 +186,12 @@ async fn degraded_blob_enumerates_as_paragraph_and_still_reads_exactly() {
 
 #[test]
 fn fallback_pdf_with_unreliable_paragraphs_reports_reliability_degradation() {
+    // PDF-7a (#232) counts a year beside a month as part of that date, so this masthead keeps
+    // its four markers through Volume, Number, Pp and the date rather than through the year.
     let mut document = document_with_content(
-        "16 October 1964, Volume 146, Number 3642 Strong Inference Certain systematic methods \
-         of scientific thinking may produce much more rapid progress than others.",
+        "16 October 1964, Volume 146, Number 3642, Pp. 347-353 Strong Inference Certain \
+         systematic methods of scientific thinking may produce much more rapid progress than \
+         others.",
     );
     document.media_type = MediaType("application/pdf".into());
     document
@@ -293,13 +296,15 @@ fn pdf_per_sentence_verdict_keeps_paragraph_index_stable() {
 #[test]
 fn pdf_masthead_blob_stays_coarse_under_the_per_sentence_guard() {
     // The same text as `merged_masthead_title_and_opening_blob_is_not_a_clean_sentence`,
-    // under the PDF profile: its first sentence packs the bibliographic markers densely
-    // enough to fire on its own, so the verdict is unchanged.
+    // under the PDF profile, plus the masthead's page marker: its first sentence packs the
+    // bibliographic markers densely enough to fire on its own, so the verdict is unchanged.
+    // PDF-7a (#232) drops the year beside the month, so Volume, Number, Pp and the date are
+    // what reach four markers here.
     let mut document = document_with_content(
-        "16 October 1964, Volume 146, Number 3642 Strong Inference Certain systematic methods \
-         of scientific thinking may produce much more rapid progress than others. John R. \
-         Platt Scientists these days tend to keep up a polite fiction that all science is \
-         equal.",
+        "16 October 1964, Volume 146, Number 3642, Pp. 347-353 Strong Inference Certain \
+         systematic methods of scientific thinking may produce much more rapid progress than \
+         others. John R. Platt Scientists these days tend to keep up a polite fiction that all \
+         science is equal.",
     );
     document.media_type = MediaType("application/pdf".into());
     document

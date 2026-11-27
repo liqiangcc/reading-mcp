@@ -7560,18 +7560,21 @@ impl TextUnitIndex for SqliteTextUnitIndex {
         &self,
         document_id: &DocumentId,
         ingest_fingerprint: &str,
+        handle_checksum: &str,
     ) -> Result<bool, ApplicationError> {
         let document_id = document_id.clone();
         let ingest_fingerprint = ingest_fingerprint.to_owned();
+        let handle_checksum = handle_checksum.to_owned();
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
                 let changed = connection
                     .execute(
-                        "UPDATE text_unit_documents_v2 SET ingest_fingerprint = ?2
+                        "UPDATE text_unit_documents_v2
+                         SET ingest_fingerprint = ?2, handle_checksum = ?3
                          WHERE document_id = ?1",
-                        params![document_id.0, ingest_fingerprint],
+                        params![document_id.0, ingest_fingerprint, handle_checksum],
                     )
                     .map_err(text_unit_index_error)?;
                 Ok(changed > 0)

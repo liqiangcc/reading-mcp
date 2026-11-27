@@ -15,6 +15,7 @@ use crate::application::ports::{
     DocumentKeyRow, DocumentRepository, RetrievalOptions, TextUnitIndex,
 };
 use crate::application::reading_error::ReadingError;
+use crate::application::short_handle::handle_checksum;
 
 pub(crate) struct HandleRecovery {
     open_document: Arc<OpenDocumentUseCase>,
@@ -102,8 +103,17 @@ impl HandleRecovery {
         // fingerprint. In that case `open` is a hit and does not rewrite the row; stamp the metadata
         // once instead of parsing the document on every read.
         if opened.document_id == fresh.document_id {
+            let opened_checksum = handle_checksum(
+                &opened.document_id,
+                &opened.normalized_document_hash,
+                &opened.media_type,
+            );
             self.text_unit_index
-                .mark_ingest_fingerprint(&fresh.document_id, &self.ingest_fingerprint)
+                .mark_ingest_fingerprint(
+                    &fresh.document_id,
+                    &self.ingest_fingerprint,
+                    &opened_checksum,
+                )
                 .await?;
             row = DocumentKeyRow {
                 document_id: fresh.document_id,

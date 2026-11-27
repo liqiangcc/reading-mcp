@@ -481,6 +481,34 @@ async fn first_deploy_rows_without_ingest_metadata_remap_stdio() {
     assert_eq!(updated, 1);
     drop(connection);
 
+    // Before any extraction change, a same-version restart can hit the existing open-result
+    // cache. That hit must stamp both metadata fields; leaving the checksum null would make a
+    // later segmentation-version deploy mistake the current probe checksum for the pre-feature
+    // checksum and skip proof generation.
+    let stamped = start_client(directory.path(), state.path()).await;
+    let same_version = payload(&v2_read(&stamped, &sentence, json!({})).await);
+    assert!(
+        same_version["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "{same_version}"
+    );
+    stamped.cancel().await.expect("stamping client should stop");
+    let connection = rusqlite::Connection::open(&database).expect("state database should reopen");
+    let stamped_checksum: Option<String> = connection
+        .query_row(
+            "SELECT handle_checksum FROM text_unit_documents_v2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("handle checksum should be queryable");
+    assert_eq!(
+        stamped_checksum.as_deref(),
+        doc.rsplit('~').next(),
+        "handle checksum must be stamped"
+    );
+    drop(connection);
+
     let second = restart_variant(directory.path(), state.path(), "spaces").await;
     let result = v2_read(&second, &sentence, json!({})).await;
     let error = tool_error(&result);

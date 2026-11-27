@@ -1200,6 +1200,7 @@ pub trait TextUnitIndex: Send + Sync {
         &self,
         _document_id: &DocumentId,
         _ingest_fingerprint: &str,
+        _handle_checksum: &str,
     ) -> Result<bool, ApplicationError> {
         Ok(false)
     }

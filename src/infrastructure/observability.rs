@@ -816,11 +816,12 @@ impl TextUnitIndex for ObservedTextUnitIndex {
         &self,
         document_id: &DocumentId,
         ingest_fingerprint: &str,
+        handle_checksum: &str,
     ) -> Result<bool, ApplicationError> {
         let started = Instant::now();
         let result = self
             .inner
-            .mark_ingest_fingerprint(document_id, ingest_fingerprint)
+            .mark_ingest_fingerprint(document_id, ingest_fingerprint, handle_checksum)
             .await;
         emit_text_unit_write(started, result.is_ok());
         result

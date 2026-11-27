@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3789,30 +3790,11 @@ impl SqliteTextUnitIndex {
                  CREATE TABLE IF NOT EXISTS handle_remap_v1 (
                     doc_key INTEGER NOT NULL,
                     source_checksum TEXT NOT NULL,
-                    source_kind TEXT NOT NULL,
                     source_section_key INTEGER NOT NULL,
-                    source_paragraph_index INTEGER NOT NULL,
-                    source_sentence_index INTEGER NOT NULL,
                     target_checksum TEXT NOT NULL,
-                    target_kind TEXT NOT NULL,
-                    target_section_key INTEGER NOT NULL,
-                    target_paragraph_index INTEGER NOT NULL,
-                    target_sentence_index INTEGER NOT NULL,
-                    sentence_stream_position INTEGER,
-                    paragraph_stream_position INTEGER,
-                    PRIMARY KEY(
-                        doc_key, source_checksum, source_kind, source_section_key,
-                        source_paragraph_index, source_sentence_index
-                    )
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_handle_remap_v1_sentence_position
-                    ON handle_remap_v1(
-                        doc_key, source_checksum, source_section_key, sentence_stream_position
-                    );
-                 CREATE INDEX IF NOT EXISTS idx_handle_remap_v1_paragraph_position
-                    ON handle_remap_v1(
-                        doc_key, source_checksum, source_section_key, paragraph_stream_position
-                    );",
+                    entries BLOB NOT NULL,
+                    PRIMARY KEY(doc_key, source_checksum, source_section_key)
+                 ) WITHOUT ROWID;",
             )
             .map_err(text_unit_index_error)?;
         ensure_handle_identity_columns(&connection)?;
@@ -5839,33 +5821,12 @@ fn plan_chunk_starts(
 // stale-handle remap construction
 // ------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RemapKind {
     Document,
     Section,
     Paragraph,
     Sentence,
-}
-
-impl RemapKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Document => "document",
-            Self::Section => "section",
-            Self::Paragraph => "paragraph",
-            Self::Sentence => "sentence",
-        }
-    }
-
-    fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "document" => Some(Self::Document),
-            "section" => Some(Self::Section),
-            "paragraph" => Some(Self::Paragraph),
-            "sentence" => Some(Self::Sentence),
-            _ => None,
-        }
-    }
 }
 
 fn remap_key_parts(unit: &HandleRemapUnit) -> (RemapKind, i64, i64, i64) {
@@ -5894,25 +5855,158 @@ fn remap_key_parts(unit: &HandleRemapUnit) -> (RemapKind, i64, i64, i64) {
     }
 }
 
-fn remap_unit(
-    kind: &str,
-    section_key: i64,
-    paragraph: i64,
-    sentence: i64,
-) -> Option<HandleRemapUnit> {
-    match RemapKind::from_str(kind)? {
-        RemapKind::Document => Some(HandleRemapUnit::Document),
-        RemapKind::Section => Some(HandleRemapUnit::Section { section_key }),
-        RemapKind::Paragraph if paragraph >= 0 => Some(HandleRemapUnit::Paragraph {
-            section_key,
-            paragraph_index: paragraph as usize,
-        }),
-        RemapKind::Sentence if paragraph >= 0 && sentence >= 0 => Some(HandleRemapUnit::Sentence {
-            section_key,
-            paragraph_index: paragraph as usize,
-            sentence_index: sentence as usize,
-        }),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EncodedRemapEntry {
+    source_kind: RemapKind,
+    source_paragraph_index: usize,
+    source_sentence_index: Option<usize>,
+    target_kind: RemapKind,
+    target_paragraph_index: usize,
+    target_sentence_index: Option<usize>,
+    sentence_stream_position: Option<usize>,
+    paragraph_stream_position: Option<usize>,
+}
+
+fn push_uvarint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_uvarint(bytes: &[u8], position: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *bytes.get(*position)?;
+        *position += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn remap_entry_kind_code(kind: RemapKind) -> u8 {
+    match kind {
+        RemapKind::Section => 0,
+        RemapKind::Paragraph => 1,
+        RemapKind::Sentence => 2,
+        RemapKind::Document => 3,
+    }
+}
+
+fn remap_entry_kind(code: u8) -> Option<RemapKind> {
+    match code {
+        0 => Some(RemapKind::Section),
+        1 => Some(RemapKind::Paragraph),
+        2 => Some(RemapKind::Sentence),
         _ => None,
+    }
+}
+
+fn optional_index_plus_one(index: Option<usize>) -> u64 {
+    index
+        .and_then(|value| u64::try_from(value).ok())
+        .map_or(0, |value| value + 1)
+}
+
+fn usize_varint(bytes: &[u8], position: &mut usize) -> Option<usize> {
+    usize::try_from(read_uvarint(bytes, position)?).ok()
+}
+
+fn optional_usize_varint(bytes: &[u8], position: &mut usize) -> Option<Option<usize>> {
+    let value = read_uvarint(bytes, position)?;
+    if value == 0 {
+        Some(None)
+    } else {
+        usize::try_from(value - 1).ok().map(Some)
+    }
+}
+
+/// The compact per-section remap payload. Positions and indexes are varints; a zero optional-index
+/// field means none, otherwise it is the index plus one.
+fn encode_handle_remap_entries(entries: &[EncodedRemapEntry]) -> Vec<u8> {
+    let mut out = vec![1];
+    push_uvarint(&mut out, entries.len() as u64);
+    for entry in entries {
+        out.push(remap_entry_kind_code(entry.source_kind));
+        push_uvarint(&mut out, entry.source_paragraph_index as u64);
+        push_uvarint(
+            &mut out,
+            optional_index_plus_one(entry.source_sentence_index),
+        );
+        out.push(remap_entry_kind_code(entry.target_kind));
+        push_uvarint(&mut out, entry.target_paragraph_index as u64);
+        push_uvarint(
+            &mut out,
+            optional_index_plus_one(entry.target_sentence_index),
+        );
+        push_uvarint(
+            &mut out,
+            optional_index_plus_one(entry.sentence_stream_position),
+        );
+        push_uvarint(
+            &mut out,
+            optional_index_plus_one(entry.paragraph_stream_position),
+        );
+    }
+    out
+}
+
+fn decode_handle_remap_entries(bytes: &[u8]) -> Vec<EncodedRemapEntry> {
+    let mut position = 0usize;
+    let Some(&1) = bytes.get(position) else {
+        return Vec::new();
+    };
+    position += 1;
+    let Some(count) = read_uvarint(bytes, &mut position) else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let Some(source_kind) = bytes.get(position).and_then(|code| remap_entry_kind(*code)) else {
+            return Vec::new();
+        };
+        position += 1;
+        let entry = (|| {
+            Some(EncodedRemapEntry {
+                source_kind,
+                source_paragraph_index: usize_varint(bytes, &mut position)?,
+                source_sentence_index: optional_usize_varint(bytes, &mut position)?,
+                target_kind: {
+                    let code = *bytes.get(position)?;
+                    position += 1;
+                    remap_entry_kind(code)?
+                },
+                target_paragraph_index: usize_varint(bytes, &mut position)?,
+                target_sentence_index: optional_usize_varint(bytes, &mut position)?,
+                sentence_stream_position: optional_usize_varint(bytes, &mut position)?,
+                paragraph_stream_position: optional_usize_varint(bytes, &mut position)?,
+            })
+        })();
+        let Some(entry) = entry else {
+            return Vec::new();
+        };
+        entries.push(entry);
+    }
+    entries
+}
+
+fn remap_target_unit(section_key: i64, entry: EncodedRemapEntry) -> Option<HandleRemapUnit> {
+    match entry.target_kind {
+        RemapKind::Section => Some(HandleRemapUnit::Section { section_key }),
+        RemapKind::Paragraph => Some(HandleRemapUnit::Paragraph {
+            section_key,
+            paragraph_index: entry.target_paragraph_index,
+        }),
+        RemapKind::Sentence => Some(HandleRemapUnit::Sentence {
+            section_key,
+            paragraph_index: entry.target_paragraph_index,
+            sentence_index: entry.target_sentence_index?,
+        }),
+        RemapKind::Document => None,
     }
 }
 
@@ -6156,6 +6250,316 @@ mod proof_automaton_tests {
             );
         }
     }
+
+    #[test]
+    fn section_proof_matches_suffix_automaton_on_overlap_heavy_text() {
+        use super::{SectionProof, StrippedSection};
+        for text in [
+            "aaaaaa",
+            "abababab",
+            "mississippi",
+            "abcabdabcabe",
+            "thequicktheorythe",
+        ] {
+            for start in 0..text.len() {
+                for end in start + 1..=text.len() {
+                    let needle = &text[start..end];
+                    let needle_bytes = [needle.as_bytes()];
+                    let mut proof = SectionProof::new(
+                        StrippedSection::new(text).expect("small text"),
+                        &needle_bytes,
+                    );
+                    assert_eq!(
+                        proof.lookup(needle.as_bytes()),
+                        ProofAutomaton::new(text).lookup(needle.as_bytes()),
+                        "text={text:?} needle={needle:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn section_proof_matches_suffix_automaton_for_random_long_needles() {
+        use super::{SectionProof, StrippedSection};
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..100 {
+            let text = (0..96)
+                .map(|_| (b'a' + (random() % 4) as u8) as char)
+                .collect::<String>();
+            let needle_len = 8 + (random() % 9) as usize;
+            let needle = if case % 2 == 0 {
+                let start = (random() % 40) as usize;
+                text[start..start + needle_len].to_owned()
+            } else {
+                (0..needle_len)
+                    .map(|_| (b'a' + (random() % 5) as u8) as char)
+                    .collect::<String>()
+            };
+            let needle_bytes = [needle.as_bytes()];
+            let mut proof = SectionProof::new(
+                StrippedSection::new(&text).expect("small text"),
+                &needle_bytes,
+            );
+            assert_eq!(
+                proof.lookup(needle.as_bytes()),
+                ProofAutomaton::new(&text).lookup(needle.as_bytes()),
+                "case={case} text={text:?} needle={needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_remap_entries_round_trip() {
+        use super::{
+            EncodedRemapEntry, RemapKind, decode_handle_remap_entries, encode_handle_remap_entries,
+        };
+        let entries = vec![
+            EncodedRemapEntry {
+                source_kind: RemapKind::Section,
+                source_paragraph_index: 0,
+                source_sentence_index: None,
+                target_kind: RemapKind::Section,
+                target_paragraph_index: 0,
+                target_sentence_index: None,
+                sentence_stream_position: None,
+                paragraph_stream_position: None,
+            },
+            EncodedRemapEntry {
+                source_kind: RemapKind::Paragraph,
+                source_paragraph_index: 130,
+                source_sentence_index: None,
+                target_kind: RemapKind::Sentence,
+                target_paragraph_index: 131,
+                target_sentence_index: Some(2),
+                sentence_stream_position: Some(259),
+                paragraph_stream_position: Some(130),
+            },
+            EncodedRemapEntry {
+                source_kind: RemapKind::Sentence,
+                source_paragraph_index: 130,
+                source_sentence_index: Some(4),
+                target_kind: RemapKind::Paragraph,
+                target_paragraph_index: 132,
+                target_sentence_index: None,
+                sentence_stream_position: Some(260),
+                paragraph_stream_position: None,
+            },
+        ];
+        assert_eq!(
+            decode_handle_remap_entries(&encode_handle_remap_entries(&entries)),
+            entries
+        );
+    }
+}
+
+const PROOF_GRAM_BYTES: usize = 8;
+const PROOF_GRAM_CANDIDATE_LIMIT: usize = 64;
+const PROOF_GRAM_OVERFLOW: usize = PROOF_GRAM_CANDIDATE_LIMIT + 1;
+const PROOF_SAMPLE_FRACTIONS: [(usize, usize); 1] = [(1, 2)];
+
+fn proof_gram_key(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(
+        bytes
+            .try_into()
+            .expect("a proof gram has exactly eight bytes"),
+    )
+}
+
+fn proof_sample_offsets(max_offset: usize) -> impl Iterator<Item = usize> {
+    PROOF_SAMPLE_FRACTIONS
+        .into_iter()
+        .map(move |(numerator, denominator)| max_offset * numerator / denominator)
+}
+
+#[derive(Default)]
+struct GramKeyHasher(u64);
+
+impl Hasher for GramKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        // Gram keys already contain eight entropy-bearing bytes; one multiply/xor fold is enough
+        // for a small in-memory table and keeps the per-byte section scan inexpensive.
+        let mixed = value.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = mixed ^ (mixed >> 29);
+    }
+}
+
+type GramMap = HashMap<u64, GramHits, BuildHasherDefault<GramKeyHasher>>;
+
+#[derive(Default)]
+struct GramHits {
+    count: usize,
+    first: u32,
+    extra: Vec<u32>,
+}
+
+impl GramHits {
+    fn add(&mut self, position: u32) {
+        if self.count >= PROOF_GRAM_OVERFLOW {
+            return;
+        }
+        if self.count == 0 {
+            self.first = position;
+        } else {
+            self.extra.push(position);
+        }
+        self.count += 1;
+    }
+}
+
+/// An exact section prover indexed by the eight-byte grams that can actually be queried. The
+/// needle-filtered scan is linear in the section; unlike an all-gram sorted index it does not sort
+/// (or even retain) positions that no old unit can ask about. Positions are capped at 65: at most
+/// 64 candidates are scanned exactly, while 65 means the suffix automaton must answer instead.
+struct SectionProof {
+    stripped: StrippedSection,
+    grams: GramMap,
+    automaton: Option<ProofAutomaton>,
+}
+
+impl SectionProof {
+    fn new(stripped: StrippedSection, needles: &[&[u8]]) -> Self {
+        let bytes = stripped.text.as_bytes();
+        let mut grams = GramMap::default();
+        for needle in needles {
+            if needle.len() < PROOF_GRAM_BYTES {
+                continue;
+            }
+            for offset in proof_sample_offsets(needle.len() - PROOF_GRAM_BYTES) {
+                grams
+                    .entry(proof_gram_key(&needle[offset..offset + PROOF_GRAM_BYTES]))
+                    .or_insert_with(GramHits::default);
+            }
+        }
+        if bytes.len() >= PROOF_GRAM_BYTES && !grams.is_empty() {
+            for position in 0..=bytes.len() - PROOF_GRAM_BYTES {
+                let key = proof_gram_key(&bytes[position..position + PROOF_GRAM_BYTES]);
+                if let Some(hits) = grams.get_mut(&key) {
+                    hits.add(position as u32);
+                }
+            }
+        }
+        Self {
+            stripped,
+            grams,
+            automaton: None,
+        }
+    }
+
+    fn original_at_byte(&self, byte: usize) -> Option<usize> {
+        self.stripped.original_at_byte(byte)
+    }
+
+    fn automaton_lookup(&mut self, needle: &[u8]) -> (usize, usize) {
+        if self.automaton.is_none() {
+            self.automaton = Some(ProofAutomaton::new(&self.stripped.text));
+        }
+        self.automaton
+            .as_ref()
+            .expect("automaton built above")
+            .lookup(needle)
+    }
+
+    /// Exact scan for needles shorter than a gram. These are rare in real unit streams and at most
+    /// seven bytes here, so scanning once is far cheaper than constructing the whole automaton.
+    fn direct_lookup(&self, needle: &[u8]) -> (usize, usize) {
+        let haystack = self.stripped.text.as_bytes();
+        if needle.is_empty() || needle.len() > haystack.len() {
+            return (0, 0);
+        }
+        let mut count = 0usize;
+        let mut first = 0usize;
+        for start in 0..=haystack.len() - needle.len() {
+            if haystack[start..start + needle.len()] == *needle {
+                if count == 0 {
+                    first = start;
+                }
+                count += 1;
+                if count == 2 {
+                    break;
+                }
+            }
+        }
+        (count, first)
+    }
+
+    fn lookup(&mut self, needle: &[u8]) -> (usize, usize) {
+        if needle.len() < PROOF_GRAM_BYTES {
+            return self.direct_lookup(needle);
+        }
+        // Every occurrence contains every sampled gram. Correctness does not depend on the sample
+        // being exhaustive: any selected gram is part of the needle, so every occurrence appears in
+        // that gram's positions and is verified byte-for-byte. The rarest sample is only a heuristic
+        // for avoiding the exact automaton on repetitive text.
+        let mut best_offset = 0usize;
+        let mut best_key = 0u64;
+        let mut best_candidates = usize::MAX;
+        for offset in proof_sample_offsets(needle.len() - PROOF_GRAM_BYTES) {
+            let key = proof_gram_key(&needle[offset..offset + PROOF_GRAM_BYTES]);
+            let candidates = self.grams.get(&key).map_or(0, |hits| hits.count);
+            if candidates < best_candidates {
+                best_offset = offset;
+                best_key = key;
+                best_candidates = candidates;
+                if candidates <= 1 {
+                    break;
+                }
+            }
+        }
+        if best_candidates == 0 {
+            return (0, 0);
+        }
+        if best_candidates > PROOF_GRAM_CANDIDATE_LIMIT {
+            return self.automaton_lookup(needle);
+        }
+        let Some(hits) = self.grams.get(&best_key) else {
+            return (0, 0);
+        };
+        let haystack = self.stripped.text.as_bytes();
+        let mut count = 0usize;
+        let mut first = 0usize;
+        let check_position = |position: u32, count: &mut usize, first: &mut usize| {
+            let position = position as usize;
+            let Some(start) = position.checked_sub(best_offset) else {
+                return;
+            };
+            let Some(end) = start.checked_add(needle.len()) else {
+                return;
+            };
+            if end <= haystack.len() && haystack[start..end] == *needle {
+                if *count == 0 {
+                    *first = start;
+                }
+                *count += 1;
+            }
+        };
+        if hits.count > 0 {
+            check_position(hits.first, &mut count, &mut first);
+            for position in &hits.extra {
+                if count == 2 {
+                    break;
+                }
+                check_position(*position, &mut count, &mut first);
+            }
+        }
+        (count, first)
+    }
 }
 
 struct OldNeedle {
@@ -6289,6 +6693,9 @@ fn target_at(layout: &SectionLayout, original_start: usize) -> Option<(RemapKind
 
 /// Builds every provable remap from the rows still in the store to the replacement segmentation.
 /// This runs inside the replacement transaction, before the old text and layout rows are deleted.
+/// The write is one compact row per section because even a small book has hundreds of thousands of
+/// sentence and paragraph units; the rare stale lookup can decode that section faster than SQLite
+/// can maintain hundreds of thousands of wide index entries here.
 #[allow(clippy::too_many_arguments)]
 fn build_handle_remaps(
     connection: &Connection,
@@ -6301,12 +6708,8 @@ fn build_handle_remaps(
     let mut insert = connection
         .prepare(
             "INSERT OR REPLACE INTO handle_remap_v1(
-                doc_key, source_checksum, source_kind, source_section_key,
-                source_paragraph_index, source_sentence_index,
-                target_checksum, target_kind, target_section_key,
-                target_paragraph_index, target_sentence_index,
-                sentence_stream_position, paragraph_stream_position
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                doc_key, source_checksum, source_section_key, target_checksum, entries
+             ) VALUES (?1,?2,?3,?4,?5)",
         )
         .map_err(text_unit_index_error)?;
     // A document handle needs no text proof: the raw document identity is the same `doc_key`.
@@ -6314,17 +6717,9 @@ fn build_handle_remaps(
         .execute(params![
             meta.doc_key,
             source_checksum,
-            "document",
-            -1,
-            -1,
             -1,
             target_checksum,
-            "document",
-            -1,
-            -1,
-            -1,
-            rusqlite::types::Null,
-            rusqlite::types::Null,
+            Vec::<u8>::new(),
         ])
         .map_err(text_unit_index_error)?;
 
@@ -6365,26 +6760,20 @@ fn build_handle_remaps(
             continue;
         };
 
+        let mut entries = Vec::new();
         // Structure handles remap structurally only when the whole section is the same modulo the
         // proof whitespace. A paragraph/sentence handle still uses the stronger span proof below.
         if strip_handle_whitespace(&old_text) == stripped_current.text && !old_text.is_empty() {
-            insert
-                .execute(params![
-                    meta.doc_key,
-                    source_checksum,
-                    "section",
-                    section_key,
-                    -1,
-                    -1,
-                    target_checksum,
-                    "section",
-                    section_key,
-                    -1,
-                    -1,
-                    rusqlite::types::Null,
-                    rusqlite::types::Null,
-                ])
-                .map_err(text_unit_index_error)?;
+            entries.push(EncodedRemapEntry {
+                source_kind: RemapKind::Section,
+                source_paragraph_index: 0,
+                source_sentence_index: None,
+                target_kind: RemapKind::Section,
+                target_paragraph_index: 0,
+                target_sentence_index: None,
+                sentence_stream_position: None,
+                paragraph_stream_position: None,
+            });
         }
 
         let (paragraph_positions, sentence_positions, coarse_sentence_positions) =
@@ -6433,48 +6822,47 @@ fn build_handle_remaps(
                 paragraph_position: None,
             });
         }
-        if needles.is_empty() {
-            continue;
-        }
-        let automaton = ProofAutomaton::new(&stripped_current.text);
-        for needle in &needles {
-            let (count, first_match) = automaton.lookup(needle.stripped.as_bytes());
-            if count != 1 {
-                continue;
+        if !needles.is_empty() {
+            let needle_bytes = needles
+                .iter()
+                .map(|needle| needle.stripped.as_bytes())
+                .collect::<Vec<_>>();
+            let mut proof = SectionProof::new(stripped_current, &needle_bytes);
+            for needle in &needles {
+                let (count, first_match) = proof.lookup(needle.stripped.as_bytes());
+                if count != 1 {
+                    continue;
+                }
+                let Some(original_start) = proof.original_at_byte(first_match) else {
+                    continue;
+                };
+                let Some((target_kind, target_paragraph, target_sentence)) =
+                    target_at(&current_layout, original_start)
+                else {
+                    continue;
+                };
+                entries.push(EncodedRemapEntry {
+                    source_kind: needle.kind,
+                    source_paragraph_index: needle.paragraph_index,
+                    source_sentence_index: (needle.kind == RemapKind::Sentence)
+                        .then_some(needle.sentence_index),
+                    target_kind,
+                    target_paragraph_index: target_paragraph,
+                    target_sentence_index: (target_kind == RemapKind::Sentence)
+                        .then_some(target_sentence),
+                    sentence_stream_position: needle.sentence_position,
+                    paragraph_stream_position: needle.paragraph_position,
+                });
             }
-            let Some(original_start) = stripped_current.original_at_byte(first_match) else {
-                continue;
-            };
-            let Some((target_kind, target_paragraph, target_sentence)) =
-                target_at(&current_layout, original_start)
-            else {
-                continue;
-            };
-            let source_sentence = if needle.kind == RemapKind::Sentence {
-                needle.sentence_index as i64
-            } else {
-                -1
-            };
-            let target_sentence = if target_kind == RemapKind::Sentence {
-                target_sentence as i64
-            } else {
-                -1
-            };
+        }
+        if !entries.is_empty() {
             insert
                 .execute(params![
                     meta.doc_key,
                     source_checksum,
-                    needle.kind.as_str(),
                     section_key,
-                    needle.paragraph_index as i64,
-                    source_sentence,
                     target_checksum,
-                    target_kind.as_str(),
-                    section_key,
-                    target_paragraph as i64,
-                    target_sentence,
-                    needle.sentence_position.map(|v| v as i64),
-                    needle.paragraph_position.map(|v| v as i64),
+                    encode_handle_remap_entries(&entries),
                 ])
                 .map_err(text_unit_index_error)?;
         }
@@ -7596,23 +7984,37 @@ impl TextUnitIndex for SqliteTextUnitIndex {
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
-                read_handle_remap(
-                    connection,
-                    "SELECT target_checksum, target_kind, target_section_key,
-                            target_paragraph_index, target_sentence_index
-                       FROM handle_remap_v1
-                      WHERE doc_key = ?1 AND source_checksum = ?2 AND source_kind = ?3
-                        AND source_section_key = ?4 AND source_paragraph_index = ?5
-                        AND source_sentence_index = ?6",
-                    params![
-                        doc_key,
-                        source_checksum,
-                        kind.as_str(),
-                        section_key,
-                        paragraph,
-                        sentence
-                    ],
-                )
+                let Some((target_checksum, entries)) =
+                    read_handle_remap_row(connection, doc_key, &source_checksum, section_key)?
+                else {
+                    return Ok(None);
+                };
+                if kind == RemapKind::Document {
+                    return Ok(Some(HandleRemap {
+                        target_checksum,
+                        target: HandleRemapUnit::Document,
+                    }));
+                }
+                let target = decode_handle_remap_entries(&entries)
+                    .into_iter()
+                    .find(|entry| match kind {
+                        RemapKind::Section => entry.source_kind == RemapKind::Section,
+                        RemapKind::Paragraph => {
+                            entry.source_kind == RemapKind::Paragraph
+                                && entry.source_paragraph_index == paragraph as usize
+                        }
+                        RemapKind::Sentence => {
+                            entry.source_kind == RemapKind::Sentence
+                                && entry.source_paragraph_index == paragraph as usize
+                                && entry.source_sentence_index == Some(sentence as usize)
+                        }
+                        RemapKind::Document => false,
+                    })
+                    .and_then(|entry| remap_target_unit(section_key, entry));
+                Ok(target.map(|target| HandleRemap {
+                    target_checksum,
+                    target,
+                }))
             },
         )
         .await
@@ -7628,56 +8030,52 @@ impl TextUnitIndex for SqliteTextUnitIndex {
     ) -> Result<Option<HandleRemap>, ApplicationError> {
         let _foreground = self.foreground.enter();
         let source_checksum = source_checksum.to_owned();
-        let column = match stream_kind {
-            RequestedTextUnitKind::Sentence => "sentence_stream_position",
-            RequestedTextUnitKind::Paragraph => "paragraph_stream_position",
-        };
         run_sqlite(
             &self.connection,
             ApplicationError::TextUnitIndexFailed,
             move |connection| {
-                read_handle_remap(
-                    connection,
-                    &format!(
-                        "SELECT target_checksum, target_kind, target_section_key,
-                                target_paragraph_index, target_sentence_index
-                           FROM handle_remap_v1
-                          WHERE doc_key = ?1 AND source_checksum = ?2 AND source_section_key = ?3
-                            AND {column} = ?4"
-                    ),
-                    params![doc_key, source_checksum, section_key, position as i64],
-                )
+                let Some((target_checksum, entries)) =
+                    read_handle_remap_row(connection, doc_key, &source_checksum, section_key)?
+                else {
+                    return Ok(None);
+                };
+                let target = decode_handle_remap_entries(&entries)
+                    .into_iter()
+                    .find(|entry| match stream_kind {
+                        RequestedTextUnitKind::Sentence => {
+                            entry.sentence_stream_position == Some(position)
+                        }
+                        RequestedTextUnitKind::Paragraph => {
+                            entry.paragraph_stream_position == Some(position)
+                        }
+                    })
+                    .and_then(|entry| remap_target_unit(section_key, entry));
+                Ok(target.map(|target| HandleRemap {
+                    target_checksum,
+                    target,
+                }))
             },
         )
         .await
     }
 }
 
-fn read_handle_remap(
+fn read_handle_remap_row(
     connection: &Connection,
-    sql: &str,
-    parameters: impl rusqlite::Params,
-) -> Result<Option<HandleRemap>, ApplicationError> {
-    let row = connection
-        .query_row(sql, parameters, |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })
+    doc_key: i64,
+    source_checksum: &str,
+    section_key: i64,
+) -> Result<Option<(String, Vec<u8>)>, ApplicationError> {
+    connection
+        .query_row(
+            "SELECT target_checksum, entries
+               FROM handle_remap_v1
+              WHERE doc_key = ?1 AND source_checksum = ?2 AND source_section_key = ?3",
+            params![doc_key, source_checksum, section_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
         .optional()
-        .map_err(text_unit_index_error)?;
-    Ok(
-        row.and_then(|(checksum, kind, section, paragraph, sentence)| {
-            remap_unit(&kind, section, paragraph, sentence).map(|target| HandleRemap {
-                target_checksum: checksum,
-                target,
-            })
-        }),
-    )
+        .map_err(text_unit_index_error)
 }
 
 fn stale_text_units(document_id: &DocumentId) -> ApplicationError {

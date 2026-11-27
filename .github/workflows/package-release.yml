@@ -222,17 +222,9 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           archive=$(find dist -maxdepth 1 -type f -name '*.tar.gz' -print -quit)
           test -n "$archive"
-          for asset in "$archive" dist/SHA256SUMS; do
-            name=$(basename "$asset")
-            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
-              echo "refusing to overwrite existing release asset: $name" >&2
-              exit 1
-            fi
-          done
-          gh release upload "$RELEASE_TAG" "$archive" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          python3 packaging/scripts/release-upload-assets.py             --repository "$GITHUB_REPOSITORY"             --tag "$RELEASE_TAG"             "$archive" dist/SHA256SUMS
 
   portability:
     needs: package

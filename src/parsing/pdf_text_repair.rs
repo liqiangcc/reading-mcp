@@ -413,9 +413,20 @@ pub(super) fn repair_fallback_fonts(doc: &mut LopdfDocument) -> FallbackFonts {
         fonts: Vec::new(),
         added: Vec::new(),
     };
+    // One CMap object per distinct decoding: the font dictionaries of one font
+    // share an array, and a CMap is expensive to parse, so they share the stream
+    // as well as the bytes.
+    let mut streams: HashMap<Vec<u8>, ObjectId> = HashMap::new();
     for (font_id, cmap) in fallback_font_cmaps(doc) {
-        let to_unicode = doc.add_object(Stream::new(Dictionary::new(), cmap));
-        saved.added.push(to_unicode);
+        let to_unicode = match streams.get(&cmap) {
+            Some(id) => *id,
+            None => {
+                let id = doc.add_object(Stream::new(Dictionary::new(), cmap.clone()));
+                saved.added.push(id);
+                streams.insert(cmap, id);
+                id
+            }
+        };
         let Some(font) = doc
             .get_object_mut(font_id)
             .and_then(Object::as_dict_mut)

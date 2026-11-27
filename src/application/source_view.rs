@@ -692,8 +692,10 @@ mod locator_differential_tests {
         // local differential run names them with this variable, separated by
         // `;`; CI still runs every committed fixture without downloading
         // anything.
+        let mut has_external_inputs = false;
         if let Ok(extra) = std::env::var("READING_MCP_SOURCE_VIEW_DIFFERENTIAL_INPUTS") {
             for input in extra.split(';').filter(|input| !input.is_empty()) {
+                has_external_inputs = true;
                 inputs.push(PathBuf::from(input));
             }
         }
@@ -844,7 +846,17 @@ mod locator_differential_tests {
             "source-view locator differential: documents={opened_documents} handles={compared} matching_refusals={matching_refusals}"
         );
         assert!(opened_documents >= 8, "text-layer fixtures should open");
-        assert!(compared >= 100, "the fixtures should exercise many handles");
+        if has_external_inputs {
+            assert!(
+                compared >= 100,
+                "external measurement PDFs should exercise many handles"
+            );
+        } else {
+            assert_eq!(
+                compared, 36,
+                "the committed fixtures plus cross-page case are deterministic"
+            );
+        }
         assert!(
             matching_refusals >= 2,
             "the synthetic page-crossing paragraph and sentence must both refuse"

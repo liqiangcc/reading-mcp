@@ -528,11 +528,83 @@ pub fn too_long_retry(request: &ReadRequest, error: &ReadingError) -> Option<Val
     }
     if let Some(direction) = &request.direction {
         retry.insert("direction".into(), Value::String(direction.clone()));
+    } else if request.from.starts_with("b:") {
+        retry.insert("direction".into(), Value::String("backward".into()));
     }
     if let Some(back) = request.back.filter(|back| *back > 0) {
         retry.insert("back".into(), json!(back));
     }
     Some(Value::Object(retry))
+}
+
+fn stale_target(error: &ReadingError) -> Option<&str> {
+    (error.code == ReadingErrorCode::StaleHandle).then_some(error.retry_handle.as_ref()?.as_str())
+}
+
+/// The `retry` object of a proven stale `read`: the same call with `from` replaced by the current handle.
+pub fn stale_read_retry(request: &ReadRequest, error: &ReadingError) -> Option<Value> {
+    let target = stale_target(error)?;
+    let mut retry = Map::new();
+    retry.insert("from".into(), Value::String(target.to_owned()));
+    if let Some(unit) = &request.unit {
+        retry.insert("unit".into(), Value::String(unit.clone()));
+    }
+    if let Some(max_chars) = request.max_chars {
+        retry.insert("max_chars".into(), json!(max_chars));
+    }
+    if let Some(direction) = &request.direction {
+        retry.insert("direction".into(), Value::String(direction.clone()));
+    }
+    if let Some(back) = request.back.filter(|back| *back > 0) {
+        retry.insert("back".into(), json!(back));
+    }
+    Some(Value::Object(retry))
+}
+
+pub fn stale_outline_retry(request: &OutlineRequest, error: &ReadingError) -> Option<Value> {
+    if request.cursor.is_some() {
+        return None;
+    }
+    let target = stale_target(error)?;
+    let mut retry = Map::new();
+    retry.insert("at".into(), Value::String(target.to_owned()));
+    retry.insert("depth".into(), json!(request.depth));
+    retry.insert("limit".into(), json!(request.limit));
+    Some(Value::Object(retry))
+}
+
+pub fn stale_search_retry(request: &SearchRequest, error: &ReadingError) -> Option<Value> {
+    let target = stale_target(error)?;
+    Some(json!({
+        "doc": target,
+        "query": request.query,
+        "limit": request.limit,
+    }))
+}
+
+pub fn stale_cite_retry(request: &CiteRequest, error: &ReadingError) -> Option<Value> {
+    let target = stale_target(error)?;
+    let source = error.retry_source.as_ref()?.as_str();
+    let at = request
+        .at
+        .iter()
+        .map(|handle| {
+            if handle == source {
+                target.to_owned()
+            } else {
+                handle.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    Some(json!({ "at": at }))
+}
+
+pub fn stale_source_view_retry(
+    _request: &SourceViewRequest,
+    error: &ReadingError,
+) -> Option<Value> {
+    let target = stale_target(error)?;
+    Some(json!({ "at": target }))
 }
 
 /// The `retry` object of a v2 error, or `None` when repeating the call would not be exactly right.

@@ -57,6 +57,12 @@ pub struct ReadingError {
     /// answer, when the renderer reported them. Boxed to keep the `Err` side
     /// of `Result` small; a source-view limit is the rare case.
     pub source_view: Option<Box<SourceViewLimitDetail>>,
+    /// The current handle a proven `stale_handle` remap names. Boxed for the same reason as
+    /// `source_view`: almost every error carries none.
+    pub retry_handle: Option<Box<String>>,
+    /// The stale handle or cursor the caller sent, when the tool needs it to rebuild its arguments
+    /// (`cite` replaces one element of its `at` array).
+    pub retry_source: Option<Box<String>>,
 }
 
 impl ReadingError {
@@ -69,7 +75,16 @@ impl ReadingError {
             pages: None,
             characters: None,
             source_view: None,
+            retry_handle: None,
+            retry_source: None,
         }
+    }
+
+    /// Attaches the proven current handle of a stale handle or cursor.
+    pub fn with_retry(mut self, source: impl Into<String>, handle: impl Into<String>) -> Self {
+        self.retry_source = Some(Box::new(source.into()));
+        self.retry_handle = Some(Box::new(handle.into()));
+        self
     }
 
     pub fn invalid(field: &'static str, detail: impl Into<String>) -> Self {

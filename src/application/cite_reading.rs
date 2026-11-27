@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::application::handle_reading::{ResolvedHeader, resolve_header, resolve_locator};
+use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{DocumentRepository, TextUnitIndex};
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::carrier_section;
@@ -46,6 +47,7 @@ pub struct CiteReadingResult {
 pub struct CiteReadingUseCase {
     repository: Arc<dyn DocumentRepository>,
     text_unit_index: Arc<dyn TextUnitIndex>,
+    handle_recovery: Option<Arc<HandleRecovery>>,
 }
 
 impl CiteReadingUseCase {
@@ -56,7 +58,13 @@ impl CiteReadingUseCase {
         Self {
             repository,
             text_unit_index,
+            handle_recovery: None,
         }
+    }
+
+    pub(crate) fn with_handle_recovery(mut self, recovery: Arc<HandleRecovery>) -> Self {
+        self.handle_recovery = Some(recovery);
+        self
     }
 
     pub async fn execute(&self, handles: &[String]) -> Result<CiteReadingResult, ReadingError> {
@@ -74,7 +82,8 @@ impl CiteReadingUseCase {
             let resolved = resolve_header(
                 self.text_unit_index.as_ref(),
                 &self.repository,
-                handle.document(),
+                &handle,
+                self.handle_recovery.as_deref(),
             )
             .await?;
             let locator =
@@ -177,7 +186,8 @@ impl CiteReadingUseCase {
         let resolved = resolve_header(
             self.text_unit_index.as_ref(),
             &self.repository,
-            handle.document(),
+            &handle,
+            self.handle_recovery.as_deref(),
         )
         .await?;
         if !resolved.header().media_type.is_pdf() {

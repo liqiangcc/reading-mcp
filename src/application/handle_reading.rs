@@ -11,13 +11,15 @@
 
 use std::sync::Arc;
 
+use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{
-    DocumentHeader, DocumentRepository, OwnedStreamUnit, SectionRow, TextUnitIndex,
+    DocumentHeader, DocumentRepository, HandleRemap, HandleRemapUnit, OwnedStreamUnit, SectionRow,
+    TextUnitIndex,
 };
 use crate::application::reading_error::ReadingError;
 use crate::application::section_view::{DocumentView, carrier_section};
 use crate::application::short_handle::{
-    DocumentHandle, ReadingHandle, SectionHandle, handle_checksum,
+    CursorUnit, DocumentHandle, ReadingCursor, ReadingHandle, SectionHandle, handle_checksum,
 };
 use crate::domain::{
     Document, DocumentId, NormalizedDocumentHash, Section, SentenceTextUnit, TextLocator, TextUnit,
@@ -46,50 +48,75 @@ impl ResolvedHeader {
     }
 }
 
-/// Resolves a document handle to its header, verifying its identity checksum.
+/// Resolves a handle's document to its header, verifying its identity checksum. When the server
+/// carries a lazy recovery object, a row written by another ingest is re-ingested here before the
+/// checksum is judged.
 pub(crate) async fn resolve_header(
     index: &dyn TextUnitIndex,
     repository: &Arc<dyn DocumentRepository>,
-    handle: &DocumentHandle,
+    handle: &ReadingHandle,
+    recovery: Option<&HandleRecovery>,
 ) -> Result<ResolvedHeader, ReadingError> {
-    let document_id = document_id_for(index, handle).await?;
-    let (view, normalized_document_hash) =
+    let document_handle = handle.document();
+    // Read the current rows first. A fresh handle must keep exactly its old hot path: one key
+    // lookup plus the document read, never a lazy parse merely because a deploy changed the
+    // ingest fingerprint. Only a checksum mismatch enters the recovery path.
+    let mut row = index.document_key_row(document_handle.doc_key).await?;
+    let Some(initial_row) = row else {
+        return Err(ReadingError::unknown_handle(format!(
+            "doc_key {} is not stored in this server",
+            document_handle.doc_key
+        )));
+    };
+    let mut document_id = initial_row.document_id;
+    let (mut view, mut normalized_document_hash) =
         DocumentView::load_with_hash(Arc::clone(repository), &document_id)
             .await?
             .ok_or_else(ReadingError::not_opened)?;
-    if handle_checksum(
+    let mut current_checksum = handle_checksum(
         view.id(),
         &normalized_document_hash,
         &view.header().media_type,
-    ) != handle.checksum
+    );
+    if recovery.is_some_and(|recovery| !recovery.accepts(initial_row.ingest_fingerprint.as_deref()))
     {
-        return Err(ReadingError::stale_handle(format!(
+        let recovery = recovery.expect("checked above");
+        row = recovery.current_row(document_handle.doc_key).await?;
+        let Some(recovered) = row else {
+            return Err(ReadingError::unknown_handle(format!(
+                "doc_key {} is not stored in this server",
+                document_handle.doc_key
+            )));
+        };
+        document_id = recovered.document_id;
+        (view, normalized_document_hash) =
+            DocumentView::load_with_hash(Arc::clone(repository), &document_id)
+                .await?
+                .ok_or_else(ReadingError::not_opened)?;
+        current_checksum = handle_checksum(
+            view.id(),
+            &normalized_document_hash,
+            &view.header().media_type,
+        );
+    }
+    if current_checksum != document_handle.checksum {
+        let detail = format!(
             "handle checksum {} does not match the current document identity",
-            handle.checksum
-        )));
+            document_handle.checksum
+        );
+        let mut error = ReadingError::stale_handle(detail);
+        if let Some(retry) =
+            remap_reading_handle(index, document_handle.doc_key, &current_checksum, handle).await?
+        {
+            error = error.with_retry(handle.to_string(), retry);
+        }
+        return Err(error);
     }
     Ok(ResolvedHeader {
         view,
         normalized_document_hash,
-        handle: handle.clone(),
+        handle: document_handle.clone(),
     })
-}
-
-/// The document a `doc_key` names, or the `unknown_handle` every tool reports for a key this server
-/// does not store.
-async fn document_id_for(
-    index: &dyn TextUnitIndex,
-    handle: &DocumentHandle,
-) -> Result<DocumentId, ReadingError> {
-    index
-        .document_id_for_key(handle.doc_key)
-        .await?
-        .ok_or_else(|| {
-            ReadingError::unknown_handle(format!(
-                "doc_key {} is not stored in this server",
-                handle.doc_key
-            ))
-        })
 }
 
 /// Resolves a section handle to its row, inside an already resolved header.
@@ -204,6 +231,151 @@ pub(crate) async fn resolve_locator(
             )))
         }
     }
+}
+
+/// The remap unit a parsed handle names.
+fn remap_unit_of_handle(handle: &ReadingHandle) -> HandleRemapUnit {
+    match handle {
+        ReadingHandle::Document(_) => HandleRemapUnit::Document,
+        ReadingHandle::Section(section) => HandleRemapUnit::Section {
+            section_key: section.section_key,
+        },
+        ReadingHandle::Paragraph {
+            section,
+            paragraph_index,
+        } => HandleRemapUnit::Paragraph {
+            section_key: section.section_key,
+            paragraph_index: *paragraph_index,
+        },
+        ReadingHandle::Sentence {
+            section,
+            paragraph_index,
+            sentence_index,
+        } => HandleRemapUnit::Sentence {
+            section_key: section.section_key,
+            paragraph_index: *paragraph_index,
+            sentence_index: *sentence_index,
+        },
+    }
+}
+
+/// Renders a remap target as a handle of the same document key and the current identity checksum.
+fn format_remap_target(doc_key: i64, current_checksum: &str, target: &HandleRemapUnit) -> String {
+    let document = DocumentHandle {
+        doc_key,
+        checksum: current_checksum.to_owned(),
+    };
+    match target {
+        HandleRemapUnit::Document => document.to_string(),
+        HandleRemapUnit::Section { section_key } => SectionHandle {
+            document,
+            section_key: *section_key,
+        }
+        .to_string(),
+        HandleRemapUnit::Paragraph {
+            section_key,
+            paragraph_index,
+        } => super::short_handle::paragraph_handle(
+            &SectionHandle {
+                document,
+                section_key: *section_key,
+            },
+            *paragraph_index,
+        ),
+        HandleRemapUnit::Sentence {
+            section_key,
+            paragraph_index,
+            sentence_index,
+        } => super::short_handle::sentence_handle(
+            &SectionHandle {
+                document,
+                section_key: *section_key,
+            },
+            *paragraph_index,
+            *sentence_index,
+        ),
+    }
+}
+
+/// Follows one already found remap step through chained re-ingests. A cycle or a missing step means
+/// no proof and therefore no retry; there is deliberately no generation-count bound.
+async fn follow_remap_step(
+    index: &dyn TextUnitIndex,
+    doc_key: i64,
+    current_checksum: &str,
+    first: HandleRemap,
+) -> Result<Option<String>, ReadingError> {
+    let mut checksum = first.target_checksum;
+    let mut target = first.target;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if checksum == *current_checksum {
+            return Ok(Some(format_remap_target(
+                doc_key,
+                current_checksum,
+                &target,
+            )));
+        }
+        if !seen.insert((checksum.clone(), target.clone())) {
+            return Ok(None);
+        }
+        let Some(step) = index.handle_remap(doc_key, &checksum, &target).await? else {
+            return Ok(None);
+        };
+        checksum = step.target_checksum;
+        target = step.target;
+    }
+}
+
+/// The proven current handle of one stale document, section, paragraph or sentence handle.
+pub(crate) async fn remap_reading_handle(
+    index: &dyn TextUnitIndex,
+    doc_key: i64,
+    current_checksum: &str,
+    handle: &ReadingHandle,
+) -> Result<Option<String>, ReadingError> {
+    let source_checksum = &handle.document().checksum;
+    if source_checksum == current_checksum {
+        return Ok(None);
+    }
+    let unit = remap_unit_of_handle(handle);
+    let Some(first) = index.handle_remap(doc_key, source_checksum, &unit).await? else {
+        return Ok(None);
+    };
+    follow_remap_step(index, doc_key, current_checksum, first).await
+}
+
+/// The proven current handle of the first item a stale backward cursor would read. A cursor names
+/// an exclusive end, so its item is `position - 1`; the returned handle is the exact backward-read
+/// anchor of the current stream.
+pub(crate) async fn remap_reading_cursor(
+    index: &dyn TextUnitIndex,
+    doc_key: i64,
+    current_checksum: &str,
+    cursor: &ReadingCursor,
+) -> Result<Option<String>, ReadingError> {
+    if cursor.position == 0 || cursor.section.document.checksum == *current_checksum {
+        return Ok(None);
+    }
+    let kind = match cursor.unit {
+        CursorUnit::Sentence => crate::application::get_text_units::RequestedTextUnitKind::Sentence,
+        CursorUnit::Paragraph => {
+            crate::application::get_text_units::RequestedTextUnitKind::Paragraph
+        }
+    };
+    let Some(first) = index
+        .handle_remap_at_stream_position(
+            doc_key,
+            &cursor.section.document.checksum,
+            cursor.section.section_key,
+            kind,
+            cursor.position - 1,
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    follow_remap_step(index, doc_key, current_checksum, first).await
 }
 
 fn paragraph_locator(document: &Document, section: &Section, unit: &TextUnit) -> TextLocator {

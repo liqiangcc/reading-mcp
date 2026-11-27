@@ -6,6 +6,7 @@ use std::sync::Arc;
 pub(crate) use ephemeral_state::EphemeralStateDir;
 
 use crate::application::cite_reading::CiteReadingUseCase;
+use crate::application::handle_recovery::HandleRecovery;
 use crate::application::list_directories::ListDirectoryUseCase;
 use crate::application::list_documents::ListDocumentsUseCase;
 use crate::application::open_document::OpenDocumentUseCase;
@@ -185,7 +186,7 @@ pub fn build_server(
         .map(|i| i.sha256.clone())
         .unwrap_or_else(|| "ocr-disabled/v1".into());
     // Everything that changes what the parser publishes for the same bytes; keys the stored open results.
-    let ingest_fingerprint = format!(
+    let mut ingest_fingerprint = format!(
         "{fingerprint}|pdf-layout={}|pdf-text={}",
         if config.pdf_layout_python.is_some() {
             crate::parsing::PDF_LAYOUT_CACHE_NAMESPACE
@@ -194,6 +195,10 @@ pub fn build_server(
         },
         crate::parsing::PDF_TEXT_EXTRACTION_VERSION,
     );
+    if let Ok(variant) = std::env::var("READING_MCP_TEST_EXTRACTION_VARIANT") {
+        ingest_fingerprint.push_str("|test-extraction=");
+        ingest_fingerprint.push_str(&variant);
+    }
     let mut cached = CachingParser::new(Arc::new(router), components.parsed_cache)
         .with_ocr_fingerprint(fingerprint)
         .with_ocr_admission(config.ocr_enabled)
@@ -267,23 +272,44 @@ pub fn build_server(
         repository.clone(),
         text_unit_index.clone(),
     ));
-    let read_reading = Arc::new(ReadReadingUseCase::new(
-        repository.clone(),
-        text_unit_index.clone(),
-    ));
-    let outline_reading = Arc::new(OutlineReadingUseCase::new(
-        repository.clone(),
-        text_unit_index.clone(),
-    ));
-    let search_reading = Arc::new(SearchReadingUseCase::new(
-        repository.clone(),
-        text_unit_index.clone(),
-        search_document.clone(),
-    ));
-    let cite_reading = Arc::new(CiteReadingUseCase::new(
-        repository.clone(),
-        text_unit_index.clone(),
-    ));
+    let handle_recovery = open_document
+        .current_ingest_fingerprint()
+        .map(|fingerprint| {
+            Arc::new(HandleRecovery::new(
+                open_document.clone(),
+                repository.clone(),
+                text_unit_index.clone(),
+                fingerprint,
+            ))
+        });
+    let read_reading = Arc::new(match handle_recovery.clone() {
+        Some(recovery) => ReadReadingUseCase::new(repository.clone(), text_unit_index.clone())
+            .with_handle_recovery(recovery),
+        None => ReadReadingUseCase::new(repository.clone(), text_unit_index.clone()),
+    });
+    let outline_reading = Arc::new(match handle_recovery.clone() {
+        Some(recovery) => OutlineReadingUseCase::new(repository.clone(), text_unit_index.clone())
+            .with_handle_recovery(recovery),
+        None => OutlineReadingUseCase::new(repository.clone(), text_unit_index.clone()),
+    });
+    let search_reading = Arc::new(match handle_recovery.clone() {
+        Some(recovery) => SearchReadingUseCase::new(
+            repository.clone(),
+            text_unit_index.clone(),
+            search_document.clone(),
+        )
+        .with_handle_recovery(recovery),
+        None => SearchReadingUseCase::new(
+            repository.clone(),
+            text_unit_index.clone(),
+            search_document.clone(),
+        ),
+    });
+    let cite_reading = Arc::new(match handle_recovery {
+        Some(recovery) => CiteReadingUseCase::new(repository.clone(), text_unit_index.clone())
+            .with_handle_recovery(recovery),
+        None => CiteReadingUseCase::new(repository.clone(), text_unit_index.clone()),
+    });
     Ok(ReadingMcpServer::from_use_cases(
         list_documents,
         list_directory,

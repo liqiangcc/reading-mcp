@@ -10,6 +10,8 @@ use std::sync::Arc;
 use crate::application::get_text_units::{
     EffectiveTextUnitKind, RequestedTextUnitKind, TextUnitCoveragePolicy, TextUnitDirection,
 };
+use crate::application::handle_reading::{remap_reading_cursor, remap_reading_handle};
+use crate::application::handle_recovery::HandleRecovery;
 use crate::application::ports::{
     DocumentRepository, OwnedStreamUnit, StoredStreamItem, TextUnitIndex, TextUnitStreamKey,
 };
@@ -72,6 +74,7 @@ pub struct ReadReadingResult {
 pub struct ReadReadingUseCase {
     repository: Arc<dyn DocumentRepository>,
     text_unit_index: Arc<dyn TextUnitIndex>,
+    handle_recovery: Option<Arc<HandleRecovery>>,
 }
 
 impl ReadReadingUseCase {
@@ -82,7 +85,13 @@ impl ReadReadingUseCase {
         Self {
             repository,
             text_unit_index,
+            handle_recovery: None,
         }
+    }
+
+    pub(crate) fn with_handle_recovery(mut self, recovery: Arc<HandleRecovery>) -> Self {
+        self.handle_recovery = Some(recovery);
+        self
     }
 
     pub async fn execute(
@@ -136,29 +145,77 @@ impl ReadReadingUseCase {
             }
         };
 
-        let document_id = self
+        // Preserve the fresh-handle hot path exactly: consult the recovery machinery only after
+        // the cheap identity comparison has already failed.
+        let mut row = self
             .text_unit_index
-            .document_id_for_key(document_handle.doc_key)
-            .await?
-            .ok_or_else(|| {
-                ReadingError::unknown_handle(format!(
-                    "doc_key {} is not stored in this server",
-                    document_handle.doc_key
-                ))
-            })?;
+            .document_key_row(document_handle.doc_key)
+            .await?;
+        let Some(initial_row) = row else {
+            return Err(ReadingError::unknown_handle(format!(
+                "doc_key {} is not stored in this server",
+                document_handle.doc_key
+            )));
+        };
+        let mut document_id = initial_row.document_id;
         // The header carries the identity the handle is bound to; the body order is read by
         // position, never materialized as a `Vec<SectionId>`.
-        let (view, normalized_hash) =
+        let (mut view, mut normalized_hash) =
             DocumentView::load_with_hash(Arc::clone(&self.repository), &document_id)
                 .await?
                 .ok_or_else(ReadingError::not_opened)?;
-        if handle_checksum(view.id(), &normalized_hash, &view.header().media_type)
-            != document_handle.checksum
+        let mut current_checksum =
+            handle_checksum(view.id(), &normalized_hash, &view.header().media_type);
+        if self
+            .handle_recovery
+            .as_ref()
+            .is_some_and(|recovery| !recovery.accepts(initial_row.ingest_fingerprint.as_deref()))
         {
-            return Err(ReadingError::stale_handle(format!(
+            let recovery = self.handle_recovery.as_ref().expect("checked above");
+            row = recovery.current_row(document_handle.doc_key).await?;
+            let Some(recovered) = row else {
+                return Err(ReadingError::unknown_handle(format!(
+                    "doc_key {} is not stored in this server",
+                    document_handle.doc_key
+                )));
+            };
+            document_id = recovered.document_id;
+            (view, normalized_hash) =
+                DocumentView::load_with_hash(Arc::clone(&self.repository), &document_id)
+                    .await?
+                    .ok_or_else(ReadingError::not_opened)?;
+            current_checksum =
+                handle_checksum(view.id(), &normalized_hash, &view.header().media_type);
+        }
+        if current_checksum != document_handle.checksum {
+            let mut error = ReadingError::stale_handle(format!(
                 "handle checksum {} does not match the current document identity",
                 document_handle.checksum
-            )));
+            ));
+            let retry = match &from {
+                ReadingFrom::Handle(handle) => {
+                    remap_reading_handle(
+                        self.text_unit_index.as_ref(),
+                        document_handle.doc_key,
+                        &current_checksum,
+                        handle,
+                    )
+                    .await?
+                }
+                ReadingFrom::Cursor(cursor) => {
+                    remap_reading_cursor(
+                        self.text_unit_index.as_ref(),
+                        document_handle.doc_key,
+                        &current_checksum,
+                        cursor,
+                    )
+                    .await?
+                }
+            };
+            if let Some(retry) = retry {
+                error = error.with_retry(command.from.clone(), retry);
+            }
+            return Err(error);
         }
 
         // The body order's length. A stored body order that is readable holds every section

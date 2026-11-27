@@ -42,6 +42,62 @@ pub struct OpenDocumentResult {
     pub reading_profile: ReadingProfile,
 }
 
+/// Test-only extraction variants let integration tests simulate a parser deploy without changing
+/// the source bytes. Production deployments never set this variable; the value is part of the
+/// ingest fingerprint in `runtime`, so changing it misses the open-result cache exactly like a real
+/// extraction-version bump.
+fn apply_test_extraction_variant(document: &mut crate::domain::Document) {
+    let variant = std::env::var("READING_MCP_TEST_EXTRACTION_VARIANT").unwrap_or_default();
+    fn transform(section: &mut crate::domain::Section, variant: &str) {
+        section.content = match variant {
+            "spaces" | "spaces2" => {
+                let spaces = if variant == "spaces2" { 2 } else { 1 };
+                let mut content = String::with_capacity(section.content.len() * 2);
+                for ch in section.content.chars() {
+                    content.push(ch);
+                    if ch.is_alphanumeric() {
+                        for _ in 0..spaces {
+                            content.push(' ');
+                        }
+                    }
+                }
+                content
+            }
+            // Whitespace decides whether an ASCII period is terminal. These variants therefore
+            // exercise merged and split sentences while every non-whitespace character stays put.
+            "tight" => section.content.replace(". ", "."),
+            "loose" => {
+                let chars = section.content.chars().collect::<Vec<_>>();
+                let mut content = String::with_capacity(section.content.len() * 2);
+                for (index, ch) in chars.iter().enumerate() {
+                    content.push(*ch);
+                    if *ch == '.'
+                        && chars
+                            .get(index + 1)
+                            .is_some_and(|next| next.is_ascii_alphabetic())
+                    {
+                        content.push(' ');
+                    }
+                }
+                content
+            }
+            // Blank lines decide fallback paragraph boundaries. Both directions are whitespace-only.
+            "parasplit" => section.content.replace(". ", ".\n\n"),
+            "parajoin" => section.content.replace("\n\n", " "),
+            // Negative controls: these alter non-whitespace text and therefore must fail closed.
+            "delete" => section.content.replacen('x', "", 1),
+            "change" => section.content.replacen('x', "z", 1),
+            _ => return,
+        };
+        for child in &mut section.children {
+            transform(child, variant);
+        }
+    }
+    for section in &mut document.root_sections {
+        transform(section, &variant);
+    }
+}
+
 pub struct OpenDocumentUseCase {
     source_policy: Arc<dyn SourcePolicy>,
     retriever: Arc<dyn Retriever>,
@@ -129,6 +185,15 @@ impl OpenDocumentUseCase {
         )
     }
 
+    /// The fingerprint this binary assigns to newly ingested rows, when open results are enabled.
+    /// Handle recovery compares the stored row with exactly the same string the open-result cache
+    /// uses, so a parser deploy is visible without another hot-path store query.
+    pub fn current_ingest_fingerprint(&self) -> Option<String> {
+        self.open_results
+            .as_ref()
+            .map(|(_, ingest_fingerprint)| self.open_result_fingerprint(ingest_fingerprint))
+    }
+
     pub async fn execute(
         &self,
         command: OpenDocumentCommand,
@@ -213,7 +278,9 @@ impl OpenDocumentUseCase {
             return Err(ApplicationError::OcrTimeout);
         }
 
-        let (document, parsed_segmentation) = self.parser.parse_with_segmentation(resource).await?;
+        let (mut document, parsed_segmentation) =
+            self.parser.parse_with_segmentation(resource).await?;
+        apply_test_extraction_variant(&mut document);
         document
             .validate_ocr_publication()
             .map_err(ApplicationError::ParseFailed)?;
@@ -267,9 +334,19 @@ impl OpenDocumentUseCase {
         // `document_json` only when `section_text_v3` already holds the text of this very document
         // version, and reads it back from there on load.
         if let Some(index) = &self.text_unit_index {
-            index
-                .replace_document_segmentation(&document, Arc::clone(&segmentation))
-                .await?;
+            if let Some(fingerprint) = self.current_ingest_fingerprint() {
+                index
+                    .replace_document_segmentation_with_ingest(
+                        &document,
+                        Arc::clone(&segmentation),
+                        &fingerprint,
+                    )
+                    .await?;
+            } else {
+                index
+                    .replace_document_segmentation(&document, Arc::clone(&segmentation))
+                    .await?;
+            }
         }
         self.repository.save_shared(Arc::clone(&document)).await?;
         self.search_index

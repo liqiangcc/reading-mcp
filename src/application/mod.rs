@@ -8,6 +8,7 @@ mod directory_cursor;
 mod discovery_cursor;
 pub mod get_text_units;
 mod handle_reading;
+pub(crate) mod handle_recovery;
 mod light_sections;
 pub mod list_directories;
 pub mod list_documents;

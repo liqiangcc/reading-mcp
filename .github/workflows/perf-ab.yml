@@ -96,15 +96,30 @@ jobs:
       # head actually changes.
       - name: Build the base binary
         run: |
+          # Cargo's fingerprint does not include the manifest path: after the base build it
+          # would call the identical head build fresh without recompiling. Touching the
+          # crate sources forces the rebuild through the mtime check while the shared target
+          # dir still reuses every unchanged dependency artifact.
+          find base-src/src -name '*.rs' -exec touch {} +
+          touch base-src/Cargo.toml
           cargo build --release --locked --bin reading-mcp \
             --manifest-path base-src/Cargo.toml --target-dir target 2>&1 | tail -5
           mkdir -p "$RUNNER_TEMP/out"
           cp target/release/reading-mcp "$RUNNER_TEMP/out/reading-mcp-base"
       - name: Build the head binary
         run: |
+          find head-src/src -name '*.rs' -exec touch {} +
+          touch head-src/Cargo.toml
           cargo build --release --locked --bin reading-mcp \
             --manifest-path head-src/Cargo.toml --target-dir target 2>&1 | tail -5
           cp target/release/reading-mcp "$RUNNER_TEMP/out/reading-mcp-head"
+      - name: Verify the binaries differ when the trees differ
+        run: |
+          if [ "${{ needs.resolve.outputs.base }}" != "${{ needs.resolve.outputs.head }}" ] \
+              && cmp -s "$RUNNER_TEMP/out/reading-mcp-base" "$RUNNER_TEMP/out/reading-mcp-head"; then
+            echo "::error::base and head binaries are identical for different commits"
+            exit 1
+          fi
       - name: Upload both binaries
         uses: actions/upload-artifact@v4
         with:

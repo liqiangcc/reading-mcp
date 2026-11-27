@@ -170,7 +170,7 @@ jobs:
           VERIFY_RELEASE_TAG=false \
           TARGET_TRIPLE=x86_64-unknown-linux-gnu \
           PLATFORM=linux-x86_64 \
-          OUTPUT_DIR="$RUNNER_TEMP/package-smoke" \
+          OUTPUT_DIR="$GITHUB_WORKSPACE/dist" \
           PACKAGING_COMMIT_SHA="$release_sha" \
           bash scripts/package-release.sh
 
@@ -179,8 +179,8 @@ jobs:
         with:
           name: release-candidate-package
           path: |
-            ${{ runner.temp }}/package-smoke/*.tar.gz
-            ${{ runner.temp }}/package-smoke/SHA256SUMS
+            dist/*.tar.gz
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
 
